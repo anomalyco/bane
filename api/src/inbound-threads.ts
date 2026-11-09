@@ -25,7 +25,7 @@ const Message = z.object({
   id: z.string(), threadId: z.string(), addressIds: z.array(z.string()), direction: z.enum(['inbound', 'outbound']), status: z.string(),
   from: Address, to: z.array(Address), cc: z.array(Address), replyTo: z.array(Address), subject: z.string(), snippet: z.string(),
   text: z.string(), replyText: z.string(), receivedAt: z.string(), bodyTruncated: z.boolean(), attachmentCount: z.number().int(), read:z.boolean(), errorCode:z.string().nullable(), suppressionReason:SuppressionReason.nullable().optional(),
-  emailId: z.string().nullable(), messageId: z.string().nullable().describe('RFC Message-ID, not the OpenSend message ID (id).'),
+  emailId: z.string().nullable(), messageId: z.string().nullable().describe('RFC Message-ID, not the Bane message ID (id).'),
   inReplyTo: z.string().nullable(), references: z.array(z.string()),
 }).openapi('InboundMessage');
 const Cursor = z.string().min(1).max(300).optional().describe('Opaque cursor from the preceding page, with the same filters.');

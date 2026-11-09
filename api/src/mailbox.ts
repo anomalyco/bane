@@ -22,11 +22,11 @@ const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSes
 // ---------- access ----------
 function access(c: Ctx, permission?: MailboxPermission): MailboxAccess {
   const value = c.get('mailboxAccess');
-  if (!value) throw new ApiError(401, 'AUTH_REQUIRED', 'Supply an inbound key or an OpenSend API key.');
+  if (!value) throw new ApiError(401, 'AUTH_REQUIRED', 'Supply an inbound key or a Bane API key.');
   if (permission && !value.admin && !value.permissions.includes(permission)) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
   return value;
 }
-function admin(c: Ctx) { const value = access(c); if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', 'This operation requires an unrestricted live OpenSend key with manage permission.'); return value; }
+function admin(c: Ctx) { const value = access(c); if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', 'This operation requires an unrestricted live Bane key with manage permission.'); return value; }
 const scopeOf = (value: MailboxAccess): Scope => ({ workspaceId: value.workspaceId });
 async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermission = 'read', db: DbExecutor = c.env.db) {
   const value = access(c, permission);
@@ -74,7 +74,7 @@ const MxRecord = z.object({ type: z.literal('MX'), name: z.string(), value: z.st
 const MxReportSchema = z.object({ state: z.enum(['active', 'missing', 'conflict', 'mixed', 'wrong_region', 'null_mx', 'cname', 'error']), expected: MxRecord, records: z.array(z.object({ priority: z.number(), host: z.string(), provider: z.string().nullable() })), providers: z.array(z.string()), message: z.string(), checkedAt: z.string() }).openapi('InboundMxReport');
 const InboundCatchAll = z.enum(['create_address', 'store']);
 const InboundDomainSchema = z.object({
-  id: z.string().describe('OpenSend domain ID.'), name: z.string(), region: z.string(),
+  id: z.string().describe('Bane domain ID.'), name: z.string(), region: z.string(),
   status: z.enum(['off', 'provisioning', 'waiting_for_mx', 'active', 'disabling', 'disabled', 'failed']),
   catchAll: InboundCatchAll.describe('For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.'),
   dns: z.array(MxRecord).describe('Records to publish for receiving.'), mx: MxReportSchema.nullable(), lastError: z.string().nullable(),
@@ -82,7 +82,7 @@ const InboundDomainSchema = z.object({
   subdomains: z.object({ enabled: z.boolean().describe('Whether the receipt rule also matches every subdomain.'), count: z.number().int().describe('Receiving subdomains.'), dns: z.array(MxRecord).describe('The wildcard MX record subdomains need, published once.') }),
 }).openapi('InboundDomain');
 const InboundSubdomainSchema = z.object({
-  id: z.string().describe('Subdomain ID (mdom_…).'), name: z.string().describe('Full host, e.g. acme.example.com.'), parentDomainId: z.string().describe('OpenSend domain ID of the parent.'), parentName: z.string(),
+  id: z.string().describe('Subdomain ID (mdom_…).'), name: z.string().describe('Full host, e.g. acme.example.com.'), parentDomainId: z.string().describe('Bane domain ID of the parent.'), parentName: z.string(),
   status: z.enum(['active', 'disabled']), catchAll: InboundCatchAll, metadata: z.record(z.string(), z.unknown()),
   dns: z.array(MxRecord).describe('The parent’s wildcard MX record, which receives this subdomain.'), mx: MxReportSchema.nullable(), addressCount: z.number().int(), createdAt: z.string(), updatedAt: z.string(),
 }).openapi('InboundSubdomain');
@@ -238,7 +238,7 @@ function registerReceivingDomains(app: App) {
     return c.json({ ...view!, mx }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/enable`, operationId: 'enableInboundDomain', summary: 'Enable receiving for a verified domain',
-    description: 'Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: an OpenSend S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.',
+    description: 'Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Bane S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.',
     request: { params: IdParam, body: json(z.object({ catchAll: InboundCatchAll.optional(), force: z.boolean().default(false) }).strict().openapi('EnableInboundDomain')) }, responses: { 202: response(InboundDomainSchema), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id); const input = c.req.valid('json');
     c.env = await withRegionSettings(c.env, value.workspaceId);
@@ -259,7 +259,7 @@ function registerReceivingDomains(app: App) {
     log('info', { code: 'MAILBOX_DOMAIN_ENABLE_QUEUED', region: row.region, mx: mx.state });
     return c.json((await domainViews(c, [row]))[0]!, 202);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/disable`, operationId: 'disableInboundDomain', summary: 'Stop receiving for a domain', description: `Removes the domain from the OpenSend receipt rule. Receiving addresses and stored messages are kept.`, request: { params: IdParam }, responses: { 202: response(InboundDomainSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/disable`, operationId: 'disableInboundDomain', summary: 'Stop receiving for a domain', description: `Removes the domain from the Bane receipt rule. Receiving addresses and stored messages are kept.`, request: { params: IdParam }, responses: { 202: response(InboundDomainSchema), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id);
     if (c.env.config.multiTenant) throw new ApiError(409,'HOSTED_RECEIVING_MANAGED','Receiving follows verified DNS. Remove the MX record to stop delivery.');
     await c.env.db.transaction(async tx => {
@@ -464,10 +464,10 @@ export function registerMailbox(app: App) {
   const Recipients = z.array(Address).max(50);
   const AttachmentItem = z.union([
     z.object({ filename: AttachmentFilename, content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64; line breaks are accepted.'), contentType: AttachmentContentType.optional(), disposition: AttachmentDisposition.optional(), contentId: AttachmentContentId.optional() }).strict(),
-    z.object({ id: z.string().min(1).max(120).describe('A received attachment in this mailbox (matt_…) or an OpenSend attachment upload (attachment_…).') }).strict(),
+    z.object({ id: z.string().min(1).max(120).describe('A received attachment in this mailbox (matt_…) or a Bane attachment upload (attachment_…).') }).strict(),
   ]).openapi('InboundAttachmentInput');
   const Compose = {
-    from: Address.optional().describe('Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.'),
+    from: Address.optional().describe('Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers.'),
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
     attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).'),
     replyTo: Recipients.max(10).default([]),
@@ -478,7 +478,7 @@ export function registerMailbox(app: App) {
   const CreateInbound = z.object({ ...Compose, addressId: InboundAddressId, to: Recipients.min(1), cc: Recipients.default([]), bcc: Recipients.default([]), subject: z.string().trim().min(1).max(998).refine(value => !/[\r\n]/.test(value), 'Subject cannot contain line breaks.') })
     .strict().refine(needsBody, 'Provide text or html.').openapi('CreateInboundThread');
   const ReplyInbound = z.object({ ...Compose, addressId: InboundAddressId.optional(),
-    replyToMessageId: z.string().min(1).max(120).optional().describe('OpenSend message ID (msg_…) of a visible message in this thread.'),
+    replyToMessageId: z.string().min(1).max(120).optional().describe('Bane message ID (msg_…) of a visible message in this thread.'),
     expectedRecipients: z.object({ to: Recipients, cc: Recipients, bcc: Recipients }).strict().optional().describe('Check the final To, Cc and Bcc against these reviewed address sets; never overrides recipients. A mismatch returns 409 INBOUND_RECIPIENTS_CHANGED.'),
     replyAll: z.boolean().default(false).describe('Also copy everyone else on the original message.'),
     to: Recipients.optional().describe('Override the computed recipients.'), cc: Recipients.optional(), bcc: Recipients.default([]),

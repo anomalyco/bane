@@ -75,7 +75,7 @@ export function registerSesRegions(app: App) {
     await saveDiscovery(runtime, report, undefined, value.workspaceId, connection); return c.json(report, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/regions/{region}/provision', operationId: 'provisionRegion', tags: ['Regions'], security,
-    description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',
+    description: 'Explicitly queue idempotent setup of Bane-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',
     request: { params: Params, body: json(z.object({ confirm: z.literal(true) }).strict().openapi('ProvisionRegion')) }, responses: { 202: response(Receipt), ...errors },
   }), async c => {
     const value = access(c, true, true); const { region } = c.req.valid('param');
@@ -98,7 +98,7 @@ export function registerSesRegions(app: App) {
     return c.json(receipt, 202);
   });
   app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}/auto-validation', operationId: 'configureRegionAutoValidation', tags: ['Regions'], security,
-    description: 'Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.',
+    description: 'Set SES Auto Validation for one Bane-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.',
     request: { params: Params, body: json(ValidationSettings.extend({ confirm: z.literal(true) }).strict().openapi('ConfigureSesAutoValidation')) }, responses: { 200: response(ValidationSettings), ...errors },
   }), async c => {
     const value = access(c, true, true); const { region } = c.req.valid('param'); const input = c.req.valid('json');

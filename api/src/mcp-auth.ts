@@ -37,7 +37,7 @@ function grantPermissions(values: readonly string[]): Permission[] {
   return permissions.filter(permission => values.includes(`opensend:${permission}`));
 }
 function invalidGrant(): never {
-  throw new APIError('BAD_REQUEST', { error: 'invalid_grant', error_description: 'This OpenSend approval is no longer valid.' });
+  throw new APIError('BAD_REQUEST', { error: 'invalid_grant', error_description: 'This Bane approval is no longer valid.' });
 }
 
 // Each auth instance belongs to one request. One reference is reused when the
@@ -49,7 +49,7 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
   const resource = resourceOf(runtime);
   return mcp({
     resource, loginPage: '/mcp/login', consentPage: '/mcp/consent', scopes,
-    resources: [{ identifier: resource, name: 'OpenSend MCP', allowedScopes: scopes, accessTokenTtl: 300 }],
+    resources: [{ identifier: resource, name: 'Bane MCP', allowedScopes: scopes, accessTokenTtl: 300 }],
     grantTypes: ['authorization_code', 'refresh_token'], accessTokenExpiresIn: 300,
     refreshTokenExpiresIn: 30 * 24 * 60 * 60, refreshTokenReuseInterval: 0, codeExpiresIn: 600,
     allowDynamicClientRegistration: true, allowUnauthenticatedClientRegistration: true,
@@ -116,7 +116,7 @@ export async function getMcpGrantActor(runtime: Runtime, keyId: string, db: DbEx
   return (await loadGrant(runtime, keyId, db))?.actor ?? null;
 }
 function deniedToken(runtime: Runtime) {
-  return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'OpenSend authorization is required.' }, id: null }, {
+  return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bane authorization is required.' }, id: null }, {
     status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${originOf(runtime)}/.well-known/oauth-protected-resource/mcp", scope="opensend:read"` },
   });
 }
@@ -156,7 +156,7 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
     actor = { ...grant.actor, permissions: granted };
   } catch {
     log('warn', { operation: 'mcp-authorization', code: 'AUTH_UNAVAILABLE' });
-    return oauthError(503, 'temporarily_unavailable', 'OpenSend authorization is temporarily unavailable.');
+    return oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.');
   }
   return handler(actor);
 }
@@ -268,7 +268,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
       url.searchParams.set('scope', stripLegacyScope(url.searchParams.get('scope') ?? 'opensend:read'));
       if (!url.searchParams.has('resource')) url.searchParams.set('resource', resourceOf(runtime));
       const resources = url.searchParams.getAll('resource');
-      if (resources.length !== 1 || resources[0] !== resourceOf(runtime)) return oauthError(400, 'invalid_target', 'Request the canonical OpenSend MCP resource.');
+      if (resources.length !== 1 || resources[0] !== resourceOf(runtime)) return oauthError(400, 'invalid_target', 'Request the canonical Bane MCP resource.');
     }
     const result = await auth.handler(new Request(url, { method: request.method, headers, body }));
     // OAuth errors and redirect state belong to the protocol, not the Google
@@ -277,7 +277,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
   } catch (error) {
     const result = error instanceof ApiError ? oauthError(error.status, 'invalid_request', error.message) :
       error instanceof SyntaxError ? oauthError(400, 'invalid_request', 'Invalid request body.') :
-        oauthError(503, 'temporarily_unavailable', 'OpenSend authorization is temporarily unavailable.');
+        oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.');
     if (!(error instanceof ApiError) && !(error instanceof SyntaxError)) log('warn', { operation: 'mcp-oauth', code: 'AUTH_UNAVAILABLE' });
     return cors ? publicCors(result) : result;
   }
@@ -286,7 +286,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
 function page(title: string, content: string) {
   const nonce = crypto.randomUUID();
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · OpenSend</title><style nonce="${nonce}">@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}*{box-sizing:border-box;letter-spacing:-0.01em}body{margin:0;background:#fafafa;color:#202020;font:16px/1.5 Inter,Arial,sans-serif;letter-spacing:-0.01em}main{max-width:520px;margin:12vh auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0 0 24px;font-weight:600}p{margin:16px 0}ul{padding-left:22px;margin:20px 0}li{margin:8px 0}.identity{color:#555;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}button{font:inherit;letter-spacing:inherit;padding:10px 18px;border:1px solid #bbb;border-radius:6px;background:transparent;color:inherit;cursor:pointer}button[value=approve],button[value=signin]{background:#202020;color:white;border-color:#202020}button:focus-visible{outline:2px solid #345ad4;outline-offset:3px}small{font-size:14px}.warn{border:1px solid #bbb;border-radius:6px;padding:12px 14px;overflow-wrap:anywhere}a{color:inherit}strong{font-weight:600}</style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`, {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Bane</title><style nonce="${nonce}">@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}*{box-sizing:border-box;letter-spacing:-0.01em}body{margin:0;background:#fafafa;color:#202020;font:16px/1.5 Inter,Arial,sans-serif;letter-spacing:-0.01em}main{max-width:520px;margin:12vh auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0 0 24px;font-weight:600}p{margin:16px 0}ul{padding-left:22px;margin:20px 0}li{margin:8px 0}.identity{color:#555;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}button{font:inherit;letter-spacing:inherit;padding:10px 18px;border:1px solid #bbb;border-radius:6px;background:transparent;color:inherit;cursor:pointer}button[value=approve],button[value=signin]{background:#202020;color:white;border-color:#202020}button:focus-visible{outline:2px solid #345ad4;outline-offset:3px}small{font-size:14px}.warn{border:1px solid #bbb;border-radius:6px;padding:12px 14px;overflow-wrap:anywhere}a{color:inherit}strong{font-weight:600}</style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`, {
     headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': `default-src 'none'; style-src 'nonce-${nonce}'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'` },
   });
@@ -369,19 +369,19 @@ async function consentPage(runtime: Runtime, request: Request) {
     }
     const hidden = `<input type="hidden" name="oauth_query" value="${escapeHtml(query)}">` + (member ? `<input type="hidden" name="workspace" value="${escapeHtml(member.workspaceId)}">` : '');
     if (!approvedSession || (new URL(request.url).pathname === '/mcp/login' && (params.get('prompt') ?? '').split(' ').includes('login'))) {
-      return page('Connect OpenSend', `<form method="post" action="/mcp/login">${hidden}<p>Use your approved Google account to connect this client.</p><div class="actions"><button name="action" value="signin">Continue with Google</button></div></form>`);
+      return page('Connect Bane', `<form method="post" action="/mcp/login">${hidden}<p>Use your approved Google account to connect this client.</p><div class="actions"><button name="action" value="signin">Continue with Google</button></div></form>`);
     }
     const [client] = await runtime.db.select({ name: oauthClient.name, disabled: oauthClient.disabled, redirectUris: oauthClient.redirectUris }).from(oauthClient).where(eq(oauthClient.clientId, clientId)).limit(1);
-    if (!client || client.disabled) return page('Client unavailable', '<p>This client can no longer connect to OpenSend.</p>');
+    if (!client || client.disabled) return page('Client unavailable', '<p>This client can no longer connect to Bane.</p>');
     const [workspace] = member ? await runtime.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, member.workspaceId)) : [];
     const name = client.name?.slice(0, 160) || 'This MCP client';
     const redirectUri = params.get('redirect_uri') ?? client.redirectUris[0] ?? '';
     let host = redirectUri; try { host = new URL(redirectUri).host || redirectUri; } catch { /* Show the raw value when it is not a URL. */ }
     const hostname = host.replace(/:\d+$/, '');
     const destination = ['localhost', '127.0.0.1', '[::1]'].includes(hostname) ? `an app on this computer (${escapeHtml(host)})` : `<strong>${escapeHtml(host)}</strong>`;
-    const warning = `<p class="warn"><strong>Self-registered client.</strong> OpenSend has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
+    const warning = `<p class="warn"><strong>Self-registered client.</strong> Bane has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
     const labels = requested.filter(scope => !(requested.includes('opensend:manage') && ['opensend:read', 'opensend:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
-    return page(`Allow ${name} to access OpenSend?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
+    return page(`Allow ${name} to access Bane?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
   } catch (error) {
     if (error instanceof ApiError) return oauthError(error.status, 'access_denied', error.message);
     return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
@@ -432,7 +432,7 @@ export function registerMcpAuth(app: App): void {
         return publicCors(await createAuth(c.env, { mcp: true }).handler(new Request(url, c.req.raw)));
       } catch {
         log('warn', { operation: 'mcp-discovery', code: 'AUTH_UNAVAILABLE' });
-        return publicCors(oauthError(503, 'temporarily_unavailable', 'OpenSend authorization is temporarily unavailable.'));
+        return publicCors(oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.'));
       }
     });
   }

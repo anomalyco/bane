@@ -226,7 +226,7 @@ async function main() {
   if (!health.response.ok || !object(health.data) || health.data.service !== 'opensend' || health.data.status !== 'ok') fail('INVALID_SERVICE', 'API health check did not identify a healthy OpenSend service.');
   const fetched = await request('/openapi.json', {}, false, SPEC_LIMIT);
   const spec = fetched.data;
-  if (!fetched.response.ok || !object(spec) || spec.openapi !== '3.1.0' || spec.info?.title !== 'OpenSend API' || spec.info?.version !== '0.1.0' || !object(spec.paths)) fail('INVALID_SPEC', 'Expected OpenSend API 0.1.0 with OpenAPI 3.1.0.');
+  if (!fetched.response.ok || !object(spec) || spec.openapi !== '3.1.0' || !['Bane API', 'OpenSend API'].includes(spec.info?.title) || spec.info?.version !== '0.1.0' || !object(spec.paths)) fail('INVALID_SPEC', 'Expected Bane API 0.1.0 with OpenAPI 3.1.0.');
   inspectSpec(spec);
   const ajv = new Ajv2020({ strict: false, validateFormats: false, allErrors: false, ownProperties: true });
   const operations = new Map<string, { tool: Tool; method: string; path: string; write: boolean; validate: ValidateFunction; validateOutput: ValidateFunction }>();

@@ -22,7 +22,7 @@ function sampleString(name: string, schema: Json): string {
   if (schema.format === 'date-time' || /(?:At|Date)$/i.test(name)) return '2026-09-18T19:00:00Z';
   if (schema.format === 'uri' || /url$/i.test(name)) return 'https://example.com/webhook';
   if (/region/i.test(name)) return 'us-east-1';
-  if (/subject/i.test(name)) return 'Hello from OpenSend';
+  if (/subject/i.test(name)) return 'Hello from Bane';
   if (/html/i.test(name)) return '<h1>Hello</h1><p>Your message is ready.</p>';
   if (/text|markdown|description|purpose/i.test(name)) return 'Your message is ready.';
   if (/name/i.test(name)) return 'Example';
@@ -73,13 +73,13 @@ function sdkSample(document: Json, path: string, method: string, pathItem: Json,
   const bodySchema = operation.requestBody?.content?.['application/json']?.schema;
   if (bodySchema) {
     options.body = sample(document, bodySchema, 'body');
-    const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from OpenSend', text: email.text ?? 'Your message is ready.' });
+    const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from Bane', text: email.text ?? 'Your message is ready.' });
     if (operation.operationId === 'sendEmail') options.body = completeEmail(options.body);
     if (operation.operationId === 'sendEmailBatch') options.body.emails = options.body.emails.map(completeEmail);
   }
   const renderedOptions = Object.entries(options).map(([key, value]) => `  ${key}: ${JSON.stringify(value, null, 2).replaceAll('\n', '\n  ')},`).join('\n');
-  if (operation.tags?.includes('Workspaces')) return `import { createClient } from 'opensend-js/client';\nimport { ${operation.operationId} } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
-  return `import { createClient } from 'opensend-js/client';\nimport { ${operation.operationId} } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
+  if (operation.tags?.includes('Workspaces')) return `import { createClient } from 'banemx/client';\nimport { ${operation.operationId} } from 'banemx';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
+  return `import { createClient } from 'banemx/client';\nimport { ${operation.operationId} } from 'banemx';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
 }
 
 function curlSample(document: Json, path: string, method: string, pathItem: Json, operation: Json): string {
@@ -89,21 +89,21 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   if (query.length) target += `?${query.join('&')}`;
   const bodySchema = operation.requestBody?.content?.['application/json']?.schema;
   let body = bodySchema ? sample(document, bodySchema, 'body') : undefined;
-  const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from OpenSend', text: email.text ?? 'Your message is ready.' });
+  const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from Bane', text: email.text ?? 'Your message is ready.' });
   if (operation.operationId === 'sendEmail') body = completeEmail(body);
   if (operation.operationId === 'sendEmailBatch') body.emails = body.emails.map(completeEmail);
-  const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url 'https://opensend.anoma.ly${target}' \\`, `  --header 'Authorization: Bearer $OPENSEND_API_KEY'`];
-  lines[2] = `  --header "Authorization: Bearer $OPENSEND_API_KEY"`;
+  const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url 'https://bane.mx${target}' \\`, `  --header 'Authorization: Bearer $BANE_API_KEY'`];
+  lines[2] = `  --header "Authorization: Bearer $BANE_API_KEY"`;
   if (operation.tags?.includes('Workspaces')) {
-    lines[1] = `  --url "\${OPENSEND_ORIGIN}${target}" \\`;
-    lines[2] = `  --header "Origin: $OPENSEND_ORIGIN" \\\n  --cookie "$OPENSEND_COOKIE_JAR"`;
+    lines[1] = `  --url "\${BANE_ORIGIN}${target}" \\`;
+    lines[2] = `  --header "Origin: $BANE_ORIGIN" \\\n  --cookie "$BANE_COOKIE_JAR"`;
   }
   if (bodySchema) { lines[lines.length - 1] += ' \\'; lines.push(`  --header 'Content-Type: application/json' \\`, `  --data '${JSON.stringify(body, null, 2)}'`); }
   return lines.join('\n');
 }
 
 export function createOpenApiDocument(app: App) {
-  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Sending is simulated when live SES is disabled or AWS credentials are not configured.' } }) as Json;
+  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Sending is simulated when live SES is disabled or AWS credentials are not configured.' } }) as Json;
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {
     const operation = pathItem[method];
     if (!operation?.operationId) continue;
@@ -153,7 +153,7 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
   const entries = operationEntries(document);
   const selected = operationId ? entries.filter(entry => entry.operation.operationId === operationId) : entries;
   if (operationId && !selected.length) return null;
-  const intro = `# OpenSend API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`opensend-js\`\n\n`;
+  const intro = `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`banemx\`\n\n`;
   if (operationId) return `${intro}[All operations](/docs.md)\n\n${operationMarkdown(document, selected[0])}`;
   const index = [...new Set(entries.map(entry => entry.operation.tags?.[0] ?? 'API'))].map(tag => `## ${tag}\n\n${entries.filter(entry => (entry.operation.tags?.[0] ?? 'API') === tag).map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\``).join('\n')}`).join('\n\n');
   return `${intro}${index}\n\n${entries.map(entry => operationMarkdown(document, entry)).join('\n---\n\n')}`;
@@ -161,5 +161,5 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
 
 export function createLlmsText(document: Json): string {
   const entries = operationEntries(document);
-  return `# OpenSend\n\nOpenSend is a self-hosted transactional and marketing email API on Amazon SES.\n\n## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/opensend-js\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+  return `# Bane\n\nBane is a transactional and marketing email API on Amazon SES.\n\n## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/banemx\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

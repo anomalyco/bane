@@ -314,7 +314,7 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; OpenSend records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.
+ * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.
  */
 export const updateContactConsent = <ThrowOnError extends boolean = false>(options: Options<UpdateContactConsentData, ThrowOnError>): RequestResult<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError> => (options.client ?? client).post<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError>({
     security: [
@@ -2229,7 +2229,7 @@ export const discoverRegion = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.
+ * Explicitly queue idempotent setup of Bane-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.
  */
 export const provisionRegion = <ThrowOnError extends boolean = false>(options: Options<ProvisionRegionData, ThrowOnError>): RequestResult<ProvisionRegionResponses, ProvisionRegionErrors, ThrowOnError> => (options.client ?? client).post<ProvisionRegionResponses, ProvisionRegionErrors, ThrowOnError>({
     security: [
@@ -2254,7 +2254,7 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.
+ * Set SES Auto Validation for one Bane-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.
  */
 export const configureRegionAutoValidation = <ThrowOnError extends boolean = false>(options: Options<ConfigureRegionAutoValidationData, ThrowOnError>): RequestResult<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError> => (options.client ?? client).put<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError>({
     security: [
@@ -2365,7 +2365,7 @@ export const checkInboundDomain = <ThrowOnError extends boolean = false>(options
 /**
  * Enable receiving for a verified domain
  *
- * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: an OpenSend S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.
+ * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Bane S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.
  */
 export const enableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<EnableInboundDomainData, ThrowOnError>): RequestResult<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError>({
     security: [
@@ -2392,7 +2392,7 @@ export const enableInboundDomain = <ThrowOnError extends boolean = false>(option
 /**
  * Stop receiving for a domain
  *
- * Removes the domain from the OpenSend receipt rule. Receiving addresses and stored messages are kept.
+ * Removes the domain from the Bane receipt rule. Receiving addresses and stored messages are kept.
  */
 export const disableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<DisableInboundDomainData, ThrowOnError>): RequestResult<DisableInboundDomainResponses, DisableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<DisableInboundDomainResponses, DisableInboundDomainErrors, ThrowOnError>({
     security: [

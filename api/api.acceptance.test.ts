@@ -1840,7 +1840,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const { token, consentId } = await oauthGrant(t, db);
     const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
     assert.equal(initialized.protocolVersion, '2025-11-25');
-    assert.equal(initialized.serverInfo.name, 'opensend');
+    assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
     assert.equal(catalog.tools.length, 56);
     assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 25);

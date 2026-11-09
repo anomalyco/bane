@@ -118,7 +118,7 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
     return adapter;
   };
   return betterAuth({
-    appName: 'OpenSend', baseURL: origin, basePath: '/api/auth', secret: runtime.config.authSecret,
+    appName: 'Bane', baseURL: origin, basePath: '/api/auth', secret: runtime.config.authSecret,
     database,
     plugins: includeMcp ? [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace)] : [],
     trustedOrigins: [origin],

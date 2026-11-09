@@ -202,7 +202,7 @@ function combineReads(operations: Map<string, McpOperation>, spec: ObjectValue):
     const lookupNotes = spec.paths[detail.path][detail.method].description;
     const notes = `${typeof listingNotes === 'string' ? ` Listing: ${listingNotes.slice(0, 4000)}` : ''}${typeof lookupNotes === 'string' && lookupNotes !== listingNotes ? ` Lookup: ${lookupNotes.slice(0, 4000)}` : ''}`;
     const tool: Tool = { ...list.tool, name, inputSchema: schema,
-      description: `Get ${label}. Supply id alone for one exact record, or omit id to list/filter one page. Always returns response.data as an array and response.nextCursor; an unknown id remains a 404 error. Pass response.nextCursor as cursor for another page.${name === 'getEmails' ? ' The from/to filters are creation-date bounds, not email addresses; search covers sender, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, kind, region and creation-date filters instead of searching their text.' : ''} Permissions are enforced by OpenSend.${notes}`,
+      description: `Get ${label}. Supply id alone for one exact record, or omit id to list/filter one page. Always returns response.data as an array and response.nextCursor; an unknown id remains a 404 error. Pass response.nextCursor as cursor for another page.${name === 'getEmails' ? ' The from/to filters are creation-date bounds, not email addresses; search covers sender, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, kind, region and creation-date filters instead of searching their text.' : ''} Permissions are enforced by Bane.${notes}`,
     };
     const combined = { ...list, tool, singlePath: detail.path, validate: validator(schema) };
     freeze(tool); Object.freeze(combined);
@@ -388,7 +388,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   inbound(actionTool('sendInboundThread', `Queue real mail now from a receiving address. For replies, read the thread first. Pin body.addressId, body.replyToMessageId and body.expectedRecipients to the reviewed address, message and exact To/Cc/Bcc; do not guess recipients from participants. Never split a send across threads to bypass the 50-person limit. Reuse the same idempotencyKey only for a retry of the same confirmed send. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, threadSends, 'mode'));
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
-  direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx opensend-js upload so file bytes bypass model context.', 'uploadAttachment');
+  direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx banemx upload so file bytes bypass model context.', 'uploadAttachment');
   direct('deleteAttachment', 'Delete an attachment that is not referenced by retained mail or campaigns.', 'deleteAttachment');
 
   const webhooks = need('getWebhooks');
@@ -410,7 +410,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
-  const spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0' } });
+  const spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
   if (bytes(spec) > 2 * 1024 * 1024 || !object(spec.paths)) invalid('OpenAPI document exceeds its byte limit or has no paths.');
   inspectSpec(spec);
   const operations = new Map<string, McpOperation>();
@@ -430,7 +430,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (!input) continue;
       const tool: Tool = {
         name,
-        description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${EMAIL_SEND_TOOLS.has(name) ? `${EMAIL_SEND_CONFIRMATION} ` : ''}${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions are enforced by OpenSend.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
+        description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${EMAIL_SEND_TOOLS.has(name) ? `${EMAIL_SEND_CONFIRMATION} ` : ''}${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions are enforced by Bane.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
         inputSchema: input,
         outputSchema: outputSchema(spec, operation),
         annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true },

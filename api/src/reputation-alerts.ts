@@ -102,7 +102,7 @@ export function reputationAlertText(input: { region: string; metric: Metric; lev
   const { warning, risk } = THRESHOLDS[input.metric];
   const rising = LEVELS.indexOf(input.level) > LEVELS.indexOf(input.previous);
   const title = `${emoji[input.level]} *${names[input.metric]} ${(rising ? risingText : fallingText)[input.level]}* · ${input.region}`;
-  return `${title}\n${percent(input.value)} now  ·  warning ${percent(warning)}  ·  at risk ${percent(risk)}\n<${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in OpenSend>`;
+  return `${title}\n${percent(input.value)} now  ·  warning ${percent(warning)}  ·  at risk ${percent(risk)}\n<${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in Bane>`;
 }
 
 const deliver: JobHandler = async (runtime, payload) => {

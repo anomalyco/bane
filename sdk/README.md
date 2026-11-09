@@ -1,26 +1,26 @@
-# OpenSend TypeScript SDK
+# Bane TypeScript SDK
 
-TypeScript client for the self-hosted [OpenSend email API](https://github.com/R44VC0RP/opensend). Includes generated request and response types, with no runtime dependencies.
+TypeScript client for the [Bane email API](https://bane.mx). Includes generated request and response types, with no runtime dependencies.
 
 ## Install
 
 ```sh
-npm install opensend-js
+npm install banemx
 ```
 
-This package uses ESM and the Fetch API. Use it on your server; never ship an OpenSend API key in a browser bundle.
+This package uses ESM and the Fetch API. Use it on your server; never ship a Bane API key in a browser bundle.
 
 ## Send an email
 
-Set `OPENSEND_API_KEY` to a key from your OpenSend installation. Replace the example base URL with your deployment's public URL.
+Set `BANE_API_KEY` to a Bane API key. Replace the example base URL with your deployment's public URL.
 
 ```ts
-import { createClient } from 'opensend-js/client';
-import { sendEmail, getEmail } from 'opensend-js';
+import { createClient } from 'banemx/client';
+import { sendEmail, getEmail } from 'banemx';
 
 const client = createClient({
   baseUrl: 'https://mail.example.com',
-  auth: scheme => scheme.scheme === 'bearer' ? process.env.OPENSEND_API_KEY : undefined,
+  auth: scheme => scheme.scheme === 'bearer' ? process.env.BANE_API_KEY : undefined,
 });
 
 const result = await sendEmail({
@@ -49,12 +49,12 @@ The auth callback supplies the API key only to the bearer scheme; dashboard cook
 
 An **address** routes mail and authorizes a sender. A **message** is one email; a **thread** is the conversation you read and reply to. Unrelated emails to the same address start separate threads. Adding an address to a later message does not reveal earlier messages to its key.
 
-1. Enable receiving on a verified domain (`POST /v1/inbound/domains/{id}/enable`), publish the returned MX, then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-opensend).
+1. Enable receiving on a verified domain (`POST /v1/inbound/domains/{id}/enable`), publish the returned MX, then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-bane).
 2. Subscribe with `POST /v1/inbound/webhooks`, for example `{"url":"https://example.com/support-hook","eventTypes":["message.received"],"addressIds":["mbx_…"]}`. Allowlist the exact HTTPS host, verify the raw-body signature and timestamp, and deduplicate the event `id`. Store `threadId` with the ticket; `messageId` identifies the individual message. Issue a scoped `read`/`send` key with `POST /v1/inbound/keys` and the relevant `addressIds`.
-3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in OpenSend for the receiving region, while address keys may only use their own addresses. OpenSend sets `In-Reply-To` and `References`. `202` means queued, not delivered.
+3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in Bane for the receiving region, while address keys may only use their own addresses. Bane sets `In-Reply-To` and `References`. `202` means queued, not delivered.
 
 ```ts
-import { getInboundThread, replyToInboundThread } from 'opensend-js';
+import { getInboundThread, replyToInboundThread } from 'banemx';
 
 // event is a verified message.received webhook; no address lookup is required.
 const { data: thread } = await getInboundThread({ client, path: { threadId: event.threadId }, throwOnError: true });
@@ -65,11 +65,11 @@ await replyToInboundThread({
 });
 ```
 
-### Forward a public address into OpenSend
+### Forward a public address into Bane
 
-Keep your existing mail provider for the root domain and let OpenSend receive one forwarded address. This is the flow used for `testing@opencode.ai`:
+Keep your existing mail provider for the root domain and let Bane receive one forwarded address. This is the flow used for `testing@opencode.ai`:
 
-1. Add and verify `inbox.example.com` in OpenSend, then enable receiving on it. Publish its SES MX record **only** on `inbox.example.com`; never add an SES MX to `example.com`, which would outrank your provider and take all its mail.
+1. Add and verify `inbox.example.com` in Bane, then enable receiving on it. Publish its SES MX record **only** on `inbox.example.com`; never add an SES MX to `example.com`, which would outrank your provider and take all its mail.
 2. In your provider (for example Cloudflare Email Routing), forward `support@example.com` to `support@inbox.example.com` and verify that destination. Automatic forwarding keeps `From`, `To`, `Subject`, `Message-ID`, `In-Reply-To` and `References`; it rewrites the envelope sender and adds authentication headers.
 3. Reply as the public address. Either create the address with `"publicAddress": "support@example.com"` (same local part, parent domain verified with DKIM), or pass `from` per reply when the address already exists, for example because the catch-all created it:
 
@@ -85,9 +85,9 @@ await replyToInboundThread({
 });
 ```
 
-The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and OpenSend files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
+The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and Bane files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
 
-**Reply to a conversation OpenSend never received:** pass the original Message-IDs as headers when starting the thread, and the customer's mail app keeps it in the same conversation:
+**Reply to a conversation Bane never received:** pass the original Message-IDs as headers when starting the thread, and the customer's mail app keeps it in the same conversation:
 
 ```ts
 await createInboundThread({
@@ -103,7 +103,7 @@ await createInboundThread({
 });
 ```
 
-Single sends, each item in a batch, and inbound thread creation and reply accept up to 20 custom headers (8 KB total). Names use letters, digits and hyphens; values must be single-line printable ASCII. OpenSend reserves identity, recipient, MIME, authentication, transport and unsubscribe headers; see the `headers` field in the generated SDK for the full list. When replying to an existing OpenSend thread, omit `In-Reply-To` and `References`: OpenSend computes them from the selected message.
+Single sends, each item in a batch, and inbound thread creation and reply accept up to 20 custom headers (8 KB total). Names use letters, digits and hyphens; values must be single-line printable ASCII. Bane reserves identity, recipient, MIME, authentication, transport and unsubscribe headers; see the `headers` field in the generated SDK for the full list. When replying to an existing Bane thread, omit `In-Reply-To` and `References`: Bane computes them from the selected message.
 
 **Only act on verified senders:** set `"requireDmarc": true` in `POST /v1/inbound/addresses` or `PATCH /v1/inbound/addresses/{addressId}`. Mail without a DMARC pass for its `From` domain is still stored and labelled `unverified` for that address, but it triggers neither a `message.received` event nor a webhook for that address. The event’s `data.dmarc` carries the SES verdict, or `null` if absent. Forwarded mail can still pass when the original sender’s aligned DKIM signature survives. The setting defaults to `false`; enable it on every address whose events you treat as verified.
 
@@ -120,7 +120,7 @@ Single sends, each item in a batch, and inbound thread creation and reply accept
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
 
 ```sh
-npx --yes opensend-js upload ./invite.ics \
+npx --yes banemx upload ./invite.ics \
   --api https://mail.example.com \
   --token 'os_agent_…' \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
@@ -131,7 +131,7 @@ Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as
 Generated per-recipient content can use the same raw upload path without writing a temporary file:
 
 ```ts
-import { uploadAttachmentBytes } from 'opensend-js/upload';
+import { uploadAttachmentBytes } from 'banemx/upload';
 
 const attachment = await uploadAttachmentBytes({
   apiUrl: 'https://mail.example.com',

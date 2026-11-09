@@ -59,7 +59,7 @@ export async function checkMx(domain: string, region: string): Promise<MxReport>
   if (ours.length === records.length) return { ...base, state: 'active', records, providers, message: 'MX points to Amazon SES in this region. Mail is being received.' };
   if (ours.length) return { ...base, state: 'mixed', records, providers, message: `MX also lists ${providers.filter(p => p !== 'Amazon SES').join(', ')}. Some mail may go there instead. Remove the other MX records.` };
   if (records.every(record => /^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com$/.test(record.host))) return { ...base, state: 'wrong_region', records, providers, message: `MX points to Amazon SES in another region. Change it to ${expected.value}.` };
-  return { ...base, state: 'conflict', records, providers, message: `${providers.join(', ')} currently receives mail for ${domain}. Changing the MX record moves all of its mail to OpenSend; use a subdomain to keep the existing mailboxes.` };
+  return { ...base, state: 'conflict', records, providers, message: `${providers.join(', ')} currently receives mail for ${domain}. Changing the MX record moves all of its mail to Bane; use a subdomain to keep the existing mailboxes.` };
 }
 
 export const mxBlocksEnable = (report: MxReport) => ['conflict', 'mixed', 'wrong_region', 'null_mx', 'cname'].includes(report.state);

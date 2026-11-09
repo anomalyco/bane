@@ -201,7 +201,7 @@ export async function assertRegisteredSender(db: DbExecutor, scope: Scope, regio
   const host = from.split('@')[1]!.toLowerCase();
   const names = host.split('.').map((_, index, parts) => parts.slice(index).join('.')).filter(name => name.includes('.'));
   const [registered] = await db.select({ name: domains.name }).from(domains).where(and(eq(domains.workspaceId, scope.workspaceId), eq(domains.region, region), inArray(domains.name, names))).limit(1);
-  if (!registered) throw new ApiError(422, 'SENDER_DOMAIN_NOT_REGISTERED', `Add ${host} or a parent domain to OpenSend in ${region} before sending from it.`, field);
+  if (!registered) throw new ApiError(422, 'SENDER_DOMAIN_NOT_REGISTERED', `Add ${host} or a parent domain to Bane in ${region} before sending from it.`, field);
 }
 
 /** Explicit bridge only: an ordinary send from the same address must not become readable by a mailbox key. */

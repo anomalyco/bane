@@ -285,7 +285,7 @@ export type CampaignTemplateDraft = {
     fromName?: string;
     replyTo?: Array<string>;
     /**
-     * Concrete OpenSend block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
+     * Concrete Bane block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
      */
     html?: string;
     attachments?: Array<string>;
@@ -397,7 +397,7 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -463,7 +463,7 @@ export type BatchSendEmailItem = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1209,7 +1209,7 @@ export type CreateWebhook = {
     regions?: Array<string> | null;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -1224,7 +1224,7 @@ export type UpdateWebhook = {
     regions?: Array<string> | null;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -1522,7 +1522,7 @@ export type InboundDomainList = {
 
 export type InboundDomain = {
     /**
-     * OpenSend domain ID.
+     * Bane domain ID.
      */
     id: string;
     name: string;
@@ -1613,7 +1613,7 @@ export type InboundSubdomain = {
      */
     name: string;
     /**
-     * OpenSend domain ID of the parent.
+     * Bane domain ID of the parent.
      */
     parentDomainId: string;
     parentName: string;
@@ -1821,7 +1821,7 @@ export type InboundMessage = {
     suppressionReason?: string | null;
     emailId: string | null;
     /**
-     * RFC Message-ID, not the OpenSend message ID (id).
+     * RFC Message-ID, not the Bane message ID (id).
      */
     messageId: string | null;
     inReplyTo: string | null;
@@ -1923,7 +1923,7 @@ export type UpdateInboundThread = {
 
 export type CreateInboundThread = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -1934,7 +1934,7 @@ export type CreateInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1965,14 +1965,14 @@ export type InboundAttachmentInput = {
     contentId?: string;
 } | {
     /**
-     * A received attachment in this mailbox (matt_…) or an OpenSend attachment upload (attachment_…).
+     * A received attachment in this mailbox (matt_…) or a Bane attachment upload (attachment_…).
      */
     id: string;
 };
 
 export type ReplyToInboundThread = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -1983,7 +1983,7 @@ export type ReplyToInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1998,7 +1998,7 @@ export type ReplyToInboundThread = {
      */
     addressId?: string;
     /**
-     * OpenSend message ID (msg_…) of a visible message in this thread.
+     * Bane message ID (msg_…) of a visible message in this thread.
      */
     replyToMessageId?: string;
     /**
@@ -2116,7 +2116,7 @@ export type CreateInboundWebhook = {
     eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -2138,7 +2138,7 @@ export type UpdateInboundWebhook = {
     eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
      */
     headers?: Array<{
         name: string;

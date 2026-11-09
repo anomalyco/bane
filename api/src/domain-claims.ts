@@ -40,7 +40,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
   if (row.error_code==='OPERATOR_ADOPTION_REQUIRED') throw new ApiError(409,row.error_code,'An operator must reattest this retained sending identity.');
   if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
-  if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,'Hosted sending placement is managed by OpenSend.','region');
+  if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,'Hosted sending placement is managed by Bane.','region');
   if (row.error_code==='DOMAIN_LIMIT_REACHED') throw new ApiError(409,row.error_code,'A workspace can have at most 10 unproven domains and 100 domains in total. Verify or remove a domain first.');
   if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
   if (!row.token || !row.id) throw new ApiError(409,'DOMAIN_CLAIMED','This domain overlaps an existing claim.');

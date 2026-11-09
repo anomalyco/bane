@@ -17,11 +17,11 @@ const HREF = /^(?:https?:\/\/|mailto:|tel:|\{\{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\}\}|
 const IMAGE_SRC = /^(?:https:\/\/[^\s"'<>]+|cid:[a-zA-Z0-9_.@-]{1,120})$/;
 const DIMENSION = /^(?:[1-9][0-9]{0,3}|[1-9][0-9]?%|100%)$/;
 
-export const CAMPAIGN_CONTENT_GUIDE = `# OpenSend campaign and template content
+export const CAMPAIGN_CONTENT_GUIDE = `# Bane campaign and template content
 
 Campaign and template \`html\` is **block HTML**: a small HTML vocabulary that maps exactly onto the
 dashboard composer's blocks. Anything written through the API opens as editable blocks
-for people, and anything people compose comes back to you in the same form. OpenSend
+for people, and anything people compose comes back to you in the same form. Bane
 applies the email design (fonts, spacing, colours, button and layout styling) when it
 renders; the content itself carries structure only. The server rejects anything outside
 this vocabulary with a 422 that names the offending tag or attribute.
@@ -62,7 +62,7 @@ email. Supported properties are \`color\`, \`background-color\`, \`font-size\` (
 \`font-weight\` (400–700), \`line-height\`, \`letter-spacing\`, \`text-decoration\`, padding
 sides/shorthands (up to 64 px), border color/style/width (up to 4 px), corner radii (up to
 24 px), and width/height. Use styles on headings, paragraphs, lists/items, quotes, code blocks,
-dividers, images, buttons, column cells and styled sections. OpenSend canonicalizes these values
+dividers, images, buttons, column cells and styled sections. Bane canonicalizes these values
 and rejects positioning, display changes, CSS variables, calculations, URLs, expressions,
 \`!important\`, selectors and any other CSS.
 

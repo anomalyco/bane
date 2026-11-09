@@ -1,7 +1,7 @@
 {
-  "name": "opensend-js",
+  "name": "banemx",
   "version": "0.4.1",
-  "description": "TypeScript SDK for the self-hosted OpenSend email API",
+  "description": "TypeScript SDK for the Bane email API",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -12,7 +12,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "opensend": "./dist/cli.js"
+    "bane": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -38,7 +38,7 @@
     "url": "https://github.com/R44VC0RP/opensend/issues"
   },
   "keywords": [
-    "opensend",
+    "bane",
     "email",
     "ses",
     "sdk",

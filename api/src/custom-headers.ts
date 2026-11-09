@@ -16,7 +16,7 @@ export const CustomHeaders = z.array(z.object({
   let total = 0;
   headers.forEach((header, index) => {
     const name = header.name.toLowerCase();
-    if (RESERVED.test(name)) ctx.addIssue({ code: 'custom', path: [index, 'name'], message: `${header.name} is set by OpenSend and cannot be passed as a custom header.` });
+    if (RESERVED.test(name)) ctx.addIssue({ code: 'custom', path: [index, 'name'], message: `${header.name} is set by Bane and cannot be passed as a custom header.` });
     if (seen.has(name)) ctx.addIssue({ code: 'custom', path: [index, 'name'], message: `Do not repeat ${header.name}.` });
     seen.add(name);
     if (header.name.length + 2 + header.value.length > 998) ctx.addIssue({ code: 'custom', path: [index, 'value'], message: `${header.name} exceeds the 998-character SMTP line limit.` });
@@ -25,7 +25,7 @@ export const CustomHeaders = z.array(z.object({
     total += header.name.length + header.value.length;
   });
   if (total > MAX_TOTAL) ctx.addIssue({ code: 'custom', message: `Custom headers may total at most ${MAX_TOTAL} characters.` });
-}).describe('Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient\'s mail client.');
+}).describe('Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient\'s mail client.');
 
 export type CustomHeader = { name: string; value: string };
 
