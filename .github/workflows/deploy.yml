@@ -12,7 +12,8 @@ concurrency:
 jobs:
   deploy:
     # Manual dispatch is allowed, but only main may deploy production or publish the SDK.
-    if: github.ref == 'refs/heads/main'
+    # This deploys the self-hosted installation, which lives only in the original repository.
+    if: github.ref == 'refs/heads/main' && github.repository == 'R44VC0RP/opensend'
     runs-on: ubuntu-latest
     environment: production
     steps:

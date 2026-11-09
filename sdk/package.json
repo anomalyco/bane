@@ -30,12 +30,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/R44VC0RP/opensend.git",
+    "url": "git+https://github.com/anomalyco/bane.git",
     "directory": "sdk"
   },
-  "homepage": "https://github.com/R44VC0RP/opensend/tree/main/sdk#readme",
+  "homepage": "https://github.com/anomalyco/bane/tree/main/sdk#readme",
   "bugs": {
-    "url": "https://github.com/R44VC0RP/opensend/issues"
+    "url": "https://github.com/anomalyco/bane/issues"
   },
   "keywords": [
     "bane",
