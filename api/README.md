@@ -64,6 +64,7 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 | Setting | What to enter |
 | --- | --- |
 | `BETTER_AUTH_SECRET` | At least 32 random bytes, such as the 64-character hex output above. This is the installation root secret for authentication and domain-separated webhook encryption. |
+| `MX_PLATFORM_AWS_ACCOUNT` | 12-digit platform AWS account ID. Required for the API, runners and operator scripts when `MULTI_TENANT=true` and any of `MX_REGIONAL_SENDING`, `MX_TRUSTED_POOL` or `MX_BYO_V2` is `true`. |
 | `DISPATCH_RATE_FACTOR` | Optional pacing target as a multiple of the SES `MaxSendRate` (default `1`; production uses `1.1`, i.e. 22/s at a 20/s quota). Slots are spaced evenly at the target and the target follows quota changes automatically; any throttled response brakes back to the raw quota for ten seconds, so a modest overshoot cannot spiral into retries. |
 | `DISPATCH_TARGET_RATE` | Optional absolute SES sending target in recipients per second; replaces the quota-derived rate (the brake still applies). Leave unset unless the SES quota is known to be stale. |
 | `DISPATCH_DAILY_HEADROOM_PERCENT` | Percent of the SES daily quota and of each Hosted workspace’s effective daily cap kept for transactional recipients (default `10`; `0` disables the reserve). Campaigns wait automatically for capacity. This does not split the per-second rate. |

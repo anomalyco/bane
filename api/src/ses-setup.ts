@@ -478,11 +478,11 @@ export function assertProvisionable(runtime: Runtime): void {
 }
 
 export type JournalEntry={kind:'set'|'topic'|'destination'|'subscription'|'identity';resource:string;target?:string;state?:'creating'|'created';requestedAt?:number};
-export const byoFeedback='https://opensend.mx/v1/events/ses';
 // One destructive command per durable checkpoint. Re-read the full regional
 // feedback topology on every turn (including after an ambiguous delete). Only
 // explicit NotFound is evidence of absence; a denied read never prunes a journal.
 export async function removeByoFeedbackResource(runtime:Runtime,region:string,installationId:string,journal:JournalEntry[],registered:string|null) {
+  const endpoint=feedbackUrl(runtime.config);
   const account=runtime.config.awsAccountId!,names=setupResources(installationId,'byo'),arn=arns(account,region,names);
   const opts={installationId,region,namespace:'byo' as const}, drift=()=>new ApiError(409,'BYO_CLEANUP_DRIFT','The regional resources no longer match the ownership journal. Review the cleanup manifest before retrying.');
   const entries=journal.filter(e=>e.kind!=='identity'), destName=names.eventDestinationName;
@@ -491,7 +491,7 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
     if (entries.filter(v=>v.kind===e.kind && v.resource===e.resource).length!==1) throw drift();
     if (e.kind==='set' && arn.sets.includes(e.resource) || e.kind==='topic' && e.resource===arn.topic) continue;
     if (e.kind==='destination' && e.target===arn.topic && arn.sets.some(a=>e.resource===a+'/'+destName && entries.some(v=>v.kind==='set' && v.resource===a))) continue;
-    if (e.kind==='subscription' && e.resource===arn.topic && registered===arn.topic && e.target===byoFeedback && entries.some(v=>v.kind==='topic')) continue;
+    if (e.kind==='subscription' && e.resource===arn.topic && registered===arn.topic && e.target===endpoint && entries.some(v=>v.kind==='topic')) continue;
     throw drift();
   }
   const context=setupContext(45_000),c=clients(runtime,region,context),request={abortSignal:context.signal};
@@ -510,14 +510,14 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
         const page=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:arn.topic,NextToken:next}),request);
         if (!page.Subscriptions) throw drift();
         for (const s of page.Subscriptions) {
-          if (++count>1 || !sub || s.TopicArn!==arn.topic || s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==byoFeedback) throw drift();
+          if (++count>1 || !sub || s.TopicArn!==arn.topic || s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==endpoint) throw drift();
           // SNS can list our exact journaled endpoint before it exposes a usable
           // subscription ARN. DeleteTopic removes it; no confirmation or repair is needed.
           if (pending(s)) continue;
           const subscription=subscriptionArn(s,arn.topic);
           if (!subscription) throw drift();
           const v=(await c.sns.send(new GetSubscriptionAttributesCommand({SubscriptionArn:subscription}),request)).Attributes;
-          if (v?.TopicArn!==arn.topic || v.Owner!==account || v.Protocol!=='https' || v.Endpoint!==byoFeedback) throw drift();
+          if (v?.TopicArn!==arn.topic || v.Owner!==account || v.Protocol!=='https' || v.Endpoint!==endpoint) throw drift();
           const isPending=v.PendingConfirmation==='true';
           if ((!isPending && v.PendingConfirmation!=='false') || (v.RawMessageDelivery!=='false' && !(isPending && v.RawMessageDelivery===undefined)) || v.FilterPolicy && v.FilterPolicy!=='{}' || v.RedrivePolicy || v.DeliveryPolicy) throw drift();
         }
@@ -552,6 +552,7 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
 export async function provisionJournaledFeedback(runtime:Runtime,region:string,installationId:string,journal:JournalEntry[],
   fence:()=>Promise<void>, record:(entry:JournalEntry)=>Promise<void>,register:(arn:string)=>Promise<void>,signedPool?:()=>Promise<boolean>) {
   const namespace=signedPool?'trusted':'byo';
+  const endpoint=feedbackUrl(runtime.config);
   const options:SesSetupOptions={region,installationId,namespace,connectionSetup:true};
   const account=runtime.config.awsAccountId!, names=setupResources(installationId,namespace), a=arns(account,region,names);
   const ctx=setupContext(), {report,subscriptions}=await inspect(runtime,options,ctx);
@@ -564,13 +565,13 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
   };
   const blocker=report.blockers.find(b=>b.code!=='SNS_CONFIRMATION_PENDING' && (b.code!=='SES_SANDBOX' || namespace==='trusted'));
   if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code));
-  if (report.account?.id!==account || report.feedbackUrl!==byoFeedback) throw drift();
+  if (report.account?.id!==account || report.feedbackUrl!==endpoint) throw drift();
   const topic=report.resources.topic;
   check('topic',a.topic,topic.exists===true);
   if (topic.exists && (!topic.owned || !topic.policyReady && !signedPool)) throw drift();
   const subscription=journal.find(e=>e.kind==='subscription');
-  if (subscription ? subscription.resource!==a.topic || subscription.target!==byoFeedback || (!subscriptions.length && subscription.state!=='creating') : subscriptions.length>0) throw drift();
-  if (subscriptions.length>1 || subscriptions.some(s=>s.Owner!==account || s.Endpoint!==byoFeedback || s.Protocol!=='https' || s.TopicArn!==a.topic) || topic.subscriptionsTruncated || topic.subscription==='confirmed' && topic.rawMessageDelivery!==false) throw drift();
+  if (subscription ? subscription.resource!==a.topic || subscription.target!==endpoint || (!subscriptions.length && subscription.state!=='creating') : subscriptions.length>0) throw drift();
+  if (subscriptions.length>1 || subscriptions.some(s=>s.Owner!==account || s.Endpoint!==endpoint || s.Protocol!=='https' || s.TopicArn!==a.topic) || topic.subscriptionsTruncated || topic.subscription==='confirmed' && topic.rawMessageDelivery!==false) throw drift();
   const streams=['transactional','marketing'] as const;
   for (const [i,stream] of streams.entries()) {
     const s=report.resources[stream];
@@ -622,10 +623,10 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
     // Leave a delivery window before re-requesting so normal polls don't churn tokens.
     if (!subscription || ((topic.subscription==='pending' || !subscriptions.length) && Date.now()-(subscription.requestedAt??0)>=300_000)) {
       const page=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:a.topic}),opts);
-      if (page.NextToken || page.Subscriptions?.length!==subscriptions.length || page.Subscriptions.some(s=>s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==byoFeedback || s.TopicArn!==a.topic)) throw drift();
-      const intent={kind:'subscription' as const,resource:a.topic,target:byoFeedback,requestedAt:Date.now()};
+      if (page.NextToken || page.Subscriptions?.length!==subscriptions.length || page.Subscriptions.some(s=>s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==endpoint || s.TopicArn!==a.topic)) throw drift();
+      const intent={kind:'subscription' as const,resource:a.topic,target:endpoint,requestedAt:Date.now()};
       await record({...intent,state:'creating'}); // The signed callback may beat the Subscribe response.
-      await fence();await c.sns.send(new SubscribeCommand({TopicArn:a.topic,Protocol:'https',Endpoint:byoFeedback,ReturnSubscriptionArn:true,Attributes:{RawMessageDelivery:'false'}}),opts);
+      await fence();await c.sns.send(new SubscribeCommand({TopicArn:a.topic,Protocol:'https',Endpoint:endpoint,ReturnSubscriptionArn:true,Attributes:{RawMessageDelivery:'false'}}),opts);
       await record({...intent,state:'created'});
     } else if (subscription.state==='creating' && topic.subscription==='confirmed') {
       await record({...subscription,state:'created'});

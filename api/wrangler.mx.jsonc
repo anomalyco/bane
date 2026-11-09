@@ -19,6 +19,7 @@
   "vars": {
     "PUBLIC_URL": "https://opensend.mx",
     "MULTI_TENANT": "true",
+    "MX_PLATFORM_AWS_ACCOUNT": "438095551154",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",

@@ -4539,8 +4539,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('Hosted trusted pool: concurrent setup, signed publish, fenced send-only adoption and retention',async t=>{
     const [{nodeRuntime},{createApp},{trustedProvision},{setDomainPool},{adoptIdentities},{ensureRegionSettings},{JobDeferred},{SESv2Client},{SNSClient},{STSClient},{SESClient},{S3Client}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
-    const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='438095551154',tenant='opensendmx-trusted-'+wid,
-      topic=`arn:aws:sns:${va}:${acct}:opensendmx-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true'};
+    const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='opensendmx-trusted-'+wid,
+      topic=`arn:aws:sns:${va}:${acct}:opensendmx-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',MX_PLATFORM_AWS_ACCOUNT:acct,MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.opensend.dev/v1/events/ses'};
     const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
@@ -4594,7 +4594,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'ListTagsForResourceCommand':return {Tags:Object.entries(tags('ses-feedback')).map(([Key,Value])=>({Key,Value}))};
         case 'SetTopicAttributesCommand':assert.ok(confirmed);policy=i.AttributeValue;assert.deepEqual(JSON.parse(policy).Statement[1].Condition.StringEquals,{'AWS:SourceAccount':acct,'AWS:SourceArn':[...sets.keys()].map(n=>`arn:aws:ses:${va}:${acct}:configuration-set/${n}`)});return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:sub?[sub]:[]};
-        case 'SubscribeCommand':assert.ok(!sub);assert.equal(i.Endpoint,'https://opensend.mx/v1/events/ses');assert.equal((await db.query(`SELECT FROM provider_pool_regions WHERE feedback_topic_arn=$1 AND sending_state='pending' AND ownership_journal @> '[{"kind":"subscription"}]'`,[topic])).rowCount,1);sub={...i,Owner:acct,SubscriptionArn:topic+':fixture'};return {SubscriptionArn:topic+':fixture'};
+        case 'SubscribeCommand':assert.ok(!sub);assert.equal(i.Endpoint,flags.SES_FEEDBACK_URL);assert.equal((await db.query(`SELECT FROM provider_pool_regions WHERE feedback_topic_arn=$1 AND sending_state='pending' AND ownership_journal @> '[{"kind":"subscription"}]'`,[topic])).rowCount,1);sub={...i,Owner:acct,SubscriptionArn:topic+':fixture'};return {SubscriptionArn:topic+':fixture'};
         case 'GetSubscriptionAttributesCommand':return {Attributes:{...sub,PendingConfirmation:String(!confirmed),RawMessageDelivery:'false'}};
         default:assert.fail(n);
       }
@@ -4857,8 +4857,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('BYO v5 enrollment: read-only inventory and independent confirmed regional imports',async t=>{
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
-    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',MX_REGIONAL_SENDING:'true',MX_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.opensend.dev/v1/events/ses';
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',MX_PLATFORM_AWS_ACCOUNT:platform,MX_REGIONAL_SENDING:'true',MX_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
     cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM provider_feedback_history WHERE aws_account_id=$1',[account]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);});
@@ -4913,7 +4913,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'ListTagsForResourceCommand':return {Tags:topic!.Tags};
         case 'SetTopicAttributesCommand':assert.equal(i.AttributeName,'Policy');assert.ok(JSON.parse(i.AttributeValue).Statement.some((s:Json)=>s.Principal?.Service==='ses.amazonaws.com'&&s.Condition.StringEquals['AWS:SourceAccount']===account));topic!.Attributes.Policy=i.AttributeValue;return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
-        case 'SubscribeCommand':assert.equal(i.Endpoint,'https://opensend.mx/v1/events/ses');assert.equal((await db.query('SELECT FROM provider_connection_regions WHERE feedback_topic_arn=$1',[arn])).rowCount,1);
+        case 'SubscribeCommand':assert.equal(i.Endpoint,endpoint);assert.equal((await db.query('SELECT FROM provider_connection_regions WHERE feedback_topic_arn=$1',[arn])).rowCount,1);
           if (!topic!.subs.length) topic!.subs.push({...i,Owner:account,SubscriptionArn:region===west?'PendingConfirmation':arn+':test'}); // List may return a sentinel even with ReturnSubscriptionArn.
           if(region===oh && loseSubscribe){loseSubscribe=false;throw Object.assign(Error('accepted before timeout'),{name:'TimeoutError'});}return {SubscriptionArn:arn+':test'};
         case 'GetSubscriptionAttributesCommand':if(throttlePoll){throttlePoll=false;throw Object.assign(Error('poll throttled'),{name:'ThrottlingException'});}return {Attributes:{...topic!.subs[0],PendingConfirmation:String(!topic!.confirmed),RawMessageDelivery:region===west&&!topic!.confirmed?undefined:'false'}};
@@ -4935,7 +4935,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     runtime.config.byoV2=false;error(await post('/scan'),404);runtime.config.byoV2=true;
     error(await post('/scan'),404);error(await post('',{kind:'byo',awsAccountId:account}),422,'VALIDATION_ERROR');
     const {setByoV2}=await import('./scripts/set-byo-v2.js');await setByoV2(db,[wid,'enable']);
-    error(await post('',{kind:'byo',awsAccountId:'438095551154'}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
+    error(await post('',{kind:'byo',awsAccountId:platform}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
     const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
     assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'opensendmx-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
     await run('byo.prove');assert.equal(policies.length,3);
@@ -7679,6 +7679,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ]);
       const base = { BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
       assert.equal(loadConfig(base).screen, undefined, 'Without TYPESAFE_API_KEY the screen is off.');
+      for (const flag of ['MX_REGIONAL_SENDING', 'MX_TRUSTED_POOL', 'MX_BYO_V2']) {
+        assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true' }), { code: 'CONFIG_INVALID' }, `${flag} needs the platform account.`);
+        assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', MX_PLATFORM_AWS_ACCOUNT: '12345' }), { code: 'CONFIG_INVALID' });
+        assert.equal(loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', MX_PLATFORM_AWS_ACCOUNT: '000011112222' }).platformAccount, '000011112222');
+      }
+      assert.equal(loadConfig({ ...base, MX_REGIONAL_SENDING: 'true' }).platformAccount, undefined, 'Single-tenant installs need no platform account.');
       assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
       assert.equal(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-console-key', JEV_ENDPOINT: 'https://opencode.ai/inference/systemone/v1/systemone', JEV_MODEL: 'jev-1.13-free' }).screen?.endpoint, 'https://opencode.ai/inference/systemone/v1/systemone');
       // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.

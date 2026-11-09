@@ -8,12 +8,11 @@ import { GetCallerIdentityCommand,STSClient } from '@aws-sdk/client-sts';
 import { postgresConnection } from '../src/adapters/node.js';
 import { id } from '../src/core.js';
 import { domainName,claimNameAllowed } from '../src/domain-claims.js';
-import { platformAccount } from '../src/byo-regional.js';
 import { adoptionFingerprint,matchesAdoption } from '../src/adopted-identity.js';
 import { paceSetupSes,poolTenantName } from '../src/ses-setup.js';
 import { requirePoolFlags } from './set-domain-pool.js';
 
-const region='us-east-1',prefix=`arn:aws:ses:${region}:${platformAccount}:identity/`;
+const region='us-east-1';
 const attestation=z.object({workspaceId:z.string(),installation:z.literal('opensend-042df6f752eaa1f62cb8'),scope:z.literal('exclusive-send-only'),identities:z.array(z.object({
   arn:z.string(),defaultSet:z.string().nullable(),dkimOrigin:z.enum(DkimSigningAttributesOrigin),dkimZone:z.string().nullable(),dkimTokens:z.array(z.string().min(1)),mailFrom:z.string().nullable(),mailFromBehavior:z.enum(['USE_DEFAULT_VALUE','REJECT_MESSAGE']).nullable(),
 }).strict()).length(12)}).strict();
@@ -21,7 +20,7 @@ const attestation=z.object({workspaceId:z.string(),installation:z.literal('opens
 // No API endpoint. `arns` is the very same private JSON array supplied to the IAM renderer.
 // Its independently reviewed facts are pinned BEFORE reading AWS; live discovery is not authorization.
 export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:unknown,inventory:unknown,operator:string,apply:boolean,env:Record<string,string|undefined>=process.env) {
-  requirePoolFlags(env);
+  const platformAccount=requirePoolFlags(env),prefix=`arn:aws:ses:${region}:${platformAccount}:identity/`;
   if (!operator.startsWith(`arn:aws:sts::${platformAccount}:assumed-role/`)) throw new Error('Use the signed-in platform migration operator, never the runtime principal.');
   const input=attestation.parse(inventory),list=z.array(z.string()).length(12).parse(arns).sort(),tenant=poolTenantName(wid,'trusted');
   if (input.workspaceId!==wid || new Set(list).size!==12) throw new Error('Attestation workspace or ARN list mismatch.');
@@ -107,7 +106,7 @@ export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:
   } catch(e) {await db.query('ROLLBACK');throw e;}
 }
 if (import.meta.main) {
-  requirePoolFlags(process.env);
+  const platformAccount=requirePoolFlags(process.env);
   const {positionals:[wid,...rest],values:v}=parseArgs({allowPositionals:true,options:{manifest:{type:'string'},facts:{type:'string'},'dry-run':{type:'boolean'},apply:{type:'boolean'}}});
   if (!wid || rest.length || !v.manifest || v['dry-run'] && v.apply) throw new Error('Usage: adopt-identities.ts WORKSPACE_ID --manifest ARNS.json [--facts FACTS.json] [--dry-run|--apply]');
   const arns=JSON.parse(await readFile(v.manifest,'utf8')),facts=JSON.parse(await readFile(v.facts??v.manifest+'.facts.json','utf8'));

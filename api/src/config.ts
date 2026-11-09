@@ -4,6 +4,7 @@ import { ApiError } from './core.js';
 import type { Config } from './core.js';
 
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
+const accountId = z.string().regex(/^\d{12}$/);
 const values = z.object({
   BETTER_AUTH_SECRET: z.string().min(32),
   PREVIOUS_BETTER_AUTH_SECRET: optional(z.string().min(32)),
@@ -12,6 +13,7 @@ const values = z.object({
   AUTH_ALLOWED_EMAILS: z.string().default(''),
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
+  MX_PLATFORM_AWS_ACCOUNT: optional(accountId),
   MX_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
   MX_TRUSTED_POOL: z.enum(['true','false']).default('false'),
   MX_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).default('false'),
@@ -58,6 +60,10 @@ const values = z.object({
   JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.7)),
 });
 export const CONFIG_KEYS = Object.keys(values.shape);
+export function requirePlatformAccount(account: Config['platformAccount']): string {
+  if (!account || !accountId.safeParse(account).success) throw new ApiError(503,'CONFIG_INVALID','Set MX_PLATFORM_AWS_ACCOUNT to the 12-digit platform AWS account ID.');
+  return account;
+}
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
 export function deriveEncryptionKey(secret: string): string {
@@ -67,6 +73,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse(input);
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  if (v.MULTI_TENANT==='true' && [v.MX_REGIONAL_SENDING,v.MX_TRUSTED_POOL,v.MX_BYO_V2].includes('true')) requirePlatformAccount(v.MX_PLATFORM_AWS_ACCOUNT);
   if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) throw new ApiError(503,'CONFIG_INVALID','Set both DOMAIN_CONNECT_PRIVATE_KEY and DOMAIN_CONNECT_KEY_ID, or neither.');
   let domainConnect: Config['domainConnect'];
   if (v.DOMAIN_CONNECT_PRIVATE_KEY && v.DOMAIN_CONNECT_KEY_ID) {
@@ -92,7 +99,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
-    byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.MX_REGIONAL_SENDING === 'true',
+    platformAccount: v.MX_PLATFORM_AWS_ACCOUNT, byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.MX_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.MX_REGIONAL_SENDING==='true' && v.MX_TRUSTED_POOL==='true',
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && v.MX_REQUIRE_DMARC_FOR_BULK === 'true',
     placementShadow: v.MULTI_TENANT === 'true' && v.MX_PLACEMENT_SHADOW === 'true', placementDblZone: v.MX_PLACEMENT_DBL_ZONE,

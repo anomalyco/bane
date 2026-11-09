@@ -2,17 +2,17 @@ import { sql } from 'drizzle-orm';
 import { ApiError, type Runtime, type JobHandler } from './core.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, finishHostedRegion } from './states.js';
-import { awsError, byoFeedback, POOL_INSTALLATION, poolTenantName, provisionJournaledFeedback, provisionTenant, type JournalEntry } from './ses-setup.js';
+import { awsError, POOL_INSTALLATION, poolTenantName, provisionJournaledFeedback, provisionTenant, type JournalEntry } from './ses-setup.js';
 import { caller, platformCredentials } from './provider-credentials.js';
-import { platformAccount } from './byo-regional.js';
+import { requirePlatformAccount } from './config.js';
 
 export const virginia='us-east-1';
 const pending=()=>new JobDeferred(new Date(Date.now()+15_000).toISOString());
 const fenced=(count:number|null)=>{if (!count) throw new ApiError(409,'PROVISION_LEASE_LOST','The trusted setup lease changed.',undefined,true);};
-const topic=`arn:aws:sns:${virginia}:${platformAccount}:opensendmx-trusted-feedback`;
 
 // Shared across every workspace. Never call the legacy pool reconciler (it provisions receiving).
-async function ensureFeedback(r:Runtime) {
+async function ensureFeedback(r:Runtime,platformAccount:string) {
+  const topic=`arn:aws:sns:${virginia}:${platformAccount}:opensendmx-trusted-feedback`;
   const target=sql`region=${virginia} AND aws_account_id=${platformAccount} AND NOT legacy_names AND pool_tier='trusted'`;
   await r.db.execute(sql`INSERT INTO provider_pool_regions(region,aws_account_id,pool_tier,legacy_names) VALUES(${virginia},${platformAccount},'trusted',false) ON CONFLICT DO NOTHING`);
   const state=(await r.db.execute(sql`SELECT sending_state,feedback_topic_arn,confirmed_generation,generation FROM provider_pool_regions WHERE ${target}`)).rows[0];
@@ -27,7 +27,7 @@ async function ensureFeedback(r:Runtime) {
   if (!lease) throw pending();
   const owned=sql`${target} AND sending_state='pending' AND generation=${lease.generation} AND lease_until>clock_timestamp()`;
   try {
-    const result=await provisionJournaledFeedback({...r,config:{...r.config,awsAccountId:platformAccount,sesFeedbackUrl:byoFeedback}},virginia,POOL_INSTALLATION,lease.ownership_journal,
+    const result=await provisionJournaledFeedback({...r,config:{...r.config,awsAccountId:platformAccount}},virginia,POOL_INSTALLATION,lease.ownership_journal,
       async()=>fenced((await r.db.execute(sql`SELECT FROM provider_pool_regions WHERE ${owned}`)).rowCount),
       async entry=>fenced((await r.db.execute(sql`UPDATE provider_pool_regions SET ownership_journal=(SELECT coalesce(jsonb_agg(e),'[]') FROM jsonb_array_elements(ownership_journal) e WHERE NOT(e->>'kind'=${entry.kind} AND e->>'resource'=${entry.resource}))||${JSON.stringify([entry])}::jsonb WHERE ${owned}`)).rowCount),
       async arn=>fenced((await r.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned} AND ${arn}::text=${topic} AND (feedback_topic_arn IS NULL OR feedback_topic_arn=${arn})`)).rowCount),
@@ -38,6 +38,7 @@ async function ensureFeedback(r:Runtime) {
 
 export const trustedProvision:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
   if (!r.config.multiTenant || !r.config.regionalSending || !r.config.trustedPool) throw new JobDeferred(new Date(Date.now()+300_000).toISOString());
+  const platformAccount=requirePlatformAccount(r.config.platformAccount);
   const wid=j.workspaceId,cid=String(p.connectionId),name=poolTenantName(wid,'trusted');
   const target=sql`connection_id=${cid} AND region=${virginia} AND NOT legacy AND pool_tenant_name=${name}`;
   const row=(await r.db.execute(sql`SELECT r.sending_state FROM provider_connections c JOIN provider_connection_regions r ON r.connection_id=c.id
@@ -45,7 +46,7 @@ export const trustedProvision:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
   if (!row || row.sending_state==='ready' || row.sending_state==='disabled') return;
   const principal=await caller(virginia,platformCredentials(r));
   if (principal.Arn!==`arn:aws:iam::${platformAccount}:user/opensend-mx` || principal.Account!==platformAccount) throw new ApiError(409,'AWS_ACCOUNT_MISMATCH','Use only the Hosted runtime principal for pool setup.');
-  await ensureFeedback(r);
+  await ensureFeedback(r,platformAccount);
   const ref={connectionId:cid,region:virginia};
   const lease=(await r.db.execute(acquireRegionProvisioning(ref,target))).rows[0];if (!lease) throw pending();
   const gen=Number(lease.generation),owned=sql`${target} AND generation=${gen} AND lease_until>clock_timestamp() AND sending_state='provisioning'`;

@@ -9,7 +9,8 @@ import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { preparePoolReceiving } from './mailbox-setup.js';
 import { releaseConnectionDomains } from './operations.js';
 import { byoEnabled } from './byo-pilot.js';
-import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, platformAccount, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { requirePlatformAccount } from './config.js';
+import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
@@ -40,13 +41,15 @@ const sharedRegions = (runtime: Runtime) => runtime.config.regionalSending ? [pl
 const principals = new Map<string, { account: string; arn: string }>();
 async function platformIdentity(runtime: Runtime, expectedAccount?: string) {
   const key = platformCredentials(runtime), cached = principals.get(key.accessKeyId);
+  // A key from another environment must never provision or bind this installation's pool.
+  const mismatch = (account: string) => (expectedAccount && account !== expectedAccount) || (runtime.config.platformAccount && account !== runtime.config.platformAccount);
   if (cached) {
-    if (expectedAccount && cached.account !== expectedAccount) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
+    if (mismatch(cached.account)) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
     return cached;
   }
   const identity = await caller(platformRegion, key);
   if (!identity.Account || !/^\d{12}$/.test(identity.Account) || !identity.Arn?.startsWith(`arn:aws:iam::${identity.Account}:user/`)) throw new ApiError(503, 'PLATFORM_PRINCIPAL_INVALID', 'Use an IAM user in the commercial AWS partition for the platform connection.');
-  if (expectedAccount && identity.Account !== expectedAccount) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
+  if (mismatch(identity.Account)) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
   const value = { account: identity.Account, arn: identity.Arn };
   principals.set(key.accessKeyId, value); return value;
 }
@@ -263,7 +266,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
     if (region==='us-east-1') continue;
     try {
       const pool = await getPool(runtime, region);
-      if (pool?.legacy_names===false || (runtime.config.regionalSending && !pool)) continue; // The legacy reconciler never owns a newly enrolled pool.
+      if (pool?.legacy_names===false) continue; // The legacy reconciler never owns a newly enrolled pool.
       if (!pool?.sending || !pool.receiving) {
         const principal=await platformIdentity(runtime,pool?.aws_account_id);
         try { await ensurePool(runtime,principal,region); }
@@ -326,7 +329,7 @@ export function registerProviderConnections(app: App) {
     try {
       const input=c.req.valid('json');
       if (input.kind==='byo' && await byoEnabled(c.env,wid)) {
-        if (input.awsAccountId===platformAccount) throw new ApiError(409,'AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
+        if (input.awsAccountId===requirePlatformAccount(c.env.config.platformAccount)) throw new ApiError(409,'AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
         const existing=await get(c.env,wid);
         if (!existing || existing.template_version==='v5') {
           if (!input.awsAccountId || input.region) throw new ApiError(422,'INVALID_CONNECTION','Provide the AWS account ID, not a sending region.');

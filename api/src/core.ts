@@ -40,6 +40,7 @@ export interface Config {
   allowedDomains: string[];
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
+  platformAccount?: string;
   regionalSending?: boolean;
   trustedPool?: boolean;
   requireDmarcForBulk?: boolean;

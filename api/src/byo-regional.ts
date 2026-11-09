@@ -3,7 +3,8 @@ import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
 import { ApiError, id, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { assume } from './provider-credentials.js';
-import { awsError, byoFeedback, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
+import { requirePlatformAccount } from './config.js';
+import { awsError, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed, releaseConnectionClaims } from './domain-claims.js';
@@ -12,8 +13,6 @@ import { getRegionSettings } from './ses-region-state.js';
 import { byoEnabled } from './byo-pilot.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
-export const platformAccount='438095551154';
-const platformArn=`arn:aws:iam::${platformAccount}:user/opensend-mx`;
 export type V5Connection={id:string;workspace_id:string;requested_account:string;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
 type ScanRow={region:string;scan_state:string;scan_error:string|null;scan_facts:Inventory;scan_revision:string;sending_state:string;receiving_state:string;provision_error:string|null;ownership_journal:JournalEntry[]};
 const conflict=(code:string,message:string)=>new ApiError(409,code,message);
@@ -61,6 +60,7 @@ export function v5Link(r:Runtime,c:{id:string;workspace_id:string;external_id:st
   return `https://${c.region}.console.aws.amazon.com/cloudformation/home?region=${c.region}#/stacks/create/review?${params}`;
 }
 export async function enrollV5(r:Runtime,wid:string,account:string) {
+  const platformAccount=requirePlatformAccount(r.config.platformAccount),platformArn=`arn:aws:iam::${platformAccount}:user/opensend-mx`;
   if (account===platformAccount) throw conflict('AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
   const cid=id('conn'),roleRegion='us-east-2',external=crypto.randomUUID();
   v5Link(r,{id:cid,region:roleRegion,workspace_id:wid,external_id:external});
@@ -80,7 +80,7 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
 // read other sets/topics. The proof probes use the same limited policy.
 async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision'|'cleanup',verify=false) {
   const account=c.requested_account, role=`arn:aws:iam::${account}:role/OpenSendMX-${c.id.slice(-20)}`;
-  if (account===platformAccount || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
+  if (account===requirePlatformAccount(r.config.platformAccount) || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
   const names=setupResources(c.id,'byo'),ses=`arn:aws:ses:${region}:${account}:`,sets=[names.transactional,names.marketing].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
   const allow=(Action:string[],Resource:string|string[])=>({Effect:'Allow',Action,Resource,Condition:{StringEquals:{'aws:RequestedRegion':region}}});
   const Statement=purpose==='cleanup'?[
@@ -89,7 +89,7 @@ async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'pro
     allow(['ses:GetAccount'],'*'),allow(['ses:GetConfigurationSet','ses:CreateConfigurationSet','ses:TagResource','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination'],sets),
     allow(['sns:CreateTopic','sns:TagResource','sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:Subscribe'],topic)];
   const aws=await assume(r,region,role,c.external_id,verify,JSON.stringify({Version:'2012-10-17',Statement}));
-  return {...r,config:{...r.config,workspaceId:c.workspace_id,aws,awsAccountId:account,sesFeedbackUrl:byoFeedback}};
+  return {...r,config:{...r.config,workspaceId:c.workspace_id,aws,awsAccountId:account}};
 }
 async function beginScan(db:DbExecutor,c:V5Connection) {
   await db.execute(sql`DELETE FROM byo_candidates WHERE connection_id=${c.id}`);

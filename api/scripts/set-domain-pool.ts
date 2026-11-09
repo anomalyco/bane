@@ -2,19 +2,20 @@ import { Client } from 'pg';
 import { postgresConnection } from '../src/adapters/node.js';
 import { claimNameAllowed, domainName } from '../src/domain-claims.js';
 import { poolTenantName } from '../src/ses-setup.js';
-import { platformAccount } from '../src/byo-regional.js';
+import { requirePlatformAccount } from '../src/config.js';
 import { id } from '../src/core.js';
 
 export function requirePoolFlags(env:Record<string,string|undefined>) {
   if ([env.MULTI_TENANT,env.MX_REGIONAL_SENDING,env.MX_TRUSTED_POOL].some(v=>v!=='true')) throw new Error('Hosted regional sending and trusted-pool enrollment must both be enabled.');
+  return requirePlatformAccount(env.MX_PLATFORM_AWS_ACCOUNT);
 }
 // This only sets initial placement. Never silently move live mail, reset proof, or join the
 // two sending regions' DNS. A graduation requires a staged identity, drain and reviewed cutover.
 export async function setDomainPool(db:Client,args:string[],env:Record<string,string|undefined>=process.env) {
-  requirePoolFlags(env);
+  const platformAccount=requirePoolFlags(env);
   const [wid,host,tier]=args,prepare=args.length===2 && host==='--prepare-trusted';
   const canary=host==='e2e-trusted.opensend.mx' && tier==='trusted';
-  if (!wid || !prepare && (args.length!==3 || !['probation','trusted'].includes(tier!) || domainName.safeParse(host).data!==host || (!canary && !await claimNameAllowed(host!,'https://opensend.mx')))) throw new Error('Usage: set-domain-pool.ts WORKSPACE_ID DOMAIN trusted|probation, or WORKSPACE_ID --prepare-trusted');
+  if (!wid || !prepare && (args.length!==3 || !['probation','trusted'].includes(tier!) || domainName.safeParse(host).data!==host || (!canary && !await claimNameAllowed(host!,env.PUBLIC_URL ?? 'https://opensend.mx')))) throw new Error('Usage: set-domain-pool.ts WORKSPACE_ID DOMAIN trusted|probation, or WORKSPACE_ID --prepare-trusted');
   const name=poolTenantName(wid,'trusted');
   await db.query('BEGIN');
   try {
