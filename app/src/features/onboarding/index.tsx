@@ -49,11 +49,11 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
 // Full-page shell for /onboarding: no dashboard navigation or dashboard data.
 export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const session = useSession()
-  useEffect(() => { document.title = 'Get started · opensend' }, [])
+  useEffect(() => { document.title = 'Get started · bane' }, [])
   return <div className="onboarding-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="onboarding-header">
-      <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />opensend</span>
+      <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />bane</span>
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><WorkspaceSwitcher /></div>
         <ThemeToggle />
@@ -140,7 +140,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     setAwsPhase('idle')
     shared.reset(); byo.reset()
     setPicked(next)
-    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast('If you created the OpenSend stack in AWS, you can delete it there.', 'info')
+    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast('If you created the Bane stack in AWS, you can delete it there.', 'info')
     void client.cancelQueries({ queryKey: ['opensend', api.mode, 'connection'] })
     void (async () => {
       try { if (pending) await connectionApi.remove() }
@@ -240,7 +240,7 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through OpenSend. Nothing to set up.</span>
+        <span className="onboarding-option-body">Send through Bane. Nothing to set up.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">$0.11 per 1,000 emails</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
@@ -264,7 +264,7 @@ function AwsLogo() {
 
 function verifyError(error: unknown, region: string) {
   switch (code(error)) {
-    case 'AWS_ACCESS_DENIED': return `OpenSend can’t use the role yet. Check the stack shows CREATE_COMPLETE in ${region} in this account, then try again.`
+    case 'AWS_ACCESS_DENIED': return `Bane can’t use the role yet. Check the stack shows CREATE_COMPLETE in ${region} in this account, then try again.`
     case 'EXTERNAL_ID_REQUIRED': return 'The role doesn’t require this setup’s external ID. Delete the stack in AWS and open it again.'
     case 'AWS_ACCOUNT_IN_USE': return 'This AWS account is already connected to another workspace.'
     case 'AWS_ACCOUNT_MISMATCH': return 'This setup is tied to a different AWS account. Start over to use this one.'
@@ -290,7 +290,7 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <button type="button" className="onboarding-back" onClick={onBack} disabled={connected}><ArrowLeft size={14} aria-hidden />Back</button>
       <h1 className="onboarding-title">Connect your AWS account</h1>
-      <p className="onboarding-lead">A CloudFormation stack gives OpenSend a role in your account. It takes about two minutes, and this page continues on its own.</p>
+      <p className="onboarding-lead">A CloudFormation stack gives Bane a role in your account. It takes about two minutes, and this page continues on its own.</p>
     </div>
     <div className="onboarding-connect-actions onb-rise" style={rise(1)} inert={connected}>
       {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></a>
@@ -456,7 +456,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">
         <SectionHeader title="API key" />
-        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? message(create.error) : <>Store it as <code>OPENSEND_API_KEY</code> in your project’s environment. It’s shown once.</>}</p>
+        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? message(create.error) : <>Store it as <code>BANE_API_KEY</code> in your project’s environment. It’s shown once.</>}</p>
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
           <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>

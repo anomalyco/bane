@@ -74,7 +74,7 @@ export function AppShell() {
     const preferred = regions.data?.defaultRegion
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
-  useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
+  useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
@@ -90,7 +90,7 @@ export function AppShell() {
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
+      <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
         {access.multiTenant && <WorkspaceSwitcher />}

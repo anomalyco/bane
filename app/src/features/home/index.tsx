@@ -51,7 +51,7 @@ function VolumeBars({ values }: { values: readonly number[] }) {
 
 export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean; notice?: ReactNode }) {
   const sent = useLiveCount(publicStats.emailsSent, publicStats.sendsPerMinute)
-  useEffect(() => { document.title = 'opensend · Email sending infrastructure' }, [])
+  useEffect(() => { document.title = 'bane · Email sending infrastructure' }, [])
   // The first screen after signing in: fetch its code while the visitor reads, so it is already cached on return.
   useEffect(() => {
     const load = () => void import('../onboarding').catch(() => {})
@@ -61,7 +61,7 @@ export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn:
   const intent = { onPointerDown: onSignInIntent }
   return <div className="home-page">
     <header className="home-header">
-      <a className="wordmark" href="/" aria-label="opensend home"><span className="wordmark-square" aria-hidden="true" />opensend</a>
+      <a className="wordmark" href="/" aria-label="bane home"><span className="wordmark-square" aria-hidden="true" />bane</a>
       <nav className="home-nav" aria-label="Site">
         <a href="/docs">Docs</a>
         <ThemeToggle />
@@ -105,8 +105,8 @@ export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn:
       </section>
     </main>
     <footer className="home-footer muted">
-      <span>opensend</span>
-      <nav aria-label="Developer links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/opensend-js">TypeScript SDK</a></nav>
+      <span>bane</span>
+      <nav aria-label="Developer links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/banemx">TypeScript SDK</a></nav>
     </footer>
   </div>
 }

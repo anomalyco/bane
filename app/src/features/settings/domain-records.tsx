@@ -167,7 +167,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null }:
     {receiving.length > 0 && <RecordRows title="Receiving" optional description={`Add this to receive mail at ${domain.name}.`} notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. OpenSend keeps checking.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. Bane keeps checking.</p></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {connect}

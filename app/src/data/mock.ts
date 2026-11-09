@@ -29,7 +29,7 @@ const now = () => new Date().toISOString()
 const DISCOVERY_TTL = 15 * 60 * 1000
 function demoDiscovery(state: DemoState, region: string, resourcesReady: boolean, subscription: SesDiscovery['resources']['topic']['subscription'] = resourcesReady ? 'confirmed' : 'missing'): SesDiscovery {
   const profile = find(state.regions, region, 'Region')
-  const set = (kind: 'transactional' | 'marketing') => ({ name: `opensend-demo-${kind}`, exists: resourcesReady, owned: resourcesReady, sendingEnabled: resourcesReady, eventDestinationExists: resourcesReady, eventWired: resourcesReady, autoValidation: resourcesReady ? kind === 'marketing' ? 'managed' as const : 'off' as const : null })
+  const set = (kind: 'transactional' | 'marketing') => ({ name: `bane-demo-${kind}`, exists: resourcesReady, owned: resourcesReady, sendingEnabled: resourcesReady, eventDestinationExists: resourcesReady, eventWired: resourcesReady, autoValidation: resourcesReady ? kind === 'marketing' ? 'managed' as const : 'off' as const : null })
   const blockers: SesDiscovery['blockers'] = []
   if (profile.access === 'sandbox') blockers.push({ code: 'SES_SANDBOX', message: 'Demo SES production access is not enabled in this region. Provisioning cannot grant production approval.' })
   if (!profile.sendingEnabled) blockers.push({ code: 'SES_SENDING_DISABLED', message: 'Demo SES account sending is disabled.' })
@@ -39,7 +39,7 @@ function demoDiscovery(state: DemoState, region: string, resourcesReady: boolean
   return {
     region, checkedAt: now(), account: { id: '123456789012', productionAccess: profile.access === 'production', sendingEnabled: profile.sendingEnabled, enforcementStatus: profile.health.toUpperCase(), quota: { max24HourSend: profile.dailyQuota, maxSendRate: profile.maxSendRate, sentLast24Hours: profile.sent24h } },
     domains: state.domains.filter(domain => domain.regionId === region).map(domain => ({ name: domain.name, verificationStatus: domain.status === 'verified' ? 'SUCCESS' : domain.status === 'issue' ? 'FAILED' : 'PENDING', sendingEnabled: domain.status === 'verified' })), identitiesTruncated: false,
-    resources: { transactional: set('transactional'), marketing: set('marketing'), eventDestinationName: 'opensend-demo-events', topic: { name: 'opensend-demo-feedback', arn: resourcesReady ? `arn:aws:sns:${region}:123456789012:opensend-demo-feedback` : null, exists: resourcesReady, owned: resourcesReady, policyReady: resourcesReady, subscription, rawMessageDelivery: subscription === 'confirmed' ? false : null, subscriptionsTruncated: false, staleSubscriptions: 0 } },
+    resources: { transactional: set('transactional'), marketing: set('marketing'), eventDestinationName: 'bane-demo-events', topic: { name: 'bane-demo-feedback', arn: resourcesReady ? `arn:aws:sns:${region}:123456789012:bane-demo-feedback` : null, exists: resourcesReady, owned: resourcesReady, policyReady: resourcesReady, subscription, rawMessageDelivery: subscription === 'confirmed' ? false : null, subscriptionsTruncated: false, staleSubscriptions: 0 } },
     feedbackUrl: 'https://demo.example.invalid/v1/events/ses', status: blockers.length ? 'blocked' : provisioned ? 'ready' : 'needs_provisioning', provisioned, blockers,
     warnings: [{ code: 'DEMO_SIMULATION', message: 'Simulated discovery only. No AWS resources, DNS records, subscriptions, or email are changed.' }],
     reputation: demoReputation(region),
