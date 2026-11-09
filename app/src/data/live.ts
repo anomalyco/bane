@@ -40,11 +40,11 @@ export async function request<T = Json>(path: string, options: { method?: string
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
-    throw new ApiError('Cannot reach OpenSend. Check the API service and try again.', 'NETWORK_UNAVAILABLE')
+    throw new ApiError('Cannot reach Bane. Check the API service and try again.', 'NETWORK_UNAVAILABLE')
   }
   const data = await response.json().catch(() => null)
   const durationMs = Number((performance.now() - started).toFixed(1))
-  if (path.includes('/campaigns') || path === '/api/auth/get-session' || path === '/v1/me') console.info('[OpenSend timing] request', {
+  if (path.includes('/campaigns') || path === '/api/auth/get-session' || path === '/v1/me') console.info('[Bane timing] request', {
     path: new URL(path, window.location.origin).pathname,
     status: response.status,
     durationMs,

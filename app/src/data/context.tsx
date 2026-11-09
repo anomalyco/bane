@@ -82,7 +82,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
         result = await request<Identity>('/v1/me', {signal})
       }
       selectWorkspace(result.multiTenant ? result.workspaceId : null)
-      console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
+      console.info('[Bane timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
       return result
     },
   })
@@ -164,14 +164,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   } })
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
-    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
+    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue with Google</Button>
       </> : <>
         <h2>Couldn’t check your session</h2>
-        <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'OpenSend couldn’t verify your session. Try again without signing in.'}</Alert>
+        <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
       </>}
       <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
     </div></main>}

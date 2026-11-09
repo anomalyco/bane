@@ -6,7 +6,7 @@ const RESERVED = /^(?:host|content-length|content-type|content-encoding|transfer
 
 function reservedMessage(name: string) {
   if (/^cookie$/i.test(name)) return 'Cookie is not allowed. Use an endpoint token instead.'
-  if (/^(?:webhook-|opensend-test$)/i.test(name)) return `${name} is set by OpenSend.`
+  if (/^(?:webhook-|opensend-test$)/i.test(name)) return `${name} is set by Bane.`
   return `${name} is reserved for the HTTP connection.`
 }
 
