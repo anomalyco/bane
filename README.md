@@ -57,10 +57,14 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `dev` | `bane/dev/CLOUDFLARE_API_TOKEN`, `bane/dev/DEV_DATABASE_URL`, `bane/dev/DEV_E2E_API_KEY` | `DEV_E2E_DOMAIN`, `DEV_E2E_DOMAIN_ID`, `DEV_AUTH_ALLOWED_DOMAINS`, `DEV_AUTH_ALLOWED_EMAILS` |
-| `production` | `bane/production/CLOUDFLARE_API_TOKEN`, `bane/production/PROD_DATABASE_URL`, `bane/production/PROD_E2E_API_KEY` | `PROD_DEPLOY_ENABLED`, `PROD_E2E_DOMAIN`, `PROD_E2E_DOMAIN_ID`, `PROD_AUTH_ALLOWED_DOMAINS`, `PROD_AUTH_ALLOWED_EMAILS` |
+| `dev` | `bane/dev/DEV_DATABASE_URL`, `bane/dev/DEV_E2E_API_KEY` | `DEV_E2E_DOMAIN`, `DEV_E2E_DOMAIN_ID`, `DEV_AUTH_ALLOWED_DOMAINS`, `DEV_AUTH_ALLOWED_EMAILS` |
+| `production` | `bane/production/PROD_DATABASE_URL`, `bane/production/PROD_E2E_API_KEY` | `PROD_DEPLOY_ENABLED`, `PROD_E2E_DOMAIN`, `PROD_E2E_DOMAIN_ID`, `PROD_AUTH_ALLOWED_DOMAINS`, `PROD_AUTH_ALLOWED_EMAILS` |
 
-Scope deployment tokens to their respective Workers/resources. Live API keys need read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
+The Cloudflare token is not stored anywhere. Each deploy mints a 30-minute token from the
+token issuer in `anomalyco/secrets` with the environment's own role, scoped to the stage's
+Worker, its custom-domain zones and the Pulumi resources (see the `cloudflare` entry for
+`bane/dev` and `bane/production` in that repo's `config.ts`). Live API keys need
+read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
 
 **Production is frozen until the AWS account switch.** The renamed Worker expects `bane-*` pool resources that do not exist in the old production account. Leave `PROD_DEPLOY_ENABLED` unset or `false` until cutover. Only the coordinator should set it to the exact lowercase string `true`, **only** on the `production` GitHub Environment (not the repository or organization). The gate and deploy jobs both check the freeze. No required reviewers are configured; adding a reviewer rule would prompt twice because both jobs use `production`.
 
