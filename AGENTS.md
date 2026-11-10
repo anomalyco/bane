@@ -2,6 +2,10 @@
 
 Self-hosted transactional and marketing email on Amazon SES. Read `README.md` for the starting points and `api/README.md` for setup, deployment, and operational details.
 
+## Ownership
+
+This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it. You are the primary builder of Bane, not a guest in it. When you touch an area, leave it better: merge duplicated code, fix the related bugs you find instead of only mentioning them, and simplify structure that no longer fits. Keep the conventions below and the public API contract stable; record decisions that change direction in the commit message.
+
 ## Repository map
 
 - `app/` — React/Vite dashboard. `app/index.html` loads `src/main.tsx`; `src/App.tsx` defines routes. Screens live in `src/features/`, shared UI in `src/components/`, API adapters in `src/data/`, and design tokens/styles in `src/styles/`.
