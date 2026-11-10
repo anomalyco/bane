@@ -1,7 +1,11 @@
 import type { InboundAddress, MailAddress } from '../../data/types'
 
-export const nameOf = (value: MailAddress) => value.name || value.address.split('@')[0]!
-export const full = (value: MailAddress) => value.name ? `${value.name} <${value.address}>` : value.address
+// Bidi overrides, isolates and zero-width marks in a sender-chosen display name can make
+// "evil@x.example" read as another address (L17). Names are shown without them.
+const INVISIBLE = /[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g
+export const cleanName = (name: string | null | undefined) => name?.replace(INVISIBLE, '').trim() || null
+export const nameOf = (value: MailAddress) => cleanName(value.name) || value.address.split('@')[0]!
+export const full = (value: MailAddress) => cleanName(value.name) ? `${cleanName(value.name)} <${value.address}>` : value.address
 export const addressName = (addresses: Map<string, InboundAddress>, id: string) => addresses.get(id)?.address ?? id
 export function when(value: string) {
   const at = new Date(value), now = new Date()

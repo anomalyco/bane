@@ -88,10 +88,18 @@ Resources:
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/bane-*'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
+              # Imported identities are never tagged, so the tags are IfExists: an identity Bane tagged
+              # for another owner or installation in this account cannot be sent from through this role.
+              - Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
+                Condition:
+                  StringEquals: {'ses:ApiVersion': '2'}
+                  StringEqualsIfExists: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': domain-identity}
+                  'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}
               - Effect: Allow
                 Action: ses:SendEmail
                 Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
                 Condition: {StringEquals: {'ses:ApiVersion': '2'}, 'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}}

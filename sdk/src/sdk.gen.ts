@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AcceptWorkspaceInvitationData, AcceptWorkspaceInvitationErrors, AcceptWorkspaceInvitationResponses, AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CheckInboundDomainData, CheckInboundDomainErrors, CheckInboundDomainResponses, ChooseReceivingHostData, ChooseReceivingHostErrors, ChooseReceivingHostResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, CompleteDomainDnsSetupData, CompleteDomainDnsSetupErrors, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateConnectionData, CreateConnectionErrors, CreateConnectionResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateInboundAddressData, CreateInboundAddressErrors, CreateInboundAddressResponses, CreateInboundKeyData, CreateInboundKeyErrors, CreateInboundKeyResponses, CreateInboundSubdomainData, CreateInboundSubdomainErrors, CreateInboundSubdomainResponses, CreateInboundThreadData, CreateInboundThreadErrors, CreateInboundThreadResponses, CreateInboundWebhookData, CreateInboundWebhookErrors, CreateInboundWebhookResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceInvitationData, CreateWorkspaceInvitationErrors, CreateWorkspaceInvitationResponses, CreateWorkspaceResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteConnectionData, DeleteConnectionErrors, DeleteConnectionResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteDomainData, DeleteDomainErrors, DeleteDomainResponses, DeleteInboundAddressData, DeleteInboundAddressErrors, DeleteInboundAddressResponses, DeleteInboundWebhookData, DeleteInboundWebhookErrors, DeleteInboundWebhookResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DisableInboundDomainData, DisableInboundDomainErrors, DisableInboundDomainResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, EnableInboundDomainData, EnableInboundDomainErrors, EnableInboundDomainResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetConnectionData, GetConnectionErrors, GetConnectionRegionStatusData, GetConnectionRegionStatusErrors, GetConnectionRegionStatusResponses, GetConnectionResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainDnsSetupData, GetDomainDnsSetupErrors, GetDomainDnsSetupResponses, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailDetailData, GetEmailDetailErrors, GetEmailDetailResponses, GetEmailErrors, GetEmailResponses, GetInboundAddressData, GetInboundAddressErrors, GetInboundAddressResponses, GetInboundAttachmentData, GetInboundAttachmentErrors, GetInboundAttachmentResponses, GetInboundDomainData, GetInboundDomainErrors, GetInboundDomainResponses, GetInboundMessageData, GetInboundMessageErrors, GetInboundMessageResponses, GetInboundScanPolicyData, GetInboundScanPolicyErrors, GetInboundScanPolicyResponses, GetInboundSubdomainData, GetInboundSubdomainErrors, GetInboundSubdomainResponses, GetInboundThreadData, GetInboundThreadErrors, GetInboundThreadResponses, GetInboundWebhookData, GetInboundWebhookErrors, GetInboundWebhookResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetPublicStatsData, GetPublicStatsErrors, GetPublicStatsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportConnectionDomainsData, ImportConnectionDomainsErrors, ImportConnectionDomainsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, InviteWorkspaceMemberData, InviteWorkspaceMemberErrors, InviteWorkspaceMemberResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListConnectionRegionsData, ListConnectionRegionsErrors, ListConnectionRegionsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListInboundAddressesData, ListInboundAddressesErrors, ListInboundAddressesResponses, ListInboundDomainsData, ListInboundDomainsErrors, ListInboundDomainsResponses, ListInboundEventsData, ListInboundEventsErrors, ListInboundEventsResponses, ListInboundKeysData, ListInboundKeysErrors, ListInboundKeysResponses, ListInboundMessagesData, ListInboundMessagesErrors, ListInboundMessagesResponses, ListInboundSubdomainsData, ListInboundSubdomainsErrors, ListInboundSubdomainsResponses, ListInboundThreadsData, ListInboundThreadsErrors, ListInboundThreadsResponses, ListInboundWebhookDeliveriesData, ListInboundWebhookDeliveriesErrors, ListInboundWebhookDeliveriesResponses, ListInboundWebhooksData, ListInboundWebhooksErrors, ListInboundWebhooksResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, ListWorkspaceInvitationsData, ListWorkspaceInvitationsErrors, ListWorkspaceInvitationsResponses, ListWorkspaceMembersData, ListWorkspaceMembersErrors, ListWorkspaceMembersResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, PauseCampaignData, PauseCampaignErrors, PauseCampaignResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RefreshConnectionScanData, RefreshConnectionScanErrors, RefreshConnectionScanResponses, RemoveInboundSubdomainData, RemoveInboundSubdomainErrors, RemoveInboundSubdomainResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RemoveWorkspaceMemberData, RemoveWorkspaceMemberErrors, RemoveWorkspaceMemberResponses, RenameCurrentWorkspaceData, RenameCurrentWorkspaceErrors, RenameCurrentWorkspaceResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, ReplyToInboundThreadData, ReplyToInboundThreadErrors, ReplyToInboundThreadResponses, ResumeCampaignData, ResumeCampaignErrors, ResumeCampaignResponses, RetryInboundWebhookDeliveryData, RetryInboundWebhookDeliveryErrors, RetryInboundWebhookDeliveryResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeInboundKeyData, RevokeInboundKeyErrors, RevokeInboundKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RevokeWorkspaceInvitationData, RevokeWorkspaceInvitationErrors, RevokeWorkspaceInvitationResponses, RotateInboundWebhookSecretData, RotateInboundWebhookSecretErrors, RotateInboundWebhookSecretResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignPacingData, SetCampaignPacingErrors, SetCampaignPacingResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateInboundAddressData, UpdateInboundAddressErrors, UpdateInboundAddressResponses, UpdateInboundDomainData, UpdateInboundDomainErrors, UpdateInboundDomainResponses, UpdateInboundScanPolicyData, UpdateInboundScanPolicyErrors, UpdateInboundScanPolicyResponses, UpdateInboundSubdomainData, UpdateInboundSubdomainErrors, UpdateInboundSubdomainResponses, UpdateInboundThreadData, UpdateInboundThreadErrors, UpdateInboundThreadResponses, UpdateInboundWebhookData, UpdateInboundWebhookErrors, UpdateInboundWebhookResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceMemberData, UpdateWorkspaceMemberErrors, UpdateWorkspaceMemberResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyConnectionData, VerifyConnectionErrors, VerifyConnectionResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AcceptWorkspaceInvitationData, AcceptWorkspaceInvitationErrors, AcceptWorkspaceInvitationResponses, AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CheckInboundDomainData, CheckInboundDomainErrors, CheckInboundDomainResponses, ChooseReceivingHostData, ChooseReceivingHostErrors, ChooseReceivingHostResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, CompleteDomainDnsSetupData, CompleteDomainDnsSetupErrors, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateConnectionData, CreateConnectionErrors, CreateConnectionResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateInboundAddressData, CreateInboundAddressErrors, CreateInboundAddressResponses, CreateInboundKeyData, CreateInboundKeyErrors, CreateInboundKeyResponses, CreateInboundSubdomainData, CreateInboundSubdomainErrors, CreateInboundSubdomainResponses, CreateInboundThreadData, CreateInboundThreadErrors, CreateInboundThreadResponses, CreateInboundWebhookData, CreateInboundWebhookErrors, CreateInboundWebhookResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceInvitationData, CreateWorkspaceInvitationErrors, CreateWorkspaceInvitationResponses, CreateWorkspaceResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteConnectionData, DeleteConnectionErrors, DeleteConnectionResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteDomainData, DeleteDomainErrors, DeleteDomainResponses, DeleteInboundAddressData, DeleteInboundAddressErrors, DeleteInboundAddressResponses, DeleteInboundWebhookData, DeleteInboundWebhookErrors, DeleteInboundWebhookResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DisableInboundDomainData, DisableInboundDomainErrors, DisableInboundDomainResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, EnableInboundDomainData, EnableInboundDomainErrors, EnableInboundDomainResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetConnectionData, GetConnectionErrors, GetConnectionRegionStatusData, GetConnectionRegionStatusErrors, GetConnectionRegionStatusResponses, GetConnectionResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainDnsSetupData, GetDomainDnsSetupErrors, GetDomainDnsSetupResponses, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailDetailData, GetEmailDetailErrors, GetEmailDetailResponses, GetEmailErrors, GetEmailResponses, GetInboundAddressData, GetInboundAddressErrors, GetInboundAddressResponses, GetInboundAttachmentData, GetInboundAttachmentErrors, GetInboundAttachmentResponses, GetInboundDomainData, GetInboundDomainErrors, GetInboundDomainResponses, GetInboundMessageData, GetInboundMessageErrors, GetInboundMessageResponses, GetInboundScanPolicyData, GetInboundScanPolicyErrors, GetInboundScanPolicyResponses, GetInboundSubdomainData, GetInboundSubdomainErrors, GetInboundSubdomainResponses, GetInboundThreadData, GetInboundThreadErrors, GetInboundThreadResponses, GetInboundWebhookData, GetInboundWebhookErrors, GetInboundWebhookResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetPublicStatsData, GetPublicStatsErrors, GetPublicStatsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceInvitationData, GetWorkspaceInvitationErrors, GetWorkspaceInvitationResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportConnectionDomainsData, ImportConnectionDomainsErrors, ImportConnectionDomainsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, InviteWorkspaceMemberData, InviteWorkspaceMemberErrors, InviteWorkspaceMemberResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListConnectionRegionsData, ListConnectionRegionsErrors, ListConnectionRegionsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListInboundAddressesData, ListInboundAddressesErrors, ListInboundAddressesResponses, ListInboundDomainsData, ListInboundDomainsErrors, ListInboundDomainsResponses, ListInboundEventsData, ListInboundEventsErrors, ListInboundEventsResponses, ListInboundKeysData, ListInboundKeysErrors, ListInboundKeysResponses, ListInboundMessagesData, ListInboundMessagesErrors, ListInboundMessagesResponses, ListInboundSubdomainsData, ListInboundSubdomainsErrors, ListInboundSubdomainsResponses, ListInboundThreadsData, ListInboundThreadsErrors, ListInboundThreadsResponses, ListInboundWebhookDeliveriesData, ListInboundWebhookDeliveriesErrors, ListInboundWebhookDeliveriesResponses, ListInboundWebhooksData, ListInboundWebhooksErrors, ListInboundWebhooksResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, ListWorkspaceInvitationsData, ListWorkspaceInvitationsErrors, ListWorkspaceInvitationsResponses, ListWorkspaceMembersData, ListWorkspaceMembersErrors, ListWorkspaceMembersResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, PauseCampaignData, PauseCampaignErrors, PauseCampaignResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RefreshConnectionScanData, RefreshConnectionScanErrors, RefreshConnectionScanResponses, RemoveInboundSubdomainData, RemoveInboundSubdomainErrors, RemoveInboundSubdomainResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RemoveWorkspaceMemberData, RemoveWorkspaceMemberErrors, RemoveWorkspaceMemberResponses, RenameCurrentWorkspaceData, RenameCurrentWorkspaceErrors, RenameCurrentWorkspaceResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, ReplyToInboundThreadData, ReplyToInboundThreadErrors, ReplyToInboundThreadResponses, ResumeCampaignData, ResumeCampaignErrors, ResumeCampaignResponses, RetryInboundWebhookDeliveryData, RetryInboundWebhookDeliveryErrors, RetryInboundWebhookDeliveryResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeInboundKeyData, RevokeInboundKeyErrors, RevokeInboundKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RevokeWorkspaceInvitationData, RevokeWorkspaceInvitationErrors, RevokeWorkspaceInvitationResponses, RotateInboundWebhookSecretData, RotateInboundWebhookSecretErrors, RotateInboundWebhookSecretResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignPacingData, SetCampaignPacingErrors, SetCampaignPacingResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateInboundAddressData, UpdateInboundAddressErrors, UpdateInboundAddressResponses, UpdateInboundDomainData, UpdateInboundDomainErrors, UpdateInboundDomainResponses, UpdateInboundScanPolicyData, UpdateInboundScanPolicyErrors, UpdateInboundScanPolicyResponses, UpdateInboundSubdomainData, UpdateInboundSubdomainErrors, UpdateInboundSubdomainResponses, UpdateInboundThreadData, UpdateInboundThreadErrors, UpdateInboundThreadResponses, UpdateInboundWebhookData, UpdateInboundWebhookErrors, UpdateInboundWebhookResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceMemberData, UpdateWorkspaceMemberErrors, UpdateWorkspaceMemberResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyConnectionData, VerifyConnectionErrors, VerifyConnectionResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -28,7 +28,7 @@ export const listMcpConnections = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -46,7 +46,7 @@ export const revokeMcpConnection = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -64,7 +64,7 @@ export const getCurrentIdentity = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -82,7 +82,7 @@ export const listAgentTokens = <ThrowOnError extends boolean = false>(options?: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -103,7 +103,7 @@ export const createAgentToken = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -125,7 +125,7 @@ export const revokeAgentToken = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -143,7 +143,7 @@ export const listApiKeys = <ThrowOnError extends boolean = false>(options?: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -161,7 +161,7 @@ export const createApiKey = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -183,7 +183,7 @@ export const revokeApiKey = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -204,7 +204,7 @@ export const listContacts = <ThrowOnError extends boolean = false>(options?: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -222,7 +222,7 @@ export const createContact = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -247,7 +247,7 @@ export const deleteContact = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -265,7 +265,7 @@ export const getContact = <ThrowOnError extends boolean = false>(options: Option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -283,7 +283,7 @@ export const updateContact = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -305,7 +305,7 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -326,7 +326,7 @@ export const updateContactConsent = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -348,7 +348,7 @@ export const listContactLists = <ThrowOnError extends boolean = false>(options?:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -366,7 +366,7 @@ export const createContactList = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -388,7 +388,7 @@ export const deleteContactList = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -406,7 +406,7 @@ export const getContactList = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -424,7 +424,7 @@ export const updateContactList = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -446,7 +446,7 @@ export const listListMembers = <ThrowOnError extends boolean = false>(options: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -464,7 +464,7 @@ export const addListMembers = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -486,7 +486,7 @@ export const removeListMember = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -504,7 +504,7 @@ export const listSegments = <ThrowOnError extends boolean = false>(options?: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -522,7 +522,7 @@ export const createSegment = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -544,7 +544,7 @@ export const deleteSegment = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -562,7 +562,7 @@ export const getSegment = <ThrowOnError extends boolean = false>(options: Option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -580,7 +580,7 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -605,7 +605,7 @@ export const previewSegment = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -627,7 +627,7 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -648,7 +648,7 @@ export const previewContactImport = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -670,7 +670,7 @@ export const getContactImport = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -688,7 +688,7 @@ export const commitContactImport = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -709,7 +709,7 @@ export const queryAudience = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -734,7 +734,7 @@ export const planAudienceMutation = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -759,7 +759,7 @@ export const applyAudiencePlan = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -781,7 +781,7 @@ export const listCampaignTemplates = <ThrowOnError extends boolean = false>(opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -799,7 +799,7 @@ export const createCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -821,7 +821,7 @@ export const deleteCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -839,7 +839,7 @@ export const getCampaignTemplate = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -857,7 +857,7 @@ export const updateCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -879,7 +879,7 @@ export const publishCampaignTemplate = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -901,7 +901,7 @@ export const previewCampaignTemplate = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -922,7 +922,7 @@ export const renderCampaignTemplatePreviewImage = <ThrowOnError extends boolean 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -940,7 +940,7 @@ export const setCampaignTemplateArchived = <ThrowOnError extends boolean = false
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -962,7 +962,7 @@ export const uploadTemplateAsset = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -987,7 +987,7 @@ export const importTemplateImage = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1009,7 +1009,7 @@ export const deleteTemplateAsset = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1027,7 +1027,7 @@ export const getTemplateAsset = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1045,7 +1045,7 @@ export const getTemplateAssetContent = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1063,7 +1063,7 @@ export const sendEmail = <ThrowOnError extends boolean = false>(options: Options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1085,7 +1085,7 @@ export const sendEmailBatch = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1107,7 +1107,7 @@ export const listEmails = <ThrowOnError extends boolean = false>(options?: Optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1125,7 +1125,7 @@ export const getEmail = <ThrowOnError extends boolean = false>(options: Options<
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1146,7 +1146,7 @@ export const getEmailDetail = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1167,7 +1167,7 @@ export const getEmailContent = <ThrowOnError extends boolean = false>(options: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1185,7 +1185,7 @@ export const listEmailEvents = <ThrowOnError extends boolean = false>(options: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1203,7 +1203,7 @@ export const uploadAttachment = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1225,7 +1225,7 @@ export const deleteAttachment = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1243,7 +1243,7 @@ export const getAttachment = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1264,7 +1264,7 @@ export const getAttachmentContent = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1285,7 +1285,7 @@ export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1306,7 +1306,7 @@ export const createCampaign = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1328,7 +1328,7 @@ export const deleteCampaign = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1346,7 +1346,7 @@ export const getCampaign = <ThrowOnError extends boolean = false>(options: Optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1367,7 +1367,7 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1392,7 +1392,7 @@ export const getCampaignStats = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1413,7 +1413,7 @@ export const getCampaignContentGuide = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1434,7 +1434,7 @@ export const previewCampaign = <ThrowOnError extends boolean = false>(options: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1455,7 +1455,7 @@ export const previewCampaignAudience = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1476,7 +1476,7 @@ export const renderCampaignPreviewImage = <ThrowOnError extends boolean = false>
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1497,7 +1497,7 @@ export const getCampaignState = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1518,7 +1518,7 @@ export const setCampaignArchived = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1540,7 +1540,7 @@ export const testCampaign = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1565,7 +1565,7 @@ export const sendCampaign = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1590,7 +1590,7 @@ export const scheduleCampaign = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1615,7 +1615,7 @@ export const cancelCampaign = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1636,7 +1636,7 @@ export const pauseCampaign = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1661,7 +1661,7 @@ export const resumeCampaign = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1686,7 +1686,7 @@ export const setCampaignPacing = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1708,7 +1708,7 @@ export const getWorkspaceSettings = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1726,7 +1726,7 @@ export const updateWorkspaceSettings = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1748,7 +1748,7 @@ export const getSesSettings = <ThrowOnError extends boolean = false>(options?: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1769,7 +1769,7 @@ export const listDomains = <ThrowOnError extends boolean = false>(options?: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1787,7 +1787,7 @@ export const createDomain = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1812,7 +1812,7 @@ export const configureDomainMailFrom = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1837,7 +1837,7 @@ export const chooseReceivingHost = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1859,7 +1859,7 @@ export const getDomainDnsSetup = <ThrowOnError extends boolean = false>(options:
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/dns-setup',
@@ -1876,7 +1876,7 @@ export const completeDomainDnsSetup = <ThrowOnError extends boolean = false>(opt
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/dns-setup/return/{token}',
@@ -1896,7 +1896,7 @@ export const deleteDomain = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1917,7 +1917,7 @@ export const getDomain = <ThrowOnError extends boolean = false>(options: Options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1938,7 +1938,7 @@ export const verifyDomain = <ThrowOnError extends boolean = false>(options: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1956,7 +1956,7 @@ export const listWebhooks = <ThrowOnError extends boolean = false>(options?: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1974,7 +1974,7 @@ export const createWebhook = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1996,7 +1996,7 @@ export const deleteWebhook = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2014,7 +2014,7 @@ export const getWebhook = <ThrowOnError extends boolean = false>(options: Option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2032,7 +2032,7 @@ export const updateWebhook = <ThrowOnError extends boolean = false>(options: Opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2054,7 +2054,7 @@ export const revealWebhookSecret = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2072,7 +2072,7 @@ export const rotateWebhookSecret = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2090,7 +2090,7 @@ export const testWebhook = <ThrowOnError extends boolean = false>(options: Optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2108,7 +2108,7 @@ export const listWebhookDeliveries = <ThrowOnError extends boolean = false>(opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2126,7 +2126,7 @@ export const getWebhookDelivery = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2144,7 +2144,7 @@ export const retryWebhookDelivery = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2178,7 +2178,7 @@ export const getMetrics = <ThrowOnError extends boolean = false>(options?: Optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2199,7 +2199,7 @@ export const listRegions = <ThrowOnError extends boolean = false>(options?: Opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2220,7 +2220,7 @@ export const configureRegion = <ThrowOnError extends boolean = false>(options: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2245,7 +2245,7 @@ export const discoverRegion = <ThrowOnError extends boolean = false>(options: Op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2266,7 +2266,7 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2291,7 +2291,7 @@ export const configureRegionAutoValidation = <ThrowOnError extends boolean = fal
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2313,7 +2313,7 @@ export const getInboundScanPolicy = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2334,7 +2334,7 @@ export const updateInboundScanPolicy = <ThrowOnError extends boolean = false>(op
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2359,7 +2359,7 @@ export const listInboundDomains = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2377,7 +2377,7 @@ export const getInboundDomain = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2395,7 +2395,7 @@ export const updateInboundDomain = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2422,7 +2422,7 @@ export const checkInboundDomain = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2445,7 +2445,7 @@ export const enableInboundDomain = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2472,7 +2472,7 @@ export const disableInboundDomain = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2493,7 +2493,7 @@ export const listInboundSubdomains = <ThrowOnError extends boolean = false>(opti
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2516,7 +2516,7 @@ export const createInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2543,7 +2543,7 @@ export const removeInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2561,7 +2561,7 @@ export const getInboundSubdomain = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2579,7 +2579,7 @@ export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2606,7 +2606,7 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2629,7 +2629,7 @@ export const createInboundAddress = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2654,7 +2654,7 @@ export const deleteInboundAddress = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2675,7 +2675,7 @@ export const getInboundAddress = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2696,7 +2696,7 @@ export const updateInboundAddress = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2723,7 +2723,7 @@ export const listInboundThreads = <ThrowOnError extends boolean = false>(options
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2744,7 +2744,7 @@ export const createInboundThread = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2771,7 +2771,7 @@ export const getInboundThread = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2792,7 +2792,7 @@ export const updateInboundThread = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2819,7 +2819,7 @@ export const listInboundMessages = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2840,7 +2840,7 @@ export const getInboundMessage = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2861,7 +2861,7 @@ export const getInboundAttachment = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2884,7 +2884,7 @@ export const replyToInboundThread = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2911,7 +2911,7 @@ export const listInboundEvents = <ThrowOnError extends boolean = false>(options?
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2929,7 +2929,7 @@ export const listInboundKeys = <ThrowOnError extends boolean = false>(options?: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2952,7 +2952,7 @@ export const createInboundKey = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2974,7 +2974,7 @@ export const revokeInboundKey = <ThrowOnError extends boolean = false>(options: 
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2992,7 +2992,7 @@ export const listInboundWebhooks = <ThrowOnError extends boolean = false>(option
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3015,7 +3015,7 @@ export const createInboundWebhook = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3037,7 +3037,7 @@ export const deleteInboundWebhook = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3055,7 +3055,7 @@ export const getInboundWebhook = <ThrowOnError extends boolean = false>(options:
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3073,7 +3073,7 @@ export const updateInboundWebhook = <ThrowOnError extends boolean = false>(optio
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3095,7 +3095,7 @@ export const rotateInboundWebhookSecret = <ThrowOnError extends boolean = false>
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3116,7 +3116,7 @@ export const retryInboundWebhookDelivery = <ThrowOnError extends boolean = false
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3134,7 +3134,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
         },
         {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3152,7 +3152,7 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: O
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces',
@@ -3169,7 +3169,7 @@ export const createWorkspace = <ThrowOnError extends boolean = false>(options: O
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces',
@@ -3187,7 +3187,7 @@ export const renameCurrentWorkspace = <ThrowOnError extends boolean = false>(opt
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current',
@@ -3205,7 +3205,7 @@ export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(optio
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members',
@@ -3222,7 +3222,7 @@ export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(opti
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members',
@@ -3240,7 +3240,7 @@ export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -3257,7 +3257,7 @@ export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(o
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -3274,7 +3274,7 @@ export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -3292,7 +3292,7 @@ export const removeWorkspaceMember = <ThrowOnError extends boolean = false>(opti
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members/{id}',
@@ -3306,7 +3306,7 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members/{id}',
@@ -3317,6 +3317,23 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
     }
 });
 
+/**
+ * Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.
+ */
+export const getWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<GetWorkspaceInvitationData, ThrowOnError>): RequestResult<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).get<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError>({
+    security: [{
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        }, {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }],
+    url: '/v1/workspaces/invitations/{id}',
+    ...options
+});
+
 export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<AcceptWorkspaceInvitationData, ThrowOnError>): RequestResult<AcceptWorkspaceInvitationResponses, AcceptWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<AcceptWorkspaceInvitationResponses, AcceptWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
@@ -3324,7 +3341,7 @@ export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/invitations/{id}/accept',
@@ -3341,7 +3358,7 @@ export const deleteConnection = <ThrowOnError extends boolean = false>(options?:
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -3358,7 +3375,7 @@ export const getConnection = <ThrowOnError extends boolean = false>(options?: Op
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -3375,7 +3392,7 @@ export const createConnection = <ThrowOnError extends boolean = false>(options: 
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -3396,7 +3413,7 @@ export const listConnectionRegions = <ThrowOnError extends boolean = false>(opti
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/regions',
@@ -3413,7 +3430,7 @@ export const refreshConnectionScan = <ThrowOnError extends boolean = false>(opti
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/scan',
@@ -3430,7 +3447,7 @@ export const importConnectionDomains = <ThrowOnError extends boolean = false>(op
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/imports',
@@ -3451,7 +3468,7 @@ export const getConnectionRegionStatus = <ThrowOnError extends boolean = false>(
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/regions/status',
@@ -3468,7 +3485,7 @@ export const verifyConnection = <ThrowOnError extends boolean = false>(options: 
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-bane.session_token',
+            name: '__Host-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/verify',

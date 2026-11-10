@@ -81,13 +81,27 @@ jobs:
 
       - id: stage
         name: Pick the stage from the branch
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
-          case "$REF_NAME" in
-            dev|production) echo "stage=$REF_NAME" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::Deploy runs from dev or production, not $REF_NAME."; exit 1 ;;
+          case "$GITHUB_REF" in
+            refs/heads/dev|refs/heads/production) echo "stage=${GITHUB_REF#refs/heads/}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Deploy runs from the dev or production branch, not $GITHUB_REF."; exit 1 ;;
           esac
+
+      # Check the triggering commit, not workflow_run's default-branch SHA or
+      # a production rollback's explicitly authorized ancestor. Reuse this
+      # live check in each privileged job (including on failed-job reruns).
+      - &stage-tip
+        name: Require the triggering commit to still be the stage branch tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+          [[ $tip =~ ^[0-9a-f]{40}$ ]]
+          if [[ $tip != "$EXPECTED_SHA" ]]; then
+            echo "::error::Deployment stopped: $GITHUB_REF_NAME advanced from $EXPECTED_SHA to $tip."
+            exit 1
+          fi
 
       - id: pin
         name: Pin the commit to deploy
@@ -98,7 +112,7 @@ jobs:
           INPUT_REF: ${{ inputs.ref }}
           EVENT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF ]]; then
+          if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF && $INPUT_REF != production ]]; then
             ref=$(jq -rn --arg ref "$INPUT_REF" '$ref | @uri')
             sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
           else
@@ -113,7 +127,7 @@ jobs:
       # deploy is pinned separately.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -219,6 +233,8 @@ jobs:
             echo 'Production deploys are frozen. Set PROD_DEPLOY_ENABLED=true to release.' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      - *stage-tip
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -327,6 +343,8 @@ jobs:
           # --profile (rather than AWS_PROFILE) suppresses ambient credentials as final credentials.
           bash .github/scripts/receiving-rule-set.sh "$account" receiving-bootstrap
 
+      - *stage-tip
+
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
@@ -357,6 +375,7 @@ jobs:
       STAGE: ${{ needs.authorize.outputs.stage }}
     steps:
       - *unfrozen
+      - *stage-tip
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -364,26 +383,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/build-release
-
-      - id: slot
-        name: Check the dev tip after acquiring the deployment slot and building
-        if: needs.authorize.outputs.stage == 'dev'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ needs.authorize.outputs.sha }}
-        run: |
-          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)
-          [[ $tip =~ ^[0-9a-f]{40}$ ]]
-          if [[ $tip != "$SHA" ]]; then
-            echo "Skipped deployment: $SHA was superseded by dev at $tip before migration." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'current=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - id: slot-production
-        name: Production deploys the pinned commit
-        if: needs.authorize.outputs.stage == 'production'
-        run: echo 'current=true' >> "$GITHUB_OUTPUT"
 
       # The environment picks the stage and its variables. No variable or secret
       # name carries a stage prefix: both stages set AUTH_ALLOWED_*, and each
@@ -417,7 +416,6 @@ jobs:
 
       - name: Mint a short-lived Cloudflare token
         id: cloudflare
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         uses: ./.github/actions/cloudflare-token
 
       - name: Fetch the stage secrets
@@ -436,8 +434,9 @@ jobs:
             E2E_API_KEY,bane/dev/E2E_API_KEY
           parse-json-secrets: false
 
+      - *stage-tip
+
       - run: bun run migrate
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         working-directory: api
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
@@ -445,8 +444,9 @@ jobs:
           DEFAULT_SES_REGION: us-east-2
           MULTI_TENANT: 'true'
 
+      - *stage-tip
+
       - name: Deploy the Worker
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
@@ -455,11 +455,10 @@ jobs:
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 
       - name: Health check
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         run: bash .github/scripts/health.sh "$PUBLIC_URL"
 
       - name: Live dev E2E
-        if: needs.authorize.outputs.stage == 'dev' && steps.slot.outputs.current == 'true'
+        if: needs.authorize.outputs.stage == 'dev'
         id: e2e
         working-directory: api
         timeout-minutes: 5

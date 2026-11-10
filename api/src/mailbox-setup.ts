@@ -11,7 +11,8 @@ import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './job
 import { checkMx } from './mailbox-dns.js';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
-import { awsError, feedbackUrl, POOL_INSTALLATION, setupResources } from './ses-setup.js';
+import { awsError, canonical, feedbackUrl, policyReady, POOL_INSTALLATION, setupResources } from './ses-setup.js';
+import { bucketPolicy, deliveryPolicy, inboundPolicy, lifecycleRules, publicAccessBlock, receiptRule, redrivePolicy, STAGING_PREFIX } from './mail-controls.js';
 import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
 import { activateReceiving, claimReceivable, connectionReady, noteReconcileFailure } from './states.js';
 
@@ -19,12 +20,11 @@ const OWNER_TAG = 'bane:installation-id';
 const PURPOSE_TAG = 'bane:purpose';
 const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
-export const STAGING_PREFIX = 'staging/';
+export { STAGING_PREFIX };
 export const workspacePrefix = (wid:string, kind:'raw'|'att') => `workspaces/${wid}/${kind}/`;
 export function assertMailboxKey(wid:string,key:string,kind:'raw'|'att') {
   if (!key.startsWith(workspacePrefix(wid,kind)) || key.split('/').some(s=>!s || s==='.' || s==='..')) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The object is not in this workspace.');
 }
-const RAW_RETENTION_DAYS = 90;
 
 export function mailboxResources(installationId: string, region: string, account?:string) {
   const prefix = setupResources(installationId).topicName.replace(/-feedback$/, '');
@@ -113,32 +113,19 @@ const tags = (installationId: string) => [{ Key: OWNER_TAG, Value: installationI
 const errorName = (error: unknown) => error instanceof Error ? error.name : '';
 const httpStatus = (error: unknown) => (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
 
-function ruleSourceArn(region: string, account: string, rulePrefix: string) { return `arn:aws:ses:${region}:${account}:receipt-rule-set/*:receipt-rule/${rulePrefix}*`; }
-function bucketPolicy(bucket: string, region: string, account: string, rulePrefix: string) {
-  return { Version: '2012-10-17', Statement: [
-    { Sid: 'BaneSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 's3:PutObject', Resource: `arn:aws:s3:::${bucket}/${STAGING_PREFIX}*`, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
-    { Sid: 'BaneTlsOnly', Effect: 'Deny', Principal: '*', Action: 's3:*', Resource: [`arn:aws:s3:::${bucket}`, `arn:aws:s3:::${bucket}/*`], Condition: { Bool: { 'aws:SecureTransport': 'false' } } },
-  ] };
-}
-function topicPolicy(topicArn: string, region: string, account: string, rulePrefix: string) {
-  return { Version: '2012-10-17', Statement: [
-    { Sid: 'BaneOwner', Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${account}:root` }, Action: ['sns:GetTopicAttributes', 'sns:SetTopicAttributes', 'sns:AddPermission', 'sns:RemovePermission', 'sns:DeleteTopic', 'sns:Subscribe', 'sns:ListSubscriptionsByTopic', 'sns:Publish'], Resource: topicArn },
-    { Sid: 'BaneSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 'sns:Publish', Resource: topicArn, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
-  ] };
-}
-
 export type RegionResources = { account: string; bucket: string; topicArn: string; ruleSetName: string };
 
 /** Idempotently creates the Bane-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
 type Clients = { sts: STSClientType; s3: S3ClientType; sns: SNSClientType; ses: ReturnType<typeof pacedSes>; sdk: MailboxSetupSdk };
-async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses, sdk }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>, knownAccount?:string): Promise<RegionResources & { rules: ReceiptRule[] }> {
+async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses, sdk }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>): Promise<RegionResources & { rules: ReceiptRule[] }> {
+  if (runtime.config.multiTenant && installationId===POOL_INSTALLATION) throw new ApiError(409,'POOL_RESOURCE_OWNERSHIP','Per-domain setup cannot manage hosted pool resources.');
   const { DescribeActiveReceiptRuleSetCommand, CreateReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand } = sdk.ses;
   const { HeadBucketCommand, CreateBucketCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand, PutBucketPolicyCommand, PutBucketLifecycleConfigurationCommand } = sdk.s3;
   const { CreateTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, ListSubscriptionsByTopicCommand, SubscribeCommand } = sdk.sns;
   const { GetCallerIdentityCommand } = sdk.sts;
   const endpoint = feedbackUrl(runtime.config);
   {
-    const account = knownAccount ?? (await aws('sts:GetCallerIdentity', () => sts.send(new GetCallerIdentityCommand({}), { abortSignal: signal }))).Account;
+    const account = (await aws('sts:GetCallerIdentity', () => sts.send(new GetCallerIdentityCommand({}), { abortSignal: signal }))).Account;
     if (!account || !/^\d{12}$/.test(account)) throw new ApiError(503, 'AWS_ACCOUNT_UNKNOWN', 'STS did not return a valid AWS account identity.');
     if (runtime.config.awsAccountId && runtime.config.awsAccountId !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'Mailboxes must use the same AWS account as the provisioned SES region.');
     const names = mailboxResources(installationId, region,account);
@@ -160,17 +147,9 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
       catch (error) { if (errorName(error) !== 'BucketAlreadyOwnedByYou') throw errorName(error) === 'BucketAlreadyExists' ? new ApiError(409, 'MAILBOX_BUCKET_CONFLICT', `The S3 bucket name ${names.bucket} is taken.`) : step('s3:CreateBucket', error); }
     }
     await aws('s3:PutBucketTagging', () => s3.send(new PutBucketTaggingCommand({ Bucket: names.bucket, Tagging: { TagSet: tags(installationId) } }), { abortSignal: signal }));
-    await aws('s3:PutPublicAccessBlock', () => s3.send(new PutPublicAccessBlockCommand({ Bucket: names.bucket, PublicAccessBlockConfiguration: { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true } }), { abortSignal: signal }));
+    await aws('s3:PutPublicAccessBlock', () => s3.send(new PutPublicAccessBlockCommand({ Bucket: names.bucket, PublicAccessBlockConfiguration: publicAccessBlock }), { abortSignal: signal }));
     await aws('s3:PutBucketPolicy', () => s3.send(new PutBucketPolicyCommand({ Bucket: names.bucket, Policy: JSON.stringify(bucketPolicy(names.bucket, region, account, names.rulePrefix)) }), { abortSignal: signal }));
-    await aws('s3:PutLifecycleConfiguration', () => s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: names.bucket, LifecycleConfiguration: { Rules: [
-      { ID:'bane-staging',Status:'Enabled',Filter:{Prefix:STAGING_PREFIX},Expiration:{Days:3} },
-      { ID:'bane-unattributed',Status:'Enabled',Filter:{Prefix:'quarantine/'},Expiration:{Days:30} },
-      { ID:'bane-unreferenced-upload',Status:'Enabled',Filter:{Tag:{Key:'bane-kind',Value:'orphan'}},Expiration:{Days:1} },
-      { ID: 'bane-raw-retention', Status: 'Enabled', Filter: { Tag:{Key:'bane-kind',Value:'raw'} }, Expiration: { Days: RAW_RETENTION_DAYS } },
-      { ID:'bane-legacy-raw',Status:'Enabled',Filter:{Prefix:'raw/'},Expiration:{Days:RAW_RETENTION_DAYS} },
-      ...(installationId!==POOL_INSTALLATION ? [{ID:'bane-legacy-downloads',Status:'Enabled' as const,Filter:{Tag:{Key:'bane-kind',Value:'legacy-raw'}},Expiration:{Days:1}}] : []),
-      { ID: 'bane-abort-uploads', Status: 'Enabled', Filter: { Prefix: '' }, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } },
-    ] } }), { abortSignal: signal }));
+    await aws('s3:PutLifecycleConfiguration', () => s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: names.bucket, LifecycleConfiguration: {Rules:lifecycleRules(installationId===POOL_INSTALLATION)} }), { abortSignal: signal }));
 
     // Topic: CreateTopic is idempotent, so ownership is proven by tags, never by name alone.
     const expectedTopic = `arn:aws:sns:${region}:${account}:${names.topicName}`;
@@ -178,9 +157,9 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     if (created.TopicArn !== expectedTopic) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'SNS did not return the expected inbound topic ARN.');
     const topicTags = await aws('sns:ListTagsForResource', () => sns.send(new ListTagsForResourceCommand({ ResourceArn: expectedTopic }), { abortSignal: signal }));
     if (!tags(installationId).every(tag => topicTags.Tags?.some(value => value.Key === tag.Key && value.Value === tag.Value))) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'The inbound SNS topic exists without this installation’s ownership tags.');
-    await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({ TopicArn: expectedTopic, AttributeName: 'Policy', AttributeValue: JSON.stringify(topicPolicy(expectedTopic, region, account, names.rulePrefix)) }), { abortSignal: signal }));
+    await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({ TopicArn: expectedTopic, AttributeName: 'Policy', AttributeValue: JSON.stringify(inboundPolicy(expectedTopic, region, account, names.rulePrefix)) }), { abortSignal: signal }));
     // Topic default protects already-confirmed subscriptions too. SNS caps HTTP retry time at one hour.
-    await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({TopicArn:expectedTopic,AttributeName:'DeliveryPolicy',AttributeValue:JSON.stringify({http:{defaultHealthyRetryPolicy:{minDelayTarget:20,maxDelayTarget:120,numRetries:30,numNoDelayRetries:0,numMinDelayRetries:2,numMaxDelayRetries:24,backoffFunction:'exponential'},disableSubscriptionOverrides:true}})}),{abortSignal:signal}));
+    await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({TopicArn:expectedTopic,AttributeName:'DeliveryPolicy',AttributeValue:JSON.stringify(deliveryPolicy)}),{abortSignal:signal}));
 
     // Trust the topic before subscribing so the signed confirmation passes the ingress allowlist.
     await register(account,names.bucket,expectedTopic);
@@ -203,9 +182,7 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
   }
 }
 
-function ruleFor(name: string, recipients: string[], resources: RegionResources): ReceiptRule {
-  return { Name: name, Enabled: true, TlsPolicy: 'Optional', ScanEnabled: true, Recipients: [...recipients].sort(), Actions: [{ S3Action: { BucketName: resources.bucket, ObjectKeyPrefix: STAGING_PREFIX, TopicArn: resources.topicArn } }] };
-}
+const ruleFor = receiptRule;
 function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
   const action = rule.Actions?.length === 1 ? rule.Actions[0]!.S3Action : undefined;
   const want = expected.Actions![0]!.S3Action!;
@@ -213,25 +190,63 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
     && action?.BucketName === want.BucketName && action?.ObjectKeyPrefix === want.ObjectKeyPrefix && action?.TopicArn === want.TopicArn && !action?.KmsKeyArn;
 }
 
+const receivingDrift=(resource:string)=>new ApiError(409,'POOL_RECEIVING_DRIFT',`${resource} is missing or differs from the hosted configuration. An operator must run Pulumi provisioning.`);
+async function poolRead<T>(resource:string,work:()=>Promise<T>) {
+  try {return await work();} catch(e) {
+    if (httpStatus(e)===404 || /^(NoSuchBucket|NoSuchBucketPolicy|NoSuchLifecycleConfiguration|NoSuchPublicAccessBlockConfiguration|NotFound(Exception)?|RuleSetDoesNotExist)$/.test((e as StepError)?.awsName??errorName(e))) throw receivingDrift(resource);
+    throw step(resource,e);
+  }
+}
+function jsonMatches(value:string|undefined,want:unknown) {
+  try {return !!value && canonical(JSON.parse(value))===canonical(want);} catch {return false;}
+}
+async function verifyPoolRegion(runtime:Runtime,region:string,account:string,signal:AbortSignal,{sdk,s3,sns,ses}:Omit<Clients,'sts'>,register:(account:string,bucket:string,topic:string)=>Promise<void>) {
+  const {bucket,rulePrefix,topicName,ruleSetName}=mailboxResources(POOL_INSTALLATION,region,account);
+  const topicArn=`arn:aws:sns:${region}:${account}:${topicName}`, endpoint=feedbackUrl(runtime.config), opts={abortSignal:signal}, b={Bucket:bucket,ExpectedBucketOwner:account};
+  const policy=await poolRead(`${bucket} Policy`,()=>s3.send(new sdk.s3.GetBucketPolicyCommand(b),opts));
+  if (!policyReady(policy.Policy,bucketPolicy(bucket,region,account,rulePrefix))) throw receivingDrift(`${bucket} Policy`);
+  const block=await poolRead(`${bucket} PublicAccessBlock`,()=>s3.send(new sdk.s3.GetPublicAccessBlockCommand(b),opts));
+  if (canonical(block.PublicAccessBlockConfiguration)!==canonical(publicAccessBlock)) throw receivingDrift(`${bucket} PublicAccessBlock`);
+  const lifecycle=await poolRead(`${bucket} LifecycleConfiguration`,()=>s3.send(new sdk.s3.GetBucketLifecycleConfigurationCommand(b),opts));
+  // S3/terraform can represent the all-objects filter as <Filter/> rather than <Prefix/>.
+  const rules=lifecycle.Rules?.map(r=>({...r,Filter:r.Filter && !Object.keys(r.Filter).length?{Prefix:''}:r.Filter}));
+  if (canonical(rules)!==canonical(lifecycleRules(true))) throw receivingDrift(`${bucket} LifecycleConfiguration`);
+  const {Attributes:a}=await poolRead(topicArn,()=>sns.send(new sdk.sns.GetTopicAttributesCommand({TopicArn:topicArn}),opts));
+  if (a?.Owner!==account || a.TopicArn!==topicArn || !policyReady(a.Policy,inboundPolicy(topicArn,region,account,rulePrefix))) throw receivingDrift(`${topicArn} Policy`);
+  if (!jsonMatches(a.DeliveryPolicy,deliveryPolicy)) throw receivingDrift(`${topicArn} DeliveryPolicy`);
+  const t=await poolRead(topicArn,()=>sns.send(new sdk.sns.ListTagsForResourceCommand({ResourceArn:topicArn}),opts));
+  if (!tags(POOL_INSTALLATION).every(tag=>t.Tags?.some(v=>v.Key===tag.Key && v.Value===tag.Value))) throw receivingDrift(`${topicArn} tags`);
+  const active=await poolRead(ruleSetName,()=>ses<{Metadata?:{Name?:string};Rules?:ReceiptRule[]}>('ses:DescribeActiveReceiptRuleSet',new sdk.ses.DescribeActiveReceiptRuleSetCommand({})));
+  const expected=receiptRule(rulePrefix+'all',[],{bucket,topicArn}), actual=active.Rules?.[0];
+  if (active.Metadata?.Name!==ruleSetName || active.Rules?.length!==1 || !actual || canonical({...actual,Recipients:actual.Recipients??[]})!==canonical(expected)) throw receivingDrift(`${ruleSetName}/${expected.Name}`);
+
+  // Register before confirmation can be accepted. Only the deploy role subscribes inbound:
+  // a fresh account may need its signed confirmation resent after this checkpoint.
+  await register(account,bucket,topicArn);
+  const subs=await poolRead(topicArn,()=>sns.send(new sdk.sns.ListSubscriptionsByTopicCommand({TopicArn:topicArn}),opts));
+  const sub=subs.Subscriptions?.[0];
+  if (subs.NextToken || subs.Subscriptions?.length!==1 || !sub || sub.Protocol!=='https' || sub.Endpoint!==endpoint || sub.TopicArn!==topicArn || sub.Owner!==account) throw receivingDrift(`${topicArn} HTTPS subscription`);
+  if (['PendingConfirmation','pending confirmation'].includes(sub.SubscriptionArn??'')) throw new ApiError(503,'INBOUND_CONFIRMATION_PENDING','Waiting for signed confirmation of the inbound SNS subscription.',undefined,true);
+  if (!sub.SubscriptionArn?.startsWith(topicArn+':')) throw receivingDrift(`${topicArn} HTTPS subscription`);
+  const {Attributes:s}=await poolRead(sub.SubscriptionArn,()=>sns.send(new sdk.sns.GetSubscriptionAttributesCommand({SubscriptionArn:sub.SubscriptionArn}),opts));
+  if (s?.TopicArn!==topicArn || s.Owner!==account || s.Endpoint!==endpoint || s.Protocol!=='https') throw receivingDrift(`${sub.SubscriptionArn} attributes`);
+  if (s.PendingConfirmation==='true') throw new ApiError(503,'INBOUND_CONFIRMATION_PENDING','Waiting for signed confirmation of the inbound SNS subscription.',undefined,true);
+  if (s.PendingConfirmation!=='false' || s.RawMessageDelivery!=='false' || s.FilterPolicy && !jsonMatches(s.FilterPolicy,{})) throw receivingDrift(`${sub.SubscriptionArn} attributes`);
+  if (runtime.config.receivingRedrive && region==='us-east-2' && !jsonMatches(s.RedrivePolicy,redrivePolicy(region,account))) throw receivingDrift(`${sub.SubscriptionArn} RedrivePolicy`);
+  return {account,bucket,topicArn,ruleSetName,rules:active.Rules};
+}
+
 /** Platform maintenance only: customer identities share one regional catch-all rule. */
 export async function preparePoolReceiving(runtime:Runtime,region:string,account:string,register:(account:string,bucket:string,arn:string)=>Promise<void>) {
+  if (!runtime.config.multiTenant) throw new ApiError(409,'HOSTED_RECEIVING_REQUIRED','Pool verification requires a hosted installation.');
   if (region==='us-east-1' || (runtime.config.regionalSending && region!=='us-east-2')) throw new ApiError(409,'HOSTED_RECEIVING_REGION','Hosted receiving is only available in Ohio.');
+  if (!/^\d{12}$/.test(account) || runtime.config.awsAccountId && runtime.config.awsAccountId!==account) throw new ApiError(409,'AWS_ACCOUNT_MISMATCH','Hosted receiving must use the provisioned pool account.');
   assertSesConfigured(runtime);
   const { sdk, config }=await awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
-  const { CreateReceiptRuleCommand, UpdateReceiptRuleCommand } = sdk.ses;
-  const ses=new sdk.ses.SESClient(config),clients={ses:pacedSes(ses,signal),s3:new sdk.s3.S3Client(config),sns:new sdk.sns.SNSClient(config),sts:new sdk.sts.STSClient(config),sdk};
+  const ses=new sdk.ses.SESClient(config),clients={ses:pacedSes(ses,signal),s3:new sdk.s3.S3Client(config),sns:new sdk.sns.SNSClient(config),sdk};
   try {
-    const resources=await ensureRegion(runtime,region,POOL_INSTALLATION,signal,clients,register,account);
-    const rule=ruleFor(mailboxResources(POOL_INSTALLATION,region,account).rulePrefix+'all',[],resources);
-    const existing=resources.rules.find(r=>r.Name===rule.Name);
-    if (!existing) {
-      const after=resources.rules.at(-1)?.Name;
-      if(resources.rules.length && !after)throw new ApiError(503,'RECEIPT_RULE_ORDER_UNKNOWN','SES did not identify the last active rule; refusing to insert ahead of it.',undefined,true);
-      await clients.ses('ses:CreateReceiptRule',new CreateReceiptRuleCommand({RuleSetName:resources.ruleSetName,Rule:rule,After:after}));
-    }
-    else if (!ruleMatches(existing,rule)) await clients.ses('ses:UpdateReceiptRule',new UpdateReceiptRuleCommand({RuleSetName:resources.ruleSetName,Rule:rule}));
-    return resources.bucket;
-  } finally { ses.destroy(); clients.s3.destroy(); clients.sns.destroy(); clients.sts.destroy(); }
+    return (await verifyPoolRegion(runtime,region,account,signal,clients,register)).bucket;
+  } finally { ses.destroy(); clients.s3.destroy(); clients.sns.destroy(); }
 }
 
 /**

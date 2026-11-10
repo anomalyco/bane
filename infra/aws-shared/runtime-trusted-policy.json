@@ -12,24 +12,24 @@
       "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"]
     },
     {
-      "Effect": "Allow", "Action": ["ses:CreateConfigurationSet", "sns:CreateTopic"],
-      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"],
+      "Effect": "Allow", "Action": "ses:CreateConfigurationSet",
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing"],
       "Condition": {
         "StringEquals": {"aws:RequestTag/bane:owner": "bane", "aws:RequestTag/bane:installation-id": "bane:pool", "aws:RequestTag/bane:purpose": "ses-feedback"},
         "ForAllValues:StringEquals": {"aws:TagKeys": ["bane:owner", "bane:installation-id", "bane:purpose"]}
       }
     },
     {
-      "Effect": "Allow", "Action": ["ses:TagResource", "sns:TagResource"],
-      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"],
+      "Effect": "Allow", "Action": "ses:TagResource",
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing"],
       "Condition": {
         "StringEquals": {"aws:RequestTag/bane:owner": "bane", "aws:RequestTag/bane:installation-id": "bane:pool", "aws:RequestTag/bane:purpose": "ses-feedback", "aws:ResourceTag/bane:owner": "bane", "aws:ResourceTag/bane:installation-id": "bane:pool", "aws:ResourceTag/bane:purpose": "ses-feedback"},
         "ForAllValues:StringEquals": {"aws:TagKeys": ["bane:owner", "bane:installation-id", "bane:purpose"]}
       }
     },
     {
-      "Effect": "Allow", "Action": ["ses:GetConfigurationSetEventDestinations", "ses:CreateConfigurationSetEventDestination", "ses:UpdateConfigurationSetEventDestination", "ses:PutConfigurationSetSuppressionOptions", "ses:CreateTenantResourceAssociation", "sns:SetTopicAttributes"],
-      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"],
+      "Effect": "Allow", "Action": ["ses:GetConfigurationSetEventDestinations", "ses:CreateConfigurationSetEventDestination", "ses:PutConfigurationSetSuppressionOptions", "ses:CreateTenantResourceAssociation"],
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing"],
       "Condition": {"StringEquals": {"aws:ResourceTag/bane:owner": "bane", "aws:ResourceTag/bane:installation-id": "bane:pool", "aws:ResourceTag/bane:purpose": "ses-feedback"}}
     },
     {

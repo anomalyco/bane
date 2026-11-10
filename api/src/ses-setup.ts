@@ -9,6 +9,7 @@ import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError } from 
 import type { Config, Runtime } from './core.js';
 import { claimNameAllowed, domainName } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
+import { feedbackPolicy } from './mail-controls.js';
 
 type SetupSdk = {
   sesv2: typeof import('@aws-sdk/client-sesv2');
@@ -189,15 +190,9 @@ function arns(account: string, region: string, names: ReturnType<typeof setupRes
   return { topic: `arn:aws:sns:${region}:${account}:${names.topicName}`, sets: [names.transactional, names.marketing].map(name => `arn:aws:ses:${region}:${account}:configuration-set/${name}`) };
 }
 function topicPolicy(account: string, region: string, names: ReturnType<typeof setupResources>) {
-  const arn = arns(account, region, names);
-  // This dedicated, tagged topic has an exact managed policy. The owner principal is the
-  // account (not root credentials); no public Principal or unrelated service grants.
-  return { Version: '2012-10-17', Statement: [
-    { Sid: 'BaneOwner', Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${account}:root` }, Action: ['sns:GetTopicAttributes', 'sns:SetTopicAttributes', 'sns:AddPermission', 'sns:RemovePermission', 'sns:DeleteTopic', 'sns:Subscribe', 'sns:ListSubscriptionsByTopic', 'sns:Publish'], Resource: arn.topic },
-    { Sid: 'BaneSesPublish', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 'sns:Publish', Resource: arn.topic, Condition: { StringEquals: { 'AWS:SourceAccount': account, 'AWS:SourceArn': arn.sets } } },
-  ] };
+  return feedbackPolicy(account, arns(account, region, names));
 }
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return JSON.stringify(value.map(canonical).sort());
   if (value !== null && typeof value === 'object') return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, v]) => [key, canonical(v)])));
   return JSON.stringify(value);
@@ -227,11 +222,12 @@ function normalizedPolicy(value: unknown): unknown {
   });
   return policy;
 }
-function policyReady(policy: string | undefined, expected: ReturnType<typeof topicPolicy>): boolean {
+export function policyReady(policy: string | undefined, expected: unknown): boolean {
   // Normalize only IAM representation equivalences, never drop statements, principals,
   // actions, resources, operators or condition keys/values (including unexpected ones).
   try { return !!policy && canonical(normalizedPolicy(JSON.parse(policy))) === canonical(normalizedPolicy(expected)); } catch { return false; }
 }
+const poolSendingDrift = (resource:string) => new ApiError(409,'POOL_SENDING_DRIFT',`${resource} is missing or differs from the hosted configuration. An operator must run Pulumi provisioning.`);
 function add(report: SesDiscovery, code: string, message: string, warning = false) { (warning ? report.warnings : report.blockers).push({ code, message }); }
 function pending(subscription: Subscription): boolean { return subscription.SubscriptionArn === 'PendingConfirmation' || subscription.SubscriptionArn === 'pending confirmation'; }
 function subscriptionArn(subscription: Subscription, topicArn: string): string | null {
@@ -594,8 +590,12 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
   if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code));
   if (report.account?.id!==account || report.feedbackUrl!==endpoint) throw drift();
   const topic=report.resources.topic;
-  check('topic',a.topic,topic.exists===true);
-  if (topic.exists && (!topic.owned || !topic.policyReady && !signedPool)) throw drift();
+  if (signedPool) {
+    if (!topic.exists || !topic.owned) throw poolSendingDrift(a.topic);
+  } else {
+    check('topic',a.topic,topic.exists===true);
+    if (topic.exists && (!topic.owned || !topic.policyReady)) throw drift();
+  }
   const subscription=journal.find(e=>e.kind==='subscription');
   if (subscription ? subscription.resource!==a.topic || subscription.target!==endpoint || (!subscriptions.length && subscription.state!=='creating') : subscriptions.length>0) throw drift();
   if (subscriptions.length>1 || subscriptions.some(s=>s.Owner!==account || s.Endpoint!==endpoint || s.Protocol!=='https' || s.TopicArn!==a.topic) || topic.subscriptionsTruncated || topic.subscription==='confirmed' && topic.rawMessageDelivery!==false) throw drift();
@@ -611,8 +611,10 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
   try {
     const finalPolicy=topicPolicy(account,region,names),initialPolicy={...finalPolicy,Statement:finalPolicy.Statement.slice(0,1)};
     const publish=!signedPool || (topic.subscription==='confirmed' && await signedPool());
-    if (signedPool && topic.exists && !topic.policyReady && !policyReady((await c.sns.send(new GetTopicAttributesCommand({TopicArn:a.topic}),opts)).Attributes?.Policy,initialPolicy)) throw drift();
-    if (!publish && (topic.policyReady || streams.some(s=>report.resources[s].eventDestinationExists))) throw drift();
+    // Virginia stays owner-only until signed confirmation. Pulumi, not the key,
+    // opens the narrowly scoped SES grant for the second provisioning pass.
+    if (signedPool && !policyReady((await c.sns.send(new GetTopicAttributesCommand({TopicArn:a.topic}),opts)).Attributes?.Policy,publish?finalPolicy:initialPolicy)) throw poolSendingDrift(`${a.topic} Policy`);
+    if (!publish && streams.some(s=>report.resources[s].eventDestinationExists)) throw drift();
     for (const [i,stream] of streams.entries()) {
       if (!report.resources[stream].exists) {
         await record({kind:'set',resource:a.sets[i]!,state:'creating'});
@@ -625,7 +627,7 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
         await fence();await c.ses.send(validationInput(c.sdk,names[stream],DEFAULT_AUTO_VALIDATION[stream],namespace==='trusted'),opts);
       } else if (report.resources[stream].autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) throw drift();
     }
-    if (!topic.exists) {
+    if (!signedPool && !topic.exists) {
       // Bootstrap private: only add SES publish after positive checks of account,
       // tags, the initial owner-only policy and an empty subscriber inventory.
       await record({kind:'topic',resource:a.topic,state:'creating'});
@@ -638,7 +640,6 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
       if (publish) {await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);}
       await record({kind:'topic',resource:a.topic,state:'created'});
     }
-    if (signedPool && publish && !topic.policyReady) {await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);}
     for (const [i,stream] of streams.entries()) if (publish && !report.resources[stream].eventWired) {
       const set=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts), dest=await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:names[stream]}),opts);
       // SES omits EventDestinations entirely when a configuration set has none.
@@ -679,6 +680,8 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
   const names = setupResources(options.installationId,options.namespace);
   const accountId = report.account.id;
   const expected = arns(accountId, options.region, names);
+  const hosted = runtime.config.multiTenant && options.installationId === POOL_INSTALLATION;
+  if (hosted && !report.resources.topic.policyReady) throw poolSendingDrift(`${expected.topic} Policy`);
   const c = await clients(runtime, options.region, context);
   const { GetConfigurationSetCommand, CreateConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, UpdateConfigurationSetEventDestinationCommand, CreateConfigurationSetEventDestinationCommand } = c.sdk.sesv2;
   const { GetTopicAttributesCommand, ListTagsForResourceCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, GetSubscriptionAttributesCommand, SetSubscriptionAttributesCommand } = c.sdk.sns;
@@ -691,6 +694,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
     const attrs = (await c.sns.send(new GetTopicAttributesCommand({ TopicArn: expected.topic }), { abortSignal: deadlineSignal })).Attributes;
     if (attrs?.TopicArn !== expected.topic || attrs.Owner !== accountId || !owned((await c.sns.send(new ListTagsForResourceCommand({ ResourceArn: expected.topic }), { abortSignal: deadlineSignal })).Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SNS topic without the expected ARN, account and installation ownership tags.');
     if (attrs.FifoTopic === 'true' || attrs.KmsMasterKeyId) throw new ApiError(409, 'SNS_TOPIC_UNSUPPORTED', 'The owned SNS topic has unsupported FIFO or KMS settings.');
+    if (hosted && !policyReady(attrs.Policy,topicPolicy(accountId, options.region, names))) throw poolSendingDrift(`${expected.topic} Policy`);
   };
   try {
     for (const kind of ['transactional', 'marketing'] as const) {
@@ -702,7 +706,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
       const pooled = options.installationId === POOL_INSTALLATION;
       if (!set.SuppressionOptions?.ValidationOptions || (pooled && set.SuppressionOptions.SuppressionScope !== 'TENANT')) await c.ses.send(validationInput(c.sdk, names[kind], DEFAULT_AUTO_VALIDATION[kind], pooled), { abortSignal: deadlineSignal });
     }
-    if (report.resources.topic.exists === false) {
+    if (!hosted && report.resources.topic.exists === false) {
       // SNS CreateTopic is idempotent, so its success alone is not ownership evidence.
       const created = await c.sns.send(new CreateTopicCommand({ Name: names.topicName, Tags: tags(options) }), { abortSignal: deadlineSignal });
       if (created.TopicArn !== expected.topic) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'SNS did not return the expected regional topic ARN.');
@@ -710,7 +714,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
     await assertTopicOwned();
     // Exact policy replacement is limited to this installation's dedicated topic.
     // Unrelated topics, event destinations and subscriptions are never overwritten.
-    if (report.resources.topic.policyReady !== true) await c.sns.send(new SetTopicAttributesCommand({ TopicArn: expected.topic, AttributeName: 'Policy', AttributeValue: JSON.stringify(topicPolicy(accountId, options.region, names)) }), { abortSignal: deadlineSignal });
+    if (!hosted && report.resources.topic.policyReady !== true) await c.sns.send(new SetTopicAttributesCommand({ TopicArn: expected.topic, AttributeName: 'Policy', AttributeValue: JSON.stringify(topicPolicy(accountId, options.region, names)) }), { abortSignal: deadlineSignal });
     for (const name of [names.transactional, names.marketing]) {
       await assertSetOwned(name);
       const destinations = await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ ConfigurationSetName: name }), { abortSignal: deadlineSignal });
@@ -735,7 +739,10 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
       if (!arn) throw new ApiError(503, 'SNS_SUBSCRIPTION_UNKNOWN', 'SNS returned an unrecognized subscription state.');
       const attrs = (await c.sns.send(new GetSubscriptionAttributesCommand({ SubscriptionArn: arn }), { abortSignal: deadlineSignal })).Attributes;
       if (attrs?.TopicArn !== expected.topic || attrs.Endpoint !== endpoint || attrs.Protocol !== 'https' || attrs.Owner !== accountId) throw new ApiError(409, 'SNS_SUBSCRIPTION_OWNERSHIP_CONFLICT', 'Refusing to modify an SNS subscription outside the expected account, topic and endpoint.');
-      if (attrs.PendingConfirmation === 'false' && attrs.RawMessageDelivery !== 'false') await c.sns.send(new SetSubscriptionAttributesCommand({ SubscriptionArn: arn, AttributeName: 'RawMessageDelivery', AttributeValue: 'false' }), { abortSignal: deadlineSignal });
+      if (attrs.PendingConfirmation === 'false' && attrs.RawMessageDelivery !== 'false') {
+        if (hosted) throw poolSendingDrift(`${arn} RawMessageDelivery`);
+        await c.sns.send(new SetSubscriptionAttributesCommand({ SubscriptionArn: arn, AttributeName: 'RawMessageDelivery', AttributeValue: 'false' }), { abortSignal: deadlineSignal });
+      }
     }
   } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }

@@ -3,6 +3,7 @@ import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
+import {bucketPolicy,deliveryPolicy,feedbackPolicy,inboundPolicy,lifecycleRules,publicAccessBlock,receiptRule,redrivePolicy} from './src/mail-controls.js';
 // On Linux, Node gives a child a socket as stdin, which openssl cannot reopen through /dev/stdin, so pass a private temp file.
 async function selfSignedPem(key:import('node:crypto').KeyObject) {
   const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
@@ -25,7 +26,7 @@ const AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
 if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BETTER_AUTH_SECRET to sign synthetic local session fixtures; no scenarios were run.');
 const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
-const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Secure-bane.session_token' : 'bane.session_token';
+const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-bane.session_token' : 'bane.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
 const AUTH_DOMAIN = process.env.AUTH_TEST_GOOGLE_DOMAIN ?? 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
@@ -51,7 +52,21 @@ async function expandFixtureOutbox(runtime:import('./src/core.js').Runtime,wid:s
   const rows=await runtime.db.execute<{id:string;payload:Json}>(sql`UPDATE jobs SET status='completed' WHERE type='mailbox.fanout' AND workspace_id=${wid} AND status='pending' RETURNING id,payload`);
   for(const row of rows.rows)await mailboxEventJobs['mailbox.fanout']!(runtime,row.payload,{id:row.id,workspaceId:wid,attempts:1});
 }
-// Shared SNS/SES control-plane store for cold Ohio pool provisioning and legacy BYO repair.
+function deployedReceiving(region:string,account:string,endpoint:string) {
+  const bucket=`bane-${account}-mail-${region}`,topicArn=`arn:aws:sns:${region}:${account}:bane-inbound`,prefix='bane-inbound-';
+  return {bucket,rule:receiptRule(prefix+'all',[],{bucket,topicArn}),topic:{
+    Tags:[{Key:'bane:installation-id',Value:'bane:pool'},{Key:'bane:purpose',Value:'mailbox-inbound'}],
+    Attributes:{Owner:account,TopicArn:topicArn,Policy:JSON.stringify(inboundPolicy(topicArn,region,account,prefix)),DeliveryPolicy:JSON.stringify(deliveryPolicy)},
+    subs:[{Owner:account,TopicArn:topicArn,SubscriptionArn:topicArn+':fixture',Protocol:'https',Endpoint:endpoint}]},
+    s3:(name:string,i:Json)=>{assert.deepEqual(i,{Bucket:bucket,ExpectedBucketOwner:account});switch(name){
+      case 'GetBucketPolicyCommand':return {Policy:JSON.stringify({...bucketPolicy(bucket,region,account,prefix),Statement:bucketPolicy(bucket,region,account,prefix).Statement.reverse()})};
+      case 'GetPublicAccessBlockCommand':return {PublicAccessBlockConfiguration:publicAccessBlock};
+      case 'GetBucketLifecycleConfigurationCommand':return {Rules:lifecycleRules(true).reverse()};
+      default:assert.fail(`Unexpected hosted S3 command: ${name}`);
+    }}};
+}
+const deployedFeedback=(region:string,account:string,prefix:string,publish=true)=>feedbackPolicy(account,{topic:`arn:aws:sns:${region}:${account}:${prefix}-feedback`,sets:['transactional','marketing'].map(stream=>`arn:aws:ses:${region}:${account}:configuration-set/${prefix}-${stream}`)},publish);
+// The deploy has already installed the hosted policies and inbound subscription; BYO still provisions its own.
 function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:string) {
   const missing=()=>{throw Object.assign(Error('Missing fixture resource'),{name:'NotFoundException'});};
   return (name:string,i:Json,region:string,account:string)=>{
@@ -64,14 +79,19 @@ function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:strin
       case 'PutConfigurationSetSuppressionOptionsCommand':assert.equal(i.SuppressionScope,account===platform?'TENANT':'ACCOUNT');set!.SuppressionOptions=i;return {};
       case 'CreateConfigurationSetEventDestinationCommand':set!.destinations.push({...i.EventDestination,Name:i.EventDestinationName});return {};
       case 'UpdateConfigurationSetEventDestinationCommand':set!.destinations=[{...i.EventDestination,Name:i.EventDestinationName}];return {};
-      case 'CreateTopicCommand':{const arn=`arn:aws:sns:${region}:${account}:${i.Name}`;topics.set(arn,{Tags:i.Tags,Attributes:{TopicArn:arn,Owner:account},subs:[]});return {TopicArn:arn};}
+      case 'CreateTopicCommand':{assert.notEqual(account,platform);const arn=`arn:aws:sns:${region}:${account}:${i.Name}`;topics.set(arn,{Tags:i.Tags,Attributes:{TopicArn:arn,Owner:account},subs:[]});return {TopicArn:arn};}
       case 'GetTopicAttributesCommand':return topic??missing();
       case 'ListTagsForResourceCommand':return topic??missing();
-      case 'SetTopicAttributesCommand':topic!.Attributes[i.AttributeName]=i.AttributeValue;return {};
+      case 'SetTopicAttributesCommand':assert.notEqual(account,platform);topic!.Attributes[i.AttributeName]=i.AttributeValue;return {};
       case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
       default:throw Error('Unexpected AWS command '+name);
     }
   };
+}
+function seedPool(topics:Map<string,Json>,region:string,account:string,endpoint:string) {
+  const {topic}=deployedReceiving(region,account,endpoint);topics.set(topic.Attributes.TopicArn,topic);
+  const arn=`arn:aws:sns:${region}:${account}:bane-feedback`;
+  topics.set(arn,{Tags:[{Key:'bane:installation-id',Value:'bane:pool'},{Key:'bane:purpose',Value:'ses-feedback'}],Attributes:{TopicArn:arn,Owner:account,Policy:JSON.stringify(deployedFeedback(region,account,'bane'))},subs:[]});
 }
 type Key = { id: string; secret: string };
 const cleanups = new WeakMap<TestContext, Array<() => Promise<void>>>();
@@ -720,8 +740,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(account.provider_id, 'google');
         assert.equal(account.account_id, profile.sub);
         for (const field of ['access_token', 'refresh_token', 'id_token', 'password', 'scope']) assert.equal(account[field], null, 'Google token material must not remain in the account row.');
-        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Secure-bane.session_token='));
-        assert.ok(sessionCookie, 'A successful callback must issue the secure prefixed session cookie.');
+        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Host-bane.session_token='));
+        assert.ok(sessionCookie, 'A successful callback must issue the __Host- prefixed session cookie.');
+        assert.doesNotMatch(sessionCookie, /;\s*Domain=/i, 'A __Host- cookie is host-only.');
+        assert.match(sessionCookie, /;\s*Path=\/(?:;|$)/i);
         assert.match(sessionCookie, /;\s*HttpOnly/i);
         assert.match(sessionCookie, /;\s*Secure/i);
         assert.match(sessionCookie, /;\s*SameSite=Lax/i);
@@ -738,7 +760,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.deepEqual((await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows, userBefore);
         assert.deepEqual((await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows, subjectBefore, 'A denied returning profile must not replace the established identity or overwrite its last trusted hd.');
         assert.deepEqual((await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows, sessionsBefore, 'Denied profile/JWT must not create any session.');
-        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Secure-bane.session_token=')));
+        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Host-bane.session_token=')));
       }
       const replay = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
       assert.equal(replay.headers.get('location'), `${origin}/?auth=error`);
@@ -793,11 +815,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const invitedEmail = `${unique('mx-invited-owner')}@example.com`;
       const linked = ok(await local('POST', `${base}/invitations`, {email:invitedEmail,role:'member'}, b.cookie),201);
       const invitedCookie = await login({allowed:true,email:invitedEmail,verified:true,hd:'example.com'},linked.acceptUrl);
+      const before = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
+      assert.equal(before.length,1,'Signing in through an invitation link must not join the workspace before the recipient confirms it.');
+      const personal = before[0];assert.equal(personal.role,'owner');assert.notEqual(personal.id,b.org.id);workspaces.push(personal.id);
+      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,personal.id);
+      const preview = ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie));
+      assert.deepEqual({...preview,expiresAt:undefined},{id:linked.id,workspaceId:b.org.id,workspaceName:b.org.name,workspaceSlug:b.org.slug,inviterName:'Mock provider identity',inviterEmail:otherEmail,role:'member',status:'pending',expiresAt:undefined});
+      error(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,a.cookie),404); // Only the invited address can review it.
+      assert.equal(ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data.length,1,'Reviewing an invitation changes nothing.');
+      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
       const joined = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
-      assert.equal(joined.length,2,'OAuth accepted the link before any dashboard POST, without skipping the personal workspace.');
-      const personal = joined.find((w:Json)=>w.role==='owner');assert.ok(personal && personal.id!==b.org.id);workspaces.push(personal.id);
-      assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
-      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id);
+      assert.equal(joined.length,2);assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
+      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id,'Join selects the workspace the recipient confirmed.');
+      assert.equal(ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie)).status,'accepted');
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
       const extra = ok(await local('POST', '/v1/workspaces', { name: ' Automated ' }, b.cookie), 201); workspaces.push(extra.id);
       assert.equal(extra.name, 'Automated'); assert.equal(extra.role, 'owner'); assert.notEqual(extra.id, b.org.id);
@@ -852,16 +882,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const {S3Client}=await import('@aws-sdk/client-s3'),{SESClient}=await import('@aws-sdk/client-ses');
         const objects=new Map<string,Buffer>(),rules=new Map<string,Json>();let failNextArchive=false;
         providerTest.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){
-          const region=await this.config.region(),i=cmd.input;
-          if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand') return {Metadata:{Name:'existing-rules'},Rules:[{Name:'customer-rule'},...(rules.has(region)?[rules.get(region)]:[])]};
-          assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(i.RuleSetName,'existing-rules');assert.equal(i.After,'customer-rule');assert.deepEqual(i.Rule.Recipients,[]);assert.equal(i.Rule.ScanEnabled,true);assert.equal(i.Rule.Actions[0].S3Action.ObjectKeyPrefix,'staging/');rules.set(region,i.Rule);return {};
+          const region=await this.config.region();assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');
+          const {rule}=deployedReceiving(region,platform,origin+'/v1/events/ses');rules.set(region,rule);return {Metadata:{Name:'bane-inbound'},Rules:[rule]};
         });
         providerTest.mock.method(S3Client.prototype,'send',async function(this:InstanceType<typeof S3Client>,cmd:any){
           assert.equal((await this.config.credentials()).accessKeyId,platformKey.accessKeyId);
           const i=cmd.input,k=i.Bucket+'/'+i.Key;
           switch(cmd.constructor.name){
-            case 'HeadBucketCommand': throw Object.assign(new Error('missing fixture bucket'),{name:'NotFound'});
-            case 'CreateBucketCommand': case 'PutBucketTaggingCommand': case 'PutPublicAccessBlockCommand':case 'PutBucketPolicyCommand':case 'PutBucketLifecycleConfigurationCommand':return {};
+            case 'GetBucketPolicyCommand':case 'GetPublicAccessBlockCommand':case 'GetBucketLifecycleConfigurationCommand':return deployedReceiving(await this.config.region(),platform,origin+'/v1/events/ses').s3(cmd.constructor.name,i);
             case 'HeadObjectCommand': return {ContentLength:objects.get(k)!.length,ETag:'"fixture"'};
             case 'GetObjectCommand': assert.ok(objects.has(k));assert.equal(i.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>objects.get(k)}};
             case 'CopyObjectCommand':assert.ok(objects.has(i.CopySource));objects.set(k,objects.get(i.CopySource)!);return {};
@@ -928,6 +956,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         }
         providerTest.mock.method(SESv2Client.prototype, 'send', aws); providerTest.mock.method(SNSClient.prototype, 'send', aws);
         const offered = [region, 'eu-west-1'], originalRegions = runtime.config.sharedRegions;
+        for(const r of offered)seedPool(topics,r,platform,origin+'/v1/events/ses');
         runtime.config.aws = platformKey; runtime.config.liveEnabled = true; runtime.config.sharedRegions = offered;
         providerTest.after(async () => { runtime.config.aws = undefined; runtime.config.liveEnabled = false; runtime.config.byoTemplateUrl = undefined; runtime.config.sharedRegions = originalRegions; await pool.query('DELETE FROM provider_pool_regions WHERE region=ANY($1) AND aws_account_id=$2', [offered, platform]); });
         const choose = (kind: string, cookie: string) => local('POST', path, { kind, region }, cookie);
@@ -978,14 +1007,21 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const idleStart = calls.length + identityChecks;
         await reconcileSharedConnections(runtime);
         assert.equal(calls.length + identityChecks, idleStart, 'Ready pools and connections need no AWS reconciliation.');
-        assert.equal(sets.size, 4); assert.equal(topics.size, 4); assert.equal(rules.size,2); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 4);
+        assert.equal(sets.size, 4); assert.equal(topics.size, 4); assert.equal(rules.size,2); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 2);
         assert.equal(identityChecks,1,'Sending and receiving pool preparation reuse the verified platform principal across regions.');
         assert.equal(calls.filter(n => n === 'CreateTenantResourceAssociationCommand').length, 4);
-        await providerTest.test('ready Ohio receiving reconciliation preserves the binding and applies the retry policy',async()=>{
+        await providerTest.test('ready Ohio receiving reconciliation reports retry policy drift without changing the binding',async()=>{
           const {reconcileReadyPool}=await import('./scripts/reconcile-pool-receiving.js');const scoped={...runtime,config:{...runtime.config,platformAccount:platform}};
           const state=async()=>(await pool.query('SELECT receiving_state,inbound_bucket,inbound_topic_arn,lease_until FROM provider_pool_regions WHERE region=$1',[region])).rows[0];
           const prior=await state();delete topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy;
-          await reconcileReadyPool(scoped);assert.deepEqual(await state(),prior);assert.ok(topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy);
+          await assert.rejects(reconcileReadyPool(scoped),{code:'POOL_RECEIVING_DRIFT',retryable:false,message:/DeliveryPolicy.*operator.*Pulumi/});assert.deepEqual(await state(),prior);
+          assert.equal(topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy,undefined);topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy=JSON.stringify(deliveryPolicy);
+        });
+        await providerTest.test('hosted Ohio feedback refuses a foreign publish grant rather than replacing the policy',async()=>{
+          const {provisionSes,POOL_INSTALLATION}=await import('./src/ses-setup.js'),arn=`arn:aws:sns:${region}:${platform}:bane-feedback`,a=topics.get(arn)!.Attributes,good=a.Policy;
+          const p=JSON.parse(good);p.Statement.push({Effect:'Allow',Principal:{AWS:'arn:aws:iam::444455556666:root'},Action:'sns:Publish',Resource:arn});a.Policy=JSON.stringify(p);
+          try {await assert.rejects(provisionSes(runtime,{region,installationId:POOL_INSTALLATION,connectionSetup:true,registerTopic:async()=>assert.fail('must not trust drifted topic')}),{code:'POOL_SENDING_DRIFT',retryable:false,message:/bane-feedback Policy.*operator.*Pulumi/});assert.equal(a.Policy,JSON.stringify(p));}
+          finally {a.Policy=good;}
         });
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
         assert.equal((await (await getSes(scoped(a.org.id), region)).config.credentials()).accessKeyId, platformKey.accessKeyId);
@@ -1753,6 +1789,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(copied,`workspaces/${wid}/raw/${sesMessageId}.eml`);
           const {rows:[stored]}=await pool.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);
           const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
+          // A dashboard member never gets the administrator projection (unrouted mail, envelopes, raw .eml).
+          error(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,guest,headers),403,'ADMIN_REQUIRED');
+          error(await local('GET','/v1/inbound/messages?includeDelivery=true',undefined,guest,headers),403,'ADMIN_REQUIRED');
           message.mail.messageId=oversized;message.receipt.action.objectKey=`staging/${oversized}`;
           await runtime.db.transaction(async tx=>{
             const scoped={...runtime,db:tx};
@@ -2467,6 +2506,17 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContext'));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'audienceQuery'));
+    // One HTTP request is one JSON-RPC call: batches and unbounded non-JSON bodies never reach the SDK.
+    const batch = await http('POST', '/mcp', token, Array.from({ length: 500 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'tools/list', params: {} })), rpcHeaders);
+    assert.equal(batch.status, 400, diagnostic(batch));
+    assert.equal(batch.body.error.code, -32600, diagnostic(batch));
+    assert.equal(JSON.stringify(batch.body).includes('inputSchema'), false, diagnostic(batch));
+    const single = await http('POST', '/mcp', token, [{ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }], rpcHeaders);
+    assert.equal(single.status, 400, diagnostic(single));
+    const plain = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, { ...rpcHeaders, 'content-type': 'text/plain' });
+    assert.equal(plain.status, 415, diagnostic(plain));
+    const oversized = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { pad: 'x'.repeat(13 * 1024 * 1024) } }, rpcHeaders, 30_000);
+    assert.equal(oversized.status, 413, diagnostic(oversized));
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-read-state') });
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
     assert.equal((await callTool(token, 'findCampaigns', { id: campaign.id })).data[0].id, campaign.id);
@@ -3027,6 +3077,15 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     const allowed = ok(await http('POST', '/v1/emails/send', sender.secret, mail({ from: 'sender@allowed.example.com' })), 202);
     assert.equal(allowed.simulated, true);
     error(await http('GET', `/v1/emails/${allowed.id}`, sender.secret), 403, 'PERMISSION_DENIED');
+    // A domain restriction also limits reads: logs, content and events of mail from other domains stay hidden.
+    const domainReader = await keyFixture(t, { permissions: ['read'], domains: ['allowed.example.com'] });
+    const other = ok(await http('POST', '/v1/emails/send', (await keyFixture(t, { permissions: ['send'] })).secret, mail()), 202);
+    assert.equal(ok(await http('GET', `/v1/emails/${allowed.id}`, domainReader.secret)).id, allowed.id);
+    ok(await http('GET', `/v1/emails/${allowed.id}/content`, domainReader.secret));
+    for (const path of ['', '/content', '/events', '/detail']) error(await http('GET', `/v1/emails/${other.id}${path}`, domainReader.secret), 404);
+    const visible = await allPages('/v1/emails', domainReader.secret);
+    assert.ok(visible.some(row => row.id === allowed.id));
+    assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));
   });
 
   test('SES wire limits are enforced at admission including generated headers and stored attachment metadata', async t => {
@@ -4645,6 +4704,15 @@ test('cached dashboard responses accept the old expiry header and write only the
   } finally {if(previous)Object.defineProperty(globalThis,'caches',previous);else Reflect.deleteProperty(globalThis,'caches');}
 });
 
+test('reply quotes rebuild received HTML from an allow-list',async()=>{
+  const {safeForwardHtml}=await import('./src/mailbox-send.js');
+  const quoted=safeForwardHtml('<html><head><style>p{}</style></head><body><p onclick="x()" style="color:red;background:url(https://t.example/a);position:fixed">Hi <b>there</b></p><script>alert(1)<img src=x onerror=alert(1)><a href="javascript:alert(1)">j</a><a href=" https://ok.example/">ok</a><!--[if mso]><a href="https://hidden.example">o</a><![endif]--><form action="https://f.example"><input value=1>text</form><svg><script>1</script></svg><img src="cid:logo"><img src="data:image/png;base64,AA"></body></html>');
+  // The unclosed <script> runs to the next </script> (inside the svg); everything up to it is dropped.
+  assert.equal(quoted,'<p style="color:red">Hi <b>there</b></p><img src="cid:logo"><img>');
+  const rest=safeForwardHtml('<img src=x onerror=alert(1)><a href="javascript:alert(1)">j</a><a href=" https://ok.example/">ok</a><!--[if mso]><a href="https://hidden.example">o</a><![endif]--><form action="https://f.example"><input value=1>text</form><svg><script>1</script></svg><img src="cid:logo"><img src="data:image/png;base64,AA"><table border=1><tr><td colspan=2>c</td></tr></table>');
+  assert.equal(rest,'<img><a>j</a><a href="https://ok.example/">ok</a>text<img src="cid:logo"><img><table border="1"><tbody><tr><td colspan="2">c</td></tr></tbody></table>');
+});
+
 test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   const {spawnSync}=await import('node:child_process');
   const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:'opensend'});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:'OpenSend API',version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
@@ -4872,6 +4940,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const apiKey='os_'+'1'.repeat(64),app=createApp();await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key',$1,'fixture',$2,'os_fixture','["manage","read","send"]','[]')`,[w[0],createHash('sha256').update(apiKey).digest('hex')]);
     const api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{authorization:'Bearer '+apiKey,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const sets=new Map<string,Json>(),topics=new Map<string,Json>(),setup=setupStore(sets,topics,dest),identities=new Map<string,Json>(),tenants=new Set<string>(),associations=new Set<string>();
+    seedPool(topics,r,dest,origin+'/v1/events/ses');const deployed=deployedReceiving(r,dest,origin+'/v1/events/ses');
     const tags=(ts:Json[])=>Object.fromEntries(ts.map(t=>[t.Key,t.Value]));
     const owned={'bane:owner':'bane','bane:installation-id':'bane:pool'};
     let awsCalls=0; t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){awsCalls++;assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');return {Account:dest,Arn:`arn:aws:iam::${dest}:user/bane-runtime`};});
@@ -4881,9 +4950,9 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       case 'GetObjectCommand':return {Body:{transformToByteArray:async()=>objects.get(i.Key)!}};
       case 'CopyObjectCommand':objects.set(i.Key,objects.get(i.CopySource.slice(bucket(dest).length+1))!);return {};
       case 'PutObjectCommand':objects.set(i.Key,Buffer.from(i.Body));return {};
-      default:assert.match(n,/^(CreateBucket|PutBucketTagging|PutPublicAccessBlock|PutBucketPolicy|PutBucketLifecycleConfiguration)Command$/);if(n==='CreateBucketCommand')buckets++;return {};
+      default:if(n==='GetBucketPolicyCommand')buckets++;return deployed.s3(n,i);
     }});
-    t.mock.method(SESClient.prototype,'send',(cmd:any)=>{if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'bane-inbound'},Rules:[]};assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.Rule.Name,'bane-inbound-all');assert.deepEqual(cmd.input.Rule.Actions,[{S3Action:{BucketName:bucket(dest),TopicArn:topic(dest,'inbound'),ObjectKeyPrefix:'staging/'}}]);catchAll++;return {};});
+    t.mock.method(SESClient.prototype,'send',(cmd:any)=>{assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');catchAll++;return {Metadata:{Name:'bane-inbound'},Rules:[deployed.rule]};});
     async function aws(this:InstanceType<typeof SESv2Client>|InstanceType<typeof SNSClient>,cmd:any){
       awsCalls++;
       assert.equal(await this.config.region(),r);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
@@ -4919,7 +4988,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const tracked=()=>db.query(`SELECT to_jsonb(j) AS job FROM jobs j WHERE type='domain.verify' ORDER BY id`);
     const before=(await tracked()).rows;error(await api('POST',`/v1/domains/${dom[0]}/verify`),503,'AWS_ACCOUNT_MISMATCH');assert.deepEqual((await tracked()).rows,before);
     const dashboard=await seedSession(db);await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('owner',$1,$2,'owner')`,[w[0],dashboard.userId]);
-    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Secure-)?bane/,'__Secure-bane'),'x-bane-workspace':w[0]!}}),runtime);
+    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Host-)?bane/,'__Host-bane'),'x-bane-workspace':w[0]!}}),runtime);
     assert.equal(detail.status,200);assert.equal((await detail.json() as Json).id,dom[0]);assert.deepEqual((await tracked()).rows,before);
     const {workspaceCredentials}=await import('./src/provider-credentials.js');await assert.rejects(workspaceCredentials(runtime,r,{kind:'shared',id:'fixture',aws_account_id:dest,role_arn:'',external_id:''}),mismatch);
     const {tenantJob}=await import('./src/provider-connections.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),cid='conn_'+w[0];
@@ -4974,7 +5043,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     // POST /connection takes its account only from a ready sending pool.
     await db.query(`UPDATE provider_pool_regions SET sending_state='pending'`);
     const owner=await seedSession(db),host='cold-rehome.example.org';await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('personal-owner',$1,$2,'owner')`,[personal,owner.userId]);
-    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Secure-)?bane/,'__Secure-bane'),origin,'x-bane-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Host-)?bane/,'__Host-bane'),origin,'x-bane-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
     let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
     cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
@@ -5193,7 +5262,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
     const api=async(method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,pem=await selfSignedPem(signedKey);
-    let confirmed=false,policy='',sub:Json|undefined,drift=false,failAssociation=true;const calls:string[]=[],sets=new Map<string,Json>(),members=new Set<string>();
+    let confirmed=false,policy=JSON.stringify(deployedFeedback(va,acct,'bane-trusted',false)),sub:Json|undefined,drift=false,failAssociation=true;const calls:string[]=[],sets=new Map<string,Json>(),members=new Set<string>();
     const missing=()=>Object.assign(new Error('not found'),{name:'NotFoundException'});
     const tags=(purpose:string)=>({'bane:owner':'bane','bane:installation-id':'bane:pool','bane:purpose':purpose});
     const checkTags=(ts:Json[],purpose:string)=>assert.deepEqual(Object.fromEntries(ts.map(t=>[t.Key,t.Value])),tags(purpose));
@@ -5227,9 +5296,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       if(i.TopicArn || i.ResourceArn)assert.equal(i.TopicArn??i.ResourceArn,topic);
       switch(n){
         case 'GetTopicAttributesCommand':if(!policy)throw missing();return {Attributes:{TopicArn:topic,Owner:acct,Policy:policy}};
-        case 'CreateTopicCommand':assert.equal(i.Name,'bane-trusted-feedback');assert.ok(!policy);checkTags(i.Tags,'ses-feedback');policy=i.Attributes.Policy;assert.equal(JSON.parse(policy).Statement.length,1);return {TopicArn:topic};
         case 'ListTagsForResourceCommand':return {Tags:Object.entries(tags('ses-feedback')).map(([Key,Value])=>({Key,Value}))};
-        case 'SetTopicAttributesCommand':assert.ok(confirmed);policy=i.AttributeValue;assert.deepEqual(JSON.parse(policy).Statement[1].Condition.StringEquals,{'AWS:SourceAccount':acct,'AWS:SourceArn':[...sets.keys()].map(n=>`arn:aws:ses:${va}:${acct}:configuration-set/${n}`)});return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:sub?[sub]:[]};
         case 'SubscribeCommand':assert.ok(!sub);assert.equal(i.Endpoint,flags.SES_FEEDBACK_URL);assert.equal((await db.query(`SELECT FROM provider_pool_regions WHERE feedback_topic_arn=$1 AND sending_state='pending' AND ownership_journal @> '[{"kind":"subscription"}]'`,[topic])).rowCount,1);sub={...i,Owner:acct,SubscriptionArn:topic+':fixture'};return {SubscriptionArn:topic+':fixture'};
         case 'GetSubscriptionAttributesCommand':return {Attributes:{...sub,PendingConfirmation:String(!confirmed),RawMessageDelivery:'false'}};
@@ -5256,8 +5323,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     confirmed=true;await assert.rejects(prepare(),JobDeferred);confirmed=false;assert.equal(JSON.parse(policy).Statement.length,1);
     const host=`https://sns.${va}.amazonaws.com/`,signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'},body={...signed,SignatureVersion:'2',SigningCertURL:host+'SimpleNotificationService-trustedfixture.pem',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
     error(await api('POST','/v1/events/ses',{...body,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');ok(await api('POST','/v1/events/ses',body),202);
+    await assert.rejects(prepare(),{code:'POOL_SENDING_DRIFT',retryable:false});policy=JSON.stringify(deployedFeedback(va,acct,'bane-trusted')); // operator promotes after signed confirmation
     await assert.rejects(prepare(),JobDeferred);await Promise.allSettled([prepare(),prepare()]);await prepare();
-    assert.deepEqual(['CreateTopicCommand','SubscribeCommand','CreateTenantCommand','CreateConfigurationSetCommand','CreateConfigurationSetEventDestinationCommand'].map(n=>calls.filter(c=>c===n).length),[1,1,1,2,2]);
+    assert.deepEqual(['SetTopicAttributesCommand','SetSubscriptionAttributesCommand','CreateTopicCommand','SubscribeCommand','CreateTenantCommand','CreateConfigurationSetCommand','CreateConfigurationSetEventDestinationCommand'].map(n=>calls.filter(c=>c===n).length),[0,0,0,1,1,2,2]);
     const added=ok(await api('POST','/v1/domains',{name:managed}),201);assert.equal(added.region,va);await assert.rejects(setDomainPool(db,[wid,managed,'probation'],flags),/Already bound/);
     const {operationJobs}=await import('./src/operations.js');await operationJobs['domain.verify']!(runtime,{domainId:added.id,token:managedTags[0]!.Value},{workspaceId:wid,id:'verify',attempts:1});
     assert.equal(ok(await api('GET',`/v1/domains/${added.id}`)).ready,true);
@@ -6982,13 +7050,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('cold hosted receiving confirms without a workspace or a sending-ready pool',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const [{health},{reconcileSharedConnections},{STSClient},{SESClient},{SESv2Client},{S3Client},{SNSClient}]=await Promise.all([import('./src/receiving-health.js'),import('./src/provider-connections.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-s3'),import('@aws-sdk/client-sns')]);
-      const account='333344445555',topic=`arn:aws:sns:us-east-2:${account}:bane-inbound`,sub=topic+':fixture';let confirmed=false,rule:Json|undefined,redriven=false,tags:Json[]=[];
+      const account='333344445555',region='us-east-2',endpoint='https://fixture.bane.mx/v1/events/ses',d=deployedReceiving(region,account,endpoint),sub=d.topic.subs[0]!,topic=sub.TopicArn;let confirmed=false,redriven=false,drift='';
       await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE provider_connections (LIKE public.provider_connections INCLUDING ALL) ON COMMIT DROP');
       Object.assign(runtime.config,{workspaceId:'no-such-workspace',platformAccount:account,multiTenant:true,regionalSending:true,liveEnabled:true,receivingRedrive:true,publicUrl:'https://fixture.bane.mx',allowSesSandbox:false,aws:{accessKeyId:'synthetic-no-workspace',secretAccessKey:'fixture'}});
-      t.mock.method(STSClient.prototype,'send',()=>({Account:account,Arn:`arn:aws:iam::${account}:user/fixture`}));t.mock.method(SESv2Client.prototype,'send',()=>{throw Object.assign(Error('sending unavailable'),{name:'AccessDeniedException'})});t.mock.method(S3Client.prototype,'send',()=>({}));
-      t.mock.method(SNSClient.prototype,'send',async(cmd:any)=>{const i=cmd.input;switch(cmd.constructor.name){case 'CreateTopicCommand':tags=i.Tags;return {TopicArn:topic};case 'ListTagsForResourceCommand':return {Tags:tags};case 'ListSubscriptionsByTopicCommand':return {Subscriptions:confirmed?[{Protocol:'https',Endpoint:'https://fixture.bane.mx/v1/events/ses',SubscriptionArn:sub}]:[]};case 'SubscribeCommand':return {SubscriptionArn:'pending confirmation'};case 'SetTopicAttributesCommand':return {};case 'SetSubscriptionAttributesCommand':redriven=i.SubscriptionArn===sub && JSON.parse(i.AttributeValue).deadLetterTargetArn===`arn:aws:sqs:us-east-2:${account}:bane-inbound-dead-letters`;return {};default:throw Error(cmd.constructor.name);}});
-      t.mock.method(SESClient.prototype,'send',async(cmd:any)=>{if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'bane-inbound'},Rules:[]};assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');rule=cmd.input.Rule;return {};});
-      assert.equal((await health(runtime)).status,'unready');await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).status,'unready');confirmed=true;await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).receiving,'ready');assert.equal(redriven,true);assert.deepEqual(rule?.Recipients,[]);assert.equal(rule?.Actions[0].S3Action.TopicArn,topic);assert.deepEqual((await db.query('SELECT sending_state,receiving_state FROM provider_pool_regions')).rows,[{sending_state:'pending',receiving_state:'ready'}]);
+      t.mock.method(STSClient.prototype,'send',()=>({Account:account,Arn:`arn:aws:iam::${account}:user/fixture`}));t.mock.method(SESv2Client.prototype,'send',()=>{throw Object.assign(Error('sending unavailable'),{name:'AccessDeniedException'})});
+      t.mock.method(S3Client.prototype,'send',(cmd:any)=>{if(cmd.constructor.name===drift)return {};return d.s3(cmd.constructor.name,cmd.input);});
+      t.mock.method(SNSClient.prototype,'send',(cmd:any)=>{switch(cmd.constructor.name){
+        case 'GetTopicAttributesCommand':if(drift==='topic absent')throw Object.assign(Error(),{name:'NotFoundException'});return {Attributes:{...d.topic.Attributes,...(drift==='topic policy'?{Policy:'{}'}:{})}};
+        case 'ListTagsForResourceCommand':return d.topic;
+        case 'ListSubscriptionsByTopicCommand':return {Subscriptions:[{...sub,SubscriptionArn:confirmed?sub.SubscriptionArn:'PendingConfirmation'}]};
+        case 'GetSubscriptionAttributesCommand':assert.equal(cmd.input.SubscriptionArn,sub.SubscriptionArn);redriven=true;return {Attributes:{...sub,PendingConfirmation:'false',RawMessageDelivery:'false',RedrivePolicy:drift==='redrive'?'{}':JSON.stringify(redrivePolicy(region,account))}};
+        default:assert.fail(cmd.constructor.name);
+      }});
+      t.mock.method(SESClient.prototype,'send',(cmd:any)=>{assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');return {Metadata:{Name:'bane-inbound'},Rules:drift==='rule'?[]:[d.rule]};});
+      assert.equal((await health(runtime)).status,'unready');await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).status,'unready');confirmed=true;
+      const {preparePoolReceiving}=await import('./src/mailbox-setup.js');
+      for(drift of ['GetBucketPolicyCommand','GetPublicAccessBlockCommand','GetBucketLifecycleConfigurationCommand','topic absent','topic policy','rule','redrive'])await assert.rejects(preparePoolReceiving(runtime,region,account,async()=>{}),{code:'POOL_RECEIVING_DRIFT',retryable:false,message:/operator.*Pulumi/});
+      drift='';await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).receiving,'ready');assert.ok(redriven);assert.deepEqual((await db.query('SELECT sending_state,receiving_state FROM provider_pool_regions')).rows,[{sending_state:'pending',receiving_state:'ready'}]);
     });
   });
   test('inbound staging recovery and ingest limits',async t=>{
@@ -7148,10 +7226,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('inbound IAM confines staging list, quarantine and multipart grants to receiving resources',async()=>{
+  test('inbound IAM confines receiving storage and BYO sending cannot use another installation\'s identities',async()=>{
     const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{load}=await import('js-yaml'),{readFile}=await import('node:fs/promises');
     const account='905840579680',docs=render('--fresh',{account,origin:'https://dev.bane.mx'}),all=(Object.values(docs) as Json[]).flatMap(d=>d.Statement);
-    const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),byo=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources.ReceivingPolicy.Properties.PolicyDocument.Statement;
+    const forbidden=['s3:CreateBucket','s3:PutBucketTagging','s3:PutBucketPublicAccessBlock','s3:PutBucketPolicy','s3:PutLifecycleConfiguration','ses:CreateReceiptRule','ses:UpdateReceiptRule','ses:CreateReceiptRuleSet','ses:SetActiveReceiptRuleSet','sns:CreateTopic','sns:SetTopicAttributes','sns:SetSubscriptionAttributes','sns:TagResource'];
+    for(const s of all.filter(s=>s.Effect==='Allow'))for(const action of [s.Action].flat())assert.ok(!forbidden.some(f=>new RegExp('^'+action.replaceAll('*','.*').replaceAll('?','.')+'$','i').test(f)),`runtime grants ${action}`);
+    const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),resources=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources;
+    const byo=resources.ReceivingPolicy.Properties.PolicyDocument.Statement;
+    const sending=resources.BaneRole.Properties.Policies.find((p:Json)=>p.PolicyName==='Sending').PolicyDocument.Statement;
+    const grants=sending.filter((s:Json)=>s.Effect==='Allow' && [s.Action].flat().includes('ses:SendEmail')) as Json[];
+    const identity='arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*',set='arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-';
+    assert.deepEqual(grants.flatMap(g=>g.Resource).sort(),[identity,set+'transactional',set+'marketing'].sort());
+    for(const g of grants){
+      const identityGrant=[g.Resource].flat().includes(identity);
+      assert.deepEqual(g.Condition.StringEquals,{'ses:ApiVersion':'2'});
+      // Imported identities carry no Bane tags; tagged ones must belong to this installation.
+      assert.deepEqual(g.Condition.StringEqualsIfExists,identityGrant?{'aws:ResourceTag/bane:owner':'bane','aws:ResourceTag/bane:installation-id':'ConnectionId','aws:ResourceTag/bane:purpose':'domain-identity'}:undefined);
+      assert.deepEqual(g.Condition.Null,{'ses:TenantName':'true','ses:MultiRegionEndpointId':'true'});
+      if(identityGrant)assert.deepEqual([g.Resource].flat(),[identity]); // Don't apply identity tags to configuration sets.
+    }
     for(const [rows,bucket] of [[all,`arn:aws:s3:::bane-${account}-mail-us-east-2`],[byo,'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}']] as [Json[],string][]){
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:ListBucket' && s.Resource===bucket && s.Condition.StringEquals['s3:prefix']==='staging/'));
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:PutObject' && s.Resource===bucket+'/quarantine/?*'));
@@ -7160,12 +7253,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok(all.some(s=>s.Effect==='Deny' && s.Action?.includes('s3:ListBucket') && s.Condition?.StringNotEquals?.['s3:ResourceAccount']===account));
   });
 
-  test('receiving CI only describes the active Ohio set and refuses a missing or foreign set',async()=>{
+  test('receiving CI manages the Ohio rule but cannot create or activate a set and refuses a missing or foreign set',async()=>{
     const {spawnSync}=await import('node:child_process'),{readFile}=await import('node:fs/promises');
     const policy=JSON.parse(await readFile(new URL('../infra/aws-shared/receiving-deploy-policy.json',import.meta.url),'utf8'));
-    const ses=policy.Statement.filter((s:Json)=>[s.Action].flat().some((a:string)=>a.startsWith('ses:')));assert.deepEqual(ses,[{Effect:'Allow',Action:'ses:DescribeActiveReceiptRuleSet',Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'us-east-2'}}}]);
+    const ses=policy.Statement.filter((s:Json)=>[s.Action].flat().some((a:string)=>a.startsWith('ses:')));assert.deepEqual(ses,[{Effect:'Allow',Action:['ses:DescribeActiveReceiptRuleSet','ses:DescribeReceiptRule','ses:CreateReceiptRule','ses:UpdateReceiptRule'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'us-east-2'}}}]);
     for(const [active,status] of [['None',1],['another-set',1],['bane-inbound',0]] as const){
       const r=spawnSync('bash',['-c',`ACTIVE=$2; aws(){ case "$*" in '--profile fixture sts get-caller-identity --query Account --output text') echo 905840579680;; '--profile fixture --region us-east-2 ses describe-active-receipt-rule-set --query Metadata.Name --output text') echo "$ACTIVE";; *) exit 99;; esac; }; source "$1" 905840579680 fixture`, '_',new URL('../.github/scripts/receiving-rule-set.sh',import.meta.url).pathname,active]);assert.equal(r.status,status);
+    }
+    // The offline AWS double also proves a denied inventory is not converted into
+    // an empty import list (which would cause a conflicting resource create).
+    const script=new URL('../infra/aws-shared/mail-control-imports.sh',import.meta.url).pathname;
+    for(const mode of ['fresh','existing','denied','foreign','pending']){
+      const account='905840579680',arn=`arn:aws:sns:us-east-2:${account}:bane-inbound`,bucket=`bane-${account}-mail-us-east-2`,sub=arn+':11111111-2222-3333-4444-555555555555';
+      const result=spawnSync('bash',['-c',`aws(){ case "$*" in
+        *'sts get-caller-identity') echo '{"Account":"${account}"}';;
+        *'s3api list-buckets') if [[ $mode = existing ]];then echo '{"Buckets":[{"Name":"${bucket}"}]}';else echo '{"Buckets":[]}';fi;;
+        *'s3api get-bucket-tagging'*) echo '{"TagSet":[{"Key":"bane:installation-id","Value":"bane:pool"},{"Key":"bane:purpose","Value":"mailbox-inbound"}]}';;
+        *'ses describe-active-receipt-rule-set') echo '${JSON.stringify({Metadata:{Name:'bane-inbound'},Rules:mode==='existing'?[{Name:'bane-inbound-all'}]:mode==='foreign'?[{Name:'other'}]:[]})}';;
+        *'sns list-topics') [[ $mode != denied ]] || return 13;echo '{"Topics":[{"TopicArn":"${arn}"}]}';;
+        *'sns list-tags-for-resource'*) echo '{"Tags":[{"Key":"bane:installation-id","Value":"bane:pool"},{"Key":"bane:purpose","Value":"mailbox-inbound"}]}';;
+        *'sns list-subscriptions-by-topic'*) echo '${JSON.stringify({Subscriptions:mode==='fresh'?[]:[{Owner:account,TopicArn:arn,Protocol:'https',Endpoint:'https://dev.bane.mx/v1/events/ses',SubscriptionArn:mode==='pending'?'PendingConfirmation':sub}]})}';;
+        *) return 99;; esac; }; mode=$2; source "$1" dev`,'_',script,mode],{encoding:'utf8'});
+      if(mode==='existing') {assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),[bucket,'bane-inbound:bane-inbound-all',arn,sub]);}
+      else if(mode==='fresh') {assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),[arn]);}
+      else assert.notEqual(result.status,0);
     }
   });
 
@@ -9650,21 +9761,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       `, true),
       // 6. Cold preparePoolReceiving (mailbox-setup SESv1/S3/SNS/STS), mailbox-staging S3 ListObjectsV2, and operations sesCall (GetAccountCommand)
       runColdIsolate('mailbox-pool-ops-and-staging', `
+        const controls=await import(mod('src/mail-controls.js')),account='111122223333',region='us-east-2',b='bane-'+account+'-mail-'+region,t='arn:aws:sns:'+region+':'+account+':bane-inbound',endpoint='https://dev.bane.mx/v1/events/ses';
+        const xml=o=>Object.entries(o).map(([k,v])=>'<'+k+'>'+(v && typeof v==='object'?xml(v):String(v))+'</'+k+'>').join('');
+        const response=text=>new Response(text,{headers:{'content-type':'text/xml'}});
+        const snsResponse=(op,body)=>response('<'+op+'Response><'+op+'Result>'+body+'</'+op+'Result></'+op+'Response>');
+        const attrs=(op,o)=>snsResponse(op,'<Attributes>'+Object.entries(o).map(([key,value])=>'<entry>'+xml({key,value})+'</entry>').join('')+'</Attributes>');
         globalThis.fetch = async (input, init) => {
           const url = typeof input === 'string' ? input : input.url;
           const body = input instanceof Request ? await input.clone().text() : (init?.body ? Buffer.from(init.body).toString() : '');
           if (url.includes('s3.')) {
             if (url.includes('list-type=2')) return new Response('<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>false</IsTruncated></ListBucketResult>', { status: 200, headers: { 'content-type': 'application/xml' } });
-            return new Response(null, { status: 200 });
+            if(new URL(url).searchParams.has('policy'))return Response.json(controls.bucketPolicy(b,region,account,'bane-inbound-'));
+            if(new URL(url).searchParams.has('publicAccessBlock'))return response(xml({PublicAccessBlockConfiguration:controls.publicAccessBlock}));
+            if(new URL(url).searchParams.has('lifecycle'))return response('<LifecycleConfiguration>'+controls.lifecycleRules(true).map(Rule=>xml({Rule})).join('')+'</LifecycleConfiguration>');
+            throw Error('Unexpected S3 request: '+url);
           }
           if (url.includes('sns.')) {
-            if (body.includes('CreateTopic')) return new Response('<CreateTopicResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><CreateTopicResult><TopicArn>arn:aws:sns:us-east-2:111122223333:bane-inbound</TopicArn></CreateTopicResult></CreateTopicResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+            if(body.includes('GetTopicAttributes'))return attrs('GetTopicAttributes',{TopicArn:t,Owner:account,Policy:JSON.stringify(controls.inboundPolicy(t,region,account,'bane-inbound-')),DeliveryPolicy:JSON.stringify(controls.deliveryPolicy)});
             if (body.includes('ListTagsForResource')) return new Response('<ListTagsForResourceResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><ListTagsForResourceResult><Tags><member><Key>bane:installation-id</Key><Value>bane:pool</Value></member><member><Key>bane:purpose</Key><Value>mailbox-inbound</Value></member></Tags></ListTagsForResourceResult></ListTagsForResourceResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
-            if (body.includes('SetTopicAttributes')) return new Response('<SetTopicAttributesResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"/>', { status: 200, headers: { 'content-type': 'text/xml' } });
-            if (body.includes('ListSubscriptionsByTopic')) return new Response('<ListSubscriptionsByTopicResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><ListSubscriptionsByTopicResult><Subscriptions><member><Protocol>https</Protocol><Endpoint>https://dev.bane.mx/v1/events/ses</Endpoint><SubscriptionArn>arn:aws:sns:us-east-2:111122223333:bane-inbound:sub1</SubscriptionArn></member></Subscriptions></ListSubscriptionsByTopicResult></ListSubscriptionsByTopicResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+            const sub={Owner:account,TopicArn:t,SubscriptionArn:t+':sub1',Protocol:'https',Endpoint:endpoint};
+            if(body.includes('ListSubscriptionsByTopic'))return snsResponse('ListSubscriptionsByTopic',xml({Subscriptions:{member:sub}}));
+            if(body.includes('GetSubscriptionAttributes'))return attrs('GetSubscriptionAttributes',{...sub,PendingConfirmation:'false',RawMessageDelivery:'false'});
           }
-          if (body.includes('DescribeActiveReceiptRuleSet')) return new Response('<DescribeActiveReceiptRuleSetResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><DescribeActiveReceiptRuleSetResult><Metadata><Name>default-set</Name></Metadata><Rules/></DescribeActiveReceiptRuleSetResult></DescribeActiveReceiptRuleSetResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
-          if (body.includes('CreateReceiptRule')) return new Response('<CreateReceiptRuleResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"/>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if(body.includes('DescribeActiveReceiptRuleSet')){const rule=controls.receiptRule('bane-inbound-all',[],{bucket:b,topicArn:t});return snsResponse('DescribeActiveReceiptRuleSet',xml({Metadata:{Name:'bane-inbound'},Rules:{member:{...rule,Actions:{member:rule.Actions[0]}}}}));}
           if (url.endsWith('/v2/email/account')) return Response.json({ ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY', SendQuota: { Max24HourSend: 50000, MaxSendRate: 100, SentLast24Hours: 0 } });
           throw new Error('Unexpected fetch in mailbox-pool-ops: ' + url);
         };

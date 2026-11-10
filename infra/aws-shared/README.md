@@ -2,7 +2,7 @@
 
 Production (`009882681002`, `https://bane.mx`) and dev (`905840579680`, `https://dev.bane.mx`) have separate dedicated accounts. No policy or key is shared between them.
 
-The [hosted Pulumi stacks](../pulumi/README.md) adopt the existing IAM user and its policies and own the new runtime access key; SES is outside Pulumi. Do not rerun the manual bootstrap or create another key in those accounts. The renderer below remains the policy source for both stacks and the acceptance suite.
+The [hosted Pulumi stacks](../pulumi/README.md) own the runtime key and policies, the Ohio mail bucket and receipt rule, and the regional notification topic policies. Before deploying these resources, [authorize the deploy role and inventory existing resources](../../docs/receiving-operations.md). Do not rerun the key bootstrap in these accounts. The renderer below is the policy source for both stacks and the acceptance suite.
 
 ## Manual bootstrap reference (non-Pulumi installations)
 
@@ -19,7 +19,7 @@ The [hosted Pulumi stacks](../pulumi/README.md) adopt the existing IAM user and 
 3. Create an access key for **Application running outside AWS**. Store both values securely and configure `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as secrets on that environment's Worker. No session token. This is not an R2 or administrator key.
 4. Prepare sending independently in Ohio and Virginia; receiving is **Ohio only**. There is no per-domain receipt-rule setup on the shared account. Shared sends, including inline images and attachments, use tenant-conditioned SESv2 `SendEmail`. There is no classic raw-send or SMTP grant. [SES v2 authorization](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sesv2.html) · [classic SES authorization](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ses.html)
 
-The one key can impersonate any pool tenant, read pooled mailbox objects, and reroute inbound mail. Classic receipt-rule actions cannot be scoped by name or ARN. On a fresh Ohio installation an operator bootstraps the reviewed active set once; the Worker cannot create, activate, swap or deactivate a set. Store the key only server-side. Strict pauses individual tenants, but AWS still evaluates the account's overall reputation. [SES tenants](https://docs.aws.amazon.com/ses/latest/dg/tenants.html)
+Keep `bane-runtime` server-side: it can still send as pool tenants and read pooled mailbox objects. It verifies, but cannot rewrite, the bucket controls, receipt rules, topic policies or subscription attributes. `bane-deploy` provisions those controls. Only an operator can create or activate a receipt rule **set**; classic SES does not support name-scoped receipt-rule permissions. Strict pauses individual tenants, but AWS still evaluates the account's overall reputation. [SES tenants](https://docs.aws.amazon.com/ses/latest/dg/tenants.html)
 
 In the intended dedicated account, confirm there is no existing active set serving mail. Using the operator principal, not `bane-runtime`, create and activate the Ohio set:
 

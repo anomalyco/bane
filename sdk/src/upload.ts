@@ -22,12 +22,22 @@ export class BaneUploadError extends Error {
   constructor(message: string, readonly code: string, readonly status: number, readonly requestId?: string) { super(message); this.name = 'BaneUploadError' }
 }
 export { BaneUploadError as OpenSendUploadError }
+// The token and file bytes go only to an HTTPS origin (HTTP only on loopback), and never follow a redirect
+// to another origin: Node's fetch would otherwise resend the body there.
+function apiOrigin(apiUrl: string) {
+  let base: URL
+  try { base = new URL(apiUrl) } catch { throw new BaneUploadError('apiUrl must be an absolute URL such as https://bane.mx.', 'INVALID_API_URL', 0) }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)
+  if (base.username || base.password || (base.protocol !== 'https:' && !(base.protocol === 'http:' && loopback))) {
+    throw new BaneUploadError('apiUrl must be an HTTPS origin without credentials. HTTP is allowed only on loopback.', 'INVALID_API_URL', 0)
+  }
+  return base.origin
+}
 export async function uploadAttachmentBytes(options: UploadAttachmentBytesOptions): Promise<UploadedAttachment> {
-  const base = new URL(options.apiUrl)
-  const endpoint = new URL('/v1/attachments/upload', base.origin)
+  const endpoint = new URL('/v1/attachments/upload', apiOrigin(options.apiUrl))
   const bytes = options.bytes instanceof Blob ? options.bytes : new Blob([options.bytes instanceof Uint8Array ? options.bytes.slice().buffer : options.bytes])
   const response = await fetch(endpoint, {
-    method: 'POST', signal: options.signal, body: bytes,
+    method: 'POST', signal: options.signal, body: bytes, redirect: 'error',
     headers: {
       Authorization: `Bearer ${options.token}`,
       'Content-Type': options.contentType ?? 'application/octet-stream',

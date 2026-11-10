@@ -4,32 +4,50 @@
 
 `deploy.yml` deploys `api/wrangler.prod.jsonc` to `bane.mx`. Both dedicated Ohio accounts returned `ProductionAccessEnabled=false`, `SendingEnabled=true`, `EnforcementStatus=HEALTHY` from `sesv2 get-account`. Dev permits sending sandbox provisioning; production does not. The old reconciler called `provisionSes` and `checkProvisioned` **before** `preparePoolReceiving`. `SES_SANDBOX` therefore stopped the production run before its first inbound S3 or SNS call. The recent production runtime CloudTrail sample shows repeated successful *sending* configuration-set, feedback topic and subscription reads, not an S3 provisioning or IAM failure. The pre-created active `bane-inbound` **set** is only an IAM bootstrap; it contains no rule on its own. The old health check never inspected it. No production database was queried to make this diagnosis.
 
-Sending and receiving checkpoint independently. The minute cron registers the exact inbound ARN before subscribing, waits for confirmation, attaches redrive, and creates or repairs one enabled, scanning, recipient-unfiltered rule. `/health` is deploy liveness: neither GET nor HEAD checks PostgreSQL or AWS. Monitor `/health/receiving` separately: behind Worker admission, it returns 503 until the account, region, topic, bucket and a reconciliation in the past 25 hours match. It samples at most once per isolate per 30 seconds; a cold concurrent probe can return 503. Ready bindings are rechecked daily. This is control-plane readiness, **not** an SMTP canary. Do not set `BANE_ALLOW_SES_SANDBOX=true` in production to repair receiving.
+Sending and receiving checkpoint independently. Pulumi provisions the mail controls. The minute cron registers the verified inbound ARN, waits for signed confirmation and checks the bucket controls, topic policies, HTTPS redrive and sole catch-all without rewriting them. `/health` is deploy liveness; `/health/receiving` returns 503 without a matching binding verified in the last 25 hours. Ready bindings are rechecked daily. This is control-plane readiness, **not** an SMTP canary. Do not enable the production SES sandbox override to repair receiving.
 
 ## One-time operator action — not executed during development
 
-1. **Before the reviewed deployment**, authorize `bane-deploy` to check the active Ohio set and manage the named dead-letter queue and its alarm. From the repository root, under an IAM administrator (not the Worker):
+1. **Before deploying**, authorize the Pulumi role. Run from the repository root using the two IAM-administrator profiles, **not** the Worker. The IAM role name is `bane-deploy` in both accounts. Keep the existing inline policy name so this replaces the old DLQ-only grant:
 
    ```bash
    set -euo pipefail
-   export AWS_PROFILE=bane-production AWS_REGION=us-east-2 AWS_PAGER=''
-   account=009882681002
-   test "$(aws sts get-caller-identity --query Account --output text)" = "$account"
+   export AWS_REGION=us-east-2 AWS_PAGER=''
    file=$(mktemp); trap 'rm -f "$file"' EXIT
-   sed "s/YOUR_AWS_ACCOUNT_ID/$account/g" infra/aws-shared/receiving-deploy-policy.json >"$file"
-   aws iam put-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --policy-document "file://$file"
-   aws iam get-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --query PolicyDocument --output json | jq -e --slurpfile expected "$file" '. == $expected[0]'
+   for stage in dev production; do
+     case "$stage" in dev) account=905840579680; origin=https://dev.bane.mx;; production) account=009882681002; origin=https://bane.mx;; esac
+     profile=bane-$stage
+     test "$(aws --profile "$profile" sts get-caller-identity --query Account --output text)" = "$account"
+     sed -e "s/YOUR_AWS_ACCOUNT_ID/$account/g" -e "s|YOUR_STAGE_ORIGIN|$origin|g" infra/aws-shared/receiving-deploy-policy.json >"$file"
+     aws --profile "$profile" iam put-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --policy-document "file://$file"
+     aws --profile "$profile" iam get-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --query PolicyDocument --output json | jq -e --slurpfile expected "$file" '. == $expected[0]'
+   done
    ```
 
-   Expected: `true`. Repeat for dev with `bane-dev`, `905840579680`. The **only** SES action CI needs is `ses:DescribeActiveReceiptRuleSet`, limited to Ohio. A missing or differently named active set stops CI. Only an operator may [bootstrap the reviewed empty set on a fresh account](../infra/aws-shared/README.md); never replace a set serving mail. No Worker grants for SQS or CloudWatch alarm administration.
+   Expected: `true` twice. Verify the existing runtime **permissions boundary** permits the new bucket reads (`s3:GetBucketPolicy`, `s3:GetBucketPublicAccessBlock`, `s3:GetLifecycleConfiguration`) and the read-only topic/subscription calls. If the boundary blocks them, amend that boundary on the same resource/region, not the runtime write grants. Only an operator may [bootstrap the reviewed empty Ohio set on a fresh account](../infra/aws-shared/README.md); never replace a set serving mail.
 
-   Configure `bane:receivingAlarmTopicArn` in each reviewed Pulumi stack config before CI preview/up. Use an existing, monitored same-account Ohio SNS pager topic (not the inbound notification topic). Confirm its subscription and allow `cloudwatch.amazonaws.com` to publish from this account's `arn:aws:cloudwatch:us-east-2:<account>:alarm:bane-inbound-dead-letters`. No pager destination means no infrastructure rollout.
+2. **Inventory before the first Pulumi update.** Run the following per stage, pointing Pulumi at that stage's normal backend. `PAGER_ARN` must be an existing, monitored same-account Ohio topic (not inbound) allowing CloudWatch to publish from the named DLQ alarm. Set `TRUSTED_PUBLISH=false` for a new/private Virginia topic. For an existing published topic, set it to `true` **only** after checking the trusted pool row has the expected account/feedback ARN and `confirmed_generation=generation`; do not close a live feedback route or accept SNS subscription status alone as signed evidence.
 
-2. **Deploy the approved production ref via the existing workflow** after stage testing and the production unfreeze. CI checks the set, provisions the queue/policy and alarm, migrates PostgreSQL, then deploys the Worker. The signed SNS confirmation and next minute tick complete setup; never insert a fake workspace or force `receiving_state='ready'`. Review over-cap legacy configs (>32 active hooks per workspace, >64 wildcard mailboxes per domain). 095 builds the new indexes online and keeps `jobs_ingest_due` for old Workers. On a lock timeout retry the migration; do not remove the old index during rollout.
+   ```bash
+   # Set STAGE (dev or production), PAGER_ARN and TRUSTED_PUBLISH as reviewed above.
+   set -euo pipefail
+   : "${STAGE:?}" "${PAGER_ARN:?}" "${TRUSTED_PUBLISH:?}"
+   case "$TRUSTED_PUBLISH" in true|false) ;; *) exit 1;; esac
+   imports=$(bash infra/aws-shared/mail-control-imports.sh "$STAGE")
+   (cd infra/pulumi && pulumi config set --stack "$STAGE" bane:mailControlImports "$imports" &&
+     pulumi config set --stack "$STAGE" bane:trustedFeedbackPublish "$TRUSTED_PUBLISH" &&
+     pulumi config set --stack "$STAGE" bane:receivingAlarmTopicArn "$PAGER_ARN")
+   ```
+
+   Include both reviewed stack settings files in the release. Review the preview: import existing bucket, topics, confirmed inbound subscription and `bane-inbound:bane-inbound-all`; create only genuinely absent resources. Bucket policy/block/lifecycle are put-style resources. No replacements, deletes or set activation. On an import mismatch, stop and inspect the live resource; never delete it to make the import pass. Use a separately approved state-only `pulumi import` with the stack's **regional provider** for a proven owned but drifted resource, then review the in-place correction. Avoid concurrent changes by the old Worker during adoption.
+
+3. **Roll out dev first**, then production via the existing workflow. Pulumi prepares the controls before narrowing the runtime IAM policies; the old Worker may log AccessDenied on setup until the new Worker runs. Existing mail routes remain in place. Do not restore the old grants on rollback. On a fresh inbound subscription, let the cron register the topic; if the initial confirmation arrived too early, use SNS **Request confirmation** on the exact pending HTTPS subscription. Never forge a confirmation or force `receiving_state='ready'`.
+
+   Fresh Virginia enrollment is two-phase: after signed confirmation (`confirmed_generation=generation` for the exact trusted pool binding), change `bane:trustedFeedbackPublish` to `true` and deploy. Retry the trusted provisioning job if it already failed. `POOL_RECEIVING_DRIFT` / `POOL_SENDING_DRIFT` require an operator to review the named resource, refresh Pulumi state and apply the reviewed correction, not a Worker retry to repair it. When changing shared documents in `api/src/mail-controls.ts`, include the infrastructure in the deploy (manual workflow dispatch if necessary).
 
    Bound, proven receiving claims get a one-time freshness credit and a verify job. A missing TXT raises `receivingIssue.code=proof_stale` immediately; no observation for 24 hours also warns. Mail for that same host continues until the earlier of 48 hours after the first miss or 72 hours after the last proof. SES freshness warns at 48 hours and expires at 96 hours. Restore TXT/SES verification and use **Check now**; the issue includes the hold deadline. A definitive identity rejection, disconnect, or expired MX loss has no extra grace. Holds remain private to the original owners and expire on the existing schedule.
 
-3. **Verify before enabling traffic**:
+4. **Verify before enabling traffic**:
 
    ```bash
    export AWS_PROFILE=bane-production AWS_REGION=us-east-2 AWS_PAGER=''
@@ -75,6 +93,8 @@ aws sqs delete-message --queue-url "$q" --receipt-handle "$(jq -er '.Messages[0]
 No SQS message means no replay. If an object or binding is gone, or a step fails, stop before delete. Do not reconstruct recipients from MIME headers. Workspace raw copies are required for private Bcc/trace stripping and separate access; S3 staging/quarantine/raw retention remains 3/30/90 days. Published attachments do not acquire an age-based expiry; only positively unreferenced uploads get an orphan expiration tag.
 
 ## Capacity and alerts
+
+Alert on CloudTrail management events from `arn:aws:iam::<account>:user/bane-runtime` for `PutBucketPolicy`, `CreateReceiptRule`, `UpdateReceiptRule`, `SetTopicAttributes` and `SetSubscriptionAttributes` in both hosted accounts, including denied attempts. After rollout these are never normal. A successful write calls for inspection/restoration of the affected control, not just key rotation.
 
 `SES_IDENTITY_QUOTA_EXHAUSTED` is non-retryable. Monitor this error in Worker logs and configure `REPUTATION_ALERT_SLACK_URL` for the daily deduplicated account/region alert. Identity count—not receipt-rule count—limits independent domains. To check or request headroom in the **receiving account and region**, before admitting a batch:
 

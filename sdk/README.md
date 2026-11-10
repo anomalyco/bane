@@ -123,13 +123,13 @@ Single sends, each item in a batch, and inbound thread creation and reply accept
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
 
 ```sh
+export BANE_TOKEN='bane_agent_…'   # read from the environment, never from the command line
 npx --yes @banemx/sdk upload ./invite.ics \
   --api https://bane.mx \
-  --token 'bane_agent_…' \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
 ```
 
-Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as `cid:logo`. Other supported files are regular attachments. The command prints attachment metadata as JSON and never prints the token.
+Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as `cid:logo`. Other supported files are regular attachments. The command prints attachment metadata as JSON and never prints the token. The API URL must be HTTPS (HTTP only on loopback), and the upload never follows a redirect.
 
 Generated per-recipient content can use the same raw upload path without writing a temporary file:
 

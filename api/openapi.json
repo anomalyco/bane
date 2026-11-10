@@ -44,8 +44,8 @@
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "__Secure-bane.session_token",
-        "description": "Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin."
+        "name": "__Host-bane.session_token",
+        "description": "Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
       }
     },
     "schemas": {
@@ -8854,6 +8854,58 @@
           "role"
         ],
         "additionalProperties": false
+      },
+      "WorkspaceInvitationPreview": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "workspaceName": {
+            "type": "string"
+          },
+          "workspaceSlug": {
+            "type": "string"
+          },
+          "inviterName": {
+            "type": "string"
+          },
+          "inviterEmail": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ]
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "workspaceName",
+          "workspaceSlug",
+          "inviterName",
+          "inviterEmail",
+          "role",
+          "expiresAt",
+          "status"
+        ]
       },
       "ProviderConnection": {
         "type": "object",
@@ -36894,6 +36946,159 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request DELETE \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/members/resource_123\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+          }
+        ]
+      }
+    },
+    "/v1/workspaces/invitations/{id}": {
+      "get": {
+        "operationId": "getWorkspaceInvitation",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceInvitationPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getWorkspaceInvitation } from '@banemx/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await getWorkspaceInvitation({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/invitations/resource_123\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
           }
         ]
       }
