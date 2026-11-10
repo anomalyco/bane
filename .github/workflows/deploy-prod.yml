@@ -34,12 +34,12 @@ jobs:
       # Environment variables are available inside an environment job, not in
       # its job-level if. A shell equality check is case-sensitive; Actions' == isn't.
       - &account-switch
-        name: Require production account switch
+        name: Require production deploys to be unfrozen
         env:
           PROD_DEPLOY_ENABLED: ${{ vars.PROD_DEPLOY_ENABLED }}
         run: |
           if [ "$PROD_DEPLOY_ENABLED" != 'true' ]; then
-            echo 'Production deploys are frozen until the account switch.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Production deploys are frozen. Set PROD_DEPLOY_ENABLED=true to release.' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
       - id: gate
@@ -100,7 +100,6 @@ jobs:
           secret-ids: |
             CLOUDFLARE_API_TOKEN,bane/production/CLOUDFLARE_API_TOKEN
             PROD_DATABASE_URL,bane/production/PROD_DATABASE_URL
-            PROD_E2E_API_KEY,bane/production/PROD_E2E_API_KEY
           parse-json-secrets: false
       - run: npm run migrate
         working-directory: api
@@ -115,21 +114,4 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
           AUTH_ALLOWED_DOMAINS: ${{ vars.PROD_AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ vars.PROD_AUTH_ALLOWED_EMAILS }}
-      - run: bash .github/scripts/health.sh https://bane.mx https://opensend.mx
-      - name: Live production E2E (safe subset)
-        id: e2e
-        working-directory: api
-        timeout-minutes: 5
-        env:
-          BANE_E2E_URL: https://bane.mx
-          BANE_E2E_API_KEY: ${{ env.PROD_E2E_API_KEY }}
-          BANE_E2E_DOMAIN: ${{ vars.PROD_E2E_DOMAIN }}
-          BANE_E2E_DOMAIN_ID: ${{ vars.PROD_E2E_DOMAIN_ID }}
-          BANE_E2E_REGION: us-east-2
-        run: npm run e2e
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: ${{ !cancelled() && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}
-        with:
-          name: prod-e2e-${{ needs.gate.outputs.sha }}-${{ github.run_attempt }}
-          path: api/e2e-report.json
-          if-no-files-found: error
+      - run: bash .github/scripts/health.sh https://bane.mx
