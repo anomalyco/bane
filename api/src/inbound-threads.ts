@@ -131,7 +131,8 @@ async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect
   const rawExpiresAt=row.rawKey?new Date(Math.min(Date.parse(row.createdAt),Date.parse(row.receivedAt))+90*86400000).toISOString():null;
   const bucket = row.rawBucket ?? files[0]?.bucket, region = row.region;
   if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
-  if (!region || !bucket || row.verdicts.virus==='FAIL') return { rawUrl: null,rawExpiresAt, urls: files.map(() => null) };
+  // Only outbound copies have no SES receiving scan by design.
+  if (!region || !bucket || (row.verdicts.virus ?? (row.direction==='outbound'?'PASS':null))!=='PASS') return { rawUrl: null,rawExpiresAt, urls: files.map(() => null) };
   const client = await mailboxS3(runtime, row.workspaceId, region, bucket);
   try {
     if (files.some(f => f.sourceId)) await archiveMailboxFiles(runtime, row.workspaceId, row.id, client);
@@ -206,7 +207,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
     request:{params:z.object({messageId:Id,attachmentId:Id}),query:AddressFilter},responses:{200:response(z.object({url:z.string(),expiresAt:z.string()}).openapi('InboundAttachmentDownload')),...errors}}),async c=>{
     const v=access(c,'read'),p=c.req.valid('param'),q=c.req.valid('query');
-    const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),sql`${messages.verdicts}->>'virus' IS DISTINCT FROM 'FAIL'`,accessible(v,q)));
+    const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),sql`coalesce(${messages.verdicts}->>'virus',CASE WHEN ${messages.direction}='outbound' THEN 'PASS' END)='PASS'`,accessible(v,q)));
     if (!file?.region) throw new ApiError(404,'NOT_FOUND','Attachment was not found.');
     return c.json(await signedUrl(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined),200);
   });

@@ -1,1 +1,8 @@
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["sqs:CreateQueue","sqs:GetQueueUrl","sqs:GetQueueAttributes","sqs:SetQueueAttributes","sqs:TagQueue","sqs:UntagQueue","sqs:ListQueueTags"],"Resource":"arn:aws:sqs:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound-dead-letters"}]}
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect":"Allow","Action":["sqs:CreateQueue","sqs:GetQueueUrl","sqs:GetQueueAttributes","sqs:SetQueueAttributes","sqs:TagQueue","sqs:UntagQueue","sqs:ListQueueTags"],"Resource":"arn:aws:sqs:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound-dead-letters"},
+    {"Effect":"Allow","Action":"ses:DescribeActiveReceiptRuleSet","Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2"}}},
+    {"Effect":"Allow","Action":["cloudwatch:PutMetricAlarm","cloudwatch:DescribeAlarms","cloudwatch:ListTagsForResource","cloudwatch:TagResource","cloudwatch:UntagResource"],"Resource":"arn:aws:cloudwatch:us-east-2:YOUR_AWS_ACCOUNT_ID:alarm:bane-inbound-dead-letters"}
+  ]
+}

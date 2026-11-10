@@ -3,6 +3,7 @@ import * as cf from "@pulumi/cloudflare";
 import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
+import { receivingAlarm } from './receiving-alarm.js';
 
 const stages = {
   dev: {
@@ -71,6 +72,7 @@ const ohio = new aws.Provider("ohio-receiving", { ...credentials, region: "us-ea
 const deadLetters = new aws.sqs.Queue("receiving-dead-letters", { name: "bane-inbound-dead-letters", sqsManagedSseEnabled: true,
   // The original staging object is recoverable for three days. No extension of mail retention.
   messageRetentionSeconds: 3 * 86400 }, { provider: ohio, protect: true });
+new aws.cloudwatch.MetricAlarm('receiving-dead-letter-alarm', receivingAlarm(stage.account,deadLetters.name,config.require('receivingAlarmTopicArn')), {provider:ohio,protect:true});
 new aws.sqs.QueuePolicy("receiving-dead-letter-policy", {queueUrl:deadLetters.url,policy:deadLetters.arn.apply(arn=>JSON.stringify({Version:"2012-10-17",Statement:[{
   Effect:"Allow",Principal:{Service:"sns.amazonaws.com"},Action:"sqs:SendMessage",Resource:arn,Condition:{ArnEquals:{"aws:SourceArn":`arn:aws:sns:us-east-2:${stage.account}:bane-inbound`},StringEquals:{"aws:SourceAccount":stage.account}}
 }]}))},{provider:ohio});

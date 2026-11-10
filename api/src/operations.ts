@@ -61,7 +61,7 @@ const dnsState = z.enum(['pending','verified']);
 const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc']), status:dnsState, note:z.string().optional() });
 const dmarcSchema=z.object({status:z.enum(['missing','invalid','none','quarantine','reject']),record:z.string().nullable(),source:z.string().nullable().describe('Domain publishing the effective TXT record; may be the organizational domain.'),adkim:z.enum(['r','s']),aspf:z.enum(['r','s']),alignment:z.object({dkim:z.boolean(),spf:z.boolean()})}).nullable().describe('Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.');
 const receivingIssueSchema = z.object({
-  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','mx_missing','wrong_region','null_mx']).describe('cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.'),
+  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','mx_missing','wrong_region','null_mx','proof_stale','identity_stale']).describe('Receiving host conflict, missing ownership proof, or stale SES verification.'),
   host: z.string(), blocking: z.boolean().describe('True when receiving there cannot work until DNS or the choice changes.'), message: z.string(),
   provider: z.string().nullable().optional(), target: z.string().nullable().optional().describe('The existing CNAME target.'), suggestion: z.string().nullable().optional().describe('A free subdomain to use instead.'),
 }).openapi('ReceivingIssue');
@@ -224,12 +224,13 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'bane:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
+type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
+type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
-    dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
+    dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN domain_sending_bindings b ON b.domain_id=d.id AND b.connection_id=dc.connection_id AND b.region=d.region
@@ -308,7 +309,11 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
   return report;
 }
 const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
-type ClaimRow = DomainRef & ClaimState & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean };
+type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean };
+const hour=3600_000;
+const proofTime=(at:Date|string|null|undefined)=>at?new Date(at).getTime():0;
+const proofUntil=(row:ProofTimes)=>Math.min(proofTime(row.receiving_proved_at)+72*hour,row.receiving_proof_missed_at?proofTime(row.receiving_proof_missed_at)+48*hour:Infinity);
+const observeProof=(positive:boolean)=>sql`receiving_proved_at=CASE WHEN ${positive} THEN now() ELSE receiving_proved_at END,receiving_proof_missed_at=CASE WHEN NOT ${positive} THEN coalesce(receiving_proof_missed_at,now()) END`;
 const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='verified' || row.sending_state==='lost';
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
 function derivedReadiness(row: ClaimRow): Readiness {
@@ -326,6 +331,14 @@ function derivedReadiness(row: ClaimRow): Readiness {
   report.dns=report.dns.map(r=>r.purpose==='receiving' ? {...r,name:receivingName(r.name),status:state(row.receiving_host!==null)} : r);
   const shown=report.dns.find(r=>r.purpose==='receiving')?.name;
   report.receivingIssue=(row.receiving_host ? baneRecordIssue(row.receiving_host,row.name,ses,row.region,null) : null) ?? (facts?.issue && facts.issue.host===shown ? facts.issue : null);
+  if(row.receiving_host && report.receiving==='verified'){
+    const deadline=Math.min(proofUntil(row),proofTime(row.receiving_identity_at)+96*hour),blocking=deadline<=Date.now();
+    const stale=!!row.receiving_proof_missed_at || proofTime(row.receiving_proved_at)<Date.now()-24*hour;
+    if(stale || proofTime(row.receiving_identity_at)<Date.now()-48*hour){
+      report.receivingIssue={code:stale?'proof_stale':'identity_stale',host:row.receiving_host,blocking,message:`${stale?'Recheck the ownership TXT record':'Recheck the SES domain identity'}. ${blocking?'New mail is held until verification succeeds.':`New mail will be held after ${new Date(deadline).toISOString()} if verification does not succeed.`}`};
+      if(blocking)report.receiving='pending';
+    }
+  }
   if (facts?.adopted) report.dns=[]; // No DNS setup is authorized by send-only operator attestation.
   if (row.created_at!==undefined && row.ever_proven===false && !held) report.releasesAt=new Date(new Date(row.created_at).getTime()+72*3600_000).toISOString();
   else if (row.ever_proven!==undefined) report.releasesAt=null;
@@ -351,6 +364,12 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
     if (owner) { issue=takenIssue(observed,owner,null); note=issue.message; observed=null; }
   }
   const next=transitionClaim(row,{...evidence,regionReceives:row.claim_scope!=='account' && (byo || row.pool_receiving),observedHost:observed,byo});
+  if(!evidence.proven && next.receiving_host && next.receiving_host!==row.receiving_host){next.receiving_host=null;next.receiving_state='pending';next.receiving_lost_since=null;}
+  // Grace preserves an existing, still MX-bound host only. It cannot activate another host,
+  // revive a disconnected claim, or overrule a negative SES observation.
+  if(!evidence.proven && evidence.identityVerified && !evidence.definitive && !evidence.unavailable && row.claim_scope!=='account' && (byo || row.pool_receiving) && row.receiving_host && observed===row.receiving_host && ['active','lost'].includes(row.receiving_state) && proofUntil(row)>Date.now()) {
+    next.receiving_state='active';next.receiving_host=row.receiving_host;next.receiving_lost_since=null;
+  }
   const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
   // Managed sending identities confer no receiving rights (including Virginia). Only a
   // separately reviewed receiving binding may change that projection in phase 2.
@@ -571,7 +590,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
           if (trusted && !await exclusive()) defer(5000);
         }
       }
-      await db.execute(sql`UPDATE domain_claims SET receiving_proved_at=CASE WHEN ${positive} THEN now() END, receiving_identity_at=CASE WHEN ${current.connection.legacy===false} THEN receiving_identity_at WHEN ${identityVerified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
+      await db.execute(sql`UPDATE domain_claims SET ${observeProof(positive)}, receiving_identity_at=CASE WHEN ${current.connection.legacy===false} THEN receiving_identity_at WHEN ${identityVerified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
       return saveObservation(db,current,job.workspaceId,sesFacts(identity),observation,{sending:report.ready,sendingRevoked:current.identity?.imported && !report.ready,identityVerified,proven:positive},dmarc);
     });
     if (!outcome || (outcome.sending_state==='verified' && report.mailFromStatus!=='PENDING' && outcome.receiving_state!=='lost')) return; // MX-only upkeep owns receiving changes after sending verifies.
@@ -625,7 +644,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
     if (!current?.identity || current.token!==row.token || current.receiving_host!==row.receiving_host) return;
     assertSharedAccount(runtime,current.connection);
-    if(proof!==undefined) await db.execute(sql`UPDATE domain_claims SET receiving_proved_at=CASE WHEN ${proof} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
+    if(proof!==undefined) await db.execute(sql`UPDATE domain_claims SET ${observeProof(proof)} WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
     if(retainedIdentity!==undefined)await db.execute(sql`UPDATE domain_claims SET receiving_identity_at=CASE WHEN ${retainedIdentity} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
     // Never grant receiving rights (notably to a Virginia sending binding) from a DMARC check.
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
@@ -663,7 +682,7 @@ export function registerOperations(app: App) {
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
     if (c.env.config.multiTenant) {
-      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
+      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
         .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
         .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
         .where(where).orderBy(desc(domains.id)).limit(q.limit+1);

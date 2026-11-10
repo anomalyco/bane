@@ -81,7 +81,7 @@ BEGIN
     CROSS JOIN LATERAL (SELECT id,event_types,mailbox_ids FROM mailbox_webhooks WHERE workspace_id=e.workspace_id AND NOT paused ORDER BY id LIMIT 32) h
     WHERE h.event_types ? e.type AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id)) GROUP BY e.workspace_id,e.seq),
   queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.fanout',workspace_id,jsonb_object_agg(seq::text,hooks) FROM subscriptions GROUP BY workspace_id RETURNING 1),
-  owned_files AS (DELETE FROM mail_candidate_uploads u USING stored s WHERE u.workspace_id=s.workspace_id AND u.message_id=s.id AND u.ses_message_id=s.ses_message_id)
+  owned_files AS (DELETE FROM mail_candidate_uploads u USING stored s WHERE u.batch=split_part(file_items->0->>'storageKey','/',5) AND u.workspace_id=s.workspace_id AND u.message_id=s.id AND u.keys[1]=file_items->0->>'storageKey')
   SELECT count(*)::int INTO queued_count FROM queued;
  wait_ms:=extract(epoch FROM locked-started)*1000; hold_ms:=extract(epoch FROM clock_timestamp()-locked)*1000; RETURN NEXT;
 END $$;

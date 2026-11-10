@@ -21,7 +21,7 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
     if (type.startsWith('operation.') || type.startsWith('domain.')) return (await import('./operations.js')).operationJobs[type];
     if (type === 'ses.provision' || type === 'ses.discover') return (await import('./ses-regions.js')).sesRegionJobs[type];
     if (type === 'reputation.alert') return (await import('./reputation-alerts.js')).reputationAlertJobs[type];
-    if (type === 'mailbox.webhook' || type==='mailbox.fanout') return (await import('./mailbox-events.js')).mailboxEventJobs[type];
+    if (type === 'mailbox.webhook' || type==='mailbox.fanout' || type==='mailbox.resumeDeliveries') return (await import('./mailbox-events.js')).mailboxEventJobs[type];
     if (type === 'mailbox.syncOutbound') return async runtime=>{await (await import('./mailbox-send.js')).syncOutboundMessages(runtime);};
     if (type === 'mailbox.reconcile' || type === 'maintenance.domainDns') return (await import('./mailbox-setup.js')).mailboxSetupJobs[type];
     if (type.startsWith('mailbox.')) return (await import('./mailbox-ingest.js')).mailboxIngestJobs[type];

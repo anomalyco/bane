@@ -4,11 +4,11 @@
 
 `deploy.yml` deploys `api/wrangler.prod.jsonc` to `bane.mx`. Both dedicated Ohio accounts returned `ProductionAccessEnabled=false`, `SendingEnabled=true`, `EnforcementStatus=HEALTHY` from `sesv2 get-account`. Dev permits sending sandbox provisioning; production does not. The old reconciler called `provisionSes` and `checkProvisioned` **before** `preparePoolReceiving`. `SES_SANDBOX` therefore stopped the production run before its first inbound S3 or SNS call. The recent production runtime CloudTrail sample shows repeated successful *sending* configuration-set, feedback topic and subscription reads, not an S3 provisioning or IAM failure. The pre-created active `bane-inbound` **set** is only an IAM bootstrap; it contains no rule on its own. The old health check never inspected it. No production database was queried to make this diagnosis.
 
-Sending and receiving now checkpoint independently. The minute cron doesn't need a workspace or a successful work-queue drain. It registers the exact inbound ARN before subscribing, waits for confirmation, attaches redrive, and creates or repairs one enabled, scanning, recipient-unfiltered rule. The hosted `/health` probe returns 503 until the account, region, topic, bucket and a recent successful reconciliation match. Ready bindings are rechecked daily. This is readiness of the control plane, **not** an end-to-end SMTP canary. Do not set `BANE_ALLOW_SES_SANDBOX=true` in production to repair receiving.
+Sending and receiving checkpoint independently. The minute cron registers the exact inbound ARN before subscribing, waits for confirmation, attaches redrive, and creates or repairs one enabled, scanning, recipient-unfiltered rule. `/health` is deploy liveness: neither GET nor HEAD checks PostgreSQL or AWS. Monitor `/health/receiving` separately: behind Worker admission, it returns 503 until the account, region, topic, bucket and a reconciliation in the past 25 hours match. It samples at most once per isolate per 30 seconds; a cold concurrent probe can return 503. Ready bindings are rechecked daily. This is control-plane readiness, **not** an SMTP canary. Do not set `BANE_ALLOW_SES_SANDBOX=true` in production to repair receiving.
 
 ## One-time operator action — not executed during development
 
-1. **Before the reviewed deployment**, authorize Pulumi's existing `bane-deploy` role to manage only the new dead-letter queue. Its current production inline policy does not grant SQS. From the repository root, under an IAM administrator (not the Worker):
+1. **Before the reviewed deployment**, authorize `bane-deploy` to check the active Ohio set and manage the named dead-letter queue and its alarm. From the repository root, under an IAM administrator (not the Worker):
 
    ```bash
    set -euo pipefail
@@ -18,12 +18,16 @@ Sending and receiving now checkpoint independently. The minute cron doesn't need
    file=$(mktemp); trap 'rm -f "$file"' EXIT
    sed "s/YOUR_AWS_ACCOUNT_ID/$account/g" infra/aws-shared/receiving-deploy-policy.json >"$file"
    aws iam put-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --policy-document "file://$file"
-   aws iam get-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --query 'PolicyDocument.Statement[0].Resource' --output text
+   aws iam get-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --query PolicyDocument --output json | jq -e --slurpfile expected "$file" '. == $expected[0]'
    ```
 
-   Expected: `arn:aws:sqs:us-east-2:009882681002:bane-inbound-dead-letters`. Do the equivalent in dev with `bane-dev`, `905840579680` before its deployment. No Worker SQS read/write/delete permissions, no customer role changes for the hosted pool, no production-access request. Keep the deployment role's boundary controls. In a populated upgrade, review over-cap legacy configs (`count(*) > 32` active hooks per workspace, or `> 64` wildcard mailboxes per domain), and existing domain proof freshness; cached flags alone no longer open receiving. Stale candidates are privately held pending verification.
+   Expected: `true`. Repeat for dev with `bane-dev`, `905840579680`. The **only** SES action CI needs is `ses:DescribeActiveReceiptRuleSet`, limited to Ohio. A missing or differently named active set stops CI. Only an operator may [bootstrap the reviewed empty set on a fresh account](../infra/aws-shared/README.md); never replace a set serving mail. No Worker grants for SQS or CloudWatch alarm administration.
 
-2. **Deploy the approved production ref via the existing workflow** after review, stage testing and the production unfreeze. The workflow checks/prepares the dedicated Ohio active set without replacing any active set, provisions the queue/policy, migrates PostgreSQL and deploys the Worker. With the already-active production set no SES bootstrap command is necessary. The signed SNS confirmation and next minute tick complete setup automatically; never insert a fake workspace or force `receiving_state='ready'`.
+   Configure `bane:receivingAlarmTopicArn` in each reviewed Pulumi stack config before CI preview/up. Use an existing, monitored same-account Ohio SNS pager topic (not the inbound notification topic). Confirm its subscription and allow `cloudwatch.amazonaws.com` to publish from this account's `arn:aws:cloudwatch:us-east-2:<account>:alarm:bane-inbound-dead-letters`. No pager destination means no infrastructure rollout.
+
+2. **Deploy the approved production ref via the existing workflow** after stage testing and the production unfreeze. CI checks the set, provisions the queue/policy and alarm, migrates PostgreSQL, then deploys the Worker. The signed SNS confirmation and next minute tick complete setup; never insert a fake workspace or force `receiving_state='ready'`. Review over-cap legacy configs (>32 active hooks per workspace, >64 wildcard mailboxes per domain). 095 builds the new indexes online and keeps `jobs_ingest_due` for old Workers. On a lock timeout retry the migration; do not remove the old index during rollout.
+
+   Bound, proven receiving claims get a one-time freshness credit and a verify job. A missing TXT raises `receivingIssue.code=proof_stale` immediately; no observation for 24 hours also warns. Mail for that same host continues until the earlier of 48 hours after the first miss or 72 hours after the last proof. SES freshness warns at 48 hours and expires at 96 hours. Restore TXT/SES verification and use **Check now**; the issue includes the hold deadline. A definitive identity rejection, disconnect, or expired MX loss has no extra grace. Holds remain private to the original owners and expire on the existing schedule.
 
 3. **Verify before enabling traffic**:
 
@@ -31,7 +35,8 @@ Sending and receiving now checkpoint independently. The minute cron doesn't need
    export AWS_PROFILE=bane-production AWS_REGION=us-east-2 AWS_PAGER=''
    account=009882681002; bucket=bane-$account-mail-us-east-2
    topic=arn:aws:sns:us-east-2:$account:bane-inbound
-   curl -fsS https://bane.mx/health | jq -e '.status=="ok" and .receiving=="ready"'
+   curl -fsS https://bane.mx/health/receiving | jq -e '.status=="ok" and .receiving=="ready"'
+   aws cloudwatch describe-alarms --alarm-names bane-inbound-dead-letters | jq -e '.MetricAlarms | length==1 and (.[0] | .ActionsEnabled and (.AlarmActions|length)==1 and .MetricName=="ApproximateNumberOfMessagesVisible" and .Threshold==0)'
    aws ses describe-active-receipt-rule-set | jq -e --arg b "$bucket" --arg t "$topic" '
      .Metadata.Name=="bane-inbound" and (.Rules|length)==1 and
      (.Rules[0] | .Name=="bane-inbound-all" and .Enabled and .ScanEnabled and (.Recipients|length)==0 and

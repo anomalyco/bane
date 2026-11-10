@@ -1,7 +1,7 @@
 import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
 import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { mailboxEvents } from './db/mailbox.js';
-import { inboundHookClaim,WEBHOOK_ATTEMPTS,retryDatabaseFailures } from './jobs.js';
+import { inboundHookClaim,JobDeferred,WEBHOOK_ATTEMPTS,retryDatabaseFailures } from './jobs.js';
 
 export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
@@ -81,8 +81,15 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
 export async function pruneMailboxEvents(runtime: Runtime) {
   await runtime.db.execute(sql`WITH expired AS (DELETE FROM mailbox_events WHERE seq IN (SELECT seq FROM mailbox_events WHERE created_at<now()-interval '30 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
     ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
-    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
+    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed','paused') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
   log('info', { code: 'MAILBOX_EVENTS_PRUNED' });
 }
 
-export const mailboxEventJobs: Record<string, JobHandler> = { 'mailbox.webhook': retryDatabaseFailures(webhookJob),'mailbox.fanout':fanout };
+const resumeDeliveries:JobHandler=async(runtime,payload,job)=>{
+  const result=await runtime.db.execute(sql`WITH hook AS MATERIALIZED (SELECT id FROM mailbox_webhooks WHERE workspace_id=${job.workspaceId} AND id=${String(payload.hook)} AND NOT paused FOR SHARE),
+    page AS (SELECT d.id FROM mailbox_webhook_deliveries d JOIN hook ON hook.id=d.webhook_id WHERE d.workspace_id=${job.workspaceId} AND d.status='paused' AND d.created_at>=now()-interval '30 days' ORDER BY d.id LIMIT 100 FOR UPDATE OF d),
+    resumed AS (UPDATE mailbox_webhook_deliveries d SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() FROM page WHERE d.id=page.id RETURNING d.*)
+    INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`);
+  if(result.rowCount===100)throw new JobDeferred(new Date().toISOString());
+};
+export const mailboxEventJobs: Record<string, JobHandler> = { 'mailbox.webhook': retryDatabaseFailures(webhookJob),'mailbox.fanout':fanout,'mailbox.resumeDeliveries':retryDatabaseFailures(resumeDeliveries) };

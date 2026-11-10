@@ -4,6 +4,8 @@ One project, two stacks: `dev` (AWS `905840579680`, Worker `bane-dev`) and `prod
 
 ## What each stack owns
 
+Receiving also owns the Ohio `bane-inbound-dead-letters` queue, its SNS redrive policy and a CloudWatch alarm. Both stacks require the non-secret `bane:receivingAlarmTopicArn` of an existing monitored Ohio SNS topic. See [Receiving operations](../../docs/receiving-operations.md) for its policy, CI permission scope and pre-traffic checks.
+
 Each stack adopts **10 existing resources** through the `import` options in [index.ts](index.ts), all with `protect: true`:
 
 | Owner | Resources | Import ID |

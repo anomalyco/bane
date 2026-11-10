@@ -87,23 +87,23 @@ const stagingJob:JobHandler=async(runtime,payload,job)=>{
 };
 
 export const cleanCandidates:JobHandler=async(runtime)=>{
-  const {rows}=await runtime.db.execute<{workspace_id:string;ses_message_id:string;region:string;bucket:string;keys:string[];message_id:string}>(sql`WITH due AS (SELECT u.workspace_id,u.ses_message_id FROM mail_candidate_uploads u WHERE check_at<=now() ORDER BY check_at LIMIT 1 FOR UPDATE SKIP LOCKED)
-    UPDATE mail_candidate_uploads u SET check_at=now()+interval '1 hour' FROM due WHERE (u.workspace_id,u.ses_message_id)=(due.workspace_id,due.ses_message_id) RETURNING u.*`);
+  const {rows}=await runtime.db.execute<{batch:string;workspace_id:string;ses_message_id:string;region:string;bucket:string;keys:string[];message_id:string}>(sql`WITH due AS (SELECT batch FROM mail_candidate_uploads WHERE check_at<=now() ORDER BY check_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+    UPDATE mail_candidate_uploads u SET check_at=now()+interval '1 hour' FROM due WHERE u.batch=due.batch RETURNING u.*`);
   if(!rows.length)return;
   const u=rows[0]!,owner=sql`workspace_id=${u.workspace_id} AND ses_message_id=${u.ses_message_id}`;
-  // Ingest must lock the receipt before commit. Never reclaim bytes for a pending retry. Only
-  // terminal/disappeared receipts are eligible; linked files keep their existing retention.
-  await runtime.db.transaction(async tx=>{
-    // A duplicate SNS envelope may add recipients to a processed receipt. Fence that transition
-    // against tag writes; no workspace-wide lane or live ingest transaction spans S3.
-    const receipt=(await tx.execute<{status:string}>(sql`SELECT status FROM mail_receipts WHERE ${owner} FOR UPDATE`)).rows[0];
-    if(receipt?.status==='pending')return;
-    const refs=await tx.execute<{storage_key:string}>(sql`SELECT storage_key FROM mail_attachments WHERE workspace_id=${u.workspace_id} AND message_id=${u.message_id} AND bucket=${u.bucket}`);
-    const missing=u.keys.filter(key=>!refs.rows.some(f=>f.storage_key===key));
-    if(missing.length){const s3=await mailboxS3(runtime,u.workspace_id,u.region,u.bucket,tx);try{const {PutObjectTaggingCommand}=await loadS3Staging();const signal=AbortSignal.timeout(10000);for(const key of missing.slice(0,8)){assertMailboxKey(u.workspace_id,key,'att');await s3.send(new PutObjectTaggingCommand({Bucket:u.bucket,Key:key,Tagging:{TagSet:[{Key:'bane-kind',Value:'orphan'}]}}),{abortSignal:signal}).catch(e=>{if(e?.name!=='NoSuchKey')throw e;});}}finally{s3.destroy();}}
-    if(missing.length<=8)await tx.execute(sql`DELETE FROM mail_candidate_uploads WHERE ${owner}`);
-    else await tx.execute(sql`UPDATE mail_candidate_uploads SET keys=ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(missing.slice(8))}::jsonb)),check_at=now() WHERE ${owner}`);
-  });
+  const terminal=sql`NOT EXISTS(SELECT FROM mail_receipts WHERE ${owner} AND status='pending')`;
+  const {rows:[snapshot]}=await runtime.db.execute<{missing:string[]}>(sql`SELECT ARRAY(SELECT key FROM unnest(${sql.param(u.keys)}::text[]) key WHERE NOT EXISTS(SELECT FROM mail_attachments WHERE workspace_id=${u.workspace_id} AND message_id=${u.message_id} AND bucket=${u.bucket} AND storage_key=key)) AS missing WHERE ${terminal}`);
+  if(!snapshot)throw new JobDeferred(new Date().toISOString());
+  const missing=snapshot.missing;
+  if(missing.length){
+    const s3=await mailboxS3(runtime,u.workspace_id,u.region,u.bucket);
+    try {const {PutObjectTaggingCommand}=await loadS3Staging();const signal=AbortSignal.timeout(10000);
+      for(const key of missing.slice(0,8)){assertMailboxKey(u.workspace_id,key,'att');await s3.send(new PutObjectTaggingCommand({Bucket:u.bucket,Key:key,Tagging:{TagSet:[{Key:'bane-kind',Value:'orphan'}]}}),{abortSignal:signal}).catch(e=>{if(e?.name!=='NoSuchKey')throw e;});}
+    } finally {s3.destroy();}
+  }
+  const fence=sql`batch=${u.batch} AND keys=${sql.param(u.keys)}::text[] AND ${terminal}`;
+  if(missing.length<=8)await runtime.db.execute(sql`DELETE FROM mail_candidate_uploads WHERE ${fence}`);
+  else await runtime.db.execute(sql`UPDATE mail_candidate_uploads SET keys=${sql.param(missing.slice(8))}::text[],check_at=now() WHERE ${fence}`);
   throw new JobDeferred(new Date().toISOString());
 };
 export const stagingJobs:Record<string,JobHandler>={'mailbox.cleanUploads':retryDatabaseFailures(cleanCandidates),[sweep]:retryDatabaseFailures(stagingJob),[orphan]:retryDatabaseFailures(stagingJob),[holds]:retryDatabaseFailures(async runtime=>{
