@@ -47,6 +47,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      id-token: write
     environment: dev
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -67,11 +68,27 @@ jobs:
           else
             echo 'current=true' >> "$GITHUB_OUTPUT"
           fi
+      # The dev secrets live in AWS Secrets Manager as bane/dev/* and are
+      # read by the environment's own role (github/bane-dev).
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/bane-dev
+          role-session-name: bane-dev-secrets-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Fetch the dev secrets
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            CLOUDFLARE_API_TOKEN,bane/dev/CLOUDFLARE_API_TOKEN
+            DEV_DATABASE_URL,bane/dev/DEV_DATABASE_URL
+            DEV_E2E_API_KEY,bane/dev/DEV_E2E_API_KEY
+          parse-json-secrets: false
       - run: npm run migrate
         if: steps.tip.outputs.current == 'true'
         working-directory: api
         env:
-          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          DATABASE_URL: ${{ env.DEV_DATABASE_URL }}
           PUBLIC_URL: https://dev.bane.mx
           DEFAULT_SES_REGION: us-east-2
           MULTI_TENANT: 'true'
@@ -79,7 +96,7 @@ jobs:
         if: steps.tip.outputs.current == 'true'
         working-directory: api
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
           AUTH_ALLOWED_DOMAINS: ${{ vars.DEV_AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ vars.DEV_AUTH_ALLOWED_EMAILS }}
       - run: bash .github/scripts/health.sh https://dev.bane.mx
@@ -91,7 +108,7 @@ jobs:
         timeout-minutes: 5
         env:
           BANE_E2E_URL: https://dev.bane.mx
-          BANE_E2E_API_KEY: ${{ secrets.DEV_E2E_API_KEY }}
+          BANE_E2E_API_KEY: ${{ env.DEV_E2E_API_KEY }}
           BANE_E2E_DOMAIN: ${{ vars.DEV_E2E_DOMAIN }}
           BANE_E2E_DOMAIN_ID: ${{ vars.DEV_E2E_DOMAIN_ID }}
           BANE_E2E_REGION: us-east-2
