@@ -11,16 +11,16 @@
       },
       {
         "title": "Create an API key",
-        "text": "In Settings → API keys. A Send only key restricted to your domain is enough to send. Store it as BANE_API_KEY on your server and never ship it to a browser."
+        "text": "In Settings → API keys. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as BANE_API_KEY on your server and never ship it to a browser."
       },
       {
         "title": "Send",
-        "text": "202 means queued, not delivered; read the outcome with GET /v1/emails/{id}. Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator addresses don’t count against hosted sending limits.",
+        "text": "202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator addresses don’t count against hosted sending limits.",
         "code": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --header 'Idempotency-Key: first-email' \\\n  --data '{\"from\":\"hello@acme.com\",\"to\":\"you@acme.com\",\"subject\":\"Hello from Bane\",\"text\":\"It works.\"}'"
       },
       {
         "title": "Receive (optional)",
-        "text": "Publish the receiving MX record from the domain page. Hosted Bane suggests reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
+        "text": "Publish the receiving MX record from the domain page. Hosted Bane suggests a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
       },
       {
         "title": "Reply",
@@ -4591,11 +4591,13 @@
                   "wildcard",
                   "bane_record",
                   "host_taken",
+                  "claimed",
+                  "delegated",
                   "mx_missing",
                   "wrong_region",
                   "null_mx"
                 ],
-                "description": "cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail."
+                "description": "cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail."
               },
               "host": {
                 "type": "string"
@@ -4706,6 +4708,28 @@
           "host"
         ],
         "additionalProperties": false
+      },
+      "TestEmailQueued": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          "simulated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "simulated"
+        ]
       },
       "DomainDnsSetup": {
         "type": "object",
@@ -9416,36 +9440,49 @@
         "properties": {
           "generatedAt": {
             "type": "string",
-            "description": "When the figures were computed. Responses are cached for up to 60 seconds."
+            "description": "The end of the last whole UTC hour the figures cover. They change at most once an hour; responses are cached for up to 60 seconds."
+          },
+          "available": {
+            "type": "boolean",
+            "description": "False until at least 10 workspaces have sent mail in the last 30 days. Every figure is then null and regions is empty, so the figures never describe a single customer."
           },
           "acceptedLast30Days": {
-            "type": "integer",
-            "description": "Emails Amazon SES accepted in the last 30 days, across the installation. Simulated, suppressed and rejected mail is excluded. Email history is kept for 30 days, so there is no all-time total."
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Emails Amazon SES accepted in the last 30 whole days of hours, rounded to two significant figures (to the nearest 10 below 100). Simulated, suppressed and rejected mail is excluded. Email history is kept for 30 days, so there is no all-time total."
           },
           "acceptedLastHour": {
-            "type": "integer",
-            "description": "Emails Amazon SES accepted in the last 60 minutes."
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Emails Amazon SES accepted in the last whole UTC hour, rounded the same way. The last entry of acceptedHourly."
           },
           "acceptedHourly": {
             "type": "array",
             "items": {
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             },
-            "description": "Accepted emails per rolling hour over the last 24 hours, oldest first. The last entry is acceptedLastHour."
+            "description": "Accepted emails per whole UTC hour over the last 24 hours, oldest first, rounded. Null for an hour in which fewer than 3 workspaces sent."
           },
           "deliveryRate": {
             "type": [
               "number",
               "null"
             ],
-            "description": "delivered ÷ (delivered + bounced) for emails created in the last 30 days, each email counted once. Null without outcomes."
+            "description": "delivered ÷ (delivered + bounced) for emails created in the last 30 days, each email counted once, to three decimals. Null without outcomes."
           },
           "medianSendLatencyMs": {
             "type": [
               "integer",
               "null"
             ],
-            "description": "Median time from API acceptance to Amazon SES acceptance for the most recent 5,000 direct, unscheduled sends in the last 24 hours. Null without samples."
+            "description": "Median time from API acceptance to Amazon SES acceptance for the most recent 5,000 direct, unscheduled sends in the last 24 whole hours, to the nearest 10 ms. Null without samples from at least 3 workspaces."
           },
           "regions": {
             "type": "array",
@@ -9457,6 +9494,7 @@
         },
         "required": [
           "generatedAt",
+          "available",
           "acceptedLast30Days",
           "acceptedLastHour",
           "acceptedHourly",
@@ -24716,7 +24754,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM) or a host another claim receives on, in any workspace, is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.",
+        "description": "Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.",
         "parameters": [
           {
             "schema": {
@@ -24861,6 +24899,159 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/domains/resource_123/receiving-host' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"host\": \"example\",\n  \"confirm\": false\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/domains/{id}/test-send": {
+      "post": {
+        "operationId": "sendDomainTestEmail",
+        "tags": [
+          "Domains"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestEmailQueued"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { sendDomainTestEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/domains/resource_123/test-send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
@@ -38572,7 +38763,7 @@
           "Metrics"
         ],
         "security": [],
-        "description": "Public, unauthenticated sending figures for the installation, computed from stored mail. Aggregates only: no workspace, address or per-workspace figure is returned. Live figures are cached for up to 60 seconds; the 30-day delivery rate and regions for up to 10 minutes. Outcomes use current email state, so recent figures can still rise as Amazon SES reports back.",
+        "description": "Public, unauthenticated sending figures for the installation. A minute job computes them from stored mail; this route only reads the result, so a request never scans mail. Aggregates over whole UTC hours, rounded, and only once at least 10 workspaces have sent (available); a hosted installation counts only mail sent through its shared pool. No workspace, address or per-workspace figure is returned. Responses are cached for up to 60 seconds. 503 until the figures are first computed.",
         "responses": {
           "200": {
             "description": "Success",

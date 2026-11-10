@@ -11,10 +11,12 @@ export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string
 export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null };
 // The current UTC hour plus the preceding 23 buckets. The same statement as admission,
 // independent of how many envelopes or destinations were admitted in those hours.
-export function hostedAllowance(config: Config, wid: string, incoming: number, marketing = 0) {
+// `read` is for display (GET /v1/me): the same figures from hosted_allowance_read, which takes no row locks.
+// Admission keeps hosted_allowance, which locks the policy rows FOR SHARE against a concurrent pause or cap change.
+export function hostedAllowance(config: Config, wid: string, incoming: number, marketing = 0, read = false) {
   if (!config.multiTenant) return sql<HostedAllowance | null>`NULL`;
-  const { firstWeek, secondWeek, mature } = config.hostedSendCaps;
-  return sql<HostedAllowance | null>`(SELECT allowance FROM hosted_allowance(${wid},${incoming},${marketing},${firstWeek},${secondWeek},${mature},${config.dispatch.dailyHeadroomPercent}))`;
+  const { firstWeek, secondWeek, mature } = config.hostedSendCaps, fn = read ? sql`hosted_allowance_read` : sql`hosted_allowance`;
+  return sql<HostedAllowance | null>`(SELECT allowance FROM ${fn}(${wid},${incoming},${marketing},${firstWeek},${secondWeek},${mature},${config.dispatch.dailyHeadroomPercent}))`;
 }
 const count = (value: number) => value.toLocaleString('en-US');
 export function assertHostedAllowance(allowance: HostedAllowance | null, incoming: number, marketing = 0) {

@@ -8,8 +8,9 @@ import { request } from '../../data/live'
 import { number, percent } from '../../lib/format'
 import './home.css'
 
-// GET /v1/public/stats: installation-wide aggregates computed from stored mail, cached by the API for 60 seconds.
-export type PublicStats = { generatedAt: string; acceptedLast30Days: number; acceptedLastHour: number; acceptedHourly: number[]; deliveryRate: number | null; medianSendLatencyMs: number | null; regions: string[] }
+// GET /v1/public/stats: installation-wide aggregates over whole hours, rounded, computed every minute by the API.
+// `available` is false until enough workspaces send that the figures can't describe one customer; every figure is then null.
+export type PublicStats = { generatedAt: string; available: boolean; acceptedLast30Days: number | null; acceptedLastHour: number | null; acceptedHourly: (number | null)[]; deliveryRate: number | null; medianSendLatencyMs: number | null; regions: string[] }
 export const usePublicStats = () => useQuery({ queryKey: ['public-stats'], queryFn: ({ signal }) => request<PublicStats>('/v1/public/stats', { signal }), refetchInterval: 60_000, staleTime: 30_000, retry: 1 })
 
 export const capabilities = [
@@ -108,7 +109,8 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
         <p className="home-invite muted">Invite-only for now. Sign in with Google to request access.</p>
         {notice}
       </section>
-      {stats.data ? <Board stats={stats.data} fetchedAt={stats.dataUpdatedAt} /> : stats.isPending && <BoardSkeleton />}
+      {/* No board until there are figures to show: while they're withheld (available: false) or failing, the page goes straight to the capabilities. */}
+      {stats.data?.available ? <Board stats={stats.data} fetchedAt={stats.dataUpdatedAt} /> : stats.isPending && <BoardSkeleton />}
       <section className="home-capabilities" aria-label="Capabilities">
         {capabilities.map(([name, line, endpoint]) => <div className="home-capability" key={name}>
           <h2>{name}</h2>
@@ -122,8 +124,8 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
 }
 
 export function Board({ stats, fetchedAt }: { stats: PublicStats; fetchedAt: number }) {
-  const perMinute = stats.acceptedLastHour / 60
-  const sent = useLiveCount(stats.acceptedLast30Days, perMinute, fetchedAt)
+  const perMinute = (stats.acceptedLastHour ?? 0) / 60
+  const sent = useLiveCount(stats.acceptedLast30Days ?? 0, perMinute, fetchedAt)
   return <section className="home-board" aria-label="Sending stats">
     <div className="home-counter">
       <div>
@@ -131,14 +133,14 @@ export function Board({ stats, fetchedAt }: { stats: PublicStats; fetchedAt: num
         <div className="home-counter-value">{number(sent)}</div>
       </div>
       <div className="home-counter-chart">
-        <VolumeBars values={stats.acceptedHourly} />
+        <VolumeBars values={stats.acceptedHourly.map(value => value ?? 0)} />
         <div className="muted cell-caption">Last 24 h</div>
       </div>
     </div>
     <div className="metrics-grid">
       <Stat title="Delivery rate" value={stats.deliveryRate === null ? '—' : percent(stats.deliveryRate)} note="30 days" tone={stats.deliveryRate === null ? undefined : 'success'} />
       <Stat title="Median latency" value={stats.medianSendLatencyMs === null ? '—' : `${number(stats.medianSendLatencyMs)} ms`} note="API to SES" />
-      <Stat title="Last hour" value={number(stats.acceptedLastHour)} note={perMinute >= 1 ? `≈ ${number(Math.round(perMinute))}/min` : '< 1/min'} />
+      <Stat title="Last hour" value={stats.acceptedLastHour === null ? '—' : number(stats.acceptedLastHour)} note={stats.acceptedLastHour === null ? 'Too few senders' : perMinute >= 1 ? `≈ ${number(Math.round(perMinute))}/min` : '< 1/min'} />
       <Stat title="Regions" value={String(stats.regions.length)} note={stats.regions.map((region, index) => <span key={region}>{index > 0 && ' · '}<span className="nowrap">{region}</span></span>)} />
     </div>
   </section>

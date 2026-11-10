@@ -8,6 +8,7 @@ import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { mailboxHourly } from './mailbox-ingest.js';
+import { publicStatsTick } from './public-stats.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { queueStartupDiscovery } from './ses-regions.js';
 import { ApiError, log } from './core.js';
@@ -16,6 +17,7 @@ try {
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
+  let publicStats: Promise<void> | undefined, lastPublicStats = 0;
   // In-process pacing state per account/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
@@ -44,6 +46,11 @@ try {
           lastSharedSetup = Date.now();
           sharedSetup = reconcileSharedConnections(runtime).catch(() => log('warn', { code: 'SHARED_SETUP_FAILED' })).finally(() => { sharedSetup = undefined; });
         }
+        // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
+        if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
+          lastPublicStats = Date.now();
+          publicStats = publicStatsTick(runtime).finally(() => { publicStats = undefined; });
+        }
         if (Date.now() - lastCleanup > 3600000) {
           await cleanup(runtime); lastCleanup = Date.now();
           try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
@@ -62,7 +69,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await hooks;await sharedSetup; await listener?.end(); await close(); }
+  } finally { stopped=true;await hooks;await sharedSetup;await publicStats; await listener?.end(); await close(); }
 } catch (error) {
   log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
   process.exitCode = 1;

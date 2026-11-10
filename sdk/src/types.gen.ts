@@ -1196,9 +1196,9 @@ export type DomainReadiness = {
      */
     receivingIssue?: {
         /**
-         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.
+         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.
          */
-        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'mx_missing' | 'wrong_region' | 'null_mx';
+        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx';
         host: string;
         /**
          * True when receiving there cannot work until DNS or the choice changes.
@@ -1232,6 +1232,12 @@ export type ConfigureDomainMailFrom = {
 export type ChooseReceivingHost = {
     host: string | null;
     confirm?: boolean;
+};
+
+export type TestEmailQueued = {
+    id: string;
+    status: 'queued';
+    simulated: boolean;
 };
 
 export type DomainDnsSetup = {
@@ -2401,27 +2407,31 @@ export type CreateConnection = {
 
 export type PublicStats = {
     /**
-     * When the figures were computed. Responses are cached for up to 60 seconds.
+     * The end of the last whole UTC hour the figures cover. They change at most once an hour; responses are cached for up to 60 seconds.
      */
     generatedAt: string;
     /**
-     * Emails Amazon SES accepted in the last 30 days, across the installation. Simulated, suppressed and rejected mail is excluded. Email history is kept for 30 days, so there is no all-time total.
+     * False until at least 10 workspaces have sent mail in the last 30 days. Every figure is then null and regions is empty, so the figures never describe a single customer.
      */
-    acceptedLast30Days: number;
+    available: boolean;
     /**
-     * Emails Amazon SES accepted in the last 60 minutes.
+     * Emails Amazon SES accepted in the last 30 whole days of hours, rounded to two significant figures (to the nearest 10 below 100). Simulated, suppressed and rejected mail is excluded. Email history is kept for 30 days, so there is no all-time total.
      */
-    acceptedLastHour: number;
+    acceptedLast30Days: number | null;
     /**
-     * Accepted emails per rolling hour over the last 24 hours, oldest first. The last entry is acceptedLastHour.
+     * Emails Amazon SES accepted in the last whole UTC hour, rounded the same way. The last entry of acceptedHourly.
      */
-    acceptedHourly: Array<number>;
+    acceptedLastHour: number | null;
     /**
-     * delivered ÷ (delivered + bounced) for emails created in the last 30 days, each email counted once. Null without outcomes.
+     * Accepted emails per whole UTC hour over the last 24 hours, oldest first, rounded. Null for an hour in which fewer than 3 workspaces sent.
+     */
+    acceptedHourly: Array<number | null>;
+    /**
+     * delivered ÷ (delivered + bounced) for emails created in the last 30 days, each email counted once, to three decimals. Null without outcomes.
      */
     deliveryRate: number | null;
     /**
-     * Median time from API acceptance to Amazon SES acceptance for the most recent 5,000 direct, unscheduled sends in the last 24 hours. Null without samples.
+     * Median time from API acceptance to Amazon SES acceptance for the most recent 5,000 direct, unscheduled sends in the last 24 whole hours, to the nearest 10 ms. Null without samples from at least 3 workspaces.
      */
     medianSendLatencyMs: number | null;
     /**
@@ -8239,6 +8249,69 @@ export type ChooseReceivingHostResponses = {
 };
 
 export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
+
+export type SendDomainTestEmailData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}/test-send';
+};
+
+export type SendDomainTestEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SendDomainTestEmailError = SendDomainTestEmailErrors[keyof SendDomainTestEmailErrors];
+
+export type SendDomainTestEmailResponses = {
+    /**
+     * Success
+     */
+    202: TestEmailQueued;
+};
+
+export type SendDomainTestEmailResponse = SendDomainTestEmailResponses[keyof SendDomainTestEmailResponses];
 
 export type GetDomainDnsSetupData = {
     body?: never;

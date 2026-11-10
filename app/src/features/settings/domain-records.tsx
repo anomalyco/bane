@@ -176,7 +176,7 @@ export type ReceivingView = { actions?: ReactNode }
 
 const issueTitles: Record<ReceivingIssue['code'], (host: string) => string> = {
   cname: host => `Can’t receive at ${host}`, foreign_mx: host => `Move mail for ${host}?`, split: host => `Mail for ${host} may be split`,
-  wildcard: host => `A wildcard record answers for ${host}`, bane_record: host => `${host} is one of Bane’s own records`, host_taken: host => `${host} is already in use`,
+  wildcard: host => `A wildcard record answers for ${host}`, bane_record: host => `${host} is one of Bane’s own records`, host_taken: host => `${host} is already in use`, claimed: host => `${host} belongs to another workspace`, delegated: host => `${host} is a separate zone`,
   mx_missing: host => `The MX record on ${host} is gone`, wrong_region: host => `${host} points to another SES region`, null_mx: host => `${host} refuses all mail`,
 }
 // What the API's DNS checks found for the receiving host: blocking issues in red, the rest as warnings.

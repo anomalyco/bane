@@ -461,7 +461,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
     { value: 'manage', label: 'Full access' },
   ]
-  const scopeHint = scope === 'send' ? `Sends from ${current?.name ?? 'your domains'} and nothing else: no logs, keys or settings. Best for an app.` : 'Sends, reads logs and manages domains, receiving, keys and settings. A coding agent needs this to set up receiving for you.'
+  const scopeHint = scope === 'send' ? `Sends email and campaigns from ${current?.name ?? 'your domains'} only, and uploads their attachments. It can’t read logs or contacts, or change keys, domains or settings. Best for an app.` : 'Sends, reads logs and manages domains, receiving, keys and settings. A coding agent needs this to set up receiving for you.'
   return <div className="onboarding onboarding--agent">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Send your first email</h1>

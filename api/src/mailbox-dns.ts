@@ -30,19 +30,28 @@ export const expectedMx = (domain: string, region: string): MxReport['expected']
 const provider = (host: string) => PROVIDERS.find(([pattern]) => pattern.test(host))?.[1] ?? null;
 
 type DohAnswer = { name: string; type: number; data: string };
-async function resolve(name: string, type: 'MX' | 'CNAME'): Promise<{ status: number; answers: DohAnswer[] }> {
-  const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000) });
+// `signal` lets a caller share one time budget across several lookups; alone, each lookup gets 5 seconds.
+async function resolve(name: string, type: 'MX' | 'CNAME' | 'NS', signal?: AbortSignal): Promise<{ status: number; answers: DohAnswer[] }> {
+  const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: 'application/dns-json' }, signal: signal ?? AbortSignal.timeout(5000) });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`DNS_HTTP_${response.status}`); }
   const body = await response.json() as { Status?: number; TC?: boolean; Answer?: DohAnswer[] };
   return { status: body.TC ? -1 : body.Status ?? -1, answers: (body.Answer ?? []).filter(rr=>rr.name.toLowerCase().replace(/\.$/,'')===name) };
 }
 
+/** True when `name` has NS records of its own (a delegated zone), false when it has none, null when DNS failed. */
+export async function delegatedZone(name: string, signal?: AbortSignal): Promise<boolean | null> {
+  try {
+    const ns = await resolve(name, 'NS', signal);
+    return ns.status === 0 || ns.status === 3 ? ns.status === 0 && ns.answers.some(answer => answer.type === 2) : null;
+  } catch { return null; }
+}
+
 /** Reads public MX/CNAME records over DNS-over-HTTPS and classifies who receives the domain's mail. Read-only. */
-export async function checkMx(domain: string, region: string): Promise<MxReport> {
+export async function checkMx(domain: string, region: string, signal?: AbortSignal): Promise<MxReport> {
   const expected = expectedMx(domain, region);
   const base = { expected, checkedAt: new Date().toISOString() };
   let mx: { status: number; answers: DohAnswer[] };
-  try { mx = await resolve(domain, 'MX'); }
+  try { mx = await resolve(domain, 'MX', signal); }
   catch { return { ...base, state: 'error', records: [], providers: [], message: 'DNS lookup failed. Retry the check.' }; }
   if (mx.status !== 0 && mx.status !== 3) return { ...base, state: 'error', records: [], providers: [], message: `DNS lookup returned status ${mx.status}. Retry the check.` };
   // DoH follows a CNAME at the name and reports it in the answer; an MX cannot coexist with it.

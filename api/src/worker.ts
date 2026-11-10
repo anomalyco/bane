@@ -226,8 +226,8 @@ export default {
   },
   async scheduled(controller, env) {
     const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
-    const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }] = await core.wrapModuleLoad(() => Promise.all([
-      import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'),
+    const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
+      import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'), import('./public-stats.js'),
     ]));
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     await withRuntime(env, async runtime => {
@@ -257,6 +257,8 @@ export default {
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
+      // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
+      await publicStatsTick(runtime);
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

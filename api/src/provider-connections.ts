@@ -81,12 +81,12 @@ async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
-  // One statement: the same allowance admission charges against (incoming=1 reads the current usage).
+  // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
   const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; allowance: HostedAllowance | null}>(sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost')) AS verified_domains,
-      CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1)} END AS allowance
+      CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
     FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
   if (!row) return null;
   const iso = (value: string | null | undefined) => value ? new Date(value).toISOString() : null;

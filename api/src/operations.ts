@@ -61,7 +61,7 @@ const dnsState = z.enum(['pending','verified']);
 const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc']), status:dnsState, note:z.string().optional() });
 const dmarcSchema=z.object({status:z.enum(['missing','invalid','none','quarantine','reject']),record:z.string().nullable(),source:z.string().nullable().describe('Domain publishing the effective TXT record; may be the organizational domain.'),adkim:z.enum(['r','s']),aspf:z.enum(['r','s']),alignment:z.object({dkim:z.boolean(),spf:z.boolean()})}).nullable().describe('Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.');
 const receivingIssueSchema = z.object({
-  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','mx_missing','wrong_region','null_mx']).describe('cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.'),
+  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','claimed','delegated','mx_missing','wrong_region','null_mx']).describe('cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.'),
   host: z.string(), blocking: z.boolean().describe('True when receiving there cannot work until DNS or the choice changes.'), message: z.string(),
   provider: z.string().nullable().optional(), target: z.string().nullable().optional().describe('The existing CNAME target.'), suggestion: z.string().nullable().optional().describe('A free subdomain to use instead.'),
 }).openapi('ReceivingIssue');
@@ -350,18 +350,41 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
     const owner=(await db.execute<{name:string;own:boolean}>(sql`SELECT name,workspace_id=${wid} AS own FROM domain_claims dc WHERE receiving_host=${observed} AND NOT (workspace_id=${wid} AND name=${row.name}) LIMIT 1`)).rows[0];
     if (owner) { issue=takenIssue(observed,owner,null); note=issue.message; observed=null; }
   }
-  const next=transitionClaim(row,{...evidence,regionReceives:row.claim_scope!=='account' && (byo || row.pool_receiving),observedHost:observed,byo});
-  const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
-  // Managed sending identities confer no receiving rights (including Virginia). Only a
-  // separately reviewed receiving binding may change that projection in phase 2.
-  if (row.connection.legacy===false) {
-    await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported,adopted:row.identity?.adopted},null);
-    return next;
-  }
-  await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx,note,issue,receivingChoice:row.identity?.receivingChoice ?? null,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
+  // A host another workspace has claimed (in any scope) or delegated to its own name servers is never routed here.
+  if (observed && issue?.host===observed && (issue.code==='claimed' || issue.code==='delegated')) observed=null;
+  const transition=(host:string|null|undefined)=>transitionClaim(row,{...evidence,regionReceives:row.claim_scope!=='account' && (byo || row.pool_receiving),observedHost:host,byo});
+  let next=transition(observed);
+  const ref={name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region};
+  const apply=async()=>{
+    // Managed sending identities confer no receiving rights (including Virginia). Only a
+    // separately reviewed receiving binding may change that projection in phase 2.
+    if (row.connection.legacy===false) return applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported,adopted:row.identity?.adopted},null);
+    const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
+    await applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx,note,issue,receivingChoice:row.identity?.receivingChoice ?? null,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
+  };
+  if (next.receiving_host && next.receiving_host!==row.receiving_host) {
+    // Two claims can both read a host as free above and then race to route it; the unique indexes decide. The loser
+    // reports host_taken on the domain instead of failing the job (the savepoint keeps the transaction usable).
+    await db.execute(sql`SAVEPOINT receiving_host_claim`);
+    try { await apply(); await db.execute(sql`RELEASE SAVEPOINT receiving_host_claim`); }
+    catch (e) {
+      if (!receivingHostConflict(e)) throw e;
+      await db.execute(sql`ROLLBACK TO SAVEPOINT receiving_host_claim`);
+      const host=next.receiving_host;
+      const owner=(await db.execute<{name:string;own:boolean}>(sql`SELECT name,workspace_id=${wid} AS own FROM domain_claims WHERE receiving_host=${host} AND NOT (workspace_id=${wid} AND name=${row.name}) LIMIT 1`)).rows[0];
+      issue=takenIssue(host,owner ?? {own:false,name:''},null); note=issue.message; observed=null;
+      next=transition(null);
+      await apply();
+    }
+  } else await apply();
+  if (row.connection.legacy===false) return next;
   if (byo && (next.receiving_host!==row.receiving_host || (next.receiving_state==='pending' && next.receiving_host))) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,wid,row.region);
   return next;
 }
+const receivingHostConflict=(error:unknown)=>{
+  const e=((error as {cause?:unknown})?.cause ?? error) as {code?:string;constraint?:string};
+  return e?.code==='23505' && ['domain_claims_receiving_host','domain_claims_routing','mailbox_domains_receiving_host'].includes(e.constraint ?? '');
+};
 // Same DNS checks for "Check MX now" (domain.verify), the hourly sweep (domain.mx) and an explicit choice; see receiving-host.ts.
 const receivingMx=(db:DbExecutor,row:HostedDomain,wid:string):Promise<ReceivingObservation>=>observeReceiving(db,row,wid,dnsUnavailable);
 const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFacts['ses'] => ({ VerificationStatus: identity.VerificationStatus, VerifiedForSendingStatus: identity.VerifiedForSendingStatus, DkimAttributes: identity.DkimAttributes, MailFromAttributes: identity.MailFromAttributes });
@@ -762,7 +785,7 @@ export function registerOperations(app: App) {
     return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
-    description:'Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM) or a host another claim receives on, in any workspace, is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.',
+    description:'Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.',
     request:{params:IdParams,body:json(z.object({host:domainName.nullable(),confirm:z.boolean().default(false)}).strict().openapi('ChooseReceivingHost'))},
     responses:{200:response(domainSchema),...errors}}),async c=>{
     const a=actor(c,'manage'); if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -777,6 +800,8 @@ export function registerOperations(app: App) {
       if (issue?.code==='cname') throw new ApiError(409,'RECEIVING_HOST_CNAME',issue.message,'host');
       if (issue?.code==='bane_record') throw new ApiError(409,'RECEIVING_HOST_RESERVED',issue.message,'host');
       if (issue?.code==='host_taken') throw new ApiError(409,'RECEIVING_HOST_TAKEN',issue.message,'host');
+      if (issue?.code==='claimed') throw new ApiError(409,'RECEIVING_HOST_CLAIMED',issue.message,'host');
+      if (issue?.code==='delegated') throw new ApiError(409,'RECEIVING_HOST_DELEGATED',issue.message,'host');
       if (issue && ['foreign_mx','split','wrong_region','null_mx'].includes(issue.code) && !confirm)
         throw new ApiError(409,'RECEIVING_HOST_IN_USE',`Move mail for ${host}? ${issue.message} Send confirm: true to choose it anyway.`,'host');
       facts={receivingChoice:host,mx,issue};
@@ -791,6 +816,18 @@ export function registerOperations(app: App) {
     return c.json(saved,200);
   });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
+  // The guarantee is the server's, not the dashboard's: no recipient or content is accepted, only the domain.
+  app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/test-send',operationId:'sendDomainTestEmail',tags:['Domains'],security:dashboardSecurity,
+    description:'Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.',
+    request:{params:IdParams},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
+    const a=actor(c,'send');
+    if (a.credential!=='dashboard' || !a.email) throw new ApiError(403,'DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.');
+    const [row]=await c.env.db.select({name:domains.name}).from(domains).where(and(scoped(domains,a),eq(domains.id,c.req.valid('param').id)));
+    if (!row) return notFound('Domain');
+    allowedDomain(a,row.name);
+    const { admitTestEmail }=await wrapModuleLoad(() => import('./sending.js'));
+    return c.json(await admitTestEmail(c,a,row.name,a.email),202);
+  });
   const dnsSetup='/v1/domains/{id}/dns-setup';
   const dnsGroup=`(${groupIds.join('|')})`;
   app.openapi(createRoute({method:'get',path:dnsSetup,operationId:'getDomainDnsSetup',tags:['Domains'],security:dashboardSecurity,
