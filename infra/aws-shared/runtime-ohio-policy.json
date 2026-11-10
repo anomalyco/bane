@@ -72,7 +72,7 @@
     },
     {
       "Effect": "Allow", "Action": "s3:CreateBucket", "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
-      "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2", "s3:LocationConstraint": "us-east-2" }, "Null": { "s3:x-amz-object-ownership": "true" } }
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2", "s3:LocationConstraint": "us-east-2" }, "StringEqualsIfExists": { "s3:x-amz-object-ownership": "BucketOwnerEnforced" } }
     },
     {
       "Effect": "Deny", "Action": ["s3:GetObject", "s3:Put*"], "Resource": "*",

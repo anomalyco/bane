@@ -75,9 +75,9 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null}>(sql`SELECT kind, region, state, tenant_state, paused_at, pause_reason FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
   return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null } : null;
 }
-function checkProvisioned(report: SesDiscovery, pooled: boolean) {
+function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
-  const blocker = report.blockers.find(b => b.code !== 'SES_DOMAIN_REQUIRED' && (pooled || b.code !== 'SES_SANDBOX'));
+  const blocker = report.blockers.find(b => b.code !== 'SES_DOMAIN_REQUIRED' && ((pooled && !allowSandbox) || b.code !== 'SES_SANDBOX'));
   if (report.provisioned && !blocker) return;
   if (blocker?.code === 'SNS_CONFIRMATION_PENDING') throw new ApiError(409, blocker.code, 'Waiting for AWS to confirm the feedback subscription. Retry shortly.', undefined, true);
   const retryable=!blocker || ['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code);
@@ -109,7 +109,7 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
       const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, verifiedPoolPrincipal:principal, connectionSetup: true, registerTopic: async (_account, arn) => {
         if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
       } });
-      checkProvisioned(report, true);
+      checkProvisioned(report, true, runtime.config.allowSesSandbox);
       if (!(await runtime.db.execute(setPoolState(owned,'sending_state'))).rowCount) throw busy();
     }
     const bucket=await preparePoolReceiving(scoped,region,account,async(_account,_bucket,arn)=>{

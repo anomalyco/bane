@@ -16,6 +16,8 @@ const values = z.object({
   MX_PLATFORM_AWS_ACCOUNT: optional(accountId),
   MX_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
   MX_TRUSTED_POOL: z.enum(['true','false']).default('false'),
+  // Development installations only: let Hosted pools become ready while the AWS account is still in the SES sandbox.
+  MX_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
   MX_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).default('false'),
   MX_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
@@ -101,6 +103,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
     platformAccount: v.MX_PLATFORM_AWS_ACCOUNT, byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.MX_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.MX_REGIONAL_SENDING==='true' && v.MX_TRUSTED_POOL==='true',
+    allowSesSandbox: v.MULTI_TENANT==='true' && v.MX_ALLOW_SES_SANDBOX==='true',
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && v.MX_REQUIRE_DMARC_FOR_BULK === 'true',
     placementShadow: v.MULTI_TENANT === 'true' && v.MX_PLACEMENT_SHADOW === 'true', placementDblZone: v.MX_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.MX_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,

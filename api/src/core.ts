@@ -43,6 +43,7 @@ export interface Config {
   platformAccount?: string;
   regionalSending?: boolean;
   trustedPool?: boolean;
+  allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   placementShadow?: boolean;
   placementDblZone?: string;

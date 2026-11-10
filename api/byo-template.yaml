@@ -219,11 +219,11 @@ Resources:
                 - Effect: Allow
                   Action: s3:CreateBucket
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
-                  Condition: {StringEquals: {'s3:LocationConstraint': '${aws:RequestedRegion}'}, StringNotEquals: {'aws:RequestedRegion': us-east-1}, 'Null': {'s3:x-amz-object-ownership': 'true'}}
+                  Condition: {StringEquals: {'s3:LocationConstraint': '${aws:RequestedRegion}'}, StringNotEquals: {'aws:RequestedRegion': us-east-1}, StringEqualsIfExists: {'s3:x-amz-object-ownership': BucketOwnerEnforced}}
                 - Effect: Allow
                   Action: s3:CreateBucket
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-us-east-1'
-                  Condition: {StringEquals: {'aws:RequestedRegion': us-east-1}, 'Null': {'s3:LocationConstraint': 'true', 's3:x-amz-object-ownership': 'true'}}
+                  Condition: {StringEquals: {'aws:RequestedRegion': us-east-1}, 'Null': {'s3:LocationConstraint': 'true'}, StringEqualsIfExists: {'s3:x-amz-object-ownership': BucketOwnerEnforced}}
                 - Effect: Allow
                   Action: s3:ListBucket
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-us-east-1'

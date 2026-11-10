@@ -563,7 +563,7 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
     // absence; do not adopt an existing AWS resource after an ambiguous result.
     if (entry?.state==='creating' ? exists : !!entry!==exists) throw drift();
   };
-  const blocker=report.blockers.find(b=>b.code!=='SNS_CONFIRMATION_PENDING' && (b.code!=='SES_SANDBOX' || namespace==='trusted'));
+  const blocker=report.blockers.find(b=>b.code!=='SNS_CONFIRMATION_PENDING' && (b.code!=='SES_SANDBOX' || (namespace==='trusted' && !runtime.config.allowSesSandbox)));
   if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code));
   if (report.account?.id!==account || report.feedbackUrl!==endpoint) throw drift();
   const topic=report.resources.topic;
