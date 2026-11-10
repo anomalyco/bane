@@ -3,14 +3,13 @@ import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, DeleteEmailIdentityCommand, DeleteTenantResourceAssociationCommand, GetAccountCommand, GetEmailIdentityCommand, ListResourceTenantsCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
+import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
-import { recordUnsubscribe } from './audience.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { SuppressionEventData } from './core.js';
 import { workspaces } from './db/workspaces.js';
@@ -18,24 +17,25 @@ import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
 import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
+import { loadRegistries } from './domain-registry.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { dmarcView, localDmarc, observeDmarc, type DmarcObservation } from './dmarc.js';
-import { verifiedDashboardUser } from './google-auth.js';
-import { assertSharedAccount, forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
-import { byoStackTopic } from './provider-connections.js';
+import { forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoEnabled } from './byo-pilot.js';
-import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
 import { awsError, feedbackUrl, mxOwnerTag, mxResourceName, POOL_INSTALLATION } from './ses-setup.js';
-import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, simulatedTopic, taggedEmailId, type RoutineIngress } from './sending.js';
+import type { RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
-import { acceptInboundNotification } from './mailbox-ingest.js';
 import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
-import { queueReconcile } from './mailbox-setup.js';
 import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
+
+const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
+type Sesv2Mod = typeof import('@aws-sdk/client-sesv2');
+const loadOperationsSesv2 = lazyModule((): Promise<Sesv2Mod> => import('@aws-sdk/client-sesv2'));
+const loadSendingOps = lazyModule(() => import('./sending.js'));
 
 const now = () => new Date().toISOString();
 const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
@@ -68,9 +68,10 @@ const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQ
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
-async function sesCall<T>(operation: () => Promise<T>): Promise<T> {
-  try { return await operation(); } catch (error) {
-    if (error instanceof ApiError) throw error;
+async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>): Promise<T> {
+  const sesv2 = await loadOperationsSesv2();
+  try { return await operation(sesv2); } catch (error) {
+    if (error instanceof ModuleLoadError || error instanceof ApiError) throw error;
     const provider = error as { name?: string; $metadata?: { httpStatusCode?: number } };
     const name = provider?.name ?? '', status = provider?.$metadata?.httpStatusCode;
     if (status === 403 || /AccessDenied|Unauthorized|InvalidClientTokenId|UnrecognizedClient|ExpiredToken/.test(name)) throw new ApiError(403, 'SES_ACCESS_DENIED', 'AWS denied the SES operation. Check deployment credentials and IAM permissions.');
@@ -285,7 +286,7 @@ function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>
 }
 async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetEmailIdentityCommandOutput, mode:'create'|'read'|'verify'='read') {
   const [stored]=await runtime.db.select({mx:mailboxDomains.mx,status:mailboxDomains.status}).from(mailboxDomains).where(and(eq(mailboxDomains.domainId,row.id),isNull(mailboxDomains.parentId)));
-  identity??=await sesCall(() => getSes(runtime,row.region).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
+  identity??=await sesCall(async ({ GetEmailIdentityCommand }) => (await getSes(runtime,row.region)).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
   const report=readiness(row,identity,undefined,stored?.mx,undefined,mode==='create' ? null : await localDmarc(row.name,identity.MailFromAttributes?.MailFromDomain,mode==='verify'));
   if (stored?.status!=='active') report.receiving='pending';
   return report;
@@ -328,7 +329,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
     return next;
   }
   await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx,note,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
-  if (byo && (next.receiving_host!==row.receiving_host || (next.receiving_state==='pending' && next.receiving_host))) await queueReconcile(db,wid,row.region);
+  if (byo && (next.receiving_host!==row.receiving_host || (next.receiving_state==='pending' && next.receiving_host))) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,wid,row.region);
   return next;
 }
 async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
@@ -347,12 +348,12 @@ async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
 }
 const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFacts['ses'] => ({ VerificationStatus: identity.VerificationStatus, VerifiedForSendingStatus: identity.VerifiedForSendingStatus, DkimAttributes: identity.DkimAttributes, MailFromAttributes: identity.MailFromAttributes });
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
-async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string,installation?:string,regionalByo=false) {
+async function ensureIdentity(client: Awaited<ReturnType<typeof getSes>>, name: string, token: string,installation?:string,regionalByo=false) {
   try {
-    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})));
+    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})));
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
-    const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
+    const existing=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
     if (!ownsIdentity(existing,token) || regionalByo && ![mxOwnerTag,{Key:'bane:installation-id',Value:installation},{Key:'bane:purpose',Value:'domain-identity'}].every(tag=>existing.Tags?.some(t=>t.Key===tag.Key && t.Value===tag.Value))) throw unavailableDomain();
     return existing;
   }
@@ -360,7 +361,7 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
 // A retried/reconnected creation or a verifier can recover an old claim right at its deadline.
 // Recheck and hold the row across Create so recovery cannot recreate the identity after expiry cleanup.
 const identityJournalEntry=(row:Pick<HostedDomain,'connection'|'region'|'name'|'token'>)=>({kind:'identity',resource:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`,claim:row.token});
-function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
+function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:Awaited<ReturnType<typeof getSes>>) {
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
     if (current && current.token===token && !current.expired && !current.identity?.adopted) {
@@ -379,23 +380,23 @@ function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string
 // Removes only this claim's tagged identity (and, in the shared pool, its tenant association). Used by
 // domain deletion and by disconnecting a shared connection, so a later reconnect never meets its own ghost.
 async function deleteClaimIdentity(runtime:Runtime,wid:string,row:Pick<HostedDomain,'name'|'region'|'token'|'connection'>) {
-  const client=getSes({...runtime,config:{...runtime.config,regions:[row.region]}},row.region,{...row.connection,identitySession:{name:row.name,purpose:'delete'}});
-  const ignoreMissing=async <T>(fn:()=>Promise<T>)=>{ try {return await sesCall(fn);} catch(e){if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND') throw e;} };
-  const identity=await ignoreMissing(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
+  const client=await getSes({...runtime,config:{...runtime.config,regions:[row.region]}},row.region,{...row.connection,identitySession:{name:row.name,purpose:'delete'}});
+  const ignoreMissing=async <T>(fn:(sesv2: Sesv2Mod)=>Promise<T>)=>{ try {return await sesCall(fn);} catch(e){if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND') throw e;} };
+  const identity=await ignoreMissing(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
   if (!identity || !ownsIdentity(identity,row.token)) return;
   // Read actual SES membership, not readiness: DNS can regress, or the association acknowledgement can be lost.
   // The caller holds the claim lock through deletion so a concurrent release/re-claim cannot delete a new owner's identity.
   if (row.connection.kind==='shared' && row.connection.aws_account_id) {
     const binding=identityBinding(row,wid); let next: string | undefined;
     do {
-      const page=await sesCall(()=>client.send(new ListResourceTenantsCommand({ResourceArn:binding.ResourceArn,NextToken:next})));
+      const page=await sesCall(({ ListResourceTenantsCommand })=>client.send(new ListResourceTenantsCommand({ResourceArn:binding.ResourceArn,NextToken:next})));
       if (page.ResourceTenants?.some(t=>t.TenantName===binding.TenantName)) {
-        await ignoreMissing(()=>client.send(new DeleteTenantResourceAssociationCommand(binding))); break;
+        await ignoreMissing(({ DeleteTenantResourceAssociationCommand })=>client.send(new DeleteTenantResourceAssociationCommand(binding))); break;
       }
       next=page.NextToken;
     } while (next);
   }
-  await ignoreMissing(()=>client.send(new DeleteEmailIdentityCommand({EmailIdentity:row.name})));
+  await ignoreMissing(({ DeleteEmailIdentityCommand })=>client.send(new DeleteEmailIdentityCommand({EmailIdentity:row.name})));
 }
 /** Disconnect: shared identities are deleted, BYO identities stay in AWS, and only exclusive claims are retained. */
 export async function releaseConnectionDomains(runtime:Runtime,db:DbExecutor,wid:string,connection:HostedDomain['connection'] & {region:string}) {
@@ -431,7 +432,7 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
       if (!found) break;
       released++;
     } catch (e) {
-      if (!selected || !(e instanceof ApiError)) throw e;
+      if (e instanceof ModuleLoadError || !selected || !(e instanceof ApiError)) throw e;
       log('warn',{code:'DOMAIN_EXPIRY_RETRY',reason:e.code});
     }
   }
@@ -475,16 +476,22 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
   };
   const scoped={...runtime,config:{...runtime.config,workspaceId:job.workspaceId,regions:[row.region]}};
   try {
+    if (row.connection.kind==='byo' && row.connection.legacy===false && !await byoEnabled(runtime,job.workspaceId)) defer(300_000);
+    await Promise.all([
+      preloadSesTransport(runtime.config.multiTenant),
+      loadOperationsSesv2(),
+      loadRegistries(),
+      ...(row.connection.kind==='byo' ? [wrapModuleLoad(() => import('./mailbox-setup.js'))] : []),
+    ]);
     // Reserve the next GetEmailIdentity across workers, not per workspace or per invocation.
     const lane='domain.verify:'+(row.connection.kind==='shared'?'platform':row.connection.aws_account_id);
     if (!(await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before) VALUES (${lane},clock_timestamp()+interval '1 second') ON CONFLICT(workspace_id)
       DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount) {
       defer(1000+Math.random()*1000);
     }
-    if (row.connection.kind==='byo' && row.connection.legacy===false && !await byoEnabled(runtime,job.workspaceId)) defer(300_000);
-    const client=getSes(scoped,row.region,{...row.connection,identitySession:{name:row.name,purpose:row.identity?.imported?'read':'verify'}});
+    const client=await getSes(scoped,row.region,{...row.connection,identitySession:{name:row.name,purpose:row.identity?.imported?'read':'verify'}});
     let identity: GetEmailIdentityCommandOutput | undefined;
-    try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
+    try { identity=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
     catch (e) {
       const ses=row.identity?.ses,reset=row.connection.kind==='shared' && !row.identity?.adopted && !row.identity?.imported && !ses?.VerifiedForSendingStatus &&
         (!ses?.VerificationStatus || ['PENDING','NOT_STARTED'].includes(ses.VerificationStatus)) && (!ses?.DkimAttributes?.Status || ses.DkimAttributes.Status==='NOT_STARTED');
@@ -511,7 +518,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // is established, keep checking it even if DKIM regresses: receive-only routing has its own grace.
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
     const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
-    const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? ownershipTxt(row.name,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(()=>null),
+    const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? ownershipTxt(row.name,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return null;}),
       scopedImport || row.connection.legacy===false ? undefined : receivingMx(row),scopedImport ? ownershipTxt(row.name,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
@@ -535,13 +542,13 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       if (shared && report.ready && !sends(current)) {
         const binding=identityBinding(current,job.workspaceId);
         const exclusive=async()=>{
-          const page=await sesCall(()=>client.send(new ListResourceTenantsCommand({ResourceArn:binding.ResourceArn,PageSize:2})));
+          const page=await sesCall(({ ListResourceTenantsCommand })=>client.send(new ListResourceTenantsCommand({ResourceArn:binding.ResourceArn,PageSize:2})));
           if (!page.ResourceTenants || page.NextToken || page.ResourceTenants.length>1 || page.ResourceTenants.some(t=>t.ResourceArn!==binding.ResourceArn || t.TenantName!==binding.TenantName)) throw unavailableDomain();
           return page.ResourceTenants.length===1;
         };
         const trusted=!!current.connection.pool_tenant_name && current.region==='us-east-1';
         if (!trusted || !await exclusive()) {
-          try { await sesCall(()=>client.send(new CreateTenantResourceAssociationCommand(binding))); }
+          try { await sesCall(({ CreateTenantResourceAssociationCommand })=>client.send(new CreateTenantResourceAssociationCommand(binding))); }
           catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e; }
           if (trusted && !await exclusive()) defer(5000);
         }
@@ -555,6 +562,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // A grace period must be observed again before it can expire.
     if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),nextPoll);
   } catch (e) {
+    if (e instanceof ModuleLoadError) throw e;
     if (e instanceof ApiError && ['SES_IDENTITY_NOT_FOUND','DOMAIN_UNAVAILABLE'].includes(e.code)) {
       await runtime.db.transaction(async db=>{
         const current=await hostedDomain(db,job.workspaceId,row.id,true);
@@ -580,7 +588,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
   // A definitive missing/invalid/ambiguous answer must still replace it.
-  const [observation,dmarc]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(()=>undefined)]);
+  const [observation,dmarc]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;})]);
   if(!observation && dmarc===undefined) throw dnsUnavailable();
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
@@ -599,7 +607,7 @@ async function account(runtime: Runtime, wid: string, requested?: string) {
   if (connection?.kind==='shared') throw new ApiError(403,'SHARED_ACCOUNT_PRIVATE','Account-wide SES settings are not available on hosted mail.');
   const selectedRegion=connection?.template_version==='v5' && !requested ? (await getRegionSettings(runtime.db,wid)).defaultRegion : connection?.region ?? requested ?? runtime.config.regions[0]!;
   if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[selectedRegion]}};
-  const a = await sesCall(() => getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'})).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
+  const a = await sesCall(async ({ GetAccountCommand }) => (await getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'}))).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
 
 export function registerOperations(app: App) {
@@ -618,7 +626,7 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query'); if (!c.env.config.multiTenant) getSes(c.env, q.region ?? c.env.config.regions[0]!);
+    const a = actor(c), q = c.req.valid('query'); if (!c.env.config.multiTenant) { region(c.env, q.region ?? c.env.config.regions[0]!); assertSesConfigured(c.env); }
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
     if (c.env.config.multiTenant) {
@@ -641,7 +649,7 @@ export function registerOperations(app: App) {
     const data: z.infer<typeof domainSchema>[] = [];
     for (const {row,mx,status} of rows.slice(0, q.limit)) {
       if (data.length) await new Promise(resolve => setTimeout(resolve, 1000));
-      const identity=await sesCall(()=>getSes(c.env,row.region).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
+      const identity=await sesCall(async ({ GetEmailIdentityCommand })=>(await getSes(c.env,row.region)).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
       const report=readiness(row,identity,undefined,mx,undefined,await localDmarc(row.name,identity.MailFromAttributes?.MailFromDomain));if(status!=='active')report.receiving='pending';data.push(report);
     }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
@@ -649,8 +657,9 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Regional BYO defaults to the first enabled region, otherwise Ohio.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema),202:response(RegionalAccepted), ...errors } }), async c => {
     const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name);
     if (c.env.config.multiTenant) {
-      const pending=await newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
+      const pending=await (await wrapModuleLoad(() => import('./byo-regional.js'))).newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
       if (pending) {a.wakeJobs=1;return c.json(pending,202);}
+      await Promise.all([preloadSesTransport(true), loadOperationsSesv2(), loadRegistries()]);
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
       if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
       a.wakeJobs=1;
@@ -658,11 +667,12 @@ export function registerOperations(app: App) {
       // The reservation already queued the verify job, which creates the identity itself if this request dies here.
       let identity: Partial<GetEmailIdentityCommandOutput>|undefined;
       try {
-        const client=getSes(runtime,row.region,claim.connection);
+        const client=await getSes(runtime,row.region,claim.connection);
         const pooled=claim.connection.kind==='shared' && c.env.config.trustedPool;
         identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token,pooled?POOL_INSTALLATION:c.env.config.regionalSending && (claim.connection.kind==='shared' || claim.connection.legacy_names===false)?claim.connection.id:undefined,pooled));
       }
       catch(e) {
+        if (e instanceof ModuleLoadError) throw e;
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
@@ -675,13 +685,13 @@ export function registerOperations(app: App) {
     }
     assertSesConfigured(c.env);
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
-    const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
-    try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
+    const client = await getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
+    try { identity = await sesCall(({ GetEmailIdentityCommand }) => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
     catch (error) {
       if (!(error instanceof ApiError) || error.code !== 'SES_IDENTITY_NOT_FOUND') throw error;
     }
     if (!identity) {
-      try { await sesCall(() => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' } }))); }
+      try { await sesCall(({ CreateEmailIdentityCommand }) => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' } }))); }
       catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -698,11 +708,11 @@ export function registerOperations(app: App) {
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
-        const client=getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,{...current.connection,identitySession:{name:row.name,purpose:'mailFrom'}});
+        const client=await getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,{...current.connection,identitySession:{name:row.name,purpose:'mailFrom'}});
         if (current.identity?.imported) throw new ApiError(409,'IMPORTED_IDENTITY_READ_ONLY','Manage this imported identity’s MAIL FROM settings in AWS.');
-        const identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
+        const identity=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
         if (!ownsIdentity(identity,current.token)) throw unavailableDomain();
-        await sesCall(()=>client.send(new PutEmailIdentityMailFromAttributesCommand({EmailIdentity:row.name,MailFromDomain:mailFromDomain,BehaviorOnMxFailure:'USE_DEFAULT_VALUE'})));
+        await sesCall(({ PutEmailIdentityMailFromAttributesCommand })=>client.send(new PutEmailIdentityMailFromAttributesCommand({EmailIdentity:row.name,MailFromDomain:mailFromDomain,BehaviorOnMxFailure:'USE_DEFAULT_VALUE'})));
         // Changing MAIL FROM is a new fact, not a state change: ownership, sending and routing stay as they are.
         const facts:IdentityFacts={...(current.identity ?? identityOnly(sesFacts(identity))),ses:{...(current.identity?.ses ?? sesFacts(identity)),MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}};
         await db.execute(sql`WITH saved AS (UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id} RETURNING ${current.id}::text AS id,token)
@@ -710,8 +720,8 @@ export function registerOperations(app: App) {
         return derivedReadiness({...current,identity:facts});
       }); a.wakeJobs=1; return c.json(report,200);
     }
-    const client = getSes(c.env, row.region);
-    await sesCall(() => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    const client = await getSes(c.env, row.region);
+    await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
     return c.json(await domainReadiness(c.env, row), 200);
   });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
@@ -740,6 +750,7 @@ export function registerOperations(app: App) {
     const claim=verifyReturn(c.env.config.authSecret,token);
     if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) return back();
     // A session that ended while the user was at the provider also goes back; the dashboard asks them to sign in.
+    const { verifiedDashboardUser } = await wrapModuleLoad(() => import('./google-auth.js'));
     const user=await verifiedDashboardUser(c.env,c.req.raw.headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
     if(!user || claim.userId!==user.userId) return back();
     const {userId}=user;
@@ -781,7 +792,7 @@ export function registerOperations(app: App) {
           WHERE connection_id=${row.connection.id} AND region=${row.region} AND NOT legacy`);
       }
       await releaseClaim(db,a.workspaceId,row);
-      if (row.connection.kind==='byo' && row.receiving_host) await queueReconcile(db,a.workspaceId,row.region);
+      if (row.connection.kind==='byo' && row.receiving_host) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,a.workspaceId,row.region);
     }); return c.json({deleted:true as const},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
@@ -939,10 +950,10 @@ function registerPublicEvents(app: App) {
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
     const envelope = parsed.data;
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
-    let stack: Awaited<ReturnType<typeof byoStackTopic>>;
+    let stack: Awaited<ReturnType<typeof import('./provider-connections.js').byoStackTopic>>;
     let binding:TopicBinding|undefined;
     if (c.env.config.multiTenant) {
-      if (envelope.Type==='SubscriptionConfirmation') stack=await byoStackTopic(c.env,envelope.TopicArn);
+      if (envelope.Type==='SubscriptionConfirmation') stack=await (await wrapModuleLoad(() => import('./provider-connections.js'))).byoStackTopic(c.env,envelope.TopicArn);
       binding=stack ? undefined : await sendingTopic(c.env,envelope.TopicArn,envelope.Type==='SubscriptionConfirmation');
       if (!stack && !binding) throw new ApiError(403,'SNS_TOPIC_NOT_ALLOWED','This SNS topic is not registered for the account and region.');
       c.env={...c.env,config:{...c.env.config,snsTopicArns:[envelope.TopicArn],inboundTopicArns:binding?.inbound?[envelope.TopicArn]:[]}};
@@ -958,6 +969,7 @@ function registerPublicEvents(app: App) {
         if (stack) {
           try { await stack({messageId:envelope.MessageId,confirm}); }
           catch (e) {
+            if (e instanceof ModuleLoadError) throw e;
             const error=awsError(e);
             // IAM propagation and racing callbacks can precede a usable role; SNS retries 5xx, not 409/403.
             if (error.retryable || error.code==='AWS_ACCESS_DENIED') throw new ApiError(503,error.code,error.message,undefined,true);
@@ -986,7 +998,7 @@ function registerPublicEvents(app: App) {
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
     // Mailbox receipt notifications arrive on a separate Bane-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
-      const runnable = await acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
+      const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
       if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
@@ -1000,6 +1012,7 @@ function registerPublicEvents(app: App) {
       await c.env.feedback.enqueue([item]);
       return c.json({ accepted: true }, 202);
     }
+    const { ingestRoutineSesEvent } = await loadSendingOps();
     const { error, runnable } = await ingestRoutineSesEvent(c.env, routineInput(item, true));
     if (error === 'SES_ACCOUNT_MISMATCH') throw new ApiError(403, error, 'The SES sending account is missing or does not match this deployment.');
     // SNS retries 5xx, not 4xx. Without a verified owner we cannot store a tenant-scoped recovery job yet.
@@ -1021,7 +1034,7 @@ function registerPublicEvents(app: App) {
     if (method === 'get') return c.html(unsubscribePage('Unsubscribe from marketing emails?', '<p>You will no longer receive marketing emails from this workspace.</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>'), 200);
     const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>));
     // The audience helper commits consent, audit, and the subscription event outbox atomically.
-    await recordUnsubscribe(c.env, token.workspaceId, token.email, form.confirm === 'footer' ? 'footer-confirm' : 'rfc8058-post');
+    await (await wrapModuleLoad(() => import('./audience.js'))).recordUnsubscribe(c.env, token.workspaceId, token.email, form.confirm === 'footer' ? 'footer-confirm' : 'rfc8058-post');
     return c.html(unsubscribePage('You’re unsubscribed', '<p>You will no longer receive marketing emails from this workspace.</p>'), 200);
   });
 }
@@ -1201,6 +1214,7 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
  * signature check at ingress; simulated items must carry the simulator's synthetic identity.
  */
 export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[]): Promise<{ ok: boolean; error?: string }[]> {
+  const { ingestRoutineSesEvents } = await loadSendingOps();
   const outcomes: { ok: boolean; error?: string }[] = items.map(() => ({ ok: false }));
   const group: { index: number; input: RoutineIngress }[] = [];
   const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
@@ -1217,6 +1231,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
     try {
       results = await ingestRoutineSesEvents(runtime, batch.map(entry => entry.input));
     } catch (error) {
+      if (error instanceof ModuleLoadError) throw error;
       const failure=feedbackFailure(error);
       if (failure!=='retry' && (batch.length>1 || retry)) {
         if (failure==='conflict') await feedbackBackoff();
@@ -1247,6 +1262,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       await processSesReceipt(runtime, item, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: attempt, workspaceId });
       outcomes[index] = { ok: true }; break;
     } catch (error) {
+      if (error instanceof ModuleLoadError) throw error;
       if (error instanceof ApiError && (error.code === 'SES_EMAIL_NOT_FOUND' || error.code === 'SES_ENVIRONMENT_MISMATCH')) {
         outcomes[index] = {ok:false,error:error.code}; break;
       }
@@ -1287,6 +1303,7 @@ async function quarantineFeedback(runtime: Runtime, item: FeedbackItem, workspac
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
   const data = payload.message as Record<string, any>;
+  const { recordEmailEvent } = await loadSendingOps();
   const { kind, providerId } = sesFeedbackIdentity(data);
   const tagged = taggedEmailId(data);
   const [input] = await runtime.db.select({ receipt: snsReceipts, hostedFeedback: runtime.config.multiTenant && (kind==='Bounce' || kind==='Complaint')
@@ -1304,7 +1321,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
     const preferences = data.subscription?.newTopicPreferences;
     // SES topic defaults are not evidence of app-wide opt-in; never reverse local opt-outs from them.
     if (preferences?.unsubscribeAll === true && email.to.length === 1 && !email.cc.length && !email.bcc.length) {
-      await recordUnsubscribe(runtime, job.workspaceId, email.to[0]!, 'ses-subscription');
+      await (await wrapModuleLoad(() => import('./audience.js'))).recordUnsubscribe(runtime, job.workspaceId, email.to[0]!, 'ses-subscription');
     } else {
       await publishEvent(runtime, { id: `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`, type: 'contact.subscription_changed', createdAt: receipt.createdAt, workspaceId: job.workspaceId, region: email.region, data: { emailId: email.id, source: 'ses', preferences: preferences ?? null, appliedToWorkspaceConsent: false } });
     }
@@ -1370,6 +1387,7 @@ function assertSimulatedFeedback(runtime: Runtime, payload: Record<string, unkno
 }
 const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
   assertSimulatedFeedback(runtime, payload);
+  const { ingestRoutineSesEvent } = await loadSendingOps();
   const input = routineInput({ topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), message: payload.message as Record<string, unknown> });
   await ingestRoutineSesEvent(runtime, { ...input, workspaceId: job.workspaceId });
 };
@@ -1407,4 +1425,4 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     }
   });
 };
-export const operationJobs: Record<string, JobHandler> = { 'domain.placement': retryDatabaseFailures(async (...args) => { await (await import('./placement.js')).shadowPlacement(...args); }), 'domain.verify': retryDatabaseFailures(domainVerify), 'domain.mx': retryDatabaseFailures(domainMx), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };
+export const operationJobs: Record<string, JobHandler> = { 'domain.placement': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./placement.js'))).shadowPlacement(...args); }), 'domain.verify': retryDatabaseFailures(domainVerify), 'domain.mx': retryDatabaseFailures(domainMx), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

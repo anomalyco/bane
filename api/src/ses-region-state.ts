@@ -1,13 +1,12 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { ApiError, digest, id, type Config, type Database, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, digest, id, lazyModule, type Config, type Database, type DbExecutor, type Runtime } from './core.js';
 import { sesRegions, sesSettings } from './db/ses-regions.js';
 import { mailboxRegions } from './db/mailbox.js';
 import { campaigns, emails } from './db/sending.js';
 import { jobs } from './db/core.js';
 import { CAMPAIGN_ACTIVE } from './states.js';
-import { feedbackTarget, setupResources } from './ses-setup.js';
 
-export const discoveryTarget = (config: Config) => JSON.stringify([config.publicUrl, feedbackTarget(config)]);
+export const discoveryTarget = (config: Config) => JSON.stringify([config.publicUrl, config.sesFeedbackUrl ?? `${config.publicUrl.replace(/\/$/, '')}/v1/events/ses`]);
 
 export const regionPattern = /^[a-z]{2}(?:-[a-z]+)+-\d$/;
 export const DISCOVERY_TTL = 15 * 60 * 1000;
@@ -73,6 +72,7 @@ const regionRows = (runtime: Runtime, workspaceId: string) => Promise.all([
 // Per-isolate cache for the SES callback route only (one POST per SES event, ~23/s mid-send, 3 queries each).
 // Callers must treat a cached miss as unknown and re-resolve fresh before rejecting (see the SNS route).
 const regionCache = new Map<string, { expires: number; rows: ReturnType<typeof regionRows> }>();
+const loadSesSetup = lazyModule(() => import('./ses-setup.js'));
 export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?: number; workspaceId?: string } = {}): Promise<Runtime> {
   const workspaceId = options.workspaceId ?? runtime.config.workspaceId;
   let rows: ReturnType<typeof regionRows>;
@@ -87,6 +87,7 @@ export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?
     }
   }
   const [settings, trusted, inbound] = await rows;
+  const { setupResources } = await loadSesSetup();
   const resources = setupResources(settings.installationId);
   const valid = trusted.filter(row => row.account && /^\d{12}$/.test(row.account) && row.arn === `arn:aws:sns:${row.region}:${row.account}:${resources.topicName}`);
   const accounts = new Set(valid.map(row => row.account!));

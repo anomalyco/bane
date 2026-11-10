@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+export { AudienceSpec };
 import { contacts, consentAudit, imports, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
 import { enqueue } from './jobs.js';
 import { mailAddress } from './outbound-content.js';
@@ -29,8 +30,6 @@ function ruleSize(rule: SegmentRule): number { return 'rules' in rule ? 1 + rule
 const Rule = ruleSchema.refine(v => ruleSize(v) <= 50, 'A segment supports at most 50 rules and three nested groups.').openapi('SegmentRule');
 const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: Rule }).strict();
 const Segment = SegmentInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('Segment');
-export const AudienceSpec = z.object({ listId: z.string().min(1).max(120), segmentId: z.string().min(1).max(120).optional(), excludeListIds: z.array(z.string().min(1).max(120)).max(20).optional(), excludeSegmentIds: z.array(z.string().min(1).max(120)).max(20).optional(),
-  priority: z.object({ property: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,79}$/), values: z.array(z.string().max(200)).min(1).max(20) }).strict().optional().describe('Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.') }).strict();
 const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
 const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), occurredAt: z.string(), createdAt: z.string() });

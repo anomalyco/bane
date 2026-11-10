@@ -1,3 +1,4 @@
+import { getPath } from 'hono/utils/url';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
 export { DispatcherShard };
@@ -18,19 +19,30 @@ function fastSecure(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-function initHttpDeps() {
+function initRuntimeDeps() {
   return Promise.all([
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
-    import('./app.js'), import('./config.js'), import('./adapters/storage.js'),
+    import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { app }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage, workWake }]) => ({
-    Pool, drizzle, sql, app, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage, workWake }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage, workWake,
   }));
 }
-let httpDepsPromise: ReturnType<typeof initHttpDeps> | undefined;
+async function toModuleLoadError(error: unknown): Promise<never> {
+  const core = await import('./core.js').catch(() => null);
+  throw core ? (error instanceof core.ModuleLoadError ? error : new core.ModuleLoadError(error)) : error;
+}
+let runtimeDepsPromise: ReturnType<typeof initRuntimeDeps> | undefined;
+function loadRuntimeDeps() {
+  return runtimeDepsPromise ??= initRuntimeDeps().catch(error => { runtimeDepsPromise = undefined; return toModuleLoadError(error); });
+}
+let appPromise: Promise<typeof import('./app.js')> | undefined;
+function loadApp() {
+  return appPromise ??= import('./app.js').catch(error => { appPromise = undefined; return toModuleLoadError(error); });
+}
 function loadHttpDeps() {
-  return httpDepsPromise ??= initHttpDeps().catch(error => { httpDepsPromise = undefined; throw error; });
+  return Promise.all([loadRuntimeDeps(), loadApp()]).then(([runtimeDeps, { app }]) => ({ ...runtimeDeps, app }));
 }
 
 // A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
@@ -63,7 +75,7 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fal
   return typeof value === 'string' && value ? value : fallback;
 };
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext): Promise<T> {
-  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake } = await loadHttpDeps();
+  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake } = await loadRuntimeDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
   const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
@@ -125,15 +137,16 @@ export default {
       if (request.method === 'GET' || request.method === 'HEAD') { url.protocol = 'https:'; return fastSecure(Response.redirect(url.toString(), 301)); }
       return fastSecure(Response.json({ error: { code: 'HTTPS_REQUIRED', message: 'Use HTTPS.', retryable: false } }, { status: 403, headers: { 'cache-control': 'no-store' } }));
     }
-    if (url.pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-Bane-Environment') && !request.headers.has('X-OpenSend-Environment')) {
+    const pathname = getPath(request);
+    if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-Bane-Environment') && !request.headers.has('X-OpenSend-Environment')) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       const body = request.method === 'HEAD' ? null : JSON.stringify({ status: 'ok', service: 'bane', multiTenant });
       return fastSecure(new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId, 'server-timing': 'runtime;dur=0.0' } }));
     }
-    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(url.pathname) || url.pathname.startsWith('/docs/operations/'));
+    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(url.pathname) && url.pathname !== '/health') {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(pathname) && pathname !== '/health') {
       return fastSecure(await assets.fetch(request));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
@@ -145,7 +158,7 @@ export default {
       const peer = await core.digest(address);
       // SNS publishes from a small IP pool at the full send rate; its requests are authenticated by
       // signature verification in the handler, so the per-address admission gate does not apply.
-      const feedbackIngress = url.pathname === '/v1/events/ses' && request.method === 'POST';
+      const feedbackIngress = pathname === '/v1/events/ses' && request.method === 'POST';
       const gate = feedbackIngress ? { success: true } : await env.ADMISSION.limit({ key: `bane:default:${peer}` });
       if (!gate.success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
@@ -157,7 +170,7 @@ export default {
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
         : await withRuntime(env, async runtime => {
           const result = await app.fetch(new Request(request, { headers }), runtime);
-          const failureBucket = core.publicFailureBucket(url.pathname, result.status, request.headers);
+          const failureBucket = core.publicFailureBucket(pathname, result.status, request.headers);
           return failureBucket && !await core.publicFailureAllowed(runtime, failureBucket, peer) ? core.publicFailureDenied() : result;
         }, 1, ctx);
       const runtimeMs = performance.now() - runtimeStarted;
@@ -177,11 +190,11 @@ export default {
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env) {
-    const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadHttpDeps();
+    const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadRuntimeDeps();
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback')) {
-      const { ingestFeedbackBatch } = await import('./operations.js');
+      const { ingestFeedbackBatch } = await core.wrapModuleLoad(() => import('./operations.js'));
       // Each message is one verified callback; acknowledge and retry individually so one bad
       // payload never blocks a batch of routine deliveries.
       await withRuntime(env, async runtime => {
@@ -197,7 +210,7 @@ export default {
       batch.retryAll();
       return;
     }
-    const { drainJobs } = await import('./dispatch.js');
+    const { drainJobs } = await core.wrapModuleLoad(() => import('./dispatch.js'));
     await withRuntime(env, async runtime => {
       // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
       // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
@@ -208,15 +221,16 @@ export default {
     batch.ackAll();
   },
   async scheduled(controller, env) {
-    const [{ jobConcurrency, followDueJobs, core }, { dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }] = await Promise.all([
-      loadHttpDeps(), import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'),
-    ]);
+    const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
+    const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }] = await core.wrapModuleLoad(() => Promise.all([
+      import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'),
+    ]));
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') {
-        const [{ cleanup }, { checkReputationAlerts }, { mailboxHourly }, { resolveRegionRuntime }] = await Promise.all([
+        const [{ cleanup }, { checkReputationAlerts }, { mailboxHourly }, { resolveRegionRuntime }] = await core.wrapModuleLoad(() => Promise.all([
           import('./maintenance.js'), import('./reputation-alerts.js'), import('./mailbox-ingest.js'), import('./ses-region-state.js'),
-        ]);
+        ]));
         await cleanup(runtime);
         // Alerts are best-effort and must not stop the minute recovery work below.
         try { await checkReputationAlerts(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }

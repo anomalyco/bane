@@ -1,5 +1,7 @@
-import {HeadObjectCommand,GetObjectCommand,PutObjectCommand,CopyObjectCommand,CreateMultipartUploadCommand,UploadPartCommand,UploadPartCopyCommand,CompleteMultipartUploadCommand,AbortMultipartUploadCommand,type S3Client} from '@aws-sdk/client-s3';
-import { ApiError } from './core.js';
+import type { S3Client } from '@aws-sdk/client-s3';
+import { ApiError, lazyModule } from './core.js';
+
+const loadS3Commands = lazyModule(() => import('@aws-sdk/client-s3'));
 
 const MiB=1024*1024, PREFIX=2*MiB, FIRST_PART=5.25*MiB;
 export const PARSE_LIMIT=6*MiB;
@@ -35,6 +37,7 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
 export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string) {
+  const { HeadObjectCommand, GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
   const location={Bucket:bucket,Key:source};
   const head=await client.send(new HeadObjectCommand(location));
   if (head.ContentLength === undefined || !head.ETag) throw new Error('Raw message metadata unavailable');

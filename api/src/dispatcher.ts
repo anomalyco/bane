@@ -1,6 +1,6 @@
 import { getTableColumns, sql, type SQL } from 'drizzle-orm';
-import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
+import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
+import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { sendingConnections, verifiedClaim } from './domain-claims.js';
@@ -8,9 +8,11 @@ import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './stat
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
-import { simulatedSes } from './adapters/simulated-ses.js';
 import { wakeWebhooks } from './jobs.js';
 import { screenSnapshot } from './screen.js';
+
+const loadSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
+const loadSimulatedSes = lazyModule(() => import('./adapters/simulated-ses.js'));
 
 // The dispatcher is a long-lived loop, hosted by a Durable Object on Cloudflare and by the
 // runner process on Node. PostgreSQL remains the only source of truth: a row is sent at most
@@ -18,9 +20,25 @@ import { screenSnapshot } from './screen.js';
 // Provider pacing lives in process memory (one shard owns one share of the regional quota),
 // so the hot path costs three database statements per batch rather than ten per email.
 
+type DispatchTransport = {
+  GetAccountCommand: typeof import('@aws-sdk/client-sesv2').GetAccountCommand;
+  SendEmailCommand: typeof import('@aws-sdk/client-sesv2').SendEmailCommand;
+  clientFor: (runtime: Runtime, region: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>) => SESv2Client;
+};
+function loadDispatchTransport(runtime: Runtime): Promise<DispatchTransport> {
+  return wrapModuleLoad(async () => {
+    if (isSimulatedSes(runtime)) {
+      const [{ GetAccountCommand, SendEmailCommand }, { simulatedSes }] = await Promise.all([loadSesv2(), loadSimulatedSes()]);
+      return { GetAccountCommand, SendEmailCommand, clientFor: (rt, reg) => simulatedSes(rt, reg) };
+    }
+    const { sesv2: { GetAccountCommand, SendEmailCommand }, getSesSync } = await preloadSesTransport(runtime.config.multiTenant);
+    return { GetAccountCommand, SendEmailCommand, clientFor: getSesSync };
+  });
+}
+
 export type Mail = typeof emails.$inferSelect;
 type Review = { version:number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
-type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; sendClient?:(domainId:string)=>SESv2Client; tenantName?: string; feedbackTopic?: string };
+type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
@@ -65,11 +83,11 @@ const rankJson = () => rankJsonCache ??= JSON.stringify(rank);
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-export function providerClient(runtime: Runtime, region: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client {
-  return isSimulatedSes(runtime) ? simulatedSes(runtime, region) : getSes(runtime, region, connection, runClients);
+export async function providerClient(runtime: Runtime, region: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): Promise<SESv2Client> {
+  return isSimulatedSes(runtime) ? (await loadSimulatedSes()).simulatedSes(runtime, region) : getSes(runtime, region, connection, runClients);
 }
-async function fetchQuota(ses: SESv2Client,gate:GateState): Promise<QuotaSnapshot> {
-  const account = await ses.send(new GetAccountCommand({})), quota = account.SendQuota;
+async function fetchQuota(transport: DispatchTransport, ses: SESv2Client, gate: GateState): Promise<QuotaSnapshot> {
+  const account = await ses.send(new transport.GetAccountCommand({})), quota = account.SendQuota;
   if (account.SendingEnabled) delete gate.accountPauseAt;
   if (!account.SendingEnabled || !quota || !quota.MaxSendRate || quota.MaxSendRate <= 0 || quota.Max24HourSend === undefined || quota.SentLast24Hours === undefined) throw new ApiError(503, 'SES_SENDING_NOT_READY', 'SES sending is disabled or regional quota information is unavailable.', undefined, true);
   return { maxSendRate: quota.MaxSendRate, max24HourSend: quota.Max24HourSend, sentLast24Hours: quota.SentLast24Hours, checkedAt: Date.now() };
@@ -92,8 +110,8 @@ function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number,
 }
 // Elect the refresher BEFORE GetAccount, across all DOs/lanes for this account. A failed or
 // interrupted fetch keeps its fence until the next cache period; no DB lock is held over AWS I/O.
-async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: string | undefined, region: string, gate: GateState, refreshMs: number, overlappingSends = 0) {
-  const { runtime, ses, a } = owner;
+async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'|'transport'>, account: string | undefined, region: string, gate: GateState, refreshMs: number, overlappingSends = 0) {
+  const { runtime, ses, a, transport } = owner;
   const table = sql.identifier(account ? 'provider_account_limits' : 'sending_region_limits');
   const subject = sql.identifier(account ? 'aws_account_id' : 'workspace_id'), fence = sql.identifier(account ? 'refresh_after' : 'next_allowed_at');
   const key = sql`${subject}=${account ?? a.workspaceId} AND region=${region}`;
@@ -110,7 +128,7 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: str
     SELECT fence,NULL::text AS checked,NULL::float8 AS rate,NULL::float8 AS max,NULL::float8 AS sent,NULL::float8 AS age_ms FROM elected UNION ALL ${cached} LIMIT 1`);
   let row = result.rows[0];
   if (row?.fence) {
-    const q = await fetchQuota(ses,gate);
+    const q = await fetchQuota(transport, ses, gate);
     const saved = await runtime.db.execute<{ checked: string }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
       max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours} WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked`);
     if (!saved.rowCount) return false;
@@ -129,10 +147,11 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: str
 // A held campaign can outlive its last queued email. Refresh the same fenced provider cache
 // without manufacturing a queued message just to wake a dispatcher.
 export async function campaignQuota(runtime: Runtime, a: Actor, region: string, account?: string) {
+  const transport = await loadDispatchTransport(runtime);
   const connection = runtime.config.multiTenant ? (await runtime.db.execute<ReadyConnection>(sql`SELECT * FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region} AND aws_account_id=${account ?? ''} AND paused_at IS NULL`)).rows[0] : undefined;
   if (runtime.config.multiTenant && !connection) return null;
   const gate = initialGate();
-  return await ensureQuota({ runtime, a, ses: providerClient({...runtime,config:{...runtime.config,workspaceId:a.workspaceId}}, region, forDelivery(connection,{purpose:'quota'})) }, account, region, gate, QUOTA_REFRESH_MS) ? gate.quota : null;
+  return await ensureQuota({ runtime, a, transport, ses: transport.clientFor({...runtime,config:{...runtime.config,workspaceId:a.workspaceId}}, region, forDelivery(connection,{purpose:'quota'})) }, account, region, gate, QUOTA_REFRESH_MS) ? gate.quota : null;
 }
 
 /**
@@ -185,7 +204,7 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }): Promise<Leased[]> {
+async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
@@ -294,6 +313,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
   }
   return result.rows.map(row => {
     const { review_version, review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, claim_status, webhooks, ...fields } = row;
+    void review_version; void webhooks;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
     const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState; paused_at?: string | null }) | null;
     const ready = regionReady && !pc0?.paused_at && !(mx && !isSimulatedSes(runtime) && pc0?.kind === 'shared' && pc0.tenant_state !== 'ready');
@@ -311,8 +331,8 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       const namespace=pc?.legacy_names===false ? pc.kind==='shared' ? pc.pool_tier : 'byo' : undefined;
       const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string,namespace);
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
-        sendClient:pc?.template_version==='v5'?domainId=>providerClient(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
+      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, transport, ses: transport.clientFor(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
+        sendClient:pc?.template_version==='v5'?domainId=>transport.clientFor(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
         tenantName: pc?.kind === 'shared' ? pc.pool_tenant_name ?? (pc.managed_tenant ? mxResourceName(workspaceId) : `bane-${workspaceId}`) : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
@@ -532,12 +552,14 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
     ...(item.owner.tenantName ? { TenantName: item.owner.tenantName } : {}), Content: item.content,
   };
+  const command = new item.owner.transport.SendEmailCommand(request);
+  const client = item.owner.sendClient?.((item.stored?.binding ?? mail.snapshot.binding)?.domain ?? '') ?? ses;
   try {
-    const client=item.owner.sendClient?.((item.stored?.binding??mail.snapshot.binding)?.domain??'')??ses;
-    const result = await client.send(new SendEmailCommand(request));
+    const result = await client.send(command);
     if (!result.MessageId) return { mail, type: 'acceptance_unknown', errorCode: 'SES_ACCEPTANCE_UNKNOWN', data: { code: 'SES_MESSAGE_ID_MISSING' } };
     return { mail, type: 'accepted', providerId: result.MessageId, data: {} };
   } catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
     const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
     const status = failure.$metadata?.httpStatusCode;
     const { denial, diagnostics } = redactDenial(runtime, failure);
@@ -841,7 +863,10 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   const loadAttachments = batchAttachments(base, ready);
   const prepare = async (item: typeof ready[number]) => {
     try { return await prepareMail(item, loadAttachments); }
-    catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error); }
+    catch (error) {
+      if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
+      counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error);
+    }
   };
   if (ready.some(({mail, owner}) => mail.snapshot.screen && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
     // Start every preflight together, but don't gate unrelated sends on the slowest classifier.
@@ -980,6 +1005,8 @@ async function flushFinishing(runtime: Runtime, lane: Lane) {
  */
 export async function runDispatcher(runtime: Runtime, options: DispatcherOptions): Promise<DispatcherReport> {
   if (runtime.config.multiTenant && !/^\d{12}$/.test(options.accountId ?? '')) throw new ApiError(500, 'DISPATCH_ACCOUNT_REQUIRED', 'An MX dispatcher must be scoped to an AWS account.');
+  // Resolve every transport module before leasing or transitioning any row to attempting.
+  const transport = await loadDispatchTransport(runtime);
   const started = Date.now();
   const gate = options.gate ?? initialGate();
   const counters: DispatcherReport = { claimed: 0, sent: 0, deferred: 0, skipped: 0, batches: 0, idle: true, durationMs: 0, timings: {}, statements: 0 };
@@ -1002,7 +1029,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     }
     const inline = first && runtime.config.multiTenant && !gate.dailyBlockedUntil && gate.nextAllowedAt <= now && (gate.brakeUntil ?? 0) <= now
       ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs), margin: provisionalMargin(gate.sentSinceRefresh, 1, options.shard) } : undefined;
-    return phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
+    return phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
   };
   let blocked = false;
   const drainLane = async (batch: Leased[]) => {

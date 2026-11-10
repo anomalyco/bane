@@ -2,10 +2,9 @@ import { z } from '@hono/zod-openapi';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { SESv2Client } from '@aws-sdk/client-sesv2';
-import { FetchHttpHandler } from '@smithy/fetch-http-handler';
+import type { SESv2Client } from '@aws-sdk/client-sesv2';
 import { sql } from 'drizzle-orm';
-import { assertSharedAccount, workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
+import type { ReadyConnection } from './provider-credentials.js';
 
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
@@ -105,11 +104,31 @@ export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, jo
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
+export class ModuleLoadError extends ApiError {
+  constructor(cause?: unknown) {
+    super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);
+    this.name = 'ModuleLoadError';
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+export function wrapModuleLoad<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return work().catch(error => { throw error instanceof ModuleLoadError ? error : new ModuleLoadError(error); });
+  } catch (error) {
+    return Promise.reject(error instanceof ModuleLoadError ? error : new ModuleLoadError(error));
+  }
+}
+export function lazyModule<T>(load: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return () => pending ??= wrapModuleLoad(load).catch(error => { pending = undefined; throw error; });
+}
 export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.') }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
 export const PageQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(25) });
+export const AudienceSpec = z.object({ listId: z.string().min(1).max(120), segmentId: z.string().min(1).max(120).optional(), excludeListIds: z.array(z.string().min(1).max(120)).max(20).optional(), excludeSegmentIds: z.array(z.string().min(1).max(120)).max(20).optional(),
+  priority: z.object({ property: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,79}$/), values: z.array(z.string().max(200)).min(1).max(20) }).strict().optional().describe('Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.') }).strict();
 export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'application/json': { schema } }, required: true });
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
@@ -137,21 +156,53 @@ export const isSimulatedSes = (runtime: Runtime) => !runtime.config.liveEnabled 
 export function assertSesConfigured(runtime: Runtime) {
   if (isSimulatedSes(runtime)) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
 }
-export function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client {
+export function assertSharedAccount(runtime: Runtime, row: Pick<ReadyConnection, 'kind' | 'aws_account_id'>) {
+  if (runtime.config.multiTenant && row.kind === 'shared' && runtime.config.platformAccount && row.aws_account_id !== null && row.aws_account_id !== runtime.config.platformAccount)
+    throw new ApiError(503, 'AWS_ACCOUNT_MISMATCH', 'This Hosted binding belongs to a different platform account.', undefined, true);
+}
+// Old queued simulator jobs and SNS receipts retain their original topic as a deduplication key.
+export function simulatedTopic(topic: unknown, region?: unknown) {
+  if (typeof topic !== 'string') return false;
+  return ['urn:bane:simulated-ses:', 'urn:opensend:simulated-ses:'].some(prefix => region === undefined ? topic.startsWith(prefix) : topic === prefix + region);
+}
+/** The bane_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
+export function taggedEmailId(message: unknown): string | undefined {
+  const tags = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags;
+  const tag = tags?.bane_email_id ?? tags?.opensend_email_id;
+  const value = Array.isArray(tag) ? tag[0] : undefined;
+  return typeof value === 'string' && /^email_[a-z0-9]{8,64}$/.test(value) ? value : undefined;
+}
+const loadSesClientDeps = lazyModule(() => Promise.all([import('@aws-sdk/client-sesv2'), import('@smithy/fetch-http-handler'), import('./provider-credentials.js')]));
+export async function preloadSesTransport(multiTenant = false) {
+  const [sesv2, { FetchHttpHandler }, creds] = await wrapModuleLoad(() => loadSesClientDeps());
+  if (multiTenant) await wrapModuleLoad(() => creds.loadStsSdk());
+  const getSesSync = (runtime: Runtime, selectedRegion: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client => {
+    region(runtime, selectedRegion);
+    assertSesConfigured(runtime);
+    if (runtime.config.multiTenant && connection) assertSharedAccount(runtime, connection); // Even a cached SDK client must not cross a rebind.
+    let clients = runClients ?? sesClients.get(runtime);
+    if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
+    // The dispatcher leases the connection alongside the mail. One shared-account client can
+    // sign for all Hosted tenants (TenantName is on the command); BYO role rotations must get
+    // a new provider. Never put a request-bound client or pending STS promise across invocations.
+    const key = runClients && connection
+      ? JSON.stringify([selectedRegion, connection.kind, connection.aws_account_id, connection.role_arn, connection.external_id, connection.deliverySession])
+      : connection ? JSON.stringify([selectedRegion, connection.id, connection.identitySession, connection.deliverySession]) : selectedRegion;
+    let client = clients.get(key);
+    if (!client) {
+      client = new sesv2.SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => creds.workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, cacheMiddleware: !!runClients, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) });
+      clients.set(key, client);
+    }
+    return client;
+  };
+  return { sesv2, getSesSync };
+}
+export async function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): Promise<SESv2Client> {
   region(runtime, selectedRegion);
   assertSesConfigured(runtime);
   if (runtime.config.multiTenant && connection) assertSharedAccount(runtime,connection); // Even a cached SDK client must not cross a rebind.
-  let clients = runClients ?? sesClients.get(runtime);
-  if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
-  // The dispatcher leases the connection alongside the mail. One shared-account client can
-  // sign for all Hosted tenants (TenantName is on the command); BYO role rotations must get
-  // a new provider. Never put a request-bound client or pending STS promise across invocations.
-  const key = runClients && connection
-    ? JSON.stringify([selectedRegion, connection.kind, connection.aws_account_id, connection.role_arn, connection.external_id,connection.deliverySession])
-    : connection ? JSON.stringify([selectedRegion,connection.id,connection.identitySession,connection.deliverySession]) : selectedRegion;
-  let client = clients.get(key);
-  if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, cacheMiddleware: !!runClients, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(key, client); }
-  return client;
+  const { getSesSync } = await preloadSesTransport(runtime.config.multiTenant);
+  return getSesSync(runtime, selectedRegion, connection, runClients);
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
   // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.

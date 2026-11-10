@@ -14,7 +14,11 @@ function initDeps() {
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
 function loadDeps() {
-  return depsPromise ??= initDeps().catch(error => { depsPromise = undefined; throw error; });
+  return depsPromise ??= initDeps().catch(async error => {
+    depsPromise = undefined;
+    const core = await import('./core.js').catch(() => null);
+    throw core ? (error instanceof core.ModuleLoadError ? error : new core.ModuleLoadError(error)) : error;
+  });
 }
 
 // One Durable Object per account/region/shard hosts the dispatcher loop. The object

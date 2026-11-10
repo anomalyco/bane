@@ -905,7 +905,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await reconcileReadyPool(scoped);assert.deepEqual(await state(),prior);assert.ok(topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy);
         });
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
-        assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
+        assert.equal((await (await getSes(scoped(a.org.id), region)).config.credentials()).accessKeyId, platformKey.accessKeyId);
         const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
         const discovery = `/v1/regions/${region}/discovery`;
         await providerTest.test('MX refuses public suffixes and reserved domain trees before reserving or contacting SES',async()=>{
@@ -1591,7 +1591,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         const before = calls.length;
         error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
-        assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer');
+        assert.equal((await (await getSes(scoped(a.org.id), region)).config.credentials()).accessKeyId, 'synthetic-customer');
         assert.equal(ok(await local('GET','/v1/settings/ses',undefined,a.cookie)).region,region);
         identities.set(`${customer}:${foreign}`,verifiedIdentity);
         error(await add(a.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
@@ -1664,7 +1664,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,4);
         const visible = ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;
         assert.deepEqual(Object.fromEntries(visible.map((r:Json)=>[r.name,r.verified])),{[domain]:true,[imported]:true,['mail.'+reserved]:false});
-        await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
+        await assert.rejects((await getSes(scoped(b.org.id), region)).config.credentials(), { code: 'CONNECTION_REQUIRED' });
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
         await pool.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
@@ -8727,5 +8727,822 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(sent.includes(slow));
       t.diagnostic(`Unresponsive classifier failed open in ${timeoutMs} ms; sibling already sent.`);
     });
+  });
+
+  test('cold isolates initialize every lazy AWS client and entry point on first use', async () => {
+    assert.ok(FIXTURE_DATABASE_URL, 'Cold isolate database checks require FIXTURE_DATABASE_URL.');
+    const { default: pgParent } = await import('pg');
+    const verifyLoopbackDb = (rawUrl: string) => {
+      const parsed = new URL(rawUrl);
+      assert.ok(['postgres:', 'postgresql:'].includes(parsed.protocol), `Expected PostgreSQL URL, got ${parsed.protocol}`);
+      if ([...parsed.searchParams.keys()].some(k => /^host(?:addr)?$/i.test(k))) {
+        throw new Error('Refusing ?host= or ?hostaddr= query override in fixture database URL');
+      }
+      const effectiveHost = (new pgParent.Client({ connectionString: rawUrl }) as unknown as { host: string }).host;
+      if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(effectiveHost)) {
+        throw new Error(`Refusing non-loopback fixture database host: ${effectiveHost}`);
+      }
+      return rawUrl;
+    };
+    verifyLoopbackDb(FIXTURE_DATABASE_URL);
+
+    // Encoded route prefixes against both a fresh lazy createApp() and the running Node HTTP server.
+    const { createApp } = await import('./src/app.js');
+    const { loadConfig } = await import('./src/config.js');
+    const encodedRuntime = {
+      config: loadConfig({ BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', DEFAULT_SES_REGION: REGION, AUTH_GOOGLE_CLIENT_ID: 'id', AUTH_GOOGLE_CLIENT_SECRET: 'secret', AUTH_ALLOWED_DOMAINS: AUTH_DOMAIN }),
+      db: {} as import('./src/core.js').Database,
+      storage: { put: async () => {}, get: async () => null, delete: async () => {} },
+    };
+    const encodedApp = createApp();
+    const localEncodedSes = await encodedApp.fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/%73es`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }), encodedRuntime);
+    assert.equal(localEncodedSes.status, 422);
+    assert.equal(((await localEncodedSes.json()) as Json).error?.code, 'VALIDATION_FAILED');
+    const localEncodedJwks = await encodedApp.fetch(new Request(`${PUBLIC_ORIGIN}/api/%61uth/jwks`, { method: 'OPTIONS' }), encodedRuntime);
+    assert.equal(localEncodedJwks.status, 405);
+
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const apiDirUrl = new URL('./', import.meta.url).href;
+    const runColdIsolate = async (name: string, body: string, withDb = false) => {
+      const code = `
+        import assert from 'node:assert/strict';
+        import { registerHooks } from 'node:module';
+        const loadedModules = new Set();
+        let faultResolver = null;
+        registerHooks({ resolve(specifier, context, next) {
+          if (faultResolver) faultResolver(specifier);
+          if (specifier === 'cloudflare:workers') {
+            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
+          }
+          const resolved = next(specifier, context);
+          loadedModules.add(resolved.url);
+          return resolved;
+        } });
+        globalThis.fetch = async (input) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          throw new Error('Unexpected outbound fetch in cold isolate [${name}]: ' + url);
+        };
+        const assertLoopbackDb = async (rawUrl) => {
+          assert.ok(rawUrl, 'Missing BANE_COLD_TEST_DB_URL');
+          const parsed = new URL(rawUrl);
+          if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) throw new Error('Expected PostgreSQL URL: ' + parsed.protocol);
+          if ([...parsed.searchParams.keys()].some(k => /^host(?:addr)?$/i.test(k))) {
+            throw new Error('Refusing host/hostaddr query override in fixture database URL');
+          }
+          const { default: pgMod } = await import('pg');
+          const effectiveHost = new pgMod.Client({ connectionString: rawUrl }).host;
+          if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(effectiveHost)) {
+            throw new Error('Refusing non-loopback fixture database host: ' + effectiveHost);
+          }
+          return rawUrl;
+        };
+        const base = ${JSON.stringify(apiDirUrl)};
+        const mod = p => new URL(p, base).href;
+        ${body}
+        process.exit(0);
+      `;
+      const childEnv: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of ['DATABASE_URL', 'API_FIXTURE_DATABASE_URL', 'PGHOST', 'PGHOSTADDR', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSERVICE']) {
+        delete childEnv[key];
+      }
+      if (withDb) childEnv.BANE_COLD_TEST_DB_URL = FIXTURE_DATABASE_URL;
+      try {
+        await execFileAsync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], { cwd: new URL('./', import.meta.url), env: childEnv });
+      } catch (err: unknown) {
+        const out = err && typeof err === 'object' && 'stdout' in err ? String((err as { stdout?: unknown }).stdout || '') : '';
+        const errText = err && typeof err === 'object' && 'stderr' in err ? String((err as { stderr?: unknown }).stderr || err) : String(err);
+        throw new Error(`Cold isolate [${name}] failed: ${errText}${out ? `\nstdout:\n${out}` : ''}`);
+      }
+    };
+
+    await Promise.all([
+      // 1. Cold GET /v1/inbound/messages/:id/attachments/:id (S3Client + getSignedUrl): env DB URL, pg effective-host loopback guard, default-deny fetch
+      runColdIsolate('inbound-attachment-presign', `
+        import pg from 'pg';
+        import { drizzle } from 'drizzle-orm/node-postgres';
+        await assert.rejects(() => assertLoopbackDb('postgres://remote.example.com:5432/bane'), /non-loopback/);
+        await assert.rejects(() => assertLoopbackDb('postgres://127.0.0.1:5432/bane?host=remote.example.com'), /host/);
+        await assert.rejects(() => assertLoopbackDb('postgres://127.0.0.1:5432/bane?hostaddr=8.8.8.8'), /host/);
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        assert.ok(!process.argv.some(arg => arg.includes(dbUrl)), 'Database URL must not appear in process argv.');
+        const [{ createApp }, { loadConfig }, { digest }] = await Promise.all([import(mod('src/app.js')), import(mod('src/config.js')), import(mod('src/core.js'))]);
+        const client = new pg.Client({ connectionString: dbUrl });
+        await client.connect();
+        const rollback = new Error('rollback cold fixture');
+        try {
+          await drizzle(client).transaction(async tx => {
+            const wid = 'ws_' + 'a'.repeat(32), msgId = 'msg_' + 'b'.repeat(32), attId = 'matt_' + 'c'.repeat(32), domId = 'dom_' + 'd'.repeat(32), mdomId = 'mdom_' + 'e'.repeat(32), thrId = 'thr_' + 'f'.repeat(32);
+            const secret = 'os_live_' + '1'.repeat(64);
+            await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold','cold-fixture')", [wid]);
+            await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold','us-east-2',$2::jsonb)", [wid, JSON.stringify(['us-east-2'])]);
+            await client.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key_cold',$1,'cold',$2,'os_live_111111',$3::jsonb,'[]'::jsonb)", [wid, await digest(secret), JSON.stringify(['read', 'send', 'manage'])]);
+            await client.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'cold.example','us-east-2')", [domId, wid]);
+            await client.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,'cold.example','us-east-2','active')", [mdomId, wid, domId]);
+            await client.query("INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,'Cold',1,now())", [thrId, wid]);
+            await client.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,domain_id,subject,from_address,attachment_count) VALUES($1,$2,'inbound',$3,'us-east-2',$4,'Cold','a@example.net',1)", [msgId, wid, thrId, mdomId]);
+            await client.query("INSERT INTO mail_attachments(id,workspace_id,message_id,filename,content_type,size_bytes,disposition,sha256,bucket,storage_key) VALUES($1,$2,$3,'doc.pdf','application/pdf',4,'attachment',$4,'pool-cold-mail',$5)", [attId, wid, msgId, '0'.repeat(64), 'workspaces/' + wid + '/att/' + msgId + '/' + attId]);
+            const config = loadConfig({ WORKSPACE_ID: wid, BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' });
+            const res = await createApp().fetch(new Request('https://dev.bane.mx/v1/inbound/messages/' + msgId + '/attachments/' + attId, { headers: { authorization: 'Bearer ' + secret } }), { db: tx, config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } });
+            assert.equal(res.status, 200);
+            const payload = await res.json();
+            assert.match(payload.url, /X-Amz-Signature=/);
+            throw rollback;
+          });
+        } catch (err) {
+          if (err !== rollback) throw err;
+        } finally {
+          await client.end();
+        }
+      `, true),
+      // 2. Cold s3Storage (S3Client + Put/Get/DeleteObjectCommand) and copyWorkspaceRaw (mailbox-mime S3 commands)
+      runColdIsolate('s3-storage-and-mime', `
+        globalThis.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url;
+          if (!url.includes('s3.')) throw new Error('Unexpected fetch: ' + url);
+          const method = input instanceof Request ? input.method : (init?.method ?? 'GET');
+          if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': '12', etag: '"e1"' } });
+          if (method === 'GET') return new Response('Subject: hi\\n', { status: 200, headers: { 'content-length': '12', 'content-type': 'text/plain' } });
+          if (method === 'PUT' || method === 'DELETE') return new Response('<CopyObjectResult><ETag>"e1"</ETag></CopyObjectResult>', { status: 200, headers: { 'content-type': 'application/xml' } });
+          throw new Error('Unexpected S3 method: ' + method);
+        };
+        const { s3Storage } = await import(mod('src/adapters/storage.js'));
+        const store = s3Storage({ S3_BUCKET: 'fixture', S3_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', S3_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', S3_REGION: 'us-east-2' });
+        await store.put('k', new TextEncoder().encode('hello'), 'text/plain');
+        assert.equal((await store.get('k'))?.body.byteLength, 12);
+        await store.delete('k');
+        const [{ copyWorkspaceRaw }, { mailboxS3 }, { loadConfig }] = await Promise.all([import(mod('src/mailbox-mime.js')), import(mod('src/mailbox-setup.js')), import(mod('src/config.js'))]);
+        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' });
+        const client = await mailboxS3({ config, db: {}, storage: store }, 'default', 'us-east-2', 'fixture');
+        try { await copyWorkspaceRaw(client, 'us-east-2', 'fixture', 'staging/m1', 'workspaces/default/raw/m1.eml', ['a@example.com'], 'raw'); }
+        finally { client.destroy(); }
+      `),
+      // 3. Cold STS caller/assume (provider-credentials.ts)
+      runColdIsolate('sts-credentials', `
+        globalThis.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url;
+          if (!url.includes('sts.')) throw new Error('Unexpected fetch: ' + url);
+          const body = input instanceof Request ? await input.clone().text() : (init?.body ? Buffer.from(init.body).toString() : '');
+          if (body.includes('GetCallerIdentity')) return new Response('<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Account>111122223333</Account><Arn>arn:aws:iam::111122223333:user/platform</Arn><UserId>AIDA</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (body.includes('AssumeRole')) return new Response('<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><AssumedRoleUser><Arn>arn:aws:sts::222233334444:assumed-role/Bane-0123456789abcdef0123/Bane</Arn><AssumedRoleId>AROA:Bane</AssumedRoleId></AssumedRoleUser><Credentials><AccessKeyId>ASIAEXAMPLE</AccessKeyId><SecretAccessKey>secret</SecretAccessKey><SessionToken>tok</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          throw new Error('Unexpected STS body: ' + body);
+        };
+        const [{ caller, assume }, { loadConfig }] = await Promise.all([import(mod('src/provider-credentials.js')), import(mod('src/config.js'))]);
+        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+        assert.equal((await caller('us-east-2', config.aws)).Account, '111122223333');
+        assert.equal((await assume({ config, db: {}, storage: {} }, 'us-east-2', 'arn:aws:iam::222233334444:role/Bane-0123456789abcdef0123', 'ext-1')).accessKeyId, 'ASIAEXAMPLE');
+      `),
+      // 4a. Cold ses-setup (SESv2, SES v1 receipt rules, SNS, STS, CloudWatch)
+      runColdIsolate('ses-setup', `
+        globalThis.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url;
+          const target = input instanceof Request ? (input.headers.get('x-amz-target') ?? '') : '';
+          const body = input instanceof Request ? await input.clone().text() : (init?.body ? Buffer.from(init.body).toString() : '');
+          if (url.includes('sts.') || body.includes('GetCallerIdentity')) return new Response('<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Account>111122223333</Account><Arn>arn:aws:iam::111122223333:user/u</Arn><UserId>U</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (url.includes('monitoring.') || target.includes('GetMetricData') || body.includes('GetMetricData')) return Response.json({ MetricDataResults: [] });
+          if (url.includes('sns.')) return new Response('<ErrorResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><Error><Type>Sender</Type><Code>NotFound</Code><Message>missing</Message></Error></ErrorResponse>', { status: 404, headers: { 'content-type': 'text/xml' } });
+          if (body.includes('DescribeActiveReceiptRuleSet')) return new Response('<DescribeActiveReceiptRuleSetResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><DescribeActiveReceiptRuleSetResult/></DescribeActiveReceiptRuleSetResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (url.endsWith('/v2/email/account')) return Response.json({ ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY', SendQuota: { Max24HourSend: 200, MaxSendRate: 1, SentLast24Hours: 0 } });
+          if (url.includes('/v2/email/identities')) return Response.json({ EmailIdentities: [] });
+          if (url.includes('/v2/email/configuration-sets/')) return Response.json({ message: 'missing' }, { status: 404, headers: { 'x-amzn-errortype': 'NotFoundException' } });
+          throw new Error('Unexpected fetch in ses-setup: ' + url);
+        };
+        const [{ discoverSes, scanRegionPage }, { loadConfig }] = await Promise.all([import(mod('src/ses-setup.js')), import(mod('src/config.js'))]);
+        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+        const runtime = { config, storage: {}, db: {} };
+        const report = await discoverSes(runtime, { region: 'us-east-2', installationId: 'inst_1' });
+        assert.equal(report.account?.id, '111122223333');
+        assert.equal(report.reputation?.available, true);
+        const receiptPage = await scanRegionPage(runtime, 'us-east-2', 'inst_1', 'receipt');
+        assert.equal(receiptPage.facts.receiving?.supported, true);
+      `),
+      // 4b. Dedicated cold reputation-alerts process: REPUTATION_ALERT_SLACK_URL must construct and invoke CloudWatchClient
+      runColdIsolate('reputation-alerts-cloudwatch', `
+        let cwCalls = 0;
+        globalThis.fetch = async (input) => {
+          const url = typeof input === 'string' ? input : input.url;
+          const target = input instanceof Request ? (input.headers.get('x-amz-target') ?? '') : '';
+          if (url.includes('monitoring.') && target.includes('GetMetricData')) {
+            cwCalls++;
+            return Response.json({ MetricDataResults: [] });
+          }
+          throw new Error('Unexpected fetch in reputation-alerts: ' + url);
+        };
+        const [{ checkReputationAlerts }, { loadConfig }] = await Promise.all([import(mod('src/reputation-alerts.js')), import(mod('src/config.js'))]);
+        assert.equal([...loadedModules].some(u => u.includes('client-cloudwatch')), false, 'CloudWatch SDK must not load at import time.');
+        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret', REPUTATION_ALERT_SLACK_URL: 'https://hooks.slack.com/services/fixture/reputation-alert' });
+        assert.equal(config.reputationAlertUrl, 'https://hooks.slack.com/services/fixture/reputation-alert');
+        const runtime = { config, storage: {}, db: { select: () => ({ from: async () => [{ workspaceId: 'default', regions: ['us-east-2'] }] }) } };
+        assert.equal(await checkReputationAlerts(runtime), 0);
+        assert.equal(cwCalls, 1, 'checkReputationAlerts must construct CloudWatchClient and send GetMetricData.');
+        assert.equal([...loadedModules].some(u => u.includes('client-cloudwatch')), true);
+      `),
+      // 5. Cold sending HTML parse5 + DispatcherShard live SESv2 send, AND Hosted singleton transport import fault injection
+      runColdIsolate('dispatcher-transport-and-fault', `
+        import pg from 'pg';
+        import { drizzle } from 'drizzle-orm/node-postgres';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        let sesSent = 0;
+        globalThis.fetch = async (input) => {
+          const url = typeof input === 'string' ? input : input.url;
+          if (url.includes('cdn-cgi/trace')) return new Response('colo=IAD');
+          if (url.endsWith('/v2/email/account')) return Response.json({ ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY', SendQuota: { Max24HourSend: 50000, MaxSendRate: 100, SentLast24Hours: 0 } });
+          if (url.endsWith('/v2/email/outbound-emails')) { sesSent++; return Response.json({ MessageId: 'ses_cold_' + sesSent }); }
+          throw new Error('Unexpected fetch in dispatcher test: ' + url);
+        };
+        const [{ createApp }, { DispatcherShard }, { runDispatcher }, { dispatchPartitions }, { loadConfig }, { digest, ModuleLoadError }] = await Promise.all([
+          import(mod('src/app.js')), import(mod('src/dispatcher-do.js')), import(mod('src/dispatcher.js')), import(mod('src/dispatch.js')), import(mod('src/config.js')), import(mod('src/core.js')),
+        ]);
+        assert.equal([...loadedModules].some(u => u.includes('client-sesv2')), false, 'SESv2 SDK must stay unloaded before dispatch.');
+        const client = new pg.Client({ connectionString: dbUrl });
+        await client.connect();
+        const rollback = new Error('rollback cold dispatcher fixture');
+        try {
+          await drizzle(client).transaction(async tx => {
+            const wid = 'ws_' + 'd'.repeat(32), reg = 'me-central-1', acct = '999988887777', secret = 'bane_' + '2'.repeat(64);
+            const topic = 'arn:aws:sns:' + reg + ':' + acct + ':bane-feedback';
+            const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_PLATFORM_AWS_ACCOUNT: acct, DEFAULT_SES_REGION: reg, SHARED_SENDING_REGIONS: reg, ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-do','cold-do-fixture')", [wid]);
+            await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold_do',$2,$3::jsonb)", [wid, reg, JSON.stringify([reg])]);
+            await client.query("INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier) VALUES($1,$2,$3,'ready','probation')", [reg, acct, topic]);
+            await client.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')", [wid, reg, acct]);
+            await client.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('cold-singleton.example',$1,$1,'verified')", [wid]);
+            await client.query("INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES($1,$2,100,50000,0,clock_timestamp(),clock_timestamp())", [acct, reg]);
+            await client.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key_cold_do',$1,'cold',$2,'bane_22222222',$3::jsonb,'[]'::jsonb)", [wid, await digest(secret), JSON.stringify(['read', 'send', 'manage'])]);
+            const runtime = { db: tx, config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } };
+            const sendRes = await createApp().fetch(new Request('https://dev.bane.mx/v1/emails/send', { method: 'POST', headers: { authorization: 'Bearer ' + secret, 'content-type': 'application/json' }, body: JSON.stringify({ from: 'sender@cold-singleton.example', to: 'to@example.com', region: reg, subject: 'Cold HTML', html: '<p>Hello <a href="https://example.com">world</a></p>' }) }), runtime);
+            assert.equal(sendRes.status, 202);
+            const { id: emailId } = await sendRes.json();
+
+            // Inject a transport import rejection on the first dispatch: the Hosted inline singleton must NOT transition to attempting or acceptance_unknown.
+            let failOnce = true;
+            faultResolver = (specifier) => {
+              if (failOnce && specifier === '@aws-sdk/client-sesv2') {
+                failOnce = false;
+                throw new Error('synthetic transport import failure');
+              }
+            };
+            await assert.rejects(
+              runDispatcher(runtime, { region: reg, accountId: acct, lanes: 1 }),
+              (err) => err instanceof ModuleLoadError && err.code === 'MODULE_LOAD_FAILED' && /synthetic transport import failure/.test(String(err.cause)),
+            );
+            faultResolver = null;
+            assert.equal(sesSent, 0);
+            assert.deepEqual(await dispatchPartitions(runtime, true), [{ accountId: acct, region: reg, kind: 'shared' }]);
+            const afterFault = (await client.query('SELECT status, error_code, attempt_started_at, dispatch_version, lease_until FROM sending_emails WHERE id = $1', [emailId])).rows[0];
+            assert.notEqual(afterFault.status, 'acceptance_unknown');
+            assert.deepEqual(afterFault, { status: 'queued', error_code: null, attempt_started_at: null, dispatch_version: 0, lease_until: null });
+            assert.equal((await client.query('SELECT count(*)::int AS n FROM sending_email_events WHERE email_id = $1', [emailId])).rows[0].n, 0);
+
+            // Subsequent DispatcherShard alarm loads transport cleanly and sends the message once.
+            const store = new Map([['identity', { region: reg, accountId: acct, shard: { index: 0, count: 1 } }], ['placementLogged', true]]);
+            const shard = new DispatcherShard({ storage: { get: async k => store.get(k), put: async (k, v) => store.set(k, v), getAlarm: async () => null, setAlarm: async () => {} }, waitUntil() {} }, {});
+            Object.assign(shard, { runtime: async () => runtime });
+            await shard.alarm();
+            const afterSend = (await client.query('SELECT status, error_code, provider_id, dispatch_version FROM sending_emails WHERE id = $1', [emailId])).rows[0];
+            assert.equal(sesSent, 1, 'Expected 1 SES send, row=' + JSON.stringify(afterSend));
+            assert.deepEqual(afterSend, { status: 'accepted', error_code: null, provider_id: 'ses_cold_1', dispatch_version: 0 });
+            throw rollback;
+          });
+        } catch (err) {
+          if (err !== rollback) throw err;
+        } finally {
+          await client.end();
+        }
+      `, true),
+      // 6. Cold preparePoolReceiving (mailbox-setup SESv1/S3/SNS/STS), mailbox-staging S3 ListObjectsV2, and operations sesCall (GetAccountCommand)
+      runColdIsolate('mailbox-pool-ops-and-staging', `
+        globalThis.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url;
+          const body = input instanceof Request ? await input.clone().text() : (init?.body ? Buffer.from(init.body).toString() : '');
+          if (url.includes('s3.')) {
+            if (url.includes('list-type=2')) return new Response('<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>false</IsTruncated></ListBucketResult>', { status: 200, headers: { 'content-type': 'application/xml' } });
+            return new Response(null, { status: 200 });
+          }
+          if (url.includes('sns.')) {
+            if (body.includes('CreateTopic')) return new Response('<CreateTopicResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><CreateTopicResult><TopicArn>arn:aws:sns:us-east-2:111122223333:bane-inbound</TopicArn></CreateTopicResult></CreateTopicResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+            if (body.includes('ListTagsForResource')) return new Response('<ListTagsForResourceResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><ListTagsForResourceResult><Tags><member><Key>bane:installation-id</Key><Value>bane:pool</Value></member><member><Key>bane:purpose</Key><Value>mailbox-inbound</Value></member></Tags></ListTagsForResourceResult></ListTagsForResourceResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+            if (body.includes('SetTopicAttributes')) return new Response('<SetTopicAttributesResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"/>', { status: 200, headers: { 'content-type': 'text/xml' } });
+            if (body.includes('ListSubscriptionsByTopic')) return new Response('<ListSubscriptionsByTopicResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><ListSubscriptionsByTopicResult><Subscriptions><member><Protocol>https</Protocol><Endpoint>https://dev.bane.mx/v1/events/ses</Endpoint><SubscriptionArn>arn:aws:sns:us-east-2:111122223333:bane-inbound:sub1</SubscriptionArn></member></Subscriptions></ListSubscriptionsByTopicResult></ListSubscriptionsByTopicResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          }
+          if (body.includes('DescribeActiveReceiptRuleSet')) return new Response('<DescribeActiveReceiptRuleSetResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><DescribeActiveReceiptRuleSetResult><Metadata><Name>default-set</Name></Metadata><Rules/></DescribeActiveReceiptRuleSetResult></DescribeActiveReceiptRuleSetResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (body.includes('CreateReceiptRule')) return new Response('<CreateReceiptRuleResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"/>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (url.endsWith('/v2/email/account')) return Response.json({ ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY', SendQuota: { Max24HourSend: 50000, MaxSendRate: 100, SentLast24Hours: 0 } });
+          throw new Error('Unexpected fetch in mailbox-pool-ops: ' + url);
+        };
+        const [{ preparePoolReceiving }, { stagingJobs }, { createApp }, { loadConfig }] = await Promise.all([
+          import(mod('src/mailbox-setup.js')), import(mod('src/mailbox-staging.js')), import(mod('src/app.js')), import(mod('src/config.js')),
+        ]);
+        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+        const bucket = await preparePoolReceiving({ config: { ...config, multiTenant: true }, db: {}, storage: {} }, 'us-east-2', '111122223333', async () => {});
+        assert.equal(bucket, 'bane-111122223333-mail-us-east-2');
+        const { PgDialect } = await import('drizzle-orm/pg-core');
+        const dialect = new PgDialect();
+        const db = {
+          async execute(q) {
+            const s = dialect.sqlToQuery(q).sql;
+            if (s.includes('api_keys')) return { rows: [{ id: 'key_1', workspace_id: 'default', key_id: 'key_1', permissions: ['read', 'send', 'manage'], domains: [], max_requests: 1000, used: 1 }], rowCount: 1 };
+            if (s.includes('WITH bindings AS')) return { rows: [{ region: 'us-east-2', topic: 'arn:aws:sns:us-east-2:111122223333:bane-inbound', owner: 'default' }], rowCount: 1 };
+            return { rows: [], rowCount: 0 };
+          },
+          select: () => ({ from: () => ({ where: () => ({ limit: async () => [{ workspaceId: 'default', installationId: 'inst_1', defaultRegion: 'us-east-2', enabledRegions: ['us-east-2'] }] }) }) }),
+        };
+        await stagingJobs['mailbox.sweepStaging']({ config, db, storage: {} }, { bucket: 'bane-mail', topic: 'arn:aws:sns:us-east-2:111122223333:bane-inbound', shared: false }, { id: 'j1', attempts: 1, workspaceId: 'default' });
+        const app = createApp();
+        const sesRes = await app.fetch(new Request('https://dev.bane.mx/v1/settings/ses', { headers: { authorization: 'Bearer bane_' + '1'.repeat(64) } }), { config, db, storage: {} });
+        assert.equal(sesRes.status, 200);
+        assert.equal((await sesRes.json()).quota.max24HourSend, 50000);
+      `),
+      // 7. Cold worker.queue() and worker.scheduled() in a fresh process: must NOT evaluate src/app.ts
+      runColdIsolate('worker-queue-and-cron', `
+        import pg from 'pg';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        const setup = new pg.Client({ connectionString: dbUrl });
+        await setup.connect();
+        const schema = 'cold_worker_' + Math.random().toString(36).slice(2, 10);
+        await setup.query(\`CREATE SCHEMA \${schema};
+          CREATE TABLE \${schema}.jobs (LIKE public.jobs INCLUDING ALL);
+          CREATE TABLE \${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL);
+          CREATE TABLE \${schema}.sending_emails (LIKE public.sending_emails INCLUDING ALL);
+          CREATE TABLE \${schema}.sending_campaigns (LIKE public.sending_campaigns INCLUDING ALL);
+          CREATE TABLE \${schema}.sending_email_events (LIKE public.sending_email_events INCLUDING ALL);
+          CREATE TABLE \${schema}.operation_events (LIKE public.operation_events INCLUDING ALL);
+          CREATE TABLE \${schema}.operation_webhooks (LIKE public.operation_webhooks INCLUDING ALL);
+          CREATE TABLE \${schema}.operation_deliveries (LIKE public.operation_deliveries INCLUDING ALL);
+          CREATE TABLE \${schema}.provider_connections (LIKE public.provider_connections INCLUDING ALL);
+          CREATE TABLE \${schema}.provider_connection_regions (LIKE public.provider_connection_regions INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_messages (LIKE public.mail_messages INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_message_ids (LIKE public.mail_message_ids INCLUDING ALL);
+          CREATE TABLE \${schema}.mailbox_write_lanes (LIKE public.mailbox_write_lanes INCLUDING ALL);
+          CREATE TABLE \${schema}.mailbox_events (LIKE public.mailbox_events INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);
+          CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
+          CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);
+          CREATE VIEW \${schema}.regional_simulated_connections AS SELECT * FROM public.regional_simulated_connections WHERE false;\`);
+        try {
+          const scopedUrl = new URL(dbUrl);
+          scopedUrl.searchParams.set('options', \`-c search_path=\${schema}\`);
+          const worker = (await import(mod('src/worker.js'))).default;
+          let workAcked = false;
+          const env = {
+            PUBLIC_URL: 'https://dev.bane.mx',
+            BETTER_AUTH_SECRET: 's'.repeat(32),
+            MULTI_TENANT: 'true',
+            DEFAULT_SES_REGION: 'us-east-2',
+            ENABLE_LIVE_SES: 'false',
+            WORK_QUEUE_NAME: 'bane-dev-work',
+            FEEDBACK_QUEUE_NAME: 'bane-dev-feedback',
+            HYPERDRIVE: { connectionString: scopedUrl.href },
+            ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} },
+            WAKE_QUEUE: { async send() {} },
+            FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} },
+            ADMISSION: { async limit() { return { success: true }; } },
+            DISPATCHER: { idFromName(n) { return n; }, get() { return { async fetch() { return Response.json({ ok: true }); } }; } },
+          };
+          await worker.queue({ queue: 'bane-dev-work', messages: [], ackAll() { workAcked = true; }, retryAll() { throw new Error('unexpected retryAll'); } }, env);
+          await worker.queue({ queue: 'bane-dev-feedback', messages: [], ackAll() {}, retryAll() { throw new Error('unexpected retryAll'); } }, env);
+          await worker.scheduled({ cron: '* * * * *', scheduledTime: Date.now(), noRetry() {} }, env);
+          assert.equal(workAcked, true);
+          assert.equal([...loadedModules].some(u => /\\/src\\/app\\.[jt]s$/.test(u)), false, 'worker.queue() and worker.scheduled() must not evaluate src/app.ts');
+        } finally {
+          await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
+          await setup.end();
+        }
+      `, true),
+      // 8. Cold job handler import failure: refunds attempt and retries with backoff; unknown job type fails with JOB_HANDLER_MISSING
+      runColdIsolate('job-handler-import-failure', `
+        import pg from 'pg';
+        import { drizzle } from 'drizzle-orm/node-postgres';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        let slackPosts = 0;
+        globalThis.fetch = async (input) => {
+          const url = typeof input === 'string' ? input : input.url;
+          if (url === 'https://hooks.slack.com/services/fixture/reputation-alert') {
+            slackPosts++;
+            return new Response('ok', { status: 200 });
+          }
+          throw new Error('Unexpected fetch in job-handler test: ' + url);
+        };
+        const [{ drainJobs }, { enqueue }, { loadConfig }] = await Promise.all([
+          import(mod('src/dispatch.js')), import(mod('src/jobs.js')), import(mod('src/config.js')),
+        ]);
+        const client = new pg.Client({ connectionString: dbUrl });
+        await client.connect();
+        try {
+          await client.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TEMP TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL)');
+          const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false', REPUTATION_ALERT_SLACK_URL: 'https://hooks.slack.com/services/fixture/reputation-alert' });
+          const runtime = { db: drizzle(client), config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } };
+          const knownId = await enqueue(runtime.db, { type: 'reputation.alert', workspaceId: 'default', payload: { region: 'us-east-2', metric: 'bounceRate', level: 'warning', previous: 'ok', value: 0.06 } });
+          const unknownId = await enqueue(runtime.db, { type: 'unknown.syntheticJob', workspaceId: 'default', payload: {} });
+
+          let failAlertImport = true;
+          faultResolver = (specifier) => {
+            if (failAlertImport && specifier.endsWith('/reputation-alerts.js')) {
+              failAlertImport = false;
+              throw new Error('synthetic handler module load failure');
+            }
+          };
+          await drainJobs(runtime, 10, 2);
+          faultResolver = null;
+          assert.equal(slackPosts, 0);
+
+          const firstPass = (await client.query('SELECT id, status, attempts, last_error, payload, extract(epoch FROM available_at - now())::float8 AS delay_s FROM jobs WHERE id = ANY($1)', [[knownId, unknownId]])).rows;
+          const knownAfterFail = firstPass.find(r => r.id === knownId);
+          const unknownAfterFail = firstPass.find(r => r.id === unknownId);
+          assert.equal(knownAfterFail.status, 'pending', 'Rejected import for a known job type must stay pending for retry.');
+          assert.equal(knownAfterFail.attempts, 0, 'Pre-handler load failure must not consume an execution attempt.');
+          assert.equal(knownAfterFail.last_error, 'MODULE_LOAD_FAILED');
+          assert.equal(knownAfterFail.payload._loadFailures, 1);
+          assert.ok(knownAfterFail.delay_s >= 10 && knownAfterFail.delay_s <= 25, 'Expected ~15s load-failure backoff, got ' + knownAfterFail.delay_s);
+          assert.equal(unknownAfterFail.status, 'failed', 'Genuinely unknown job type must fail immediately.');
+          assert.equal(unknownAfterFail.attempts, 1);
+          assert.equal(unknownAfterFail.last_error, 'JOB_HANDLER_MISSING');
+
+          await client.query('UPDATE jobs SET available_at = now() WHERE id = $1', [knownId]);
+          await drainJobs(runtime, 10, 2);
+          assert.equal(slackPosts, 1);
+          const completed = (await client.query('SELECT status, attempts, last_error, payload FROM jobs WHERE id = $1', [knownId])).rows[0];
+          assert.equal(completed.status, 'completed');
+          assert.equal(completed.attempts, 1);
+          assert.equal(completed.last_error, null);
+          assert.equal('_loadFailures' in completed.payload, false);
+        } finally {
+          await client.end();
+        }
+      `, true),
+      // 9. Structural ModuleLoadError: byo.scan STS load failure and ses.discover/readReputation CloudWatch load failure write no state and keep jobs pending
+      runColdIsolate('byo-scan-and-ses-discovery-load-failure', `
+        import pg from 'pg';
+        import { drizzle } from 'drizzle-orm/node-postgres';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        globalThis.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url;
+          const target = input instanceof Request ? (input.headers.get('x-amz-target') ?? '') : '';
+          const body = input instanceof Request ? await input.clone().text() : (init?.body ? Buffer.from(init.body).toString() : '');
+          if (url.includes('sts.') || body.includes('AssumeRole')) return new Response('<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><AssumedRoleUser><Arn>arn:aws:sts::222233334444:assumed-role/Bane-0123456789abcdef0123/Bane</Arn><AssumedRoleId>AROA:Bane</AssumedRoleId></AssumedRoleUser><Credentials><AccessKeyId>ASIAEXAMPLE</AccessKeyId><SecretAccessKey>secret</SecretAccessKey><SessionToken>tok</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (body.includes('GetCallerIdentity')) return new Response('<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Account>111122223333</Account><Arn>arn:aws:iam::111122223333:user/u</Arn><UserId>U</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>', { status: 200, headers: { 'content-type': 'text/xml' } });
+          if (url.includes('monitoring.') || target.includes('GetMetricData')) return Response.json({ MetricDataResults: [] });
+          if (url.includes('sns.')) return new Response('<ErrorResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/"><Error><Type>Sender</Type><Code>NotFound</Code><Message>missing</Message></Error></ErrorResponse>', { status: 404, headers: { 'content-type': 'text/xml' } });
+          if (url.endsWith('/v2/email/account')) return Response.json({ ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY', SendQuota: { Max24HourSend: 50000, MaxSendRate: 100, SentLast24Hours: 0 } });
+          if (url.includes('/v2/email/identities')) return Response.json({ EmailIdentities: [] });
+          if (url.includes('/v2/email/configuration-sets/')) return Response.json({ message: 'missing' }, { status: 404, headers: { 'x-amzn-errortype': 'NotFoundException' } });
+          throw new Error('Unexpected fetch in byo-scan/discovery test: ' + url);
+        };
+        const [{ drainJobs }, { loadConfig }, { credentialFingerprint, discoveryTarget }, { readReputation }, { ModuleLoadError }] = await Promise.all([
+          import(mod('src/dispatch.js')), import(mod('src/config.js')), import(mod('src/ses-region-state.js')), import(mod('src/ses-setup.js')), import(mod('src/core.js')),
+        ]);
+        const client = new pg.Client({ connectionString: dbUrl });
+        await client.connect();
+        const rollback = new Error('rollback byo-scan/discovery cold fixture');
+        try {
+          await drizzle(client).transaction(async tx => {
+            await client.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TEMP TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL)');
+
+            // Part A: byo.scan STS import failure must NOT mark region failed or complete the job.
+            const widByo = 'ws_' + '7'.repeat(32), cid = 'conn_0123456789abcdef0123', ext = '00000000-0000-4000-8000-000000000001';
+            const scanJobId = 'byo.scan:' + cid + ':1:us-east-2';
+            await client.query("INSERT INTO workspaces(id,name,slug,byo_v2_enabled) VALUES($1,'cold-byo','cold-byo-fixture',true)", [widByo]);
+            await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,'us-east-2',$3::jsonb)", [widByo, cid, JSON.stringify(['us-east-2'])]);
+            await client.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id,requested_account,role_arn,external_id,platform_principal_arn,resource_prefix,template_version,inventory_revision) VALUES($1,$2,'byo','us-east-2','scanning','ready','222233334444','222233334444',$3,$4,'arn:aws:iam::111122223333:user/bane-runtime','bane-0123456789abcdef0123','v5',1)", [cid, widByo, 'arn:aws:iam::222233334444:role/Bane-0123456789abcdef0123', ext]);
+            await client.query("INSERT INTO provider_connection_regions(connection_id,region,managed_tenant,tenant_state,scan_revision,scan_state) VALUES($1,'us-east-2',false,'ready',1,'scanning')", [cid]);
+            await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'byo.scan',$2,$3::jsonb)", [scanJobId, widByo, JSON.stringify({ connectionId: cid, region: 'us-east-2', revision: 1, stage: 'account', run: 'run_scan_1' })]);
+
+            const byoConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://example.com/v5.yaml', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            let failSts = true;
+            faultResolver = (specifier) => {
+              if (failSts && specifier === '@aws-sdk/client-sts') {
+                failSts = false;
+                throw new Error('synthetic STS import failure');
+              }
+            };
+            await drainJobs({ db: tx, config: byoConfig, storage: { put: async () => {}, get: async () => null, delete: async () => {} } }, 5, 1);
+            faultResolver = null;
+
+            const regionAfterFault = (await client.query('SELECT scan_state, scan_error, scan_facts FROM provider_connection_regions WHERE connection_id = $1 AND region = $2', [cid, 'us-east-2'])).rows[0];
+            assert.deepEqual(regionAfterFault, { scan_state: 'scanning', scan_error: null, scan_facts: {} }, 'STS import failure must not mark byo.scan region failed.');
+            assert.equal((await client.query('SELECT state FROM provider_connections WHERE id = $1', [cid])).rows[0].state, 'scanning');
+            const scanJobAfterFault = (await client.query('SELECT status, attempts, last_error, payload FROM jobs WHERE id = $1', [scanJobId])).rows[0];
+            assert.equal(scanJobAfterFault.status, 'pending');
+            assert.equal(scanJobAfterFault.attempts, 0);
+            assert.equal(scanJobAfterFault.last_error, 'MODULE_LOAD_FAILED');
+            assert.equal(scanJobAfterFault.payload._loadFailures, 1);
+
+            // Part B: CloudWatch import failure in readReputation and ses.discover must rethrow ModuleLoadError and never overwrite cached discovery.
+            const widDisc = 'ws_' + '8'.repeat(32);
+            const discConfig = loadConfig({ WORKSPACE_ID: widDisc, BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const fp = await credentialFingerprint(discConfig), targetUrl = discoveryTarget(discConfig);
+            const priorCheckedAt = '2026-01-01T00:00:00.000Z';
+            const priorReport = { region: 'us-east-2', checkedAt: priorCheckedAt, status: 'ready', provisioned: true, account: { id: '111122223333', productionAccess: true, sendingEnabled: true, enforcementStatus: 'HEALTHY', quota: { max24HourSend: 50000, maxSendRate: 100, sentLast24Hours: 0 } }, domains: [], identitiesTruncated: false, resources: { transactional: { name: 'bane-transactional', exists: true, owned: true, sendingEnabled: true, eventDestinationExists: true, eventWired: true, autoValidation: null }, marketing: { name: 'bane-marketing', exists: true, owned: true, sendingEnabled: true, eventDestinationExists: true, eventWired: true, autoValidation: null }, eventDestinationName: 'bane-sns', topic: { name: 'bane-feedback', arn: 'arn:aws:sns:us-east-2:111122223333:bane-feedback', exists: true, owned: true, policyReady: true, subscription: 'confirmed', rawMessageDelivery: false, subscriptionsTruncated: false, staleSubscriptions: 0 } }, feedbackUrl: 'https://dev.bane.mx/v1/events/ses', blockers: [], warnings: [], reputation: null };
+            await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-disc','cold-disc-fixture')", [widDisc]);
+            await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold_disc','us-east-2',$2::jsonb)", [widDisc, JSON.stringify(['us-east-2'])]);
+            await client.query("INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,last_discovered_at) VALUES($1,'us-east-2',$2::jsonb,$3,$4,$5::timestamptz)", [widDisc, JSON.stringify(priorReport), fp, targetUrl, priorCheckedAt]);
+            const discJobId = 'ses.discover:cold';
+            await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'ses.discover',$2,$3::jsonb)", [discJobId, widDisc, JSON.stringify({ region: 'us-east-2', credentialsFingerprint: fp, publicUrl: targetUrl })]);
+
+            let cwFaults = 2;
+            faultResolver = (specifier) => {
+              if (cwFaults > 0 && specifier === '@aws-sdk/client-cloudwatch') {
+                cwFaults--;
+                throw new Error('synthetic CloudWatch import failure');
+              }
+            };
+            await assert.rejects(
+              readReputation({}, AbortSignal.timeout(5000)),
+              (err) => err instanceof ModuleLoadError && err.code === 'MODULE_LOAD_FAILED',
+            );
+            await drainJobs({ db: tx, config: discConfig, storage: { put: async () => {}, get: async () => null, delete: async () => {} } }, 5, 1);
+            faultResolver = null;
+
+            const savedAfterFault = (await client.query('SELECT report, last_discovered_at::text AS ts FROM ses_region_discovery WHERE workspace_id = $1 AND region = $2', [widDisc, 'us-east-2'])).rows[0];
+            assert.equal(savedAfterFault.report.status, 'ready', 'CloudWatch import failure must not overwrite cached ready discovery with a blocked report.');
+            assert.equal(new Date(savedAfterFault.ts).toISOString(), priorCheckedAt);
+            assert.equal(new Date(savedAfterFault.report.checkedAt).toISOString(), priorCheckedAt);
+            const discJobAfterFault = (await client.query('SELECT status, attempts, last_error, payload FROM jobs WHERE id = $1', [discJobId])).rows[0];
+            assert.equal(discJobAfterFault.status, 'pending');
+            assert.equal(discJobAfterFault.attempts, 0);
+            assert.equal(discJobAfterFault.last_error, 'MODULE_LOAD_FAILED');
+            assert.equal(discJobAfterFault.payload._loadFailures, 1);
+
+            // Part C: hosted.trusted preload before taking the 4-minute region provisioning lease.
+            const widTrusted = 'ws_' + '6'.repeat(32), cidTrusted = 'conn_trusted_cold';
+            const [{ poolTenantName }] = await Promise.all([import(mod('src/ses-setup.js'))]);
+            const tenantName = poolTenantName(widTrusted, 'trusted');
+            const vaTopic = 'arn:aws:sns:us-east-1:111122223333:bane-trusted-feedback';
+            await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-trusted','cold-trusted-fixture')", [widTrusted]);
+            await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_trusted','us-east-2',$2::jsonb)", [widTrusted, JSON.stringify(['us-east-2'])]);
+            await client.query("INSERT INTO provider_pool_regions(region,aws_account_id,pool_tier,legacy_names,sending_state,feedback_topic_arn,generation,confirmed_generation) VALUES('us-east-1','111122223333','trusted',false,'ready',$1,1,1)", [vaTopic]);
+            await client.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id) VALUES($1,$2,'shared','us-east-2','ready','ready','111122223333')", [cidTrusted, widTrusted]);
+            await client.query("INSERT INTO provider_connection_regions(connection_id,region,legacy,managed_tenant,sending_state,tenant_state,pool_tenant_name) VALUES($1,'us-east-1',false,true,'unprovisioned','pending',$2)", [cidTrusted, tenantName]);
+            const trustedJobId = 'hosted.trusted:' + cidTrusted;
+            await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'hosted.trusted',$2,$3::jsonb)", [trustedJobId, widTrusted, JSON.stringify({ connectionId: cidTrusted })]);
+            const trustedConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_TRUSTED_POOL: 'true', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            let failSesv2 = true;
+            faultResolver = (specifier) => {
+              if (failSesv2 && specifier === '@aws-sdk/client-sesv2') {
+                failSesv2 = false;
+                throw new Error('synthetic sesv2 import failure in hosted.trusted');
+              }
+            };
+            await drainJobs({ db: tx, config: trustedConfig, storage: { put: async () => {}, get: async () => null, delete: async () => {} } }, 5, 1);
+            faultResolver = null;
+            const trustedReg = (await client.query("SELECT sending_state, lease_until, generation FROM provider_connection_regions WHERE connection_id = $1 AND region = 'us-east-1'", [cidTrusted])).rows[0];
+            assert.deepEqual(trustedReg, { sending_state: 'unprovisioned', lease_until: null, generation: '1' }, 'hosted.trusted must preload SDKs before taking a 4-minute lease.');
+            const trustedJob = (await client.query('SELECT status, attempts, last_error FROM jobs WHERE id = $1', [trustedJobId])).rows[0];
+            assert.deepEqual(trustedJob, { status: 'pending', attempts: 0, last_error: 'MODULE_LOAD_FAILED' });
+
+            throw rollback;
+          });
+        } catch (err) {
+          if (err !== rollback) throw err;
+        } finally {
+          await client.end();
+        }
+      `, true),
+      // 10. Attempt-ceiling load failure: campaign.run at attempts=5 (ceiling=6) stays pending & preparing past 6 load failures (15m backoff cap, error logs at >=6), then completes after load recovers
+      runColdIsolate('campaign-attempt-ceiling-load-failure', `
+        import pg from 'pg';
+        import { drizzle } from 'drizzle-orm/node-postgres';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        const [{ drainJobs }, { MAX_ATTEMPTS }, { loadConfig }] = await Promise.all([
+          import(mod('src/dispatch.js')), import(mod('src/jobs.js')), import(mod('src/config.js')),
+        ]);
+        const client = new pg.Client({ connectionString: dbUrl });
+        await client.connect();
+        const rollback = new Error('rollback campaign ceiling fixture');
+        try {
+          await drizzle(client).transaction(async tx => {
+            await client.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TEMP TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL)');
+            const wid = 'ws_' + '9'.repeat(32), campId = 'camp_' + '1'.repeat(32), revId = 'rev_' + '1'.repeat(32);
+            const draft = { name: 'Ceiling', from: 'news@example.com', replyTo: [], region: 'us-east-2', subject: 'Hi {{name}}', html: '<p>Hi {{name}}</p>', attachments: [], tracking: true, audience: { listId: 'lst_1' }, defaults: {} };
+            await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-camp','cold-camp-fixture')", [wid]);
+            await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold_camp','us-east-2',$2::jsonb)", [wid, JSON.stringify(['us-east-2'])]);
+            await client.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key_camp',$1,'camp','h','bane_99999999',$2::jsonb,'[]'::jsonb)", [wid, JSON.stringify(['read', 'send', 'manage'])]);
+            await client.query("INSERT INTO sending_campaigns(id,workspace_id,draft,state,review_id,actor_key_id,simulated,total,prepared,expanded,auto_pause) VALUES($1,$2,$3::jsonb,'preparing',$4,'key_camp',true,1,0,0,false)", [campId, wid, JSON.stringify(draft), revId]);
+            await client.query("INSERT INTO sending_campaign_reviews(id,renderer_version,workspace_id,campaign_id,revision,draft,content_hash,rendered) VALUES($1,2,$2,$3,1,$4::jsonb,$5,$6::jsonb)", [revId, wid, campId, JSON.stringify(draft), '0'.repeat(64), JSON.stringify({ html: '<p>Hi {{name}}</p>', text: 'Hi {{name}}' })]);
+            await client.query("INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes) VALUES($1,1,$2::jsonb,64)", [revId, JSON.stringify({ id: 'ct_1', email: 'alice@example.com', name: 'Alice', properties: {} })]);
+            const jobId = 'campaign.run:' + campId;
+            await client.query("INSERT INTO jobs(id,type,workspace_id,status,attempts,payload) VALUES($1,'campaign.run',$2,'pending',$3,$4::jsonb)", [jobId, wid, MAX_ATTEMPTS - 1, JSON.stringify({ campaignId: campId, run: 'run_c1' })]);
+
+            const config = loadConfig({ WORKSPACE_ID: wid, BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false' });
+            const runtime = { db: tx, config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } };
+
+            const warnLogs = [], errorLogs = [];
+            const origWarn = console.warn, origError = console.error;
+            console.warn = (...args) => { warnLogs.push(String(args[0])); };
+            console.error = (...args) => { errorLogs.push(String(args[0])); };
+            try {
+              // Fail 7 consecutive times at attempts=5 (claimed as attempt 6 = ceiling): 1 pre-handler sending.js failure + 6 in-handler parse5 failures.
+              for (let i = 1; i <= 7; i++) {
+                await client.query('UPDATE jobs SET available_at = now() WHERE id = $1', [jobId]);
+                let failOnce = true;
+                faultResolver = (specifier) => {
+                  if (failOnce && (i === 1 ? specifier.endsWith('/sending.js') : specifier === 'parse5')) {
+                    failOnce = false;
+                    throw new Error('synthetic load failure #' + i);
+                  }
+                };
+                await drainJobs(runtime, 5, 1);
+                faultResolver = null;
+                const jobRow = (await client.query('SELECT status, attempts, last_error, payload, extract(epoch FROM available_at - now())::float8 AS delay_s FROM jobs WHERE id = $1', [jobId])).rows[0];
+                const campRow = (await client.query('SELECT state, prepared, expanded, error FROM sending_campaigns WHERE id = $1', [campId])).rows[0];
+                assert.equal(jobRow.status, 'pending', 'Load failure #' + i + ' must never fail the job.');
+                assert.equal(jobRow.attempts, MAX_ATTEMPTS - 1, 'Load failure #' + i + ' must refund the attempt.');
+                assert.equal(jobRow.last_error, 'MODULE_LOAD_FAILED');
+                assert.equal(jobRow.payload._loadFailures, i);
+                assert.ok(jobRow.delay_s <= 905, 'Backoff must cap at 15 minutes (900s), got ' + jobRow.delay_s);
+                if (i >= 5) assert.ok(jobRow.delay_s >= 890 && jobRow.delay_s <= 905, 'Expected 15m cap at failure #' + i + ', got ' + jobRow.delay_s);
+                assert.deepEqual(campRow, { state: 'preparing', prepared: 0, expanded: 0, error: null });
+              }
+            } finally {
+              console.warn = origWarn;
+              console.error = origError;
+            }
+
+            const parsedWarns = warnLogs.filter(l => l.startsWith('{')).map(l => JSON.parse(l)).filter(e => e.code === 'MODULE_LOAD_FAILED');
+            const parsedErrors = errorLogs.filter(l => l.startsWith('{')).map(l => JSON.parse(l)).filter(e => e.code === 'MODULE_LOAD_FAILED');
+            assert.deepEqual(parsedWarns.map(e => e.loadFailures), [1, 2, 3, 4, 5]);
+            assert.deepEqual(parsedErrors.map(e => [e.jobType, e.loadFailures]), [['campaign.run', 6], ['campaign.run', 7]]);
+
+            // Once module loading recovers after 7 failures, attempt 6 runs cleanly and completes the job.
+            await client.query('UPDATE jobs SET available_at = now() WHERE id = $1', [jobId]);
+            await drainJobs(runtime, 5, 1);
+            const completedJob = (await client.query('SELECT status, attempts, last_error, payload FROM jobs WHERE id = $1', [jobId])).rows[0];
+            const completedCamp = (await client.query('SELECT state, prepared, expanded, error FROM sending_campaigns WHERE id = $1', [campId])).rows[0];
+            assert.equal(completedJob.status, 'completed');
+            assert.equal(completedJob.attempts, MAX_ATTEMPTS);
+            assert.equal(completedJob.last_error, null);
+            assert.equal('_loadFailures' in completedJob.payload, false);
+            assert.deepEqual(completedCamp, { state: 'sending', prepared: 1, expanded: 1, error: null });
+
+            throw rollback;
+          });
+        } catch (err) {
+          if (err !== rollback) throw err;
+        } finally {
+          await client.end();
+        }
+      `, true),
+      // 11. Worker percent-encoded path normalization: /health, staticDoc, ASSETS bypass, /v1/events/ses ADMISSION exemption, and exhausted publicFailureBucket returning 429
+      runColdIsolate('worker-encoded-paths-and-failure-budget', `
+        import pg from 'pg';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        const setup = new pg.Client({ connectionString: dbUrl });
+        await setup.connect();
+        const schema = 'cold_budget_' + Math.random().toString(36).slice(2, 10);
+        await setup.query(\`CREATE SCHEMA \${schema};
+          CREATE TABLE \${schema}.api_keys (LIKE public.api_keys INCLUDING ALL);
+          CREATE TABLE \${schema}.api_request_budgets (LIKE public.api_request_budgets INCLUDING ALL);
+          CREATE TABLE \${schema}.operation_unsubscribe_tokens (LIKE public.operation_unsubscribe_tokens INCLUDING ALL);\`);
+        try {
+          const worker = (await import(mod('src/worker.js'))).default;
+          const scopedUrl = new URL(dbUrl);
+          scopedUrl.searchParams.set('options', \`-c search_path=\${schema}\`);
+          let admissionAllowed = true;
+          const env = {
+            PUBLIC_URL: 'https://dev.bane.mx',
+            BETTER_AUTH_SECRET: 's'.repeat(32),
+            MULTI_TENANT: 'true',
+            DEFAULT_SES_REGION: 'us-east-2',
+            ENABLE_LIVE_SES: 'false',
+            HYPERDRIVE: { connectionString: scopedUrl.href },
+            ASSETS: { async fetch(req) { return new Response('spa:' + new URL(req.url).pathname, { status: 200 }); } },
+            ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} },
+            WAKE_QUEUE: { async send() {} },
+            FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} },
+            ADMISSION: { async limit() { return { success: admissionAllowed }; } },
+            DISPATCHER: { idFromName(n) { return n; }, get() { return { async fetch() { return Response.json({ ok: true }); } }; } },
+          };
+
+          // 1) Encoded /health fast path must answer before loading src/app.ts and must not hit ASSETS.
+          const healthRes = await worker.fetch(new Request('https://dev.bane.mx/%68ealth'), env);
+          assert.equal(healthRes.status, 200);
+          assert.equal((await healthRes.json()).service, 'bane');
+          assert.equal([...loadedModules].some(u => /\\/src\\/app\\.[jt]s$/.test(u)), false, 'Encoded /health must take the zero-dep fast path.');
+
+          // 2) Encoded staticDoc (/openapi.json) must serve JSON rather than falling through to ASSETS.
+          const openApiRes = await worker.fetch(new Request('https://dev.bane.mx/%6fpenapi.json'), env);
+          assert.equal(openApiRes.status, 200);
+          assert.equal((await openApiRes.json()).openapi, '3.1.0');
+
+          // 3) Exhaust public auth & unsubscribe failure budgets for peer 203.0.113.9; encoded variants must return 429 PUBLIC_RATE_LIMITED (and never hit ASSETS).
+          const { digest } = await import(mod('src/core.js'));
+          const peer = await digest('203.0.113.9');
+          await setup.query(\`INSERT INTO \${schema}.api_request_budgets(workspace_id, key_id, window_start, used)
+            VALUES ('default', $1, date_trunc('minute', now()), 40), ('default', $2, date_trunc('minute', now()), 40)\`,
+            ['public:auth:' + peer, 'public:unsubscribe:' + peer]);
+
+          const encodedAuthRes = await worker.fetch(new Request('https://dev.bane.mx/%761/domains', {
+            headers: { 'CF-Connecting-IP': '203.0.113.9', authorization: 'Bearer bane_' + 'f'.repeat(64) },
+          }), env);
+          assert.equal(encodedAuthRes.status, 429, 'Exhausted auth failure budget must reject encoded /%761/domains with 429.');
+          assert.equal((await encodedAuthRes.json()).error?.code, 'PUBLIC_RATE_LIMITED');
+
+          const encodedUnsubRes = await worker.fetch(new Request('https://dev.bane.mx/%75nsubscribe/not-a-valid-token', {
+            method: 'POST',
+            headers: { 'CF-Connecting-IP': '203.0.113.9' },
+          }), env);
+          assert.equal(encodedUnsubRes.status, 429, 'Exhausted unsubscribe failure budget must reject encoded /%75nsubscribe/... with 429.');
+          assert.equal((await encodedUnsubRes.json()).error?.code, 'PUBLIC_RATE_LIMITED');
+
+          // 4) Encoded /v1/events/ses POST must keep the ADMISSION exemption even when ADMISSION denies other routes.
+          admissionAllowed = false;
+          const deniedApi = await worker.fetch(new Request('https://dev.bane.mx/%761/domains'), env);
+          assert.equal(deniedApi.status, 429);
+          assert.equal((await deniedApi.json()).error?.code, 'ADMISSION_RATE_LIMITED');
+          const exemptSns = await worker.fetch(new Request('https://dev.bane.mx/%761/events/%73es', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+          }), env);
+          assert.equal(exemptSns.status, 422);
+          assert.equal((await exemptSns.json()).error?.code, 'VALIDATION_FAILED');
+        } finally {
+          await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
+          await setup.end();
+        }
+      `, true),
+      // 12. Node server path (src/server.ts): route-group import failure returns the exact retryable 503 MODULE_LOAD_FAILED JSON/Retry-After as Worker, then recovers
+      runColdIsolate('node-server-group-load-failure', `
+        import http from 'node:http';
+        const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);
+        let resolvePort;
+        const portReady = new Promise(r => { resolvePort = r; });
+        const origInfo = console.info;
+        console.info = (...args) => {
+          try {
+            const entry = JSON.parse(String(args[0]));
+            if (entry.code === 'API_READY' && typeof entry.port === 'number') resolvePort(entry.port);
+          } catch {}
+          origInfo(...args);
+        };
+        Object.assign(process.env, {
+          DATABASE_URL: dbUrl,
+          HOST: '127.0.0.1',
+          PORT: '0',
+          PUBLIC_URL: 'http://127.0.0.1',
+          BETTER_AUTH_SECRET: 's'.repeat(32),
+          DEFAULT_SES_REGION: 'us-east-2',
+          ENABLE_LIVE_SES: 'false',
+          S3_BUCKET: 'fixture',
+          S3_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+          S3_SECRET_ACCESS_KEY: 'secret',
+          S3_ENDPOINT: 'http://127.0.0.1:9',
+        });
+        await import(mod('src/server.js'));
+        const port = await portReady;
+        const worker = (await import(mod('src/worker.js'))).default;
+        const workerEnv = {
+          PUBLIC_URL: 'https://dev.bane.mx',
+          BETTER_AUTH_SECRET: 's'.repeat(32),
+          DEFAULT_SES_REGION: 'us-east-2',
+          ENABLE_LIVE_SES: 'false',
+          HYPERDRIVE: { connectionString: dbUrl },
+          ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} },
+          WAKE_QUEUE: { async send() {} },
+          FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} },
+          ADMISSION: { async limit() { return { success: true }; } },
+          DISPATCHER: { idFromName(n) { return n; }, get() { return { async fetch() { return Response.json({ ok: true }); } }; } },
+        };
+        const getNode = (path) => new Promise((resolve, reject) => {
+          const req = http.get({ host: '127.0.0.1', port, path }, (res) => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString('utf8') }));
+          });
+          req.on('error', reject);
+        });
+
+        let failAudience = 2;
+        faultResolver = (specifier) => {
+          if (failAudience > 0 && specifier.endsWith('/audience.js')) {
+            failAudience--;
+            throw new Error('synthetic audience.js group load failure');
+          }
+        };
+        const nodeRes = await getNode('/v1/contacts');
+        const workerRes = await worker.fetch(new Request('https://dev.bane.mx/v1/contacts'), workerEnv);
+        faultResolver = null;
+
+        assert.equal(nodeRes.status, 503, 'Node server must return 503 (not an empty 500) when a route group fails to import.');
+        assert.equal(workerRes.status, 503);
+        assert.equal(nodeRes.headers['retry-after'] ?? null, workerRes.headers.get('retry-after'));
+        assert.equal(nodeRes.headers['cache-control'], 'no-store');
+        assert.match(String(nodeRes.headers['x-request-id']), /^req_[0-9a-f]{32}$/);
+        const nodeJson = JSON.parse(nodeRes.text);
+        const workerJson = await workerRes.json();
+        assert.equal(nodeJson.error.requestId, nodeRes.headers['x-request-id']);
+        assert.deepEqual(
+          { ...nodeJson.error, requestId: 'req_normalized' },
+          { code: 'MODULE_LOAD_FAILED', message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId: 'req_normalized', retryable: true },
+        );
+        assert.deepEqual({ ...nodeJson.error, requestId: 'req_normalized' }, { ...workerJson.error, requestId: 'req_normalized' });
+
+        // Subsequent request loads audience.js cleanly and reaches normal route authentication.
+        const recovered = await getNode('/v1/contacts');
+        assert.equal(recovered.status, 401);
+        assert.equal(JSON.parse(recovered.text).error?.code, 'AUTH_REQUIRED');
+      `, true),
+    ]);
   });
 });

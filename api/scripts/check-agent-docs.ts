@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { createApp } from '../src/app.js';
+import { createOpenApiApp } from '../src/app.js';
 import { createLlmsText, createMarkdownDocs, createOpenApiDocument } from '../src/openapi-docs.js';
 
-const document = createOpenApiDocument(createApp());
+const document = createOpenApiDocument(await createOpenApiApp());
 const operations = Object.values(document.paths).flatMap(path => Object.values(path as Record<string, any>)).filter(operation => operation?.operationId);
 const llms = createLlmsText(document);
 const full = createMarkdownDocs(document)!;

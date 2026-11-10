@@ -1,7 +1,8 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { getPath } from 'hono/utils/url';
 import { fileURLToPath } from 'node:url';
-import { app } from './app.js';
+import { createApp } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
@@ -15,14 +16,14 @@ try {
   const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
   const assets = serveStatic({ root: publicRoot });
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });
-  app.use('*', async (c, next) => {
+  const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
     if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(c.req.path) || ['/health', '/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
     return assets(c, async () => {
       const response = await dashboard(c, next);
       if (response) c.res = response;
     });
-  });
+  } });
   // Coarse per-process admission guard; trusted proxy/WAF controls remain necessary for distributed abuse.
   const peers = new Map<string, number>(); let minute = Math.floor(Date.now() / 60000);
   const server = serve({ fetch: async (request, connection) => {
@@ -38,7 +39,7 @@ try {
     const response = await app.fetch(new Request(request, { headers }), runtime);
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
-    const bucket = publicFailureBucket(new URL(request.url).pathname, response.status, request.headers);
+    const bucket = publicFailureBucket(getPath(request), response.status, request.headers);
     if (bucket && !await publicFailureAllowed(runtime, bucket, await digest(key))) return publicFailureDenied();
     return response;
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {

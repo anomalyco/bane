@@ -1,3 +1,4 @@
+import { ModuleLoadError } from './core.js';
 import { placementRoot } from './domain-registry.js';
 import { dns, fqdn } from './public-dns.js';
 import type { IdentityFacts } from './states.js';
@@ -68,7 +69,7 @@ const local=new Map<string,{value:DmarcObservation|null;until:number}>();
 export async function localDmarc(name:string,mailFrom?:string,refresh=false) {
   const key=name+':'+(mailFrom ?? ''), hit=local.get(key);
   if(!refresh && hit && hit.until>Date.now()) return hit.value;
-  const value=await observeDmarc(name,mailFrom).catch(()=>null);
+  const value=await observeDmarc(name,mailFrom).catch(e=>{if(e instanceof ModuleLoadError)throw e;return null;});
   if(local.size>=256) local.delete(local.keys().next().value!);
   local.set(key,{value,until:Date.now()+(value?300_000:30_000)}); return value;
 }

@@ -1,13 +1,12 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, notFound, response, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
+import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
-import { awsError, discoverSes, feedbackUrl, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
+import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
 import { importByoClaims } from './domain-claims.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
-import { preparePoolReceiving } from './mailbox-setup.js';
-import { releaseConnectionDomains } from './operations.js';
+import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
 import { requirePlatformAccount } from './config.js';
 import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
@@ -92,6 +91,7 @@ async function getPool(runtime: Runtime, region: string) {
   return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, ${poolReceives()} AS receiving, aws_account_id,legacy_names FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
 }
 async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof platformIdentity>>, region: string) {
+  await Promise.all([loadSetupSdk(), loadMailboxSetupSdk()]);
   const account=principal.account;
   const lease = new Date(Date.now() + 180_000).toISOString();
   const result = await runtime.db.execute<Pick<Pool,'sending'>>(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
@@ -151,6 +151,7 @@ async function provision(runtime: Runtime, row: Row, account: string, confirmati
     return row;
   }
   if (row.state === 'ready' && !confirmation) return row;
+  if (row.template_version !== 'v4' && !confirmation) await loadSetupSdk();
   const credentials = await assume(runtime, row.region, roleArn, row.external_id!, true);
   const scoped = { ...runtime, config: { ...runtime.config, aws: credentials, awsAccountId: account, sesFeedbackUrl: undefined, workspaceId: row.workspace_id } };
   const lease = new Date(Date.now() + 240_000).toISOString();
@@ -190,6 +191,7 @@ async function provision(runtime: Runtime, row: Row, account: string, confirmati
     if (result.rows[0].state === 'provisioning') await wakeByoJob(runtime,row.id);
     return result.rows[0];
   } catch (e) {
+    if (e instanceof ModuleLoadError) throw e;
     // Waiting on AWS (SNS confirmation) is not a failure; the stack stays and verify is retried.
     if (!join) await runtime.db.execute(finishProvisioning(sql`${owned} AND NOT EXISTS (SELECT 1 FROM jobs WHERE id=${'byo.verify:'+row.id} AND status IN ('running','pending'))`, awsError(e).retryable ? 'awaiting_role' : 'failed'));
     throw e;
@@ -222,7 +224,7 @@ export const byoVerifyJob: JobHandler = retryDatabaseFailures(async (runtime, pa
     });
     if (next) throw new JobDeferred(new Date().toISOString(), { connectionId: row.id, cursor: next });
   } catch (e) {
-    if (e instanceof JobDeferred) throw e;
+    if (e instanceof JobDeferred || e instanceof ModuleLoadError) throw e;
     const error = awsError(e);
     if (!error.retryable) await runtime.db.execute(finishProvisioning(owned,'failed'));
     else if (error.code==='SNS_CONFIRMATION_PENDING' || job.attempts>=MAX_ATTEMPTS) {
@@ -253,6 +255,7 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   if (!runtime.config.multiTenant || isSimulatedSes(runtime) || typeof payload.connectionId!=='string') return;
   try { await ensureTenant(runtime,job.workspaceId,payload.connectionId); }
   catch (e) {
+    if (e instanceof ModuleLoadError) throw e;
     // The last retry marks the tenant failed so sends say so; the hourly reconcile keeps trying.
     if (job.attempts >= MAX_ATTEMPTS) await runtime.db.execute(setTenantState(payload.connectionId, 'failed',runtime.config.platformAccount));
     throw e;
@@ -272,6 +275,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
         const principal=await platformIdentity(runtime,pool?.aws_account_id);
         try { await ensurePool(runtime,principal,region); }
         catch (e) {
+          if (e instanceof ModuleLoadError) throw e;
           // Receiving (including its separate SNS confirmation) never blocks a healthy sending pool.
           if (!(await getPool(runtime,region))?.sending) throw e;
           log('warn',{operation:'shared-receiving-setup',region,code:awsError(e).code});
@@ -280,9 +284,9 @@ export async function reconcileSharedConnections(runtime: Runtime) {
       const pending = await runtime.db.execute<Pick<Row,'id'|'workspace_id'>>(sql`SELECT id,workspace_id FROM provider_connections WHERE kind='shared' AND region=${region} AND tenant_state<>'ready'`);
       for (const row of pending.rows) {
         try { await ensureTenant(runtime, row.workspace_id, row.id); }
-        catch (e) { log('warn', { operation: 'shared-tenant-setup', region, connectionId: row.id, code: awsError(e).code }); }
+        catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-tenant-setup', region, connectionId: row.id, code: awsError(e).code }); }
       }
-    } catch (e) { log('warn', { operation: 'shared-pool-setup', region, code: awsError(e).code }); }
+    } catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-pool-setup', region, code: awsError(e).code }); }
   }
 }
 async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {
@@ -344,7 +348,7 @@ export function registerProviderConnections(app: App) {
       const row = await create(c.env, wid, input);
       if ('queued' in row && row.queued) c.get('actor').wakeJobs=1;
       return c.json(view(c.env, row), 201);
-    } catch (e) { throw awsError(e); }
+    } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   });
   app.openapi(createRoute({method:'post',path:path+'/scan',operationId:'refreshConnectionScan',tags,security,description:'Refresh regional inventory without changing AWS resources or selected domains.',responses:{202:response(z.object({operationId:z.string(),revision:z.number()})),...errors}}),async c=>{
     const result=await refreshScan(c.env,owner(c),c.req.header('Idempotency-Key'));c.get('actor').wakeJobs=1;return c.json(result,202);
@@ -360,7 +364,7 @@ export function registerProviderConnections(app: App) {
     const row = await get(c.env, wid) ?? notFound('Connection');
     if (row.kind !== 'byo') throw new ApiError(409, 'BYO_CONNECTION_REQUIRED', 'Only bring-your-own connections require verification.');
     const account = c.req.valid('json').awsAccountId;
-    try { return c.json(view(c.env, await provision(c.env, row, account)), 200); } catch (e) { throw awsError(e); }
+    try { return c.json(view(c.env, await provision(c.env, row, account)), 200); } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   });
   app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.', responses: { 200: response(z.object({ deleted: z.literal(true) })),202:response(z.object({operationId:z.string()})), ...errors } }), async c => {
     const wid = owner(c);
@@ -379,10 +383,10 @@ export function registerProviderConnections(app: App) {
         // Disconnect/reconnect must not serve as a workspace-controlled unpause.
         if (row.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', row.pause_reason);
         if (row.template_version==='v5' || (await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${row.id} AND NOT legacy AND NOT (${row.kind}='shared' AND region='us-east-1' AND pool_tenant_name IS NOT NULL AND receiving_state='off' AND sending_state='ready') LIMIT 1`)).rowCount) throw new ApiError(409,'REGIONAL_DISCONNECT_REQUIRED','A regional connection requires reviewed cleanup before disconnecting.');
-        await releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_state: row.tenant_state });
+        await (await wrapModuleLoad(() => import('./operations.js'))).releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_state: row.tenant_state });
         await db.execute(sql`DELETE FROM provider_connections WHERE id=${row.id}`);
       });
-    } catch (e) { throw awsError(e); }
+    } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
     return c.json({ deleted: true as const }, 200);
   });
 }

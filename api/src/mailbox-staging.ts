@@ -1,11 +1,12 @@
-import { CopyObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { sql } from 'drizzle-orm';
-import { ApiError, log, type JobHandler, type Runtime } from './core.js';
+import { ApiError, lazyModule, log, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acceptInboundNotification, recoverHeldReceipts, sesIdPattern } from './mailbox-receipts.js';
 import { mailboxS3, STAGING_PREFIX } from './mailbox-setup.js';
 import { ADDRESS } from './mailbox-store.js';
 import { connectionReady, poolReceives } from './states.js';
+
+const loadS3Staging = lazyModule(() => import('@aws-sdk/client-s3'));
 
 const sweep='mailbox.sweepStaging', orphan='mailbox.recoverStaging', holds='mailbox.replayHolds';
 // Derive the bucket, topic and credential scope from live bindings, never from a listed key or mail header.
@@ -43,7 +44,7 @@ const stagingJob:JobHandler=async(runtime,payload,job)=>{
   const bucket=String(payload.bucket);
   const {rows:[r]}=await runtime.db.execute<{region:string;topic:string;owner:string|null}>(sql`WITH bindings AS (${resources(runtime)}) SELECT region,topic,owner FROM bindings WHERE bucket=${bucket} AND topic=${String(payload.topic)} AND owner IS NOT DISTINCT FROM ${payload.shared===true?null:job.workspaceId}::text`);
   if (!r) throw new ApiError(409,'MAILBOX_STAGING_BINDING_LOST','The original receiving binding is unavailable.');
-  const s3=await mailboxS3(runtime,job.workspaceId,r.region,bucket);
+  const [{ CopyObjectCommand, GetObjectCommand, ListObjectsV2Command }, s3] = await Promise.all([loadS3Staging(), mailboxS3(runtime,job.workspaceId,r.region,bucket)]);
   const account=r.topic.split(':')[4];
   try {
     if (payload.mid===undefined) {

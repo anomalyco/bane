@@ -1,8 +1,7 @@
 import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
-import { ApiError, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { mailboxEvents, mailboxWebhookDeliveries, mailboxWebhooks } from './db/mailbox.js';
 import { MAX_ATTEMPTS } from './jobs.js';
-import { decrypt, hmac, postWebhook, webhookUrl } from './operations.js';
 
 export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
@@ -53,6 +52,7 @@ export async function latestCursor(db: DbExecutor, workspaceId: string, scope: E
   return result?.seq ?? 0;
 }
 
+const loadWebhookOps = lazyModule(() => import('./operations.js'));
 const webhookJob: JobHandler = async (runtime, payload, job) => {
   const [delivery] = await runtime.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, job.workspaceId), eq(mailboxWebhookDeliveries.id, String(payload.deliveryId))));
   if (!delivery || delivery.status === 'delivered') return;
@@ -63,6 +63,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (!subscribed(endpoint, delivery.payload)) {
     await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'SUBSCRIPTION_CHANGED', updatedAt: new Date().toISOString() }).where(where); return;
   }
+  const { decrypt, hmac, postWebhook, webhookUrl } = await loadWebhookOps();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
     const url = webhookUrl(runtime, endpoint.url);
@@ -71,7 +72,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const signature = await hmac(secret, `${eventId}.${timestamp}.${body}`);
     const result = await postWebhook(runtime, url, { 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'Bane-Webhooks/1.0' }, body, endpoint.encryptedHeaders, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
-  } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
+  } catch (e) { if (e instanceof ModuleLoadError) throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
   await runtime.db.update(mailboxWebhookDeliveries).set({ attemptCount: sql`${mailboxWebhookDeliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: new Date().toISOString() }).where(where);
   if (error) throw new ApiError(503, error, 'Mailbox webhook delivery failed; it will be retried.', undefined, retry);
