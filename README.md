@@ -49,14 +49,17 @@ See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client
 2. **Merge to `main`:** after push CI passes, `Deploy dev` builds that SHA, then rechecks the main tip under the deployment lock. Superseded commits are skipped before migration. The current commit migrates, deploys and runs live tests on `dev.bane.mx`; its summary and JSON report distinguish success, expected rejections, skips and failures. `Publish SDK` runs automatically or by manual dispatch from main. Both paths require that exact SHA to be reachable from main and to have passed `Live dev E2E`.
 3. **Production:** dispatch `Deploy production` **from main**, with the desired branch, tag or SHA. It resolves the ref once and requires the commit to be reachable from main and to have passed the dev live E2E. Require the `build` and `acceptance` checks on protected main, disable force-pushes and restrict deployment environments to main. The production Worker must pass health checks on both domains and the non-destructive live suite. `Bane infrastructure` is manual and defaults to plan; applying requires selecting `apply`.
 
-Configure **environment-scoped** credentials and variables (not repository-wide):
+Configure **environment-scoped** variables (not repository-wide). The deploy secrets
+live in AWS Secrets Manager (`us-east-1`, account `604439173067`) and are read through
+GitHub OIDC by each environment's own role, `arn:aws:iam::604439173067:role/github/bane-dev`
+or `arn:aws:iam::604439173067:role/github/bane-production`:
 
-| Environment | Secrets | Variables |
+| Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `dev` | `CLOUDFLARE_API_TOKEN`, `DEV_DATABASE_URL`, `DEV_E2E_API_KEY` | `DEV_E2E_DOMAIN`, `DEV_E2E_DOMAIN_ID`, `DEV_AUTH_ALLOWED_DOMAINS`, `DEV_AUTH_ALLOWED_EMAILS` |
-| `production` | `CLOUDFLARE_API_TOKEN`, `PROD_DATABASE_URL`, `PROD_E2E_API_KEY` | `PROD_DEPLOY_ENABLED`, `PROD_E2E_DOMAIN`, `PROD_E2E_DOMAIN_ID`, `PROD_AUTH_ALLOWED_DOMAINS`, `PROD_AUTH_ALLOWED_EMAILS` |
+| `dev` | `bane/dev/CLOUDFLARE_API_TOKEN`, `bane/dev/DEV_DATABASE_URL`, `bane/dev/DEV_E2E_API_KEY` | `DEV_E2E_DOMAIN`, `DEV_E2E_DOMAIN_ID`, `DEV_AUTH_ALLOWED_DOMAINS`, `DEV_AUTH_ALLOWED_EMAILS` |
+| `production` | `bane/production/CLOUDFLARE_API_TOKEN`, `bane/production/PROD_DATABASE_URL`, `bane/production/PROD_E2E_API_KEY` | `PROD_DEPLOY_ENABLED`, `PROD_E2E_DOMAIN`, `PROD_E2E_DOMAIN_ID`, `PROD_AUTH_ALLOWED_DOMAINS`, `PROD_AUTH_ALLOWED_EMAILS` |
 
-Infra alone also needs `CLOUDFLARE_INFRA_API_TOKEN`, `TF_VAR_DATABASE` and `TF_VAR_STATE_PASSPHRASE` in `production`. Scope deployment tokens to their respective Workers/resources. Live API keys need read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
+Infra alone also needs `CLOUDFLARE_INFRA_API_TOKEN`, `TF_VAR_DATABASE` and `TF_VAR_STATE_PASSPHRASE` as environment **secrets** in `production`. Scope deployment tokens to their respective Workers/resources. Live API keys need read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
 
 **Production is frozen until the AWS account switch.** The renamed Worker expects `bane-*` pool resources that do not exist in the old production account. Leave `PROD_DEPLOY_ENABLED` unset or `false` until cutover. Only the coordinator should set it to the exact lowercase string `true`, **only** on the `production` GitHub Environment (not the repository or organization). The gate and deploy jobs both check the freeze. No required reviewers are configured; adding a reviewer rule would prompt twice because both jobs use `production`.
 
