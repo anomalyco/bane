@@ -1,0 +1,478 @@
+name: Deploy
+
+# One workflow per stage. The branch picks the stage (dev or production), and
+# the stage picks the environment, the AWS role, the Pulumi stack and the
+# Worker config. Infra is applied first, then the Worker migrates and deploys,
+# then health and the live dev E2E run — in one run, so a Pulumi Worker-secret
+# write can never race the E2E as it could when pulumi.yml was separate.
+run-name: Deploy ${{ github.ref_name }} ${{ github.event.workflow_run.head_sha || github.sha }}
+
+on:
+  # A dev deploy waits for the push CI on the same commit, the way deploy-dev
+  # did. github.ref_name is the default branch (dev) for workflow_run events.
+  workflow_run:
+    workflows: [CI]
+    branches: [dev]
+    types: [completed]
+  push:
+    branches: [production]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Production only: branch, tag or SHA on production to deploy instead of its tip'
+        required: false
+        default: production
+        type: string
+      init:
+        description: Create the Pulumi stack with its KMS secrets provider if it does not exist
+        type: boolean
+        default: false
+      preview:
+        description: Preview the Pulumi stack only; do not apply it or deploy the Worker
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/production') ||
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'dev' &&
+      github.event.workflow_run.path == '.github/workflows/ci.yml' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    name: Authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      stage: ${{ steps.stage.outputs.stage }}
+      sha: ${{ steps.pin.outputs.sha }}
+      pulumi: ${{ steps.paths.outputs.pulumi }}
+    steps:
+      # A dev deploy can also run as a workflow_run, whose triggering_actor is
+      # the pusher of the upstream CI run. A rerun keeps the rerunner as
+      # github.triggering_actor, so both are checked.
+      - name: Require an authorized actor
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTOR: ${{ github.triggering_actor }}
+          UPSTREAM_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+        run: |
+          allowed='^(thdxr|R44VC0RP)$'
+          if [[ ! $ACTOR =~ $allowed ]]; then
+            echo "::error::Only thdxr and R44VC0RP may deploy (actor: $ACTOR)."
+            exit 1
+          fi
+          if [[ $EVENT == workflow_run && ! $UPSTREAM_ACTOR =~ $allowed ]]; then
+            echo "::error::Only thdxr and R44VC0RP may deploy (upstream actor: $UPSTREAM_ACTOR)."
+            exit 1
+          fi
+
+      - id: stage
+        name: Pick the stage from the branch
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          case "$REF_NAME" in
+            dev|production) echo "stage=$REF_NAME" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Deploy runs from dev or production, not $REF_NAME."; exit 1 ;;
+          esac
+
+      - id: pin
+        name: Pin the commit to deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          STAGE: ${{ steps.stage.outputs.stage }}
+          INPUT_REF: ${{ inputs.ref }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF ]]; then
+            ref=$(jq -rn --arg ref "$INPUT_REF" '$ref | @uri')
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
+          else
+            sha=$EVENT_SHA
+          fi
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve a commit to deploy."; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # Full history of every branch: the production ancestry check needs
+      # origin/production, and the changed-path check needs the deployed
+      # commit. The stage branch is what gets checked out; the commit to
+      # deploy is pinned separately.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a successful dev push CI for this commit
+        if: steps.stage.outputs.stage == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=dev&head_sha=$SHA&status=success" |
+            jq -e --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" 'any(.workflow_runs[]; .head_sha == $sha and .head_repository.full_name == $repo)' || { echo 'No passing dev push CI for this SHA' >&2; exit 1; }
+
+      - name: Check the production commit
+        if: steps.stage.outputs.stage == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]]
+          # Rollbacks deploy an older production commit, so the ref must be an
+          # ancestor of production rather than necessarily its tip.
+          if ! git cat-file -e "$SHA^{commit}" 2>/dev/null; then
+            echo "::error::$SHA is not a commit in this repository."; exit 1
+          fi
+          if ! git rev-parse --verify --quiet refs/remotes/origin/production >/dev/null; then
+            echo "::error::origin/production is missing from the checkout."; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SHA" origin/production; then
+            echo "::error::$SHA is not reachable from origin/production; production is fast-forward only, so deploy a commit it already contains."; exit 1
+          fi
+          repo="repos/$GITHUB_REPOSITORY"
+          gh api "$repo/compare/$SHA...dev?per_page=1" | jq -e --arg sha "$SHA" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$SHA is not reachable from dev"; exit 1; }
+          # The name of the dev deploy job is derived from the same immutable
+          # output as its checkout, so the E2E step proves this exact commit.
+          for ((page=1; ; page++)); do
+            runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?status=success&branch=dev&per_page=100&page=$page")
+            if [[ $(jq '.workflow_runs | length' <<< "$runs") == 0 ]]; then break; fi
+            ids=$(jq -r --arg title "Deploy dev $SHA" --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.display_title == $title and .conclusion == "success" and .head_branch == "dev" and .head_repository.full_name == $repo and (.event == "workflow_run" or .event == "workflow_dispatch")) | .id' <<< "$runs")
+            for id in $ids; do
+              jobs=$(gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100")
+              if jq -e --arg job "Deploy dev $SHA" 'any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live dev E2E" and .conclusion == "success"))' <<< "$jobs"; then
+                echo "Verified dev run $id for $SHA"; exit 0
+              fi
+            done
+          done
+          echo "::error::No successful deploy.yml dev job with a passing live E2E for exactly $SHA"; exit 1
+
+      - id: paths
+        name: Decide whether Pulumi has work
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          if [[ $EVENT == workflow_dispatch ]]; then
+            echo 'pulumi=true' >> "$GITHUB_OUTPUT"
+            echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A push knows the previous tip. A workflow_run does not, so compare
+          # the first parent; merges of PRs are the usual shape on dev.
+          base=${BEFORE:-$SHA^}
+          if [[ ! $base =~ ^[0-9a-f]{40}$ || $base =~ ^0+$ ]] || ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+            base=$SHA^
+          fi
+          if git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+            changed=$(git diff --name-only "$base" "$SHA")
+          else
+            changed=$(git show --name-only --format= "$SHA")
+          fi
+          if grep -Eq '^(infra/pulumi/|infra/aws-shared/|\.github/workflows/(deploy|pulumi)\.yml$)' <<< "$changed"; then
+            echo 'pulumi=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'pulumi=false' >> "$GITHUB_OUTPUT"
+            echo 'No infrastructure changes; skipping Pulumi.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  pulumi:
+    name: Pulumi ${{ needs.authorize.outputs.stage }}
+    needs: authorize
+    if: needs.authorize.outputs.pulumi == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      STAGE: ${{ needs.authorize.outputs.stage }}
+      CF_ACCOUNT_ID: "15d29c8639fd3733b1b5486a2acfd968"
+    steps:
+      - &unfrozen
+        name: Require production deploys to be unfrozen
+        if: needs.authorize.outputs.stage == 'production'
+        env:
+          PROD_DEPLOY_ENABLED: ${{ vars.PROD_DEPLOY_ENABLED }}
+        run: |
+          # Environment variables are available inside an environment job, not
+          # in its job-level if. A shell equality check is case-sensitive;
+          # Actions' == isn't.
+          if [ "$PROD_DEPLOY_ENABLED" != 'true' ]; then
+            echo 'Production deploys are frozen. Set PROD_DEPLOY_ENABLED=true to release.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+
+      - name: Check for a Pulumi program
+        id: guard
+        run: |
+          if [ -f infra/pulumi/Pulumi.yaml ] && [ -f "infra/pulumi/Pulumi.${STAGE}.yaml" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::infra/pulumi/Pulumi.yaml or infra/pulumi/Pulumi.${STAGE}.yaml is missing; skipping deploy"
+          fi
+
+      - name: Authenticate with AWS
+        if: steps.guard.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
+          aws-region: us-east-1
+
+      - name: Mint Cloudflare token and R2 credentials
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          set +x
+
+          url="https://kjivkui2evldapbok5fhrrl6oy0fctkp.lambda-url.us-east-1.on.aws/"
+          account="$CF_ACCOUNT_ID"
+          url_pattern='^https://[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws/$'
+          if ! [[ "$url" =~ $url_pattern ]]; then echo "::error::bad token issuer URL"; exit 1; fi
+          if ! [[ "$account" =~ ^[a-f0-9]{32}$ ]]; then echo "::error::bad account id"; exit 1; fi
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+            [ -n "${!name:-}" ] || { echo "::error::$name is not set"; exit 1; }
+          done
+
+          # The response is captured, never streamed: it contains the token.
+          response=$(
+            printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' \
+              "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" |
+              curl --config - \
+                --proto '=https' --proto-redir '=https' \
+                --aws-sigv4 "aws:amz:us-east-1:lambda" \
+                --request POST --url "$url" \
+                --fail-with-body --silent --show-error --max-time 20
+          )
+          token=$(printf '%s' "$response" | jq -er '.token | strings')
+          expires=$(printf '%s' "$response" | jq -er '.expires_on | strings')
+          case "$token" in ""|*[[:space:]]*) echo "::error::invalid token"; exit 1 ;; esac
+          printf '::add-mask::%s\n' "$token"
+
+          # Account-owned tokens verify under the account, not /user.
+          id=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/tokens/verify"\n' \
+            "$token" "$account" | curl --config - --silent --show-error --fail-with-body --max-time 20 |
+            jq -er 'select(.success == true and .result.status == "active") | .result.id | strings')
+          secret=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
+          printf '::add-mask::%s\n' "$secret"
+
+          echo "CLOUDFLARE_API_TOKEN=$token" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.aws"
+          {
+            printf '\n[r2]\n'
+            printf 'aws_access_key_id = %s\n' "$id"
+            printf 'aws_secret_access_key = %s\n' "$secret"
+          } >> "$HOME/.aws/credentials"
+          {
+            printf '\n[profile r2]\n'
+            printf 'region = auto\n'
+          } >> "$HOME/.aws/config"
+
+          echo "::notice::Cloudflare token ready; expires $expires"
+
+      - name: Install Pulumi
+        if: steps.guard.outputs.skip != 'true'
+        uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
+        with:
+          pulumi-version: 3.274.1
+
+      - name: Init stack
+        if: steps.guard.outputs.skip != 'true' && github.event_name == 'workflow_dispatch' && inputs.init
+        working-directory: infra/pulumi
+        env:
+          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+        run: |
+          set -euo pipefail
+          if pulumi stack select "$STAGE" >/dev/null 2>&1; then
+            echo "stack $STAGE already exists"
+          else
+            pulumi stack init "$STAGE" --secrets-provider "awskms://alias/pulumi/bane-${STAGE}?region=us-east-1"
+          fi
+
+      - name: Setup Bun
+        if: steps.guard.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: infra/pulumi
+        run: bun install --frozen-lockfile
+
+      - name: Deploy
+        if: steps.guard.outputs.skip != 'true'
+        uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
+        with:
+          command: ${{ inputs.preview && 'preview' || 'up' }}
+          stack-name: ${{ env.STAGE }}
+          work-dir: infra/pulumi
+          cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+          pulumi-version: 3.274.1
+          suppress-progress: true
+
+  deploy:
+    name: Deploy ${{ needs.authorize.outputs.stage }} ${{ needs.authorize.outputs.sha }}
+    needs: [authorize, pulumi]
+    if: >-
+      always() && needs.authorize.result == 'success' &&
+      (needs.pulumi.result == 'success' || needs.pulumi.result == 'skipped') &&
+      inputs.preview != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    environment: ${{ github.ref_name }}
+    steps:
+      - *unfrozen
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/build-release
+
+      - id: slot
+        name: Check the dev tip after acquiring the deployment slot and building
+        if: needs.authorize.outputs.stage == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.authorize.outputs.sha }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)
+          [[ $tip =~ ^[0-9a-f]{40}$ ]]
+          if [[ $tip != "$SHA" ]]; then
+            echo "Skipped deployment: $SHA was superseded by dev at $tip before migration." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: slot-production
+        name: Production deploys the pinned commit
+        if: needs.authorize.outputs.stage == 'production'
+        run: echo 'current=true' >> "$GITHUB_OUTPUT"
+
+      - name: Configure the dev stage
+        if: needs.authorize.outputs.stage == 'dev'
+        env:
+          AUTH_ALLOWED_DOMAINS: ${{ vars.DEV_AUTH_ALLOWED_DOMAINS }}
+          AUTH_ALLOWED_EMAILS: ${{ vars.DEV_AUTH_ALLOWED_EMAILS }}
+        run: |
+          {
+            echo "PUBLIC_URL=https://dev.bane.mx"
+            echo "WRANGLER_CONFIG=wrangler.dev.jsonc"
+            echo "AWS_ROLE=arn:aws:iam::604439173067:role/github/bane-dev"
+            echo "AUTH_ALLOWED_DOMAINS=$AUTH_ALLOWED_DOMAINS"
+            echo "AUTH_ALLOWED_EMAILS=$AUTH_ALLOWED_EMAILS"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure the production stage
+        if: needs.authorize.outputs.stage == 'production'
+        env:
+          AUTH_ALLOWED_DOMAINS: ${{ vars.PROD_AUTH_ALLOWED_DOMAINS }}
+          AUTH_ALLOWED_EMAILS: ${{ vars.PROD_AUTH_ALLOWED_EMAILS }}
+        run: |
+          {
+            echo "PUBLIC_URL=https://bane.mx"
+            echo "WRANGLER_CONFIG=wrangler.prod.jsonc"
+            echo "AWS_ROLE=arn:aws:iam::604439173067:role/github/bane-production"
+            echo "AUTH_ALLOWED_DOMAINS=$AUTH_ALLOWED_DOMAINS"
+            echo "AUTH_ALLOWED_EMAILS=$AUTH_ALLOWED_EMAILS"
+          } >> "$GITHUB_ENV"
+
+      # The deploy secrets live in AWS Secrets Manager as bane/<stage>/* and are
+      # read by the environment's own role (github/bane-<stage>).
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          role-session-name: bane-${{ needs.authorize.outputs.stage }}-secrets-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Fetch the dev secrets
+        if: needs.authorize.outputs.stage == 'dev'
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            CLOUDFLARE_API_TOKEN,bane/dev/CLOUDFLARE_API_TOKEN
+            DATABASE_URL,bane/dev/DEV_DATABASE_URL
+            DEV_E2E_API_KEY,bane/dev/DEV_E2E_API_KEY
+          parse-json-secrets: false
+
+      - name: Fetch the production secrets
+        if: needs.authorize.outputs.stage == 'production'
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            CLOUDFLARE_API_TOKEN,bane/production/CLOUDFLARE_API_TOKEN
+            DATABASE_URL,bane/production/PROD_DATABASE_URL
+          parse-json-secrets: false
+
+      - run: npm run migrate
+        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          PUBLIC_URL: ${{ env.PUBLIC_URL }}
+          DEFAULT_SES_REGION: us-east-2
+          MULTI_TENANT: 'true'
+
+      - name: Deploy the Worker
+        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
+        working-directory: api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+          AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
+          AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
+        run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
+
+      - name: Health check
+        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
+        run: bash .github/scripts/health.sh "$PUBLIC_URL"
+
+      - name: Live dev E2E
+        if: needs.authorize.outputs.stage == 'dev' && steps.slot.outputs.current == 'true'
+        id: e2e
+        working-directory: api
+        timeout-minutes: 5
+        env:
+          BANE_E2E_URL: ${{ env.PUBLIC_URL }}
+          BANE_E2E_API_KEY: ${{ env.DEV_E2E_API_KEY }}
+          BANE_E2E_DOMAIN: ${{ vars.DEV_E2E_DOMAIN }}
+          BANE_E2E_DOMAIN_ID: ${{ vars.DEV_E2E_DOMAIN_ID }}
+          BANE_E2E_REGION: us-east-2
+          BANE_E2E_ALLOW_DESTRUCTIVE: '1'
+        run: npm run e2e
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() && needs.authorize.outputs.stage == 'dev' && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}
+        with:
+          name: dev-e2e-${{ needs.authorize.outputs.sha }}-${{ github.run_attempt }}
+          path: api/e2e-report.json
+          if-no-files-found: error
