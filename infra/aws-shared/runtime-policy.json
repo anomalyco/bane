@@ -2,6 +2,18 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2", "s3:prefix": "staging/"}}
+    },
+    {
+      "Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/quarantine/?*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}}
+    },
+    {
+      "Effect": "Allow", "Action": ["s3:PutObject", "s3:AbortMultipartUpload"], "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/workspaces/ws_????????????????????????????????/raw/?*.eml",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}, "Null": {"s3:RequestObjectTagKeys": "true"}}
+    },
+    {
       "Effect": "Deny", "Action": ["sns:*Topic*", "sns:*Tag*", "sns:Subscribe", "ses:*Identity*", "ses:*Tenant*", "ses:*ConfigurationSet*", "ses:TagResource", "ses:SendEmail", "ses:*Reputation*"],
       "NotResource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:*", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:*", "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:*", "arn:aws:ses:us-east-1:aws:reputation-policy/strict", "arn:aws:ses:us-east-2:aws:reputation-policy/strict"]
     },

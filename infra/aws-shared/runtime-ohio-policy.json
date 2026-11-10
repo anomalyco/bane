@@ -75,7 +75,7 @@
       "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2", "s3:LocationConstraint": "us-east-2" }, "StringEqualsIfExists": { "s3:x-amz-object-ownership": "BucketOwnerEnforced" } }
     },
     {
-      "Effect": "Deny", "Action": ["s3:GetObject", "s3:Put*"], "Resource": "*",
+      "Effect": "Deny", "Action": ["s3:GetObject", "s3:Put*", "s3:ListBucket", "s3:AbortMultipartUpload"], "Resource": "*",
       "Condition": { "StringNotEquals": { "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID" } }
     },
     {

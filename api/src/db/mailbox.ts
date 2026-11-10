@@ -114,8 +114,16 @@ export const mailReceipts = pgTable('mail_receipts', {
   workspaceId: text('workspace_id').notNull(), sesMessageId: text('ses_message_id').notNull(),
   region: text('region').notNull(), bucket: text('bucket').notNull(), objectKey: text('object_key').notNull(), recipients: jsonb('recipients').$type<string[]>().notNull(),
   notification: jsonb('notification').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'processed' | 'failed'>().notNull().default('pending'),
+  recoveryAttempts:smallint('recovery_attempts').notNull().default(0),lastRecoveredAt:ts('last_recovered_at'),
   error: text('error'), createdAt: ts('created_at').notNull().defaultNow(), processedAt: ts('processed_at'),
 }, t => [primaryKey({ columns: [t.workspaceId, t.sesMessageId] })]);
+
+export const mailReceiptHolds=pgTable('mail_receipt_holds',{
+  bucket:text('bucket').notNull(),sesMessageId:text('ses_message_id').notNull(),region:text('region').notNull(),topicArn:text('topic_arn').notNull(),
+  bindingWorkspace:text('binding_workspace'),owners:jsonb('owners').$type<Record<string,string[]>>().notNull(),recipients:jsonb('recipients').$type<string[]>().notNull(),notification:jsonb('notification').$type<Record<string,unknown>>().notNull(),
+  receivedAt:ts('received_at').notNull(),expiresAt:ts('expires_at').notNull(),nextCheck:ts('next_check').notNull().defaultNow(),status:text('status').notNull().default('held'),error:text('error'),
+},t=>[primaryKey({columns:[t.bucket,t.sesMessageId]})]);
+export const mailIngestTurns=pgTable('mail_ingest_turns',{workspaceId:text('workspace_id').primaryKey(),servedAt:ts('served_at').notNull()});
 
 export const mailboxKeys = pgTable('mailbox_keys', {
   id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), hash: text('hash').notNull().unique(), prefix: text('prefix').notNull(),

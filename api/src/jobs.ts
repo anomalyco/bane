@@ -67,6 +67,8 @@ export const webhookClaimCtes = sql`hook_inputs AS MATERIALIZED (
   FROM hook_inputs h WHERE d.id=h.delivery_id AND d.workspace_id=h.workspace_id AND d.generation=h.generation AND (h.url IS NULL OR (h.paused AND NOT h.synthetic)))`;
 const hookJoin = sql`LEFT JOIN hook_inputs h ON h.job_id=j.id AND h.url IS NOT NULL AND (NOT h.paused OR h.synthetic)`;
 export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM claimed j ${hookJoin}`;
+// Reserve before awaiting the claim, so overlapping drains in one isolate cannot both lease MIME work.
+let ingestReserved=false;
 export async function processJobs(runtime: Runtime, handlers: Record<string, JobHandler>, limit = 1, concurrency = 1, maxDurationMs = 20000) {
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
   const effectiveConcurrency = jobConcurrency(concurrency);
@@ -130,22 +132,35 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       const claimBatchSize = Math.min(freeLanes.size, maximumClaims - claims);
       const activeAtClaim = active.size;
       const claimStarted = Date.now();
-      const claimed = await runtime.db.execute<Claimed>(sql`WITH feedback AS (
+      const allowIngest=!ingestReserved;
+      if(allowIngest) ingestReserved=true;
+      let claimed:{rows:Claimed[]}|undefined;
+      try { claimed = await runtime.db.execute<Claimed>(sql`WITH feedback AS (
         SELECT j.id FROM jobs j WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
           AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
         ORDER BY j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
+      ), heads AS (
+        SELECT DISTINCT ON (workspace_id) workspace_id,available_at,id FROM jobs WHERE ${allowIngest} AND type='mailbox.ingest'
+          AND ((status='pending' AND available_at<=now()) OR (status='running' AND lease_until<now() AND attempts<${MAX_ATTEMPTS})) ORDER BY workspace_id,available_at,id
+      ), ingest AS (
+        SELECT j.id FROM heads h JOIN jobs j ON j.id=h.id LEFT JOIN mail_ingest_turns t ON t.workspace_id=h.workspace_id
+        WHERE (j.status='pending' AND j.available_at<=now()) OR (j.status='running' AND j.lease_until<now() AND j.attempts<${MAX_ATTEMPTS})
+        ORDER BY t.served_at NULLS FIRST,h.available_at,h.id FOR UPDATE OF j SKIP LOCKED LIMIT (SELECT least(1,${claimBatchSize}-count(*)) FROM feedback)
       ), regular AS (
         SELECT j.id FROM jobs j WHERE ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
+          AND j.type<>'mailbox.ingest'
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN starts_with(j.type, 'campaign.') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
-          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
+          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest))
       ), due AS (
-        SELECT id FROM feedback UNION ALL SELECT id FROM regular
+        SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
       ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
-        FROM due WHERE jobs.id = due.id RETURNING jobs.*), ${webhookClaimCtes} ${claimedWithWebhooks}`);
+        FROM due WHERE jobs.id = due.id RETURNING jobs.*), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest'
+          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${webhookClaimCtes} ${claimedWithWebhooks}`); }
+      finally { if(allowIngest && !claimed?.rows.some(j=>j.type==='mailbox.ingest')) ingestReserved=false; }
       claimRequests++;
       const claimMs = Date.now() - claimStarted;
       if (!claimed.rows.length) {
@@ -168,6 +183,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
           active.delete(task);
           freeLanes.add(index);
           if (feedback) activeFeedback--;
+          if (job.type==='mailbox.ingest') ingestReserved=false;
         });
         active.add(task);
       }
