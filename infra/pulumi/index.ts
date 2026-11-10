@@ -8,19 +8,19 @@ const stages = {
   dev: {
     account: "905840579680", origin: "https://dev.bane.mx", prefix: "bane-dev", worker: "bane-dev",
     queues: { work: "9c0d42c6410842c38d9304094dccccc4", feedback: "e655c22094e14e198abb3a254e235c7d" },
-    hyperdrive: "67bf6907a42a483da37f4d2256847281", connections: 15,
   },
   production: {
     account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "opensend-mx",
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
-    hyperdrive: "556aba191add406eaa58a0e26eebb6b1", connections: 30,
   },
 };
+
 const stack = pulumi.getStack();
 if (stack !== "dev" && stack !== "production") throw new Error(`Unsupported Bane stack: ${stack}`);
 const stage = stages[stack];
 const production = stack === "production";
 const config = new pulumi.Config("bane");
+
 const roleArn = config.require("deployRoleArn");
 if (!roleArn.startsWith(`arn:aws:iam::${stage.account}:role/`)) {
   throw new Error(`bane:deployRoleArn must identify a role in the ${stack} account`);
@@ -31,41 +31,24 @@ const writeWorkerSecrets = config.getBoolean("writeWorkerSecrets") ?? !productio
 const publishDomainConnectKey = config.getBoolean("publishDomainConnectKey") ?? false;
 if (!production && publishDomainConnectKey) throw new Error("Domain Connect publication is production-only");
 
-function databaseOrigin(raw: string | undefined) {
-  // Never let URL/parser exceptions include the input (which contains credentials) in CI logs.
-  try {
-    const url = new URL(raw ?? "");
-    if (!["postgres:", "postgresql:"].includes(url.protocol) || !url.hostname || !url.username ||
-        !url.password || !/^\/[^/]+$/.test(url.pathname) || url.hash) throw new Error();
-    return {
-      scheme: "postgres", host: url.hostname, port: Number(url.port || 5432),
-      database: decodeURIComponent(url.pathname.slice(1)), user: decodeURIComponent(url.username),
-      password: pulumi.secret(decodeURIComponent(url.password)),
-    };
-  } catch {
-    throw new Error("BANE_HYPERDRIVE_DATABASE_URL must be a Postgres URL with a host, user, password and database");
-  }
-}
-const origin = databaseOrigin(process.env.BANE_HYPERDRIVE_DATABASE_URL);
-
 function adopt(id: string, provider: pulumi.ProviderResource): pulumi.CustomResourceOptions {
-  return { import: id, protect: true, provider }; // Dev and production: dropping one would take its stage down.
+  return { import: id, protect: true, provider }; // Dropping one would take its stage down.
 }
 
-const accountId = "15d29c8639fd3733b1b5486a2acfd968";
+const cloudflareAccountId = "15d29c8639fd3733b1b5486a2acfd968";
 const cloudflare = new cf.Provider("cloudflare", {}); // CLOUDFLARE_API_TOKEN
-for (const [purpose, id] of Object.entries(stage.queues)) {
-  new cf.Queue(purpose, { accountId, queueName: `${stage.prefix}-${purpose}` }, {
-    ...adopt(`${accountId}/${id}`, cloudflare), ignoreChanges: ["settings"],
+for (const [purpose, queueId] of Object.entries(stage.queues)) {
+  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, {
+    ...adopt(`${cloudflareAccountId}/${queueId}`, cloudflare), ignoreChanges: ["settings"],
   });
 }
 const bucket = `${stage.prefix}-attachments`;
-new cf.R2Bucket("attachments", { accountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {
-  ...adopt(`${accountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"], // ENAM; creation-only.
+new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {
+  ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"], // ENAM; creation-only.
 });
-new cf.HyperdriveConfig("database", {
-  accountId, name: stage.prefix, origin, caching: { disabled: true }, originConnectionLimit: stage.connections,
-}, { ...adopt(`${accountId}/${stage.hyperdrive}`, cloudflare), ignoreChanges: ["origin.password", "mtls"] }); // Live returns mtls {}; the password comes from env.
+
+// The Hyperdrive config is not managed here. Cloudflare never returns origin.password, and
+// Pulumi fails to import the resource because the read state lacks that required property.
 
 if (production && publishDomainConnectKey) {
   // Public DER SubjectPublicKeyInfo (not the private signing key), 200 base64 characters per TXT record.
@@ -85,6 +68,7 @@ const runtime = "bane-runtime";
 const user = new aws.iam.User(runtime, {
   name: runtime, path: "/", tags: { "bane:purpose": "hosted-runtime" }, permissionsBoundary,
 }, adopt(runtime, iam));
+
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
 const attachments = Object.entries(policies).map(([name, document]) => {
   const arn = `arn:aws:iam::${stage.account}:policy/${name}`;
@@ -99,15 +83,15 @@ new aws.ses.ActiveReceiptRuleSet("active-inbound", { ruleSetName: ruleSet.ruleSe
 // Never import an IAM access key: AWS returns its secret only on creation.
 const key = new aws.iam.AccessKey("runtime-key", { user: user.name }, { provider: iam, dependsOn: attachments });
 if (writeWorkerSecrets) {
-  // v6 has account Secrets Store resources, not standalone script secrets. Pin v5 for these two PUTs only.
+  // v6 has account Secrets Store resources, not standalone script secrets, so these two PUTs use v5.
   const provider = new cfV5.Provider("worker-secrets", {});
-  const target = { accountId, scriptName: stage.worker };
-  // A secret PUT creates a Worker version. Serialize the pair; never DELETE a live binding on replacement/disable.
+  const target = { accountId: cloudflareAccountId, scriptName: stage.worker };
+  // A secret PUT creates a Worker version. Serialize the pair; never DELETE a live binding on replacement.
   const opts = { provider, retainOnDelete: true };
-  const id = new cfV5.WorkersSecret("worker-key-id", {
+  const accessKeyId = new cfV5.WorkersSecret("worker-access-key-id", {
     ...target, name: "AWS_ACCESS_KEY_ID", secretText: pulumi.secret(key.id),
   }, opts);
-  new cfV5.WorkersSecret("worker-key-secret", {
+  new cfV5.WorkersSecret("worker-secret-access-key", {
     ...target, name: "AWS_SECRET_ACCESS_KEY", secretText: key.secret,
-  }, { ...opts, dependsOn: [id] });
+  }, { ...opts, dependsOn: [accessKeyId] });
 }
