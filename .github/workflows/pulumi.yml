@@ -15,6 +15,10 @@ on:
         description: Create the stack with its KMS secrets provider if it does not exist
         type: boolean
         default: false
+      preview:
+        description: Preview only; do not apply
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -157,7 +161,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
         with:
-          command: up
+          command: ${{ inputs.preview && 'preview' || 'up' }}
           stack-name: ${{ env.STAGE }}
           work-dir: infra/pulumi
           cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
