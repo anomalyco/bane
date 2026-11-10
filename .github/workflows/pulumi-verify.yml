@@ -91,13 +91,14 @@ jobs:
           set -euo pipefail
           dir=$(mktemp -d)
           cd "$dir"
-          printf 'name: ci-probe\nruntime: nodejs\n' > Pulumi.yaml
-          printf '// empty program\n' > index.js
+          printf 'name: ci-probe\nruntime: yaml\nresources: {}\n' > Pulumi.yaml
 
           pulumi login "$R2_URL"
-          pulumi stack init ci-probe --secrets-provider "awskms://alias/pulumi/bane-dev?region=us-east-1"
+          if ! pulumi stack select ci-probe >/dev/null 2>&1; then
+            pulumi stack init ci-probe --secrets-provider "awskms://alias/pulumi/bane-dev?region=us-east-1"
+          fi
           pulumi config set --secret probe x
-          pulumi preview --stack ci-probe
+          pulumi preview --stack ci-probe --non-interactive
           pulumi stack rm ci-probe --yes
           echo "r2 backend + kms provider ok"
 
