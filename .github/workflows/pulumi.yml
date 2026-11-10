@@ -25,21 +25,19 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pulumi-${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'dev' || github.ref_name }}
+  group: pulumi-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
-  # main has no stack of its own; a manual dispatch there exercises dev until
-  # the dev and production branches exist.
-  STAGE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'dev' || github.ref_name }}
+  STAGE: ${{ github.ref_name }}
   CF_ACCOUNT_ID: "15d29c8639fd3733b1b5486a2acfd968"
 
 jobs:
   deploy:
     name: Deploy
-    if: github.ref_name == 'dev' || github.ref_name == 'production' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
+    if: github.ref_name == 'dev' || github.ref_name == 'production'
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'dev' || github.ref_name }}
+    environment: ${{ github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

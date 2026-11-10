@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   infra:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/production'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: production

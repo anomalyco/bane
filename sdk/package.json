@@ -33,7 +33,7 @@
     "url": "git+https://github.com/anomalyco/bane.git",
     "directory": "sdk"
   },
-  "homepage": "https://github.com/anomalyco/bane/tree/main/sdk#readme",
+  "homepage": "https://github.com/anomalyco/bane/tree/dev/sdk#readme",
   "bugs": {
     "url": "https://github.com/anomalyco/bane/issues"
   },

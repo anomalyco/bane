@@ -4,7 +4,7 @@ run-name: Dev ${{ github.event.workflow_run.head_sha || github.sha }}
 on:
   workflow_run:
     workflows: [CI]
-    branches: [main]
+    branches: [dev]
     types: [completed]
   workflow_dispatch:
 
@@ -15,25 +15,26 @@ permissions:
 jobs:
   authorize:
     if: >-
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'dev' &&
       github.event.workflow_run.path == '.github/workflows/ci.yml' &&
-      github.event.workflow_run.head_repository.full_name == github.repository))
+      github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - id: resolve
-        name: Require successful main push CI for the deployment SHA
+        name: Require successful dev push CI for the deployment SHA
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           [[ $SHA =~ ^[0-9a-f]{40}$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$SHA&status=success" |
-            jq -e --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" 'any(.workflow_runs[]; .head_sha == $sha and .head_repository.full_name == $repo)' || { echo 'No passing main push CI for this SHA' >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=dev&head_sha=$SHA&status=success" |
+            jq -e --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" 'any(.workflow_runs[]; .head_sha == $sha and .head_repository.full_name == $repo)' || { echo 'No passing dev push CI for this SHA' >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
   deploy:
@@ -56,15 +57,15 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/build-release
       - id: tip
-        name: Check main after acquiring deployment slot and building
+        name: Check dev after acquiring deployment slot and building
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.authorize.outputs.sha }}
         run: |
-          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)
           [[ $tip =~ ^[0-9a-f]{40}$ ]]
           if [[ $tip != "$SHA" ]]; then
-            echo "Skipped deployment: $SHA was superseded by main at $tip before migration." >> "$GITHUB_STEP_SUMMARY"
+            echo "Skipped deployment: $SHA was superseded by dev at $tip before migration." >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'current=true' >> "$GITHUB_OUTPUT"
           fi
