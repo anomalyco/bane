@@ -66,12 +66,12 @@ Scope deployment tokens to their respective Workers/resources. Live API keys nee
 
 **Before the first deployment:** preserve the existing sign-in allowlists. For each non-confidential list, set the environment variable above; the deploy passes it explicitly to Wrangler. GitHub may show plain variables in step logs. For a private list, set `AUTH_ALLOWED_EMAILS` or `AUTH_ALLOWED_DOMAINS` as a **Worker secret** out of band instead, and leave its GitHub variable empty. An empty variable sends no override: it preserves a Worker secret but does **not** preserve a dashboard-only plaintext binding. With neither configured the list is empty.
 
-**Local live E2E:** install API and SDK dependencies, build the SDK (`npm run build --prefix sdk`), and privately export `BANE_E2E_API_KEY`. From `api/` run:
+**Local live E2E:** install API and SDK dependencies, build the SDK (`cd sdk && bun run build`), and privately export `BANE_E2E_API_KEY`. From `api/` run:
 
 ```sh
 BANE_E2E_URL=https://dev.bane.mx BANE_E2E_REGION=us-east-2 \
 BANE_E2E_DOMAIN=e2e.bane.mx BANE_E2E_DOMAIN_ID=dom_e53755830a0141a5bd6e71e45e942f06 \
-BANE_E2E_ALLOW_DESTRUCTIVE=1 npm run e2e
+BANE_E2E_ALLOW_DESTRUCTIVE=1 bun run e2e
 ```
 
 This sends real SES simulator and inbound-loop mail and consumes sandbox quota. The destructive opt-in is accepted only on the pinned dev fixture. Omit it for the production-safe subset; never run tests on customer data. Both modes first clean up run-owned fixtures older than 30 minutes from interrupted runs. API keys do not support expiry; normal cleanup and the next run revoke test keys. Inspect `api/e2e-report.json` for operation coverage and request IDs.

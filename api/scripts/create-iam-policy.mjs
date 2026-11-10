@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 const directory = join(dirname(fileURLToPath(import.meta.url)), '..')
 const accountId = process.argv[2] ?? process.env.AWS_ACCOUNT_ID
 if (!accountId || !/^\d{12}$/.test(accountId)) {
-  console.error('Usage: npm run iam-policy:personal -- <12-digit-aws-account-id>')
+  console.error('Usage: bun run iam-policy:personal -- <12-digit-aws-account-id>')
   process.exit(1)
 }
 

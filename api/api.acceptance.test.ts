@@ -13,7 +13,7 @@ async function selfSignedPem(key:import('node:crypto').KeyObject) {
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 }
 
-// Run against the actual server and normal background-job runner with npm test.
+// Run against the actual server and normal background-job runner with bun run test.
 // Requires its BETTER_AUTH_SECRET and paired DATABASE_URL (localhost only) or
 // explicit API_FIXTURE_DATABASE_URL. Allow AUTH_TEST_EMAIL (operator@example.com)
 // and AUTH_TEST_GOOGLE_DOMAIN (example.com) in that server's Google access policy.
@@ -36,7 +36,7 @@ const secrets = new Set<string>([AUTH_SECRET]);
 const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')}`;
 const address = () => `${unique('acceptance')}@example.com`;
 const REGION = process.env.API_TEST_REGION ?? 'us-east-1';
-// npm test loads .env. Remote APIs require an explicitly paired fixture database;
+// bun run test loads .env. Remote APIs require an explicitly paired fixture database;
 // never silently arrange a remote API's fixtures in the developer's default DB.
 const LOCAL_API = ['localhost', '127.0.0.1'].includes(new URL(BASE).hostname);
 const FIXTURE_DATABASE_URL = process.env.API_FIXTURE_DATABASE_URL || (LOCAL_API ? process.env.DATABASE_URL : undefined);
