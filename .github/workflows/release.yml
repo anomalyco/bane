@@ -51,8 +51,6 @@ jobs:
     permissions:
       contents: write # the tag and the GitHub release
       id-token: write # npm trusted publishing and provenance
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Require an authorized actor
         env:
@@ -75,7 +73,7 @@ jobs:
         with:
           fetch-depth: 0 # every tag, for the next version
           persist-credentials: false
-      # Trusted publishing needs npm 11.5.1 or newer; a GitHub-hosted runner.
+      # Node 24.16.0 bundles npm 11.13.0 (trusted publishing requires >=11.5.1).
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: 24.16.0
@@ -83,7 +81,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
-      - run: npm install --global npm@^11.15.0
       - id: version
         name: Compute the next version
         env:
@@ -144,6 +141,7 @@ jobs:
       - name: Tag and release
         if: inputs.dry_run == false
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           tag="v$VERSION"

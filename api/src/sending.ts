@@ -2,7 +2,7 @@ import { cachedDashboardRead } from './dashboard-cache.js';
 import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
@@ -244,7 +244,13 @@ function nextCursor(rows: { id: string; createdAt: string }[], limit: number, bi
 }
 function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
 export const scope = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
-export const mailWhere = (a: Pick<Actor, 'workspaceId'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
+// A key restricted to sender domains reads only mail sent from those domains or their subdomains (L2).
+export function senderDomainWhere(column: AnyPgColumn, allowed: readonly string[]) {
+  if (!allowed.length) return undefined;
+  const domain = sql`lower(split_part(${column}, '@', 2))`;
+  return or(...allowed.map(value => { const parent = value.toLowerCase(); return sql`(${domain} = ${parent} OR right(${domain}, ${parent.length + 1}) = ${'.' + parent})`; }));
+}
+export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'domains'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains));
 export const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
 function keySender(a: Actor, from: string) {
   const domain = from.split('@')[1]!.toLowerCase();
@@ -1017,7 +1023,7 @@ export function registerSending(app: App) {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await c.env.db.select(emailColumns).from(emails).where(and(scope(emails, a),
+    const rows = await c.env.db.select(emailColumns).from(emails).where(and(scope(emails, a), senderDomainWhere(emails.from, a.domains),
       cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,

@@ -4,9 +4,9 @@ One project, two stacks: `dev` (AWS `905840579680`, Worker `bane-dev`) and `prod
 
 ## What each stack owns
 
-Receiving also owns the Ohio `bane-inbound-dead-letters` queue, its SNS redrive policy and a CloudWatch alarm. Both stacks require the non-secret `bane:receivingAlarmTopicArn` of an existing monitored Ohio SNS topic. See [Receiving operations](../../docs/receiving-operations.md) for its policy, CI permission scope and pre-traffic checks.
+The deploy role owns the Ohio mail bucket, public access block, bucket policy and lifecycle, the inbound and feedback topics, inbound HTTPS subscription/redrive, catch-all receipt rule, DLQ and alarm. It also manages the Virginia trusted feedback topic and its two-phase publish policy. [Receiving operations](../../docs/receiving-operations.md) covers required `bane:mailControlImports`, `bane:trustedFeedbackPublish` and `bane:receivingAlarmTopicArn` settings and the one-time role policy.
 
-Each stack adopts **10 existing resources** through the `import` options in [index.ts](index.ts), all with `protect: true`:
+In addition to existing mail resources identified by the adoption inventory, each stack adopts these **10 existing resources** through the `import` options in [index.ts](index.ts), all with `protect: true`:
 
 | Owner | Resources | Import ID |
 |---|---|---|
@@ -19,7 +19,7 @@ Each stack **creates one access key**; AWS cannot return the old key's secret. `
 
 `bane:publishDomainConnectKey` defaults to **false**. Only production may enable it, to **create** two public TXT records at `_dck1.domainconnect.bane.mx`. Verify the [public key in index.ts](index.ts) matches the signing key and the records are still absent first.
 
-**Never manage here:** the Worker code, routes, custom domains (including `100::` AAAAs), other bindings/secrets, queue consumers, or any other DNS (including SES DKIM and `_bane`). SES is entirely outside this program: the active receipt rule set, its rules, identities, tenants, configuration sets, SNS and the mail bucket belong to the app and the operator. The stack does not own state storage, deploy roles, KMS keys or the old manual IAM key.
+**Never manage here:** the Worker code, routes, custom domains (including `100::` AAAAs), other bindings/secrets, queue consumers, or any other DNS (including SES DKIM and `_bane`). The operator activates the receipt rule set, the Worker manages identities, tenants and SES configuration sets; Pulumi owns the catch-all rule inside the reviewed active set. The stack does not own state storage, deploy roles, KMS keys or the old manual IAM key.
 
 ## CI
 
@@ -27,4 +27,4 @@ Each stack **creates one access key**; AWS cannot return the old key's secret. `
 
 Each stack settings file pins its KMS `secretsprovider`; a clean checkout needs it, or Pulumi falls back to the passphrase provider and refuses to run. `Pulumi.dev.yaml` also carries the existing stack's `encryptedkey`. After the first init of `production`, copy its generated `encryptedkey` from the stack settings into `Pulumi.production.yaml` so later runs from a clean checkout can decrypt state.
 
-For the first run, dispatch on `dev` with `init: true`, `preview: true`. Init creates the stack; expect **10 imports, one access-key create and two dev Worker-secret writes, with zero replacements or deletes**. Then run `init: true`, `preview: false` while no dev deploy or E2E is running. After the dev E2E passes on the new key, delete the old hand-made `bane-runtime` key; IAM allows only two keys per user, and a future key replacement needs the free slot. Production follows the same sequence and writes the new key to `bane-production` only; the old `opensend-mx` Worker, its secrets and its Hyperdrive are untouched.
+For a new stack, dispatch on `dev` with `init: true`, `preview: true`. Init creates the stack; expect the baseline imports, inventoried mail-resource imports or creates, one access-key create and two dev Worker-secret writes, with zero replacements or deletes. Then run `init: true`, `preview: false` while no dev deploy or E2E is running. After the dev E2E passes on the new key, delete the old hand-made `bane-runtime` key; IAM allows only two keys per user, and a future key replacement needs the free slot. Production follows the same sequence and writes the new key to `bane-production` only; the old `opensend-mx` Worker, its secrets and its Hyperdrive are untouched.

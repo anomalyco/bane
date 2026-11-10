@@ -169,8 +169,9 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   function messageScope(c: Ctx, delivery?: string) {
     const v=access(c,'read');
     if (delivery!=='true') return v;
-    const credential=c.get('actor')?.credential;
-    if (credential!=='dashboard' && !(credential==='apiKey' && v.admin)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a dashboard session or an unrestricted live manage API key.');
+    const actor=c.get('actor'),credential=actor?.credential;
+    // A dashboard member reads only addressed mail, like a non-admin key (L1).
+    if (!(credential==='dashboard' && actor?.role!=='member') && !(credential==='apiKey' && v.admin)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
     return {...v,admin:true};
   }
   const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});

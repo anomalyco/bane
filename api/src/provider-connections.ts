@@ -135,7 +135,12 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
         if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
       });
       if (!(await runtime.db.execute(setPoolState(owned,'receiving_state',sql`,inbound_bucket=${bucket},receiving_checked_at=now()`))).rowCount) throw busy();
-    } catch(e) { receiveFailure=e; }
+    } catch(e) {
+      receiveFailure=e;
+      // A simultaneous outbound failure can be the one that escapes this run.
+      // Keep the receiving resource/operator action visible independently.
+      if (e instanceof ApiError && e.code==='POOL_RECEIVING_DRIFT') log('warn',{operation:'shared-receiving-setup',region,code:e.code,message:e.message});
+    }
     if (!result.rows[0]!.sending) {
       const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, verifiedPoolPrincipal:principal, connectionSetup: true, registerTopic: async (_account, arn) => {
         if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
@@ -313,7 +318,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
         try { await ensureTenant(runtime, row.workspace_id, row.id); }
         catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-tenant-setup', region, connectionId: row.id, code: awsError(e).code }); }
       }
-    } catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-pool-setup', region, code: awsError(e).code }); }
+    } catch (e) { if (e instanceof ModuleLoadError) throw e; const error=awsError(e); log('warn', { operation: 'shared-pool-setup', region, code: error.code, ...(error.code==='POOL_SENDING_DRIFT'?{message:error.message}:{}) }); }
   }
 }
 async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {

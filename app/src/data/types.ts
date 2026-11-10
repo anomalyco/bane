@@ -240,6 +240,7 @@ export type ConnectionState = 'awaiting_role' | 'provisioning' | 'ready' | 'fail
 export type TenantState = 'pending' | 'ready' | 'failed'
 export interface ProviderConnection { id: string; kind: ConnectionKind; region: string; state: ConnectionState; tenant: TenantState; awsAccountId: string | null; roleArn: string | null; templateVersion: string | null; quickCreateUrl: string | null; importedDomains?: number }
 export interface WorkspaceInvitation { id: string; workspaceId: string; email: string; role: WorkspaceRole; expiresAt: string; acceptUrl: string }
+export interface WorkspaceInvitationPreview { id: string; workspaceId: string; workspaceName: string; workspaceSlug: string; inviterName: string; inviterEmail: string; role: WorkspaceRole; expiresAt: string; status: 'pending' | 'accepted' }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }
 export interface ConsentInput { status: "subscribed" | "unsubscribed"; source?: string; evidence?: string; policyVersion?: string; occurredAt?: string; confirmResubscribe?: boolean }
 export interface ConsentEvent { id: string; status: "subscribed" | "unsubscribed"; source: string; evidence: string | null; policyVersion: string | null; occurredAt: string }

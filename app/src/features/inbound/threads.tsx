@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } 
 import { Link, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
-import { EmailPreview } from '../../components/EmailPreview'
+import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { useApi, useApiDef, useApiMutation, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, type InboundAddress, type InboundMessage, type InboundThread, type InboundThreadDetail, type InboundThreadPatch, type InboundThreadView, type MailAddress } from '../../data/types'
@@ -10,7 +10,7 @@ import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
-import { addressName, full, idempotencyFor, nameOf, when } from './shared'
+import { addressName, cleanName, full, idempotencyFor, nameOf, when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 
@@ -61,7 +61,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   return <li id={`message-${message.id}`} className="mailbox-message" data-direction={outbound ? 'outbound' : 'inbound'} data-unread={unread || undefined} data-reply-target={isTarget || undefined}>
     <article className="mailbox-message__card">
       <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
-        <span className="mailbox-message__from"><strong>{outbound ? 'You' : nameOf(message.from)}</strong><span className="muted">{message.from.address}</span></span>
+        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : nameOf(message.from)}</bdi></strong><bdi className="muted">{message.from.address}</bdi></span>
         <span className="mailbox-message__meta">
           {unread && <StatusBadge status="New" tone="info" />}
           {outbound && <StatusBadge status={label(message.status)} tone={statusTone(message.status)} />}
@@ -78,7 +78,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         {detail.error && <Alert tone="danger">{detail.error instanceof Error ? detail.error.message : 'The full message could not be loaded.'}</Alert>}
         {loaded ? loaded.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full.</Alert>
           : message.bodyTruncated && <Alert tone="info">This is a preview of a long message. <Button variant="ghost" size="sm" loading={pending && wanted === 'full'} onClick={() => setWanted('full')}>Show the full message</Button></Alert>}
-        {formatted && loaded?.html ? <EmailPreview html={loaded.html} title={`Message from ${nameOf(message.from)}`} remoteImages className="mailbox-message__html" />
+        {formatted && loaded?.html ? <ReceivedEmailPreview html={loaded.html} title={`Message from ${nameOf(message.from)}`} className="mailbox-message__html" />
           : <div className="mailbox-message__body">{(showQuoted ? text : replyText || text) || <span className="muted">(no text)</span>}</div>}
         {loaded && wanted === 'formatted' && !loaded.html && <p className="mailbox-message__attachments-note muted">This message has no formatted version.</p>}
         <div className="cluster mailbox-message__toggles">
@@ -174,8 +174,13 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
   </section>
 }
 
+// Each recipient's real address is shown on its own, isolated from the sender-chosen name, so a
+// name such as "ceo@acme.com" or one with bidi overrides can't pass for the address (L17).
 function RecipientList({ label: title, values, people }: { label: string; values: string[]; people: Map<string, MailAddress> }) {
-  return <p className="mailbox-composer__to inbound-recipients"><span className="inbound-recipients__label">{title}</span><span>{values.map(value => full(people.get(value) ?? { name: null, address: value })).join(', ')}</span></p>
+  return <p className="mailbox-composer__to inbound-recipients"><span className="inbound-recipients__label">{title}</span><span className="inbound-recipients__list">{values.map(value => {
+    const name = cleanName(people.get(value)?.name)
+    return <span key={value} className="inbound-recipient">{name && <bdi className="muted">{name}</bdi>}<bdi className="inbound-recipient__address">{value}</bdi></span>
+  })}</span></p>
 }
 
 function Composer({ thread, target, explicit, onClearTarget, addressId, addresses, textarea }: { thread: InboundThreadDetail; target: InboundMessage; explicit: boolean; onClearTarget: () => void; addressId?: string; addresses: Addresses; textarea: RefObject<HTMLTextAreaElement | null> }) {
@@ -199,6 +204,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const withAll = senderAddress && !replyAll ? replyRecipients(target, ownAddressesOf(senderAddress), true) : resolved
   const extra = withAll ? withAll.to.length + withAll.cc.length - (resolved?.to.length ?? 0) - (resolved?.cc.length ?? 0) : 0
   const people = useMemo(() => new Map([target.from, ...target.replyTo, ...target.to, ...target.cc].map(person => [person.address.toLowerCase(), person])), [target])
+  const redirected = target.direction !== 'outbound' && target.replyTo.length > 0 && target.replyTo.some(person => person.address.toLowerCase() !== target.from.address.toLowerCase())
   async function submit(event?: FormEvent, allowAutomated = false) {
     event?.preventDefault()
     if (!text.trim() || !sender || !resolved?.to.length || send.isPending) return
@@ -223,6 +229,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           <RecipientList label="From" values={[senderOf(senderAddress).address.toLowerCase()]} people={new Map([[senderOf(senderAddress).address.toLowerCase(), senderOf(senderAddress)]])} />
           {resolved.to.length ? <RecipientList label="To" values={resolved.to} people={people} /> : <p className="mailbox-composer__to">This reply has no recipients outside your own addresses.</p>}
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
+          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to go to a different address than the one it came from (<bdi>{target.from.address}</bdi>).</p>}
         </>}
     </div>
     <Textarea ref={textarea} id="inbound-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder="Write a reply" disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />

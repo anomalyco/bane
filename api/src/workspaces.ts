@@ -3,13 +3,14 @@ import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { authUser } from './db/google-auth.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
-import { approvedGoogleIdentity, invitationRecipient } from './google-auth.js';
+import { approvedGoogleIdentity, invitationRecipient, verifiedDashboardUser } from './google-auth.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
 const Workspace = z.object({ id: z.string(), name: z.string(), slug: z.string(), role: WorkspaceRole }).openapi('Workspace');
 const Member = z.object({ id: z.string(), userId: z.string(), email: z.string(), name: z.string(), role: WorkspaceRole }).openapi('WorkspaceMember');
 const Invitation = z.object({ id: z.string(), workspaceId: z.string(), email: z.string(), role: WorkspaceRole, expiresAt: z.string(), acceptUrl: z.string().url() }).openapi('WorkspaceInvitation');
+const InvitationPreview = z.object({ id: z.string(), workspaceId: z.string(), workspaceName: z.string(), workspaceSlug: z.string(), inviterName: z.string(), inviterEmail: z.string(), role: WorkspaceRole, expiresAt: z.string(), status: z.enum(['pending', 'accepted']) }).openapi('WorkspaceInvitationPreview');
 const Invite = z.object({ email: z.email().toLowerCase(), role: WorkspaceRole }).strict().openapi('InviteWorkspaceMember');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) });
 const security: Record<string, string[]>[] = [{ dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -34,10 +35,11 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
 
 // Called only in the transaction that *inserts* the Google user. Ordinary dashboard requests,
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
+// An invitation is claimed here only when it is the account's sole way in. An approved account
+// gets its own workspace and confirms the invitation in the dashboard, never during sign-in (M9).
 export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
   if (!allowSignup) return !!invitationId && !!await claimInvitation(db, user.id, user.email, invitationId);
   await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`, region);
-  if (invitationId) await claimInvitation(db, user.id, user.email, invitationId);
   return true;
 }
 
@@ -169,6 +171,22 @@ export function registerWorkspaces(app: App) {
       if (!result.rowCount) notFound('Invitation');
     });
     return c.json({ id, deleted: true as const }, 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/workspaces/invitations/{id}', operationId: 'getWorkspaceInvitation', tags, security,
+    description: 'Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.',
+    request: { params: IdParams }, responses: { 200: response(InvitationPreview), ...errors } }), async c => {
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    const a = await verifiedDashboardUser(c.env, c.req.raw.headers), invitationId = c.req.valid('param').id;
+    // Same conditions as claimInvitation for a pending invitation, plus the idempotent accepted case.
+    const result = await c.env.db.execute<z.infer<typeof InvitationPreview>>(sql`SELECT i.id, i.workspace_id AS "workspaceId", w.name AS "workspaceName", w.slug AS "workspaceSlug",
+        u.name AS "inviterName", u.email AS "inviterEmail", i.role, i.expires_at AS "expiresAt", CASE WHEN i.status = 'accepted' THEN 'accepted' ELSE 'pending' END AS status
+      FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id JOIN auth_user u ON u.id = i.inviter_id
+      JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
+      WHERE i.id = ${invitationId} AND i.email = ${a.email.toLowerCase()} AND i.role IN ('owner','admin','member') AND (
+        (i.status = 'pending' AND i.expires_at > now() AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner')))
+        OR (i.status = 'accepted' AND EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id = i.workspace_id AND m.user_id = ${a.userId})))`);
+    const row = result.rows[0] ?? notFound('Invitation');
+    return c.json(InvitationPreview.parse({ ...row, expiresAt: new Date(row.expiresAt).toISOString() }), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces/invitations/{id}/accept', operationId: 'acceptWorkspaceInvitation', tags, security, request: { params: IdParams }, responses: { 200: response(z.object({ workspaceId: z.string() })), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');

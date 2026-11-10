@@ -5,7 +5,7 @@ import { useApiDef, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '.
 import { queries } from '../../data/queries'
 import type { Email, ReceivedEmail, ReceivedEmailDetail } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
-import { EmailPreview, htmlToText } from '../../components/EmailPreview'
+import { EmailPreview, ReceivedEmailPreview, htmlToText } from '../../components/EmailPreview'
 import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton, logColumns } from './skeletons'
@@ -23,7 +23,9 @@ export function LogsPage() {
   const { regionId } = useRegion()
   const [params] = useSearchParams()
   const campaignId = params.get('campaign') || undefined
-  return params.get('view') === 'received' ? <ReceivedLogs key={regionId} regionId={regionId} /> : <RegionalLogs key={`${regionId}:${campaignId ?? ''}`} regionId={regionId} campaignId={campaignId} />
+  // Received logs show the whole workspace, including unrouted mail: owners and admins only. Members read their addresses in Receiving.
+  const { canAdminister } = useWorkspaceAccess()
+  return canAdminister && params.get('view') === 'received' ? <ReceivedLogs key={regionId} regionId={regionId} /> : <RegionalLogs key={`${regionId}:${campaignId ?? ''}`} regionId={regionId} campaignId={campaignId} />
 }
 function LogsHeader({ regionId, view }: { regionId: string; view: 'sent' | 'received' }) {
   const [params, setParams] = useSearchParams()
@@ -32,7 +34,7 @@ function LogsHeader({ regionId, view }: { regionId: string; view: 'sent' | 'rece
   // The sidebar's region selector already names the region; repeat it only when it is hidden or a campaign filter shows another region.
   // Hosted logs span every region and name none.
   return <><PageHeader title="Logs" actions={!multiTenant && (!canAdminister || regionId !== selected) ? <span className="muted">{regionId}</span> : undefined} />
-    <Tabs label="Log type" value={view} onValueChange={value => { const next = new URLSearchParams(params); if (value === 'received') next.set('view', 'received'); else next.delete('view'); setParams(next) }} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /></>
+    {canAdminister && <Tabs label="Log type" value={view} onValueChange={value => { const next = new URLSearchParams(params); if (value === 'received') next.set('view', 'received'); else next.delete('view'); setParams(next) }} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} />}</>
 }
 function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -111,8 +113,10 @@ export function ReceivedEmailDetailPage() {
 function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const { multiTenant } = useWorkspaceAccess()
   const [view, setView] = useState('preview')
-  // Inline images reference attachments by Content-ID; point them at the signed S3 links.
-  const html = email.attachments.reduce((value, file) => file.contentId && file.url ? value.split(`cid:${file.contentId}`).join(file.url) : value, email.html ?? '')
+  // Inline images reference attachments by Content-ID. The preview swaps in the signed S3 link only for an
+  // exact img[src="cid:…"] after sanitizing, never by text replacement in sender-controlled HTML (L15).
+  const html = email.html ?? ''
+  const inlineImages = Object.fromEntries(email.attachments.flatMap(file => file.contentId && file.url ? [[file.contentId, file.url]] : []))
   const hasHtml = html.trim().length > 0
   const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => email.verdicts[key])
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs?view=received" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
@@ -120,7 +124,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full. Download the original for the complete content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
-      {view === 'preview' ? hasHtml ? <EmailPreview html={html} title="Received message preview" remoteImages /> : email.text ? <pre className="plain-text-preview">{email.text}</pre> : <EmptyState title="This message has no body" />
+      {view === 'preview' ? hasHtml ? <ReceivedEmailPreview html={html} title="Received message preview" inlineImages={inlineImages} /> : email.text ? <pre className="plain-text-preview">{email.text}</pre> : <EmptyState title="This message has no body" />
         : view === 'plain' ? <pre className="message-source">{email.text || 'No plain-text body.'}</pre>
         : view === 'html' ? <pre className="message-source">{email.html || 'No HTML body.'}</pre>
         : <pre className="message-source">{(email.headers ?? []).map(header => `${header.name}: ${header.value}`).join('\n') || 'No headers stored.'}</pre>}

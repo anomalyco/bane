@@ -7,7 +7,7 @@ import { jwt } from 'better-auth/plugins';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, exists, gt, inArray, ne, sql } from 'drizzle-orm';
-import { hasSessionCookie, isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
+import { HOST_COOKIE, hasSessionCookie, isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 import { workspaceMembers } from './db/workspaces.js';
@@ -15,6 +15,8 @@ import { claimInvitation, onboardNewUser, WorkspaceRole } from './workspaces.js'
 import { ConnectionSummary, connectionSummary } from './provider-connections.js';
 
 const day = 24 * 60 * 60;
+// Every cookie Better Auth sets for the dashboard and MCP sign-in flows.
+const AUTH_COOKIES = ['session_token', 'session_data', 'account_data', 'dont_remember', 'state', 'oauth_state'] as const;
 
 function configured(runtime: Runtime) {
   return Boolean(runtime.config.googleClientId && runtime.config.googleClientSecret && runtime.config.authSecret);
@@ -180,7 +182,11 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
       storeAccountCookie: false, storeStateStrategy: 'database', skipStateCookieCheck: false,
     },
     advanced: {
-      cookiePrefix: 'bane', useSecureCookies: secure,
+      // __Host- cookies (Secure, Path=/, no Domain) cannot be set or overwritten from a sibling
+      // subdomain, so another *.bane.mx host cannot plant a session (L3). Better Auth would add
+      // its own __Secure- prefix, so name the cookies here and leave that prefix off.
+      cookiePrefix: 'bane', useSecureCookies: false,
+      ...(secure ? { cookies: Object.fromEntries(AUTH_COOKIES.map(name => [name, { name: `${HOST_COOKIE}${name}` }])) } : {}),
       defaultCookieAttributes: { httpOnly: true, secure, sameSite: 'lax', path: '/' },
       trustedProxyHeaders: false, disableCSRFCheck: false, disableOriginCheck: false,
       ipAddress: { ipAddressHeaders: ['x-bane-client-ip', 'x-opensend-client-ip'] },
@@ -213,11 +219,14 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
       session: {
         create: { before: async (session, context) => {
           const profile = profileFor(context);
-          if (runtime.config.multiTenant && profile.returning) {
+          let approved = await isApprovedUser(runtime, session.userId);
+          // Sign-in claims an invitation only for an account with no membership, for which it is the
+          // only way in. Anyone with a workspace confirms the invitation in the dashboard (M9).
+          if (!approved && runtime.config.multiTenant && profile.returning) {
             const invitationId = await callbackInvitation();
-            if (invitationId) await claimInvitation(runtime.db, session.userId, profile.email, invitationId);
+            if (invitationId && await claimInvitation(runtime.db, session.userId, profile.email, invitationId)) approved = await isApprovedUser(runtime, session.userId);
           }
-          if (!await isApprovedUser(runtime, session.userId)) throw new APIError('FORBIDDEN');
+          if (!approved) throw new APIError('FORBIDDEN');
         } },
         update: { before: async (changes, context) => {
           if (!changes.expiresAt) return;

@@ -1,5 +1,6 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { S3Client } from '@aws-sdk/client-s3';
+import { parseFragment, serialize, type DefaultTreeAdapterMap } from 'parse5';
 import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
@@ -265,14 +266,51 @@ export async function replyParentId(db: DbExecutor, original: MessageRow) {
   throw new ApiError(409, 'REPLY_TARGET_NOT_ACCEPTED', 'The original outbound email has no provider Message-ID. Wait for acceptance or reply to an earlier received message.');
 }
 
-// Received HTML can contain URL schemes the sending pipeline rejects (data:, javascript:). Neutralize them instead of failing the forward.
+// Received HTML quoted into a reply is rebuilt from an allow-list (L7): parsed with parse5, only
+// formatting elements and attributes survive, URLs keep safe schemes, and the result is
+// re-serialized, so unclosed tags, event handlers and comments cannot reach the outgoing message.
+const QUOTE_DROP = new Set(['script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'noscript', 'noembed', 'noframes', 'template', 'title', 'head', 'meta', 'link', 'base', 'svg', 'math', 'input', 'button', 'select', 'textarea', 'option', 'optgroup', 'datalist', 'audio', 'video', 'source', 'track', 'canvas', 'map', 'area', 'param', 'xmp', 'plaintext', 'dialog', 'portal']);
+const QUOTE_KEEP = new Set(['a', 'abbr', 'address', 'article', 'b', 'bdi', 'bdo', 'big', 'blockquote', 'br', 'caption', 'center', 'cite', 'code', 'col', 'colgroup', 'dd', 'del', 'dfn', 'div', 'dl', 'dt', 'em', 'figcaption', 'figure', 'font', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'i', 'img', 'ins', 'kbd', 'li', 'main', 'mark', 'nav', 'ol', 'p', 'pre', 'q', 's', 'samp', 'section', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'tt', 'u', 'ul', 'var', 'wbr']);
+const QUOTE_ATTRIBUTES = new Set(['align', 'valign', 'bgcolor', 'color', 'width', 'height', 'border', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'dir', 'lang', 'title', 'alt', 'face', 'size', 'start', 'type', 'span', 'nowrap', 'style']);
+const QUOTE_STYLE = /^(?:color|background-color|font(?:-family|-size|-style|-weight|-variant)?|text-(?:align|decoration|transform|indent)|line-height|letter-spacing|word-(?:spacing|break|wrap)|white-space|vertical-align|direction|(?:margin|padding)(?:-(?:top|right|bottom|left))?|border(?:-(?:top|right|bottom|left))?(?:-(?:width|style|color))?|border-(?:collapse|spacing|radius)|(?:max-|min-)?(?:width|height)|display|list-style-type|table-layout)$/;
+function quoteStyle(value: string) {
+  const kept = value.split(';').flatMap(declaration => {
+    const at = declaration.indexOf(':'), property = declaration.slice(0, at).trim().toLowerCase(), candidate = declaration.slice(at + 1).trim();
+    return at > 0 && QUOTE_STYLE.test(property) && candidate && !/[\\{}<>@]|\/\*|url\s*\(|expression|javascript|behavior|binding|image-set|var\s*\(/i.test(candidate) ? [`${property}:${candidate}`] : [];
+  });
+  return kept.length ? kept.join(';') : null;
+}
+function quoteUrl(value: string, image: boolean) {
+  const url = value.replace(/[\x00-\x20\x7f]/g, '');
+  return (image ? /^(?:https?:|cid:)/i : /^(?:https?:|mailto:|tel:|#)/i).test(url) ? value.trim() : null;
+}
+function cleanQuoteNodes(parent: QuoteParent): void {
+  const next: QuoteNode[] = [];
+  for (const node of parent.childNodes) {
+    if (node.nodeName === '#text') { next.push(node); continue; }
+    if (!('tagName' in node)) continue; // Comments (including Outlook conditional HTML) and doctypes.
+    const tag = node.tagName.toLowerCase();
+    if (QUOTE_DROP.has(tag) || node.namespaceURI !== 'http://www.w3.org/1999/xhtml') continue;
+    cleanQuoteNodes(node);
+    if (!QUOTE_KEEP.has(tag)) { for (const child of node.childNodes) { child.parentNode = parent; next.push(child); } continue; } // Unwrap html, body, form, unknown tags.
+    node.attrs = node.attrs.flatMap(({ name, value, prefix }) => {
+      if (prefix) return [];
+      const attribute = name.toLowerCase();
+      if ((tag === 'a' && attribute === 'href') || (tag === 'img' && attribute === 'src')) { const url = quoteUrl(value, tag === 'img'); return url ? [{ name: attribute, value: url }] : []; }
+      if (!QUOTE_ATTRIBUTES.has(attribute)) return [];
+      if (attribute === 'style') { const style = quoteStyle(value); return style ? [{ name: attribute, value: style }] : []; }
+      return [{ name: attribute, value }];
+    });
+    next.push(node);
+  }
+  parent.childNodes = next;
+}
+type QuoteParent = DefaultTreeAdapterMap['parentNode'];
+type QuoteNode = DefaultTreeAdapterMap['childNode'];
 export function safeForwardHtml(html: string) {
-  return html.replace(/<(script|style|iframe|object|embed)[\s\S]*?<\/\1>/gi, '')
-    .replace(/\s(href|src|background|action|poster|cite|longdesc|data|formaction)\s*=\s*("([^"]*)"|'([^']*)'|[^\s>]+)/gi, (match, name: string, _quoted, doubleValue?: string, singleValue?: string) => {
-      const value = (doubleValue ?? singleValue ?? match.split('=').slice(1).join('=')).trim().replace(/^["']|["']$/g, '');
-      return /^(?:https?:|mailto:|tel:|cid:|#|\/)/i.test(value.replace(/[\x00-\x20]/g, '')) ? match : ` ${name}="#"`;
-    })
-    .replace(/\s(srcset|imagesrcset|ping|archive)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  const fragment = parseFragment(html);
+  cleanQuoteNodes(fragment);
+  return serialize(fragment);
 }
 
 /** Copies delivery status and the SES Message-ID from the sending pipeline onto outbound mailbox messages and emits events. Every minute. */

@@ -232,9 +232,11 @@ export function applySecurityHeaders(headers: Headers): Headers {
 export function secureResponse(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: applySecurityHeaders(new Headers(response.headers)) });
 }
+// HTTPS installations name auth cookies `__Host-bane.*`; plain-HTTP local development uses `bane.*`.
+export const HOST_COOKIE = '__Host-bane.';
 export function hasSessionCookie(headers: Headers): boolean {
   const cookie = headers.get('cookie');
-  return Boolean(cookie && /(?:^|;\s*)(?:__Secure-)?bane\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
+  return Boolean(cookie && /(?:^|;\s*)(?:__Host-)?bane\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.
