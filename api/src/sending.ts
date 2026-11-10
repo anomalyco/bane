@@ -988,6 +988,12 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
   }
 }
 
+/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only. */
+export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
+  const from = `hello@${domain}`;
+  return Receipt.parse(await admitEmails(c, a, SingleSendInput.parse({ from, to: [to], subject: 'Test email from Bane', text: `This is a test email from the Bane dashboard, sent from ${from}. You can reply to it or ignore it.` })));
+}
+
 export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
@@ -1084,6 +1090,8 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;
+    // Attachments belong to the workspace, not to a sender domain, so a domain-restricted key can't show one is its own.
+    if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'A key restricted to sender domains can’t delete attachments. Unused attachments are removed automatically after 30 days.');
     await c.env.db.transaction(async db => {
       const [row] = await attachmentRows(db, a, [attachmentId], true);
       const links = await db.select().from(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.attachmentId, attachmentId))).limit(1);
@@ -1170,6 +1178,8 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
     const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    // A key restricted to sender domains renders only drafts that send from one of them.
+    if (a.domains.length && (!row.draft.from || !senderDomainAllowed(a.domains, row.draft.from.split('@')[1] ?? ''))) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key can only preview campaigns that send from its domains.', 'from');
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, a.workspaceId);
     const rendered = await renderCampaignContent(c.env, row.draft, false);

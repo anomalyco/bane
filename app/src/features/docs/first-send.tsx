@@ -25,14 +25,14 @@ export function sendSnippets({ origin, apiKey, from, to }: { origin: string; api
 
 const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'TypeScript' }]
 
-// Sends a clearly labelled test from hello@<domain> to the signed-in user's own address, through the public send API.
+// Sends a clearly labelled test from hello@<domain> to the signed-in user's own address. The server picks the
+// recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
 export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: string) => void }) {
   const identity = useSession()?.identity
   const to = identity?.email
   const from = `hello@${domain.name}`
   const verified = domain.status === 'verified'
-  const test = useMutation({ mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>('/v1/emails/send', { method: 'POST', idempotencyKey: crypto.randomUUID(),
-    body: { from, to: [to], subject: 'Test email from Bane', text: `This is a test email from the Bane dashboard, sent from ${from}. You can reply to it or ignore it.` } }),
+  const test = useMutation({ mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
     onSuccess: data => onSent?.(data.id) })
   if (!to) return null
   return <>

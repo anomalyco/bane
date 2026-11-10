@@ -31,9 +31,16 @@ export function approvedGoogleIdentity(runtime: Runtime, email: unknown, emailVe
 
 // Operators invite from this list (SELECT email, last_requested_at FROM access_requests ORDER BY requested_at).
 // Only Google-verified addresses reach it, so it needs no separate form, spam check or confirmation email.
+// Bounded: one row per identity (repeat attempts update it), at most ACCESS_REQUEST_CAP rows, and pruned 90 days after
+// the last attempt (maintenance.cleanup). The visitor controls the display name: control characters are stripped.
+const ACCESS_REQUEST_CAP = 10_000;
 async function recordAccessRequest(db: DbExecutor, user: DeniedSignup) {
-  await db.execute(sql`INSERT INTO access_requests(email, name, hosted_domain) VALUES (${user.email}, ${user.name.slice(0, 200)}, ${user.hostedDomain})
+  if (user.email.length > 320) return;
+  const name = user.name.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 200), domain = user.hostedDomain?.slice(0, 253) ?? null;
+  const saved = await db.execute(sql`INSERT INTO access_requests(email, name, hosted_domain) SELECT ${user.email}, ${name}, ${domain}
+    WHERE EXISTS (SELECT FROM access_requests WHERE email=${user.email}) OR (SELECT count(*) FROM (SELECT FROM access_requests LIMIT ${ACCESS_REQUEST_CAP}) r) < ${ACCESS_REQUEST_CAP}
     ON CONFLICT (email) DO UPDATE SET name=excluded.name, hosted_domain=excluded.hosted_domain, last_requested_at=now(), attempts=access_requests.attempts+1`);
+  if (!saved.rowCount) log('warn', { operation: 'access-request', code: 'ACCESS_REQUESTS_FULL', message: `${ACCESS_REQUEST_CAP} pending access requests; new ones are not recorded until older ones are pruned.` });
 }
 
 export function currentGoogleIdentity(runtime: Runtime, email: string, verified: boolean, hd: string | null) {

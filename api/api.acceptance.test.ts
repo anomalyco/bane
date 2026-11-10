@@ -3,6 +3,7 @@ import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
+import { readFile } from 'node:fs/promises';
 // On Linux, Node gives a child a socket as stdin, which openssl cannot reopen through /dev/stdin, so pass a private temp file.
 async function selfSignedPem(key:import('node:crypto').KeyObject) {
   const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
@@ -326,11 +327,16 @@ describe('Public contract and authentication', () => {
   });
 
   test('public stats are unauthenticated, cached installation aggregates with nothing workspace-scoped', async t => {
+    const [{ drizzle }, { refreshPublicStats, publicStatsTick, PUBLIC_STATS_PRIVACY }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/public-stats.js')]);
+    // The minute cron writes the one row the route serves; make sure it exists before the first request.
+    const setup = await fixtureDatabase(t);
+    await refreshPublicStats(drizzle(setup), false);
     const reply = await http('GET', '/v1/public/stats');
     const body = ok(reply);
-    assert.deepEqual(Object.keys(body).sort(), ['acceptedHourly', 'acceptedLast30Days', 'acceptedLastHour', 'deliveryRate', 'generatedAt', 'medianSendLatencyMs', 'regions']);
+    assert.deepEqual(Object.keys(body).sort(), ['acceptedHourly', 'acceptedLast30Days', 'acceptedLastHour', 'available', 'deliveryRate', 'generatedAt', 'medianSendLatencyMs', 'regions']);
     assert.equal(body.acceptedHourly.length, 24);
     assert.equal(body.acceptedHourly.at(-1), body.acceptedLastHour);
+    if (!body.available) assert.deepEqual([body.acceptedLast30Days, body.deliveryRate, body.medianSendLatencyMs, body.regions, new Set(body.acceptedHourly)], [null, null, null, [], new Set([null])]);
     assert.ok(body.regions.every((region: unknown) => typeof region === 'string'));
     const again = await http('GET', '/v1/public/stats');
     assert.equal(again.headers.get('x-bane-stats-cache'), 'hit');
@@ -340,7 +346,6 @@ describe('Public contract and authentication', () => {
 
     // Exact aggregates on fixture mail from two workspaces at a fixed past instant, in a transaction that is rolled back.
     const db = await fixtureDatabase(t);
-    const [{ drizzle }, { computeMonthStats, computePublicStats }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/public-stats.js')]);
     const at = '2004-06-15T12:00:00.000Z', before = (minutes: number) => new Date(Date.parse(at) - minutes * 60_000).toISOString();
     const pool = 'us-fixture-1', other = 'eu-fixture-1', [a, b] = [unique('acceptance-public-a'), unique('acceptance-public-b')];
     type Fixture = { ws: string; region?: string; status: string; outcomes?: number; minutes: number; provider?: boolean; simulated?: boolean; campaign?: boolean; scheduled?: boolean; requeued?: boolean; latencyMs?: number };
@@ -357,40 +362,96 @@ describe('Public contract and authentication', () => {
       { ws: a, status: 'suppressed', minutes: 20, provider: false },
       { ws: a, status: 'rejected', minutes: 15, provider: false },
       { ws: a, status: 'queued', minutes: 1, provider: false },
+      { ws: a, status: 'queued', minutes: 150, provider: false }, // Sent much later (below).
       { ws: b, status: 'delivered', outcomes: 3, minutes: 31 * 1440 }, // Older than 30 days.
       { ws: a, status: 'delivered', outcomes: 3, minutes: -1 }, // After the instant.
     ];
+    const insert = async (f: Fixture, index: number | string) => {
+      const id = unique('public-stats-email'), created = before(f.minutes);
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, scheduled_at, dispatch_version, created_at)
+        VALUES ($1,$2,$3,'fixture',$4,'sender@example.com','["recipient@example.com"]','[]','[]','Private subject','{}',$5,$6,$7,$8,$9,$10,$11)`,
+      [id, f.ws, f.region ?? pool, f.campaign ? unique('public-stats-campaign') : null, !!f.simulated, f.status, f.provider === false ? null : `provider-${index}`, f.outcomes ?? 0,
+        f.scheduled || f.requeued ? new Date(Date.parse(created) + 30_000).toISOString() : null, f.requeued ? 1 : 0, created]);
+      if (f.latencyMs !== undefined) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated, created_at) VALUES ($1,$2,$3,'accepted',$4,$5)",
+        [unique('public-stats-event'), f.ws, id, !!f.simulated, new Date(Date.parse(created) + f.latencyMs).toISOString()]);
+      return id;
+    };
+    // Exact figures: no privacy floor and no rounding.
+    const exact = { workspaces: 1, hourWorkspaces: 1, round: false };
     await db.query('BEGIN');
     try {
       await db.query("INSERT INTO provider_pool_regions(region, aws_account_id, sending_state) VALUES ($1, '000000000000', 'ready')", [pool]);
-      for (const [index, f] of fixtures.entries()) {
-        const id = unique('public-stats-email'), created = before(f.minutes);
-        await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, scheduled_at, dispatch_version, created_at)
-          VALUES ($1,$2,$3,'fixture',$4,'sender@example.com','["recipient@example.com"]','[]','[]','Private subject','{}',$5,$6,$7,$8,$9,$10,$11)`,
-        [id, f.ws, f.region ?? pool, f.campaign ? unique('public-stats-campaign') : null, !!f.simulated, f.status, f.provider === false ? null : `provider-${index}`, f.outcomes ?? 0,
-          f.scheduled || f.requeued ? new Date(Date.parse(created) + 30_000).toISOString() : null, f.requeued ? 1 : 0, created]);
-        if (f.latencyMs !== undefined) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated, created_at) VALUES ($1,$2,$3,'accepted',$4,$5)",
-          [unique('public-stats-event'), f.ws, id, !!f.simulated, new Date(Date.parse(created) + f.latencyMs).toISOString()]);
-      }
-      const tx = drizzle(db);
-      const month = await computeMonthStats(tx, false, at);
-      const stats = await computePublicStats(tx, month, at);
-      assert.deepEqual(stats, {
-        generatedAt: at,
+      const ids = [];
+      for (const [index, f] of fixtures.entries()) ids.push(await insert(f, index));
+      const tx = drizzle(db), refresh = (asOf: string, options: { multiTenant?: boolean; privacy?: typeof exact } = {}) => refreshPublicStats(tx, options.multiTenant ?? false, { asOf, budgetMs: 60_000, privacy: options.privacy ?? exact });
+      const expected = {
+        generatedAt: at, available: true,
         acceptedLast30Days: 8, // Both workspaces, one figure; simulated, suppressed, rejected, queued, old and future mail excluded.
         acceptedLastHour: 3,
         acceptedHourly: [...Array(19).fill(0), 1, 1, 1, 1, 3],
         deliveryRate: 7 / 9, // 7 delivered ÷ (7 delivered + 2 bounced), each email once.
         medianSendLatencyMs: 300, // Median of 100, 200, 400 and 31,000 ms.
         regions: [other, pool],
+      };
+      // Incremental: a refresh 15 minutes earlier, then one at the instant, equals the expected figures from scratch.
+      await refresh(before(15));
+      assert.deepEqual(await refresh(at), expected);
+      assert.deepEqual((await db.query('SELECT stats FROM public_stats')).rows[0].stats, expected, 'The refresh publishes exactly what the route serves.');
+      // Mail that settles after its minute was computed (queued 150 minutes before, sent later) is counted once that minute is a day old.
+      const queued = ids[fixtures.findIndex(f => f.status === 'queued' && f.minutes === 150)]!;
+      await db.query("UPDATE sending_emails SET status='delivered', provider_id='provider-late', event_outcomes=3 WHERE id=$1", [queued]);
+      const hourLater = new Date(Date.parse(at) + 3_600_000).toISOString(), dayLater = new Date(Date.parse(at) + 25 * 3_600_000).toISOString();
+      assert.equal((await refresh(hourLater)).acceptedLast30Days, 9, 'An hour on, only the previously future email joins; the late one waits for its day-old pass.');
+      assert.equal((await refresh(dayLater)).acceptedLast30Days, 10);
+      // A hosted installation counts only mail sent through its shared pool (never a BYO or other tenant's own account) and lists only pool regions.
+      await db.query("DELETE FROM public_stats_minutes WHERE minute < '2005-01-01'");
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [a]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','000000000000','ready')`, [a, pool]);
+      const hosted = await refresh(at, { multiTenant: true });
+      assert.deepEqual([hosted.acceptedLast30Days, hosted.regions, hosted.deliveryRate], [7, [pool], 7 / 8], 'Workspace b has no shared connection: none of its mail counts.');
+      await db.query("DELETE FROM public_stats_minutes WHERE minute < '2005-01-01'");
+
+      // Privacy floor (the defaults): two workspaces are too few to publish anything.
+      assert.deepEqual(await refresh(at, { privacy: PUBLIC_STATS_PRIVACY }), { generatedAt: at, available: false, acceptedLast30Days: null, acceptedLastHour: null, acceptedHourly: Array(24).fill(null), deliveryRate: null, medianSendLatencyMs: null, regions: [] });
+      // Twelve workspaces in the month publish whole-hour, rounded figures; an hour in which fewer than three of them sent stays null.
+      const crowd = Array.from({ length: 12 }, (_, index) => unique(`acceptance-public-crowd-${index}`));
+      for (const ws of crowd) await insert({ ws, status: 'delivered', outcomes: 3, minutes: 2 * 1440 }, ws);
+      for (let n = 0; n < 40; n++) await insert({ ws: crowd[n % 3]!, status: 'delivered', outcomes: 3, minutes: 20 }, `crowd-hour-${n}`);
+      for (let n = 0; n < 7; n++) await insert({ ws: crowd[0]!, status: 'delivered', outcomes: 3, minutes: 70 }, `crowd-solo-${n}`);
+      await db.query("DELETE FROM public_stats_minutes WHERE minute < '2005-01-01'");
+      assert.deepEqual(await refresh(at, { privacy: PUBLIC_STATS_PRIVACY }), {
+        generatedAt: at, available: true,
+        acceptedLast30Days: 70, // 9 + 12 + 40 + 7 = 68, to the nearest 10.
+        acceptedLastHour: 40, // 43 from four workspaces.
+        acceptedHourly: [...Array(19).fill(0), null, null, null, null, 40], // One or two senders in each earlier hour.
+        deliveryRate: 0.971, // 67 ÷ 69.
+        medianSendLatencyMs: null, // The latency samples come from only two workspaces.
+        regions: [other, pool],
       });
-      // A hosted installation lists only ready shared-pool regions.
-      assert.deepEqual((await computeMonthStats(tx, true, at)).regions, [pool]);
-      // A 30-day pass taken 15 minutes earlier, advanced by mail accepted since, matches a fresh pass.
-      assert.equal((await computePublicStats(tx, await computeMonthStats(tx, false, before(15)), at)).acceptedLast30Days, 8);
-      const serialized = JSON.stringify(stats);
-      for (const secret of [a, b, 'sender@example.com', 'recipient@example.com', 'Private subject', 'provider-0']) assert.ok(!serialized.includes(secret), `Public stats must not expose ${secret}.`);
+      const serialized = JSON.stringify(expected);
+      for (const secret of [a, b, ...crowd, 'sender@example.com', 'recipient@example.com', 'Private subject', 'provider-0']) assert.ok(!serialized.includes(secret), `Public stats must not expose ${secret}.`);
     } finally { await db.query('ROLLBACK'); }
+
+    // Each request costs at most one primary-key read of public_stats, never a scan of mail; a failed refresh keeps the last row.
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      await db.query('DELETE FROM public_stats');
+      const statements = t.mock.method(db, 'query');
+      const pending = await local('GET', '/v1/public/stats');
+      assert.equal(error(pending, 503, 'PUBLIC_STATS_PENDING').retryable, true, 'Before the first refresh there is nothing to serve, and nothing is computed.');
+      const sent = () => statements.mock.calls.map(call => String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]));
+      assert.deepEqual(sent(), ['SELECT stats FROM public_stats WHERE singleton']);
+      statements.mock.restore();
+      await refreshPublicStats(runtime.db, false, { budgetMs: 60_000 });
+      const stored = (await db.query('SELECT stats FROM public_stats')).rows[0].stats;
+      await publicStatsTick({ config: runtime.config, db: { transaction: async () => { throw new Error('canceling statement due to statement timeout'); } } as never });
+      const counted = t.mock.method(db, 'query');
+      const first = await local('GET', '/v1/public/stats'), second = await local('GET', '/v1/public/stats');
+      assert.deepEqual([first.headers.get('x-bane-stats-cache'), second.headers.get('x-bane-stats-cache')], ['miss', 'hit']);
+      assert.deepEqual(ok(first), stored, 'A failed refresh leaves the last published figures in place.');
+      assert.deepEqual(ok(second), stored);
+      assert.equal(counted.mock.callCount(), 1, 'One statement for the miss, none for the hit.');
+      assert.doesNotMatch(String((counted.mock.calls[0]!.arguments[0] as { text?: string }).text), /sending_emails/);
+    });
   });
 
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
@@ -684,10 +745,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       { allowed: false, email: returningEmail, hd: 'revoked.invalid', verified: true, sub: returningSub },
       { allowed: false, email: `${unique('mock-returning-revoked')}@unapproved.invalid`, hd: undefined, verified: true, sub: returningSub },
     ];
+    let profileName = 'Mock provider identity';
     async function login(scenario: typeof scenarios[number], callbackURL = `${origin}/`) {
       fixtureEmails.push(scenario.email);
       jwtFault = scenario.jwtFault ?? '';
-      profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: 'Mock provider identity', email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
+      profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: profileName, email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
       const userBefore = (await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows;
       const subjectBefore = (await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows;
       const sessionsBefore = (await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows;
@@ -820,6 +882,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
       // The rolled-back sign-up leaves the verified address as an access request, and nothing else.
       assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mock provider identity', hosted_domain: null, attempts: 1 }]);
+      // The visitor controls the display name: control and format characters never reach the table.
+      profileName = 'Mallory\u0007\u202e\nEvil';
+      await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
+      profileName = 'Mock provider identity';
+      assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mallory Evil', hosted_domain: null, attempts: 2 }]);
       const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
       assert.equal(new URL(invitation.acceptUrl).searchParams.get('invitation'), invitation.id);
       const guestSub = unique('guest-sub');
@@ -945,6 +1012,21 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null}); assert.deepEqual(claimed,{total:0,verified:0});
         assert.deepEqual({...sendingLimit,resetAt:undefined,nextCapAt:undefined},{cap:100,used:0,resetAt:undefined,nextCap:1000,nextCapAt:undefined}); assert.ok(Date.parse(sendingLimit.nextCapAt)>Date.now()+6*86400_000,'A new hosted workspace moves to 1,000 after a week.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
+        // GET /v1/me reads the allowance without row locks: a pending operator pause or cap change (a row lock on the
+        // workspace) doesn't hold it up, while admission's hosted_allowance still waits for it.
+        const holder = await pool.connect();
+        try {
+          await holder.query('BEGIN'); await holder.query('SELECT 1 FROM workspaces WHERE id=$1 FOR UPDATE', [a.org.id]);
+          const me = await Promise.race([local('GET','/v1/me',undefined,a.cookie), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('GET /v1/me waited for a row lock.')), 3000))]);
+          assert.deepEqual(ok(me).connection.sendingLimit, sendingLimit);
+          const admission = await pool.connect();
+          try {
+            await admission.query("SET lock_timeout='200ms'");
+            await assert.rejects(admission.query('SELECT allowance FROM hosted_allowance($1,1,0,100,1000,5000,0)', [a.org.id]), (e: Json) => e.code === '55P03');
+          } finally { await admission.query('RESET lock_timeout'); admission.release(); }
+        } finally { await holder.query('ROLLBACK'); holder.release(); }
+        const [locked, read] = await Promise.all(['hosted_allowance', 'hosted_allowance_read'].map(async fn => (await pool.query(`SELECT allowance FROM ${fn}($1,1,0,100,1000,5000,0)`, [a.org.id])).rows[0].allowance));
+        assert.deepEqual(read, locked, 'The lock-free read reports exactly what admission charges against.');
         const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
         assert.ok(!calls.includes('CreateTenantCommand'), 'A tenant must wait for the confirmed regional feedback pool.');
@@ -1043,6 +1125,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               if(q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${zone}`) return Response.json({Status:0,Answer:[{name:q,type:16,data:'v=DMARC1; p=reject'}]});
+              if(type==='NS') return Response.json({Status:3}); // Receiving hosts here are not delegated zones.
               assert.equal(type,'TXT'); assert.equal(init?.redirect,'manual');
               if(q===`_domainconnect.${name}`) return Response.json({Status:3,Authority:[{name:zone,type:6,data:'ns.invalid. hostmaster.invalid. 1 2 3 4 5'}]});
               assert.equal(q,`_domainconnect.${zone}`);
@@ -1175,6 +1258,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const name=url.searchParams.get('name')!,host=activeMx.has(name)?`inbound-smtp.${region}.amazonaws.com`:name===domain?'existing.invalid':null;
               return Response.json({Status:0,Answer:host?[{name,type:15,data:`10 ${host}.`},...(fault==='mixed' && activeMx.has(name)?[{name,type:15,data:'20 other.invalid.'}]:[])]:[]});
             }
+            if(url.searchParams.get('type')==='NS') return Response.json({Status:3}); // No delegated receiving hosts in this fixture.
             assert.equal(url.searchParams.get('type'),'TXT');
             const q=url.searchParams.get('name')!;
             if(q.startsWith('_dmarc.')) {
@@ -2014,7 +2098,7 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('hourly retention removes only old OAuth registrations without consent, access or refresh tokens', async t => {
+  test('hourly retention removes only old OAuth registrations without consent, access or refresh tokens, and access requests after 90 days', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, request }) => {
       const { cleanup } = await import('./src/maintenance.js');
       const ids: string[] = [];
@@ -2024,9 +2108,12 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query("INSERT INTO oauth_consent(id,client_id,scopes,created_at,updated_at) VALUES ($1,$1,'{}',now(),now())", [consented]);
       await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,now()+interval '1 hour',now(),'{}')", [access]);
       await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,$2,now()+interval '1 hour',now(),'{}')", [refresh,manager!.userId]);
+      const [stale, recent] = [`${unique('stale-request')}@outside.invalid`, `${unique('recent-request')}@outside.invalid`];
+      await db.query("INSERT INTO access_requests(email,last_requested_at) VALUES ($1,now()-interval '91 days'),($2,now()-interval '89 days')", [stale, recent]);
       await cleanup(runtime);
       const remaining = (await db.query('SELECT client_id FROM oauth_client WHERE client_id=ANY($1)', [ids])).rows.map(row=>row.client_id);
       assert.deepEqual(remaining.sort(), ids.filter(id=>id!==unused).sort());
+      assert.deepEqual((await db.query('SELECT email FROM access_requests WHERE email=ANY($1)', [[stale, recent]])).rows, [{ email: recent }]);
     });
   });
 
@@ -3125,6 +3212,9 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-bane-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    // An attachment belongs to the workspace, not a sender domain: a domain-restricted send key can't delete one.
+    const scoped = await keyFixture(t, { permissions: ['send'], domains: ['restricted.example.com'] });
+    error(await http('DELETE', `/v1/attachments/${attachment.id}`, scoped.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     assert.equal(ok(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret)).deleted, true);
     error(await http('GET', `/v1/attachments/${attachment.id}`, key.secret), 404, 'ATTACHMENT_NOT_FOUND');
   });
@@ -4664,7 +4754,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const {readFile,readdir}=await import('node:fs/promises'),dir=new URL('./migrations/',import.meta.url);
   for(const file of (await readdir(dir)).filter(f=>/^\d+_[a-z_]+\.sql$/.test(f)).sort()) {
     const source=await readFile(new URL(file,dir),'utf8');
-    if(source.startsWith('-- bane:no-transaction\n')){for(const ddl of source.split('\n').filter(s=>s.startsWith('CREATE ')))await db.query(ddl);continue;}
+    // As the migrator: a marked file is one online index build per line, each outside a transaction.
+    if(source.startsWith('-- bane:no-transaction\n')){for(const statement of source.split('\n').filter(line=>line.trim() && !line.startsWith('--')))await db.query(statement);continue;}
     // Only the trigram index needs the harness's existing public extension/opclass.
     await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
     await db.query(source);await db.query('COMMIT');
@@ -5742,6 +5833,56 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('the dashboard test email goes only to the signed-in user, whatever the request says', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const domain = unique('test-send-domain');
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3)", [domain, runtime.config.workspaceId, REGION]);
+      // No recipient, subject or body is accepted: extra fields are ignored and the server picks the signed-in user.
+      const sent = ok(await local('POST', `/v1/domains/${domain}/test-send`, { to: ['someone-else@example.net'], subject: 'Not this' }, 'live', { 'idempotency-key': unique('test-send') }), 202);
+      const row = (await db.query('SELECT from_address, to_addresses, cc_addresses, bcc_addresses, subject FROM sending_emails WHERE id=$1', [sent.id])).rows[0];
+      assert.deepEqual(row, { from_address: 'hello@example.com', to_addresses: [manager!.email], cc_addresses: [], bcc_addresses: [], subject: 'Test email from Bane' });
+      // An API key, even with send permission, can't use it: only a dashboard session has a "yourself".
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('test-send-key'), permissions: ['send'] }), 201).secret;
+      error(await local('POST', `/v1/domains/${domain}/test-send`, undefined, 'live', { authorization: `Bearer ${key}` }), 403, 'DASHBOARD_SESSION_REQUIRED');
+      error(await local('POST', `/v1/domains/${unique('dom-missing')}/test-send`), 404);
+    });
+  });
+
+  test('migration 098 releases duplicate receiving hosts instead of stopping the deploy, and builds its index and CHECK online', async t => {
+    const db = await fixtureDatabase(t);
+    const source = (file: string) => readFile(new URL(`./migrations/${file}`, import.meta.url), 'utf8');
+    // The index is built by its own marked file, outside a transaction; the CHECK is added NOT VALID and validated later.
+    assert.match(await source('098_receiving_host_unique.sql'), /^-- bane:no-transaction\n(?:--.*\n)*CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS domain_claims_receiving_host ON /);
+    assert.match(await source('098_receiving_host_scope.sql'), /NOT VALID/);
+    assert.deepEqual((await db.query(`SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid='domain_claims_receiving_host'::regclass) AS index_valid,
+      (SELECT convalidated FROM pg_constraint WHERE conname='domain_claims_receiving_host_scope') AS check_valid,
+      (SELECT count(*)::int FROM pg_constraint WHERE conrelid='domain_claims'::regclass AND pg_get_constraintdef(oid) LIKE '%reply.%') AS old_checks`)).rows, [{ index_valid: true, check_valid: true, old_checks: 0 }]);
+    // A legacy database: no global index yet, and two workspaces route one host. Part 1 releases the duplicate.
+    await db.query('BEGIN');
+    try {
+      await db.query('DROP INDEX domain_claims_receiving_host');
+      const base = `${unique('legacy-dup')}.example`, [older, owner, bystander] = [unique('legacy-a'), unique('legacy-b'), unique('legacy-c')];
+      for (const ws of [older, owner, bystander]) {
+        await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [ws]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','111122223333','ready')`, [ws, REGION]);
+      }
+      const identity = JSON.stringify({ proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS' } });
+      const route = (name: string, ws: string, host: string, age: string) => db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,receiving_host,ever_proven,identity,created_at)
+        VALUES ($1,$2,$2,'verified','active',$3,true,$4,now()-$5::interval)`, [name, ws, host, identity, age]);
+      await route(base, older, `reply.${base}`, '30 days'); // Older, but reply.<base> is the other claim's own name.
+      await route(`reply.${base}`, owner, `reply.${base}`, '1 day');
+      await route(`other-${base}`, bystander, `other-${base}`, '1 day');
+      await db.query(await source('098_receiving_host_scope.sql'));
+      const rows = (await db.query(`SELECT name, receiving_state, receiving_host, identity->'issue'->>'code' AS issue FROM domain_claims WHERE name IN ($1,$2,$3) ORDER BY name`, [base, `reply.${base}`, `other-${base}`])).rows;
+      assert.deepEqual(rows, [
+        { name: base, receiving_state: 'pending', receiving_host: null, issue: 'host_taken' },
+        { name: `other-${base}`, receiving_state: 'active', receiving_host: `other-${base}`, issue: null },
+        { name: `reply.${base}`, receiving_state: 'active', receiving_host: `reply.${base}`, issue: null },
+      ]);
+      await db.query('CREATE UNIQUE INDEX domain_claims_receiving_host ON domain_claims(receiving_host) WHERE receiving_host IS NOT NULL'); // Part 2 now succeeds.
+    } finally { await db.query('ROLLBACK'); }
+  });
+
   test('MX receiving hosts: DNS conflicts are checked when a host is suggested or chosen and in the hourly recheck', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const [{ operationJobs }, { baneRecordUse, receivingCandidates }] = await Promise.all([import('./src/operations.js'), import('./src/receiving-host.js')]);
@@ -5752,21 +5893,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ON CONFLICT (region) DO UPDATE SET receiving_state='ready' RETURNING aws_account_id`, [REGION, `arn:aws:sns:${REGION}:111122223333:receiving-fixture`])).rows[0].aws_account_id;
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
       // DNS stub (cloudflare-dns.com JSON): exact names first, then a *.domain wildcard for names without records of their own.
-      const zone = new Map<string, { mx?: string[]; cname?: string }>();
+      const zone = new Map<string, { mx?: string[]; cname?: string; ns?: string[] }>();
       // Each claim publishes its _bane ownership TXT: the hourly recheck requires a fresh proof before a claim may receive.
       const proofs = new Map<string, string>();
+      // Lookups in flight, their abort signals, and an optional resolver delay: how parallel one check is and what bounds it.
+      let inFlight = 0, maxInFlight = 0, delayMs = 0; const signals: (AbortSignal | null | undefined)[] = [];
       // Patched by hand and restored below: a second t.mock on fetch would restore to the fixture's guard and leak it.
       const networkGuard = globalThis.fetch;
       t.after(() => { globalThis.fetch = networkGuard; });
-      globalThis.fetch = async (input: RequestInfo | URL) => {
-        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
-        const name = url.searchParams.get('name')!;
-        if (url.searchParams.get('type') === 'TXT' && name.startsWith('_bane.') && proofs.has(name.slice(6))) return Response.json({ Status: 0, Answer: [{ name, type: 16, data: JSON.stringify(proofs.get(name.slice(6))) }] });
-        if (url.searchParams.get('type') !== 'MX') return Response.json({ Status: 3 }); // DMARC and the legacy _opensend label: none.
+      const answer = (url: URL) => {
+        const name = url.searchParams.get('name')!, type = url.searchParams.get('type');
+        if (type === 'TXT' && name.startsWith('_bane.') && proofs.has(name.slice(6))) return Response.json({ Status: 0, Answer: [{ name, type: 16, data: JSON.stringify(proofs.get(name.slice(6))) }] });
+        if (type === 'NS') { const ns = zone.get(name)?.ns; return Response.json(ns ? { Status: 0, Answer: ns.map(data => ({ name, type: 2, data })) } : { Status: 3 }); }
+        if (type !== 'MX') return Response.json({ Status: 3 }); // DMARC and the legacy _opensend label: none.
         const entry = zone.get(name) ?? (name.startsWith('*.') ? undefined : zone.get(`*.${name.split('.').slice(1).join('.')}`));
-        if (!entry) return Response.json({ Status: 3 });
+        if (!entry || (!entry.mx && !entry.cname)) return Response.json({ Status: 3 });
         if (entry.cname) return Response.json({ Status: 0, Answer: [{ name, type: 5, data: `${entry.cname}.` }] });
         return Response.json({ Status: 0, Answer: (entry.mx ?? []).map(data => ({ name, type: 15, data })) });
+      };
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        signals.push(init?.signal); inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        try { if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs)); return answer(url); } finally { inFlight--; }
       };
       const ses = '10 inbound-smtp.' + REGION + '.amazonaws.com.', tokens = ['tokena', 'tokenb', 'tokenc'];
       type Claim = { id: string; token: string; name: string };
@@ -5873,11 +6021,73 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_TAKEN').message, /already receives mail in another Bane workspace\. Use inbound\./);
       });
 
+      await t.test('a host another workspace claimed, or delegated to its own name servers, is never suggested, chosen or kept', async () => {
+        const d = await claim(`${unique('rx-claimed')}.example`), esc = (value: string) => value.replaceAll('.', '\\.');
+        // Another workspace holds reply.<domain> as a send-only (account-scope) claim; mail.<domain> is a delegated zone.
+        const claimant = unique('rx-claimant');
+        await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [claimant]);
+        await db.query("INSERT INTO domain_claims(name,workspace_id,claim_scope) VALUES ($1,$2,'account')", [`reply.${d.name}`, claimant]);
+        zone.set(`mail.${d.name}`, { ns: ['ns1.child-host.example.', 'ns2.child-host.example.'] });
+        zone.set(`inbound.${d.name}`, { mx: ['10 mx.other.example.'] });
+        await recheck(d); const suggested = receiving(await read(d));
+        assert.equal(suggested.name, `inbox.${d.name}`);
+        assert.match(suggested.note, new RegExp(`reply\\.${esc(d.name)} is claimed by another Bane workspace`)); assert.match(suggested.note, new RegExp(`mail\\.${esc(d.name)} is a delegated zone`));
+        assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_CLAIMED').message, new RegExp(`is claimed by another Bane workspace.*Use inbox\\.${esc(d.name)}`));
+        // A name below another workspace's claim is theirs as well.
+        assert.match(error(await choose(d, `x.reply.${d.name}`), 409, 'RECEIVING_HOST_CLAIMED').message, new RegExp(`^reply\\.${esc(d.name)}, which contains x\\.reply\\.`));
+        assert.match(error(await choose(d, `mail.${d.name}`), 409, 'RECEIVING_HOST_DELEGATED').message, /delegated zone with its own name servers/);
+        // A live host that is delegated later stops counting as observed at the recheck, so its grace period starts.
+        const liveName = `${unique('rx-delegated-later')}.example`, live = await claim(liveName, { receivingHost: `reply.${liveName}` });
+        zone.set(`reply.${liveName}`, { mx: [ses] }); await recheck(live); assert.equal((await read(live)).receivingIssue, null);
+        zone.set(`reply.${liveName}`, { mx: [ses], ns: ['ns1.child-host.example.'] });
+        await recheck(live); const after = await read(live);
+        assert.deepEqual([after.receivingIssue.code, after.receivingIssue.blocking], ['delegated', true]);
+        assert.equal((await db.query('SELECT receiving_state FROM domain_claims WHERE name=$1', [liveName])).rows[0].receiving_state, 'lost');
+      });
+
+      await t.test('every DNS lookup of one check runs in parallel under one shared time budget', async () => {
+        const d = await claim(`${unique('rx-parallel')}.example`);
+        zone.set(`reply.${d.name}`, { cname: 'shop.vendor.example' });
+        signals.length = 0; maxInFlight = 0; delayMs = 100;
+        try { error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_CNAME'); } finally { delayMs = 0; }
+        // The host, the wildcard, then MX and NS for each of the five other candidates at once (the suggestion).
+        assert.ok(maxInFlight >= 10, `Lookups should overlap; at most ${maxInFlight} ran at once.`);
+        assert.ok(signals.length >= 13 && new Set(signals).size === 1 && signals[0] instanceof AbortSignal, 'Every lookup of the check shares one abort signal (one 5 s budget).');
+      });
+
+      await t.test('two claims racing to one host: the loser reports host_taken instead of failing its job', async () => {
+        const name = `${unique('rx-race')}.example`, d = await claim(name);
+        zone.set(`reply.${name}`, { mx: [ses] });
+        // Another connection routes reply.<domain> for its own workspace and keeps it uncommitted until this job waits on the index.
+        const [rival, watcher] = [await fixtureDatabase(t), await fixtureDatabase(t)], ws = unique('rx-race-rival');
+        await rival.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [ws]);
+        try {
+          await rival.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [ws, REGION, account]);
+          await rival.query('BEGIN');
+          await rival.query("INSERT INTO domain_claims(name,workspace_id,connection_id,receiving_state,receiving_host) VALUES ($1,$2,$2,'pending',$1)", [`reply.${name}`, ws]);
+          const pid = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid, job = recheck(d);
+          for (const started = Date.now(); !(await watcher.query("SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid])).rowCount;) {
+            assert.ok(Date.now() - started < 4000, 'The job should wait on the rival’s uncommitted host.'); await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          await rival.query('COMMIT');
+          await job; // Completes: the unique violation is reported, not retried as an internal error.
+          const raced = await read(d);
+          assert.deepEqual([raced.receivingIssue.code, raced.receivingIssue.host], ['host_taken', `reply.${name}`]);
+          assert.match(raced.receivingIssue.message, /already receives mail in another Bane workspace/);
+          assert.deepEqual((await db.query('SELECT receiving_state, receiving_host FROM domain_claims WHERE name=$1', [name])).rows, [{ receiving_state: 'pending', receiving_host: null }]);
+        } finally { await rival.query('ROLLBACK').catch(() => undefined); await rival.query('DELETE FROM workspaces WHERE id=$1', [ws]); }
+      });
+
       await t.test('conflicts that appear after setup mark receiving as needing attention in the domain and the list', async () => {
         const name = `${unique('rx-later')}.example`, d = await claim(name, { receivingHost: `reply.${name}` });
         zone.set(`reply.${d.name}`, { mx: [ses] });
         await recheck(d); let current = await read(d); assert.equal(current.receiving, 'verified'); assert.equal(current.receivingIssue, null);
-        const listed = async () => ok(await local('GET', '/v1/domains?limit=10')).data.find((row: Json) => row.id === d.id);
+        const listed = async () => {
+          for (let cursor: string | null = ''; cursor !== null;) {
+            const page = ok(await local('GET', `/v1/domains?limit=10${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)), row = page.data.find((item: Json) => item.id === d.id);
+            if (row) return row; cursor = page.nextCursor;
+          }
+        };
         zone.set(`reply.${d.name}`, { cname: 'shop.vendor.example' });
         await recheck(d); current = await read(d);
         assert.deepEqual([current.receivingIssue.code, current.receivingIssue.blocking, current.receivingIssue.target, current.receivingIssue.suggestion], ['cname', true, 'shop.vendor.example', `inbound.${d.name}`]);
@@ -7528,6 +7738,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const key = async (permission: string) => ok(await local('POST', '/v1/api-keys', { name: 'Preview', permissions: [permission] }), 201);
       const reader = await key('read'), sender = await key('send');
       for (const path of previews) error(await request('GET', path, reader.secret), 403, 'PERMISSION_DENIED');
+      // A key restricted to sender domains previews only drafts that send from one of them (this draft has no sender yet).
+      const restricted = ok(await local('POST', '/v1/api-keys', { name: 'Preview', permissions: ['send'], domains: ['restricted.example.com'] }), 201);
+      error(await request('GET', previews[1]!, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
       const importImage = () => local('POST', '/v1/template-assets/import', { url: 'https://example.com/logo.png' });
       ok(await importImage(), 201);
       for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret));
