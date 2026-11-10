@@ -104,7 +104,8 @@ export class DispatcherShard extends DurableObject<Env> {
       if (runtime.config.multiTenant && !identity.accountId) return;
       const report = await runDispatcher(runtime, {
         ...identity, gate: this.gate, priorityWake: this.priorityWake,
-        until: started + RUN_MS, lanes: 2, batchSize: 24, sendConcurrency: 6,
+        until: started + RUN_MS, lanes: 2, batchSize: this.gate.quota && identity.shard.count>1
+          ? Math.min(24,Math.max(1,Math.ceil(this.gate.quota.maxSendRate/identity.shard.count/2))) : 24, sendConcurrency: 6,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
@@ -135,7 +136,7 @@ export class DispatcherShard extends DurableObject<Env> {
       this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
-    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE), wake: workWake(this.env.WAKE_QUEUE, 6) };
+    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
   }
 
   private async closePool() {

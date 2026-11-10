@@ -20,6 +20,8 @@
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",
     "BANE_REGIONAL_SENDING": "true",
     "BANE_TRUSTED_POOL": "true",
+    "BANE_REQUIRE_DMARC_FOR_BULK": "true",
+    "BANE_HOSTED_SCREEN": "true",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",
@@ -35,6 +37,7 @@
     "DISPATCH_RATE_FACTOR": "1.1",
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "bane-prod-work",
+    "WEBHOOK_QUEUE_NAME": "bane-prod-webhooks",
     "FEEDBACK_QUEUE_NAME": "bane-prod-feedback"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
@@ -49,13 +52,16 @@
     // Wrangler binds by name. Work: 753a4b880016464c833b836a63663684; feedback: 34426f99502941fbbed927a059517b7c.
     "producers": [
       { "binding": "WAKE_QUEUE", "queue": "bane-prod-work" },
+      { "binding": "WEBHOOK_QUEUE", "queue": "bane-prod-webhooks" },
+      { "binding": "FEEDBACK_DLQ", "queue": "bane-prod-feedback-dlq" },
       { "binding": "FEEDBACK_QUEUE", "queue": "bane-prod-feedback" }
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
       { "queue": "bane-prod-work", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
-      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1 }
+      { "queue": "bane-prod-webhooks", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 2 },
+      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

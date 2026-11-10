@@ -103,6 +103,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
       // be consumed before a later coalesced commit; callback delivery never waits here.
@@ -201,11 +202,13 @@ export default {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
         const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
         for (const [index, message] of messages.entries()) settleFeedbackMessage(message, outcomes[index]);
-        core.log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
+        const failed=outcomes.filter(outcome=>!outcome.ok).length, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
+        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, oldestMs });
       });
       return;
     }
-    if (batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'bane-work')) {
+    const hooks = batch.queue === env.WEBHOOK_QUEUE_NAME, pool = hooks ? 'webhooks' : 'work';
+    if (!hooks && batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'bane-work')) {
       core.log('error', { code: 'UNKNOWN_QUEUE', queue: batch.queue });
       batch.retryAll();
       return;
@@ -215,7 +218,7 @@ export default {
       // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
       // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
-      const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }), 45000);
+      const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
     }, concurrency);
     batch.ackAll();
@@ -239,10 +242,19 @@ export default {
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
+      // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
+      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
+        const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
+        try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
+          const alarm=(name==='feedback-dlq' && m.backlogCount>0) || oldestMs>60000;
+          core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
+        }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
+      }));
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
       // Minute cron: recover orchestration jobs whose wake was lost.
-      await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));
+      await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
+      if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       await reconcileSharedConnections(runtime);
     }, concurrency);
   },

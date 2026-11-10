@@ -18,9 +18,8 @@ export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request,
 
 // `credential` returns at most one authorized row. Charge the originating principal
 // (the grant for agent tokens), but touch only the credential actually presented.
-export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx, table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL) {
-  const result = await c.env.db.execute<T & { used: number; max_requests: number }>(sql`
-    WITH credential AS (${credential}), budget AS (
+function credentialCtes(table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL) {
+  return sql`credential AS MATERIALIZED (${credential}), budget AS (
       INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
       SELECT workspace_id, key_id, date_trunc('minute', now()), 1 FROM credential
       ON CONFLICT (workspace_id, key_id) DO UPDATE SET
@@ -30,12 +29,15 @@ export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx
       UPDATE ${table} k SET last_used_at = ${new Date().toISOString()}::timestamptz FROM credential, budget WHERE k.id = credential.id
         AND (k.last_used_at IS NULL OR k.last_used_at < now() - interval '1 minute')
         ${table === mailboxKeys ? sql`AND budget.used <= credential.max_requests` : sql``}
-    ) SELECT credential.*, budget.used FROM credential, budget`);
+    )`;
+}
+export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx, table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL) {
+  const result = await c.env.db.execute<T & { used: number; max_requests: number }>(sql`WITH ${credentialCtes(table,credential)} SELECT credential.*,budget.used FROM credential,budget`);
   const row = result.rows[0];
   if (row) checkBudget(c, row.used, row.max_requests);
   return row;
 }
-function checkBudget(c: Ctx, used: number, maxRequests: number) {
+export function checkBudget(c: Ctx, used: number, maxRequests: number) {
   if (used <= maxRequests) return;
   c.header('Retry-After', '60');
   throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
@@ -74,10 +76,16 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       if (!/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
       const limit = c.env.config.apiRateLimitPerMinute;
-      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys, sql`
+      const credential = sql`
         SELECT id, workspace_id, id AS key_id, permissions, domains,
           ${limit}::int AS max_requests
-        FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`));
+        FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`;
+      if(c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
+        const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
+        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,sql`${credential} FOR NO KEY UPDATE`));
+        if(response)return response;
+      }
+      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys,credential));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }

@@ -44,6 +44,7 @@ export interface Config {
   trustedPool?: boolean;
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
+  hostedScreen?: boolean;
   placementShadow?: boolean;
   placementDblZone?: string;
   byoTemplateUrl?: string;
@@ -205,6 +206,9 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
   return getSesSync(runtime, selectedRegion, connection, runClients);
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
+  // Sample routine successes at the source, NOT whole invocations. A sampled-out
+  // request can still emit every error and the minute and batch metrics stay exact.
+  if(level==='info' && (fields.status===200 || fields.status===202 || ['JOB_COMPLETED','QUEUE_WAKE','QUEUE_WAKE_COALESCED','JOB_DEFERRED'].includes(String(fields.code))) && Math.random()>=0.01)return;
   // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
   console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
 }

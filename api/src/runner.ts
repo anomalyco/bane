@@ -1,7 +1,7 @@
 import { setTimeout } from 'node:timers/promises';
 import { Client } from 'pg';
 import { nodeRuntime, postgresConnection } from './adapters/node.js';
-import { drain } from './dispatch.js';
+import { drain,drainJobs } from './dispatch.js';
 import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
 import { cleanup } from './maintenance.js';
@@ -25,6 +25,7 @@ try {
   let listener: Client | undefined, lastListen = 0;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });
   log('info', { code: 'RUNNER_READY', liveSesEnabled: runtime.config.liveEnabled });
+  const hooks=(async()=>{while(!stopped){try{if(await drainJobs(runtime,20,2,5000,'webhooks'))continue;}catch{log('warn',{code:'WEBHOOK_DRAIN_FAILED'});}await setTimeout(1000);}})();
   try {
     await queueStartupDiscovery(runtime);
     while (!stopped) {
@@ -53,7 +54,7 @@ try {
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
-        const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake);
+        const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake,'work');
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
       } catch (error) {
@@ -61,7 +62,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { await sharedSetup; await listener?.end(); await close(); }
+  } finally { stopped=true;await hooks;await sharedSetup; await listener?.end(); await close(); }
 } catch (error) {
   log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
   process.exitCode = 1;

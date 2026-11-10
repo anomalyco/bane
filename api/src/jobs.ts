@@ -76,7 +76,10 @@ export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM cl
 // Reserve before awaiting the claim, so overlapping drains in one isolate cannot both lease MIME work.
 let ingestReserved=false;
 export type JobHandlerResolver = Record<string, JobHandler> | ((type: string) => Promise<JobHandler | undefined> | JobHandler | undefined);
-export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver, limit = 1, concurrency = 1, maxDurationMs = 20000) {
+export type JobPool = 'all' | 'work' | 'webhooks';
+const classes = (pool: JobPool) => pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool === 'all' ? ['hook'] : [])];
+const jobDue = sql`CASE WHEN j.status='running' THEN j.lease_until ELSE j.available_at END`;
+export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver, limit = 1, concurrency = 1, maxDurationMs = 20000, pool: JobPool = 'all') {
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
   const effectiveConcurrency = jobConcurrency(concurrency);
   const laneJobs = Array<number>(effectiveConcurrency).fill(0);
@@ -159,12 +162,17 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
       const exhausted=sql`j.attempts >= CASE WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
-      const allowIngest=!ingestReserved;
+      const allowIngest=pool!=='webhooks' && !ingestReserved;
+      // Only the head of each class enters the preference sort. The expression matches
+      // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
+      const head = (kind:string, n:number) => sql`SELECT j.id,j.type,j.available_at FROM jobs j
+        WHERE public.job_class(j.type)=${kind} AND j.status IN ('pending','running') AND ${jobDue}<=now()
+        AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT ${n} FOR UPDATE SKIP LOCKED`;
       if(allowIngest) ingestReserved=true;
       let claimed:{rows:Claimed[]}|undefined;
       try { claimed = await runtime.db.execute<Claimed>(sql`WITH exhausted AS (
         SELECT j.id,j.workspace_id,CASE WHEN starts_with(j.type,'campaign.') THEN j.payload->>'campaignId' END AS campaign_id
-        FROM jobs j WHERE j.status='running' AND j.lease_until < now() AND ${exhausted} ORDER BY j.id LIMIT 100 FOR UPDATE SKIP LOCKED
+        FROM jobs j WHERE j.status='running' AND j.lease_until < now() AND ${exhausted} ORDER BY j.lease_until,j.id LIMIT 100 FOR UPDATE SKIP LOCKED
       ), parents AS MATERIALIZED (
         SELECT c.workspace_id,c.id FROM sending_campaigns c WHERE (c.workspace_id,c.id) IN (SELECT workspace_id,campaign_id FROM exhausted)
         ORDER BY c.id FOR NO KEY UPDATE SKIP LOCKED
@@ -173,10 +181,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         RETURNING j.workspace_id,j.type,j.payload,x.campaign_id), campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
       deliveries_failed AS (UPDATE operation_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f
         WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), feedback AS (
-        SELECT j.id FROM jobs j WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
-          AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
-          AND ${due}
-        ORDER BY j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
+        SELECT id FROM (${head('feedback', pool!=='webhooks' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
       ), heads AS (
         SELECT DISTINCT ON (j.workspace_id) j.workspace_id,j.available_at,j.id FROM jobs j WHERE ${allowIngest} AND j.type='mailbox.ingest'
           AND ${due} ORDER BY j.workspace_id,j.available_at,j.id
@@ -186,13 +191,12 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         WHERE ${due}
         ORDER BY t.served_at NULLS FIRST,h.available_at,h.id FOR UPDATE OF j SKIP LOCKED LIMIT (SELECT least(1,${claimBatchSize}-count(*)) FROM feedback)
       ), regular AS (
-        SELECT j.id FROM jobs j WHERE ${due}
-          AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
-          AND j.type<>'mailbox.ingest'
+        SELECT j.id FROM (${sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
+        WHERE NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN starts_with(j.type, 'campaign.') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
-          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest))
+          j.available_at, j.id LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
       ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes'
@@ -235,19 +239,19 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   return processed;
 }
 // Keep short quota deferrals moving without spinning wakeups or waiting for the next minute's cron.
-export async function nextWakeDelay(runtime: Runtime) {
+export async function nextWakeDelay(runtime: Runtime, pool: JobPool='all') {
   const result = await runtime.db.execute<{ delay: number | null }>(sql`SELECT CASE WHEN due IS NULL THEN NULL ELSE greatest(0, ceil(extract(epoch FROM due - now())))::int END AS delay
-    FROM (SELECT min(CASE WHEN status = 'running' THEN lease_until ELSE available_at END) AS due
-      FROM jobs WHERE status IN ('pending','running')) upcoming`);
+    FROM (SELECT min(first.due) AS due FROM unnest(${sql.param([...classes(pool),...(pool==='webhooks'?[]:['ingest'])])}::text[]) kind
+      CROSS JOIN LATERAL (SELECT ${jobDue} AS due FROM jobs j WHERE public.job_class(j.type)=kind AND j.status IN ('pending','running') ORDER BY ${jobDue},j.id LIMIT 1) first) upcoming`);
   const delay = result.rows[0]?.delay;
   return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
 }
 // Reserve the next delayed wake: only the caller that moves next_wake_at earlier (or past an expired reservation)
 // may schedule it. Without this every queue invocation scheduled its own follow-up, so each wake burst and each
 // completed job added a chain that never merged, and the duplicates crowded out the wakes that mattered.
-export async function reserveNextWake(runtime: Runtime, delaySeconds: number): Promise<boolean> {
+export async function reserveNextWake(runtime: Runtime, delaySeconds: number, pool: JobPool='all'): Promise<boolean> {
   const reserved = await runtime.db.execute(sql`INSERT INTO job_schedule (workspace_id, next_wake_at)
-    VALUES (${WAKE_SCHEDULE_KEY}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
+    VALUES (${pool==='webhooks'?'scheduler:webhooks':WAKE_SCHEDULE_KEY}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
     ON CONFLICT (workspace_id) DO UPDATE SET next_wake_at = excluded.next_wake_at
     WHERE job_schedule.next_wake_at IS NULL OR job_schedule.next_wake_at <= clock_timestamp()
       OR job_schedule.next_wake_at > excluded.next_wake_at + interval '1 second'
@@ -257,13 +261,13 @@ export async function reserveNextWake(runtime: Runtime, delaySeconds: number): P
 // Drain, then make sure exactly one continuation covers the next due job. A queue invocation may wait in place for a
 // job due within keepAliveMs (paced campaigns release every 10-20 s) instead of relying on a delayed message; if it
 // is interrupted, its reservation expires and the next drain or the minute cron schedules again.
-export async function followDueJobs(runtime: Runtime, drain: () => Promise<unknown>, sendWake: (delaySeconds: number) => Promise<unknown>, keepAliveMs = 0): Promise<'idle' | 'covered' | 'scheduled'> {
+export async function followDueJobs(runtime: Runtime, drain: () => Promise<unknown>, sendWake: (delaySeconds: number) => Promise<unknown>, keepAliveMs = 0, pool: JobPool='all'): Promise<'idle' | 'covered' | 'scheduled'> {
   const deadline = Date.now() + keepAliveMs;
   for (;;) {
     await drain();
-    const delaySeconds = await nextWakeDelay(runtime);
+    const delaySeconds = await nextWakeDelay(runtime,pool);
     if (delaySeconds === null) return 'idle';
-    if (!await reserveNextWake(runtime, delaySeconds)) return 'covered';
+    if (!await reserveNextWake(runtime, delaySeconds,pool)) return 'covered';
     const waitMs = Math.max(1000, delaySeconds * 1000) + 150;
     if (Date.now() + waitMs + 2000 <= deadline) { await new Promise(resolve => setTimeout(resolve, waitMs)); continue; }
     await sendWake(delaySeconds);

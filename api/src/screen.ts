@@ -13,7 +13,7 @@ const DEADLINE_MS = 500;
 const QUESTIONS = {
   spam: {
     type: 'noul',
-    instructions: 'Is `email` spam: unsolicited advertising, a gambling, adult, loan or scam promotion, or a contact/website/QR pitch for an unrelated business, smuggled into a transactional message (for example an ad placed where a workspace name, person name or product name belongs)?',
+    instructions: 'For transactional mail, detect unsolicited advertising smuggled into a receipt, invitation or notification. For marketing, do not flag ordinary subscribed promotions: flag deceptive impersonation, credential theft, scams or unrelated malicious pitches.',
     criteria: {
       true: 'The message exists to advertise or lure the recipient to a third-party site, contact or offer unrelated to the sending service',
       false: 'A genuine transactional message: invitation, receipt, code, notification or similar, even if a name in it is unusual',
@@ -24,7 +24,8 @@ const QUESTIONS = {
 export type ScreenResult = { spam: number; model: string };
 // Bulk invitations repeat identical content, so one verdict serves every copy for an hour.
 // Insertion order is age order: the first key is always the oldest entry.
-const cache = new Map<string, { expires: number; result: Promise<ScreenResult> }>();
+const cache = new Map<string, { expires: number; result: ScreenResult }>();
+const flights=new WeakMap<Runtime['storage'],Map<string,Promise<ScreenResult>>>();
 
 const textOf = (html: string) => html.replace(/<(script|style|head)\b[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<[^>]*>/g, ' ')
   .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
@@ -52,7 +53,7 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
   }
   const parsed = await response.json().catch(() => null) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
   const spam = parsed?.answers?.spam?.noul;
-  if (typeof spam !== 'number' || !Number.isFinite(spam)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no spam score.', undefined, true);
+  if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true);
   return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
 }
 
@@ -61,17 +62,18 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot):
   const settings = runtime.config.screen;
   if (!settings) return null;
   const from = formattedSender(snapshot.from, snapshot.fromName), text = body(snapshot);
-  const key = await digest(`${settings.endpoint}|${settings.model}|${from}|${snapshot.subject}|${text}`);
+  const recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
+  const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,from,snapshot.kind,snapshot.subject,text,recipients]));
   const now = Date.now();
   const hit = cache.get(key);
   if (hit && hit.expires > now) return hit.result;
   if (hit) cache.delete(key);
-  const state = { now: new Date(now).toISOString(), email: { from, subject: snapshot.subject, body: text }, signals: { recipients: snapshot.to.length + snapshot.cc.length + snapshot.bcc.length } };
+  const state = { email: { from, kind:snapshot.kind, subject: snapshot.subject, body: text }, signals: { recipients } };
   // Concurrent copies share one request; failures are not cached so the next copy retries.
-  const result = evaluate(settings.endpoint, settings.apiKey, settings.model, state);
-  const entry = { expires: now + TTL_MS, result };
-  cache.set(key, entry);
-  result.catch(() => { if (cache.get(key) === entry) cache.delete(key); });
-  while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value!);
-  return result;
+  let pending=flights.get(runtime.storage);if(!pending){pending=new Map();flights.set(runtime.storage,pending);}
+  const existing=pending.get(key);if(existing)return existing;
+  const lookup=evaluate(settings.endpoint,settings.apiKey,settings.model,state);pending.set(key,lookup);
+  try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
+    while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;
+  }finally{pending.delete(key);}
 }

@@ -45,6 +45,10 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   };
   const batch = (table: SQL, where: SQL) => () => sql`WITH gone AS (DELETE FROM ${table} WHERE ctid IN (SELECT ctid FROM ${table} WHERE ${where} LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone`;
   // Never erase contacts, consent, suppression, drafts, idempotency keys or active scheduled work.
+  await drain('expired_uploads',()=>sql`WITH expired AS (DELETE FROM sending_upload_reservations WHERE id IN
+    (SELECT id FROM sending_upload_reservations WHERE expires_at<=now() ORDER BY expires_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
+    cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-cleanup:'||id,'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM expired)
+    SELECT count(*)::int AS n FROM expired`);
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));

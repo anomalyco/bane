@@ -41,6 +41,11 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
     ...adopt(`${cloudflareAccountId}/${queueId}`, cloudflare), ignoreChanges: ["settings"],
   });
 }
+// Queue settings (including retention) use installation defaults. Never auto-drain the
+// feedback DLQ: an operator replays only after the ingestion fault has been repaired.
+for (const purpose of ['webhooks','feedback-dlq']) {
+  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, { provider: cloudflare, protect: true });
+}
 const bucket = `${stage.prefix}-attachments`;
 new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {
   ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"], // ENAM; creation-only.

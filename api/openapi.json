@@ -1824,7 +1824,7 @@
           },
           "screen": {
             "type": "boolean",
-            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured."
+            "description": "Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES."
           },
           "replyAddressId": {
             "type": "string",
@@ -2053,7 +2053,7 @@
           },
           "screen": {
             "type": "boolean",
-            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured."
+            "description": "Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES."
           }
         },
         "required": [

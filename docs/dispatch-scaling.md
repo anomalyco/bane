@@ -1,5 +1,53 @@
 # Dispatch throughput: findings, design and scaling playbook
 
+## Current Hosted release gate (2026-11-10, local measurements)
+
+**Keep production at 8 shards per shared account/region.** Six in-flight calls per shard at 170 ms give an ideal ceiling of 35 recipients/s/shard for one-recipient envelopes. Use **25/s/shard** for initial sizing, not the ideal ceiling. Start at **2–3 shards for 50/s, 8 for 200/s, 40 for 1,000/s**. BYO remains one shard. A 40-shard region may open 80 dispatcher DB clients before HTTP, queues or cron. Drain the old shard-count generation before enabling the new one: count is part of the DO identity. A higher shard count is neither an SES quota increase nor a demonstrated end-to-end rate.
+
+Measure *accepted* and *delivered* separately. This fixture uses real PostgreSQL and dispatcher code with a synthetic 170-ms SES transport. Classifier RTT, Hyperdrive RTT, large-attachment bandwidth, SES throttling and webhook latency are not represented. End-to-end approval requires flat feedback and webhook ages under sustained regional load, daily recipient quota, healthy Postgres pool/lock waits and provisioned storage headroom. Do not advertise an industry ranking from this benchmark.
+
+| Regional quota | Envelopes | Eight-shard acceptance, audit → rerun | Rerun per shard |
+|---:|---:|---:|---:|
+| 50/s | 250 | 35.8 → 36.2/s | 4.5/s |
+| 200/s | 1,000 | 186.8 → 184.7/s | 23.1/s |
+| 1,000/s | 1,500 | 271.0 → 259.9/s | 32.5/s |
+
+These finite runs include cold quota election and draining an uneven tail. Eight shards do **not** sustain 1,000/s. Sizing is a starting point; it is not evidence that 40 shards, or the current single feedback consumer, can sustain that rate.
+
+### Query and storage budget
+
+Baseline `bb00802` and the working tree use the same local fixtures. Calls count driver round trips **including BEGIN/COMMIT** (savepoint/release inside the rollback harness); a lone statement commits implicitly in production. Writes count inserted/updated row versions, including triggers; bytes sum `pg_column_size(NEW)`, **not** network traffic, indexes, TOAST, dead tuples or WAL. Counts vary with batch completion order, ID length, number of dirty counter stripes, cold quota elections and subscribers. Campaign figures use 100 recipients and 20 attachments; divide by 100 for cost per recipient. Reply includes idempotency and a selected visible parent. Direct measurements use a warm quota, API key, simulator, no subscribers and preverified domain, isolating the database cost from classifier/provider latency.
+
+| Path | Calls before → after (explicit transactions) | Row versions before → after | Logical bytes before → after |
+|---|---:|---:|---:|
+| Transactional admission, 1 | 4 → **1** (1 → 0) | 5 → 6 | 1,334 → 1,440 |
+| Warm fused lease/claim, 1 | 1 → 1 (0) | 2 → 2 | 898 → 900 |
+| SES acceptance write, 1 | 1 → 1 (0) | 4 → 5 | 1,780 → 1,888 |
+| Delivery, 1 | 1 → 1 (0) | 5 → 5 | 2,108 → 2,112 |
+| Batch admission, 100 | 4 → **1** (1 → 0) | 102 → 118 | 58,756 → 60,644 |
+| Batch dispatch incl. acceptance, 100 | 30 → 31 (0) | 700 → 760 | 323,200 → 330,240 |
+| Delivery batch, 100 | 1 → 1 (0) | 500 → 500 | 210,800 → 211,200 |
+| Campaign launch incl. capture | 19 → 19 (1) | 123 → 123 | 26,060 → 26,060 |
+| Campaign preparation | 11 → 11 (1) | 101 → 101 | 27,916 → 27,116 |
+| Campaign release | 14 → 13 (1) | 2,102 → 102 | 503,632 → 46,304 |
+| Campaign dispatch incl. finish | 43 → **41** (0) | 803 → 803 | 801,312 → 335,840 |
+| Inbound reply admission | 25 → 23 (1) | 11 → 13 | 5,047 → 5,225 |
+
+Hosted direct JSON sends with a normal API key use **one client statement** for authentication, the request budget, policy checks, the idempotency receipt and all envelopes. A policy denial rolls back the receipt inside PostgreSQL without refunding the request charge; neither envelopes nor attachment links nor unsubscribe tokens are created. This is not a one-call claim for mailbox tracking, stored templates, self-hosted discovery or dashboard authentication. A screened Hosted singleton still needs a lease, external screen, fresh authorization/consent claim and outcome write (three statements with warm quota; two for envelopes eligible for the fused claim). No database lock crosses the classifier or SES call, and ambiguous acceptance is never automatically resent.
+
+The previous audit-fix build took **46** calls for campaign dispatch and finish. The lease now returns attachment metadata once per immutable review, and small attachment pages can overlap within the shared byte limit. The acceptance fixture asserts at most **42** calls, a finished campaign and no per-recipient attachment copies. It measured **41** in the full run.
+
+**Campaign storage:** 5,438 → 872 logical bytes per accepted recipient, including its prepared recipient and envelope rows and private per-email attachment links. For 1M equivalent recipients that is **5.438 GB → 0.872 GB** (decimal; projection from measured tuples, not a 1M-row physical database size). Store the frozen draft, rendered base and attachment ownership once per review. The minimal envelope holds indexed delivery/search fields and kind, a deferred marker and, once claimed, its unique unsubscribe capability. No copied body, headers, attachment IDs or email attachment links. A 2,000 × 20 release went from failing to construct the bind list to one bounded recordset insert; the immutable review owns 20 links, not 40,000.
+
+### Feedback, webhook and screening operations
+
+* The deployed config is `api/wrangler.prod.jsonc`. Queue names use `bane-prod-` (dev: `bane-dev-`). Provision the Pulumi queues **before** the config change. Work and webhook consumers have separate claims and wake reservations. The endpoint cap is ten including paused; inventory grandfathered workspaces before rollout. At 100 callbacks the worst new workspace creates 1,000 deliveries, not 10,000. In the final local storm fixture, 100 deliveries × ten endpoints took 50.5 ms vs 233 ms at the previous 100-endpoint fan-out. Six campaign claims behind 100k ready webhook jobs took 0.141 ms DB with no temp spill vs the old priority sort's 111.5 ms and 6,192 kB spill.
+* **Page on any `QUEUE_BACKLOG_ALERT` for `feedback-dlq`, or `oldestMs > 60000` for feedback.** Minute cron samples queue bindings independently of DB ingestion. If cron itself is unhealthy, the independent [Queues metrics](https://developers.cloudflare.com/queues/observability/metrics/) endpoint provides depth and oldest timestamp. `FEEDBACK_BATCH` reports failures and oldest callback age; alert on sustained failures, `SES_FEEDBACK_QUARANTINED`, `CONTENT_SCREEN_UNAVAILABLE`, ambiguous/interrupted attempts, SES throttles and account pauses. Monitor per-stream acceptance using the metrics API; watch pool acquisition/lock waits, deadlocks, WAL and autovacuum externally. Source sampling applies only to successful routine requests, never warnings/errors. Do not log message bodies or classify queue payloads as wake hints.
+* **Private DLQ replay:** stop on any ownership ambiguity; never invent a workspace or alter the topic, message ID, provider ID or payload. Repair DB availability, conflict or pinned attribution first. An authorized operator enables [HTTP pull](https://developers.cloudflare.com/queues/configuration/pull-consumers/) **only on the stage's `feedback-dlq`**, pulls a small batch with a visibility lease and republishes each original JSON body to that stage's `feedback` queue. For JSON pull responses decode the base64 JSON first; publish as JSON, not a base64 string. Ack a DLQ lease **only after confirmed enqueue**. On uncertainty stop, leave it unacked and replay idempotently. Inspect SNS receipt, suppression/event and queue depth after the canary before continuing. No email is sent by replay. DLQ retention is finite: page immediately; if unresolved, preserve verified inputs in restricted incident storage before expiry. DB quarantine is also private, and its existing retention is unchanged.
+* Configure Jev before enabling Hosted live traffic. Start with dev, inspect rejection/deferral metrics, inventory DMARC for active exact From domains, then enable production. Hosted marketing and probation defer during classifier/key failure; a password reset on an operator-approved trusted pool may proceed during an outage. A sender cannot choose that tier or opt out. The simulator and BYO delivery remain separate. Hosted marketing and high-volume transactional senders require aligned DMARC. Short-window recipient budgets apply before a provider call, not just to HTTP requests: new/second-week/mature workspace limits are 50/100/500 per fixed minute; individual From identities get half with a floor of 50. Explicit Hosted quota exemptions remain operator-owned. Missing attachment bytes get four delayed retries before a final rejection; the repair queue is `sending_emails WHERE status='rejected' AND error_code='ATTACHMENT_STORAGE_UNAVAILABLE'`. Restore immutable bytes and verify the checksum before a separately authorized **new** submission. Never reset an attempting or ambiguous row.
+
+The sections below are historical measurements, **not** the current production manifest.
+
 Status as of 2026-09-12, `main` at `7f82248` (deployed). Written so the next person who hits a
 throughput wall can start from measurements instead of theory. Numbers below were measured against
 production infrastructure (Cloudflare Workers/Durable Objects/Queues, Hyperdrive, PlanetScale Postgres

@@ -1332,7 +1332,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             error(await local('POST','/v1/inbound/addresses',{address:blind},b.cookie,live),409,'MAILBOX_DOMAIN_NOT_ENABLED');
             const box=ok(await local('POST','/v1/inbound/addresses',{address:`archive@reply.${domain}`,publicAddress:`archive@${domain}`},b.cookie,live),201);
             assert.equal(calls.length,awsCount);
-            const sourceBytes=new Map<string,Uint8Array>();it.mock.method(runtime.storage,'put',async(key:string,bytes:Uint8Array)=>{assert.equal((await pool.query('SELECT 1 FROM sending_attachments WHERE storage_key=$1',[key])).rowCount,1,'Reservation commits before storage upload');sourceBytes.set(key,bytes);});
+            const sourceBytes=new Map<string,Uint8Array>();it.mock.method(runtime.storage,'put',async(key:string,bytes:Uint8Array)=>{assert.equal((await pool.query('SELECT 1 FROM sending_upload_reservations WHERE storage_key=$1',[key])).rowCount,1,'Reservation commits before storage upload');assert.equal((await pool.query('SELECT 1 FROM sending_attachments WHERE storage_key=$1',[key])).rowCount,0,'Incomplete bytes cannot be attached');sourceBytes.set(key,bytes);});
             it.mock.method(runtime.storage,'get',async(key:string)=>({body:sourceBytes.get(key)!,contentType:'text/plain'}));
             failNextArchive=true;const out=ok(await local('POST','/v1/inbound/threads',{addressId:box.id,to:['outside@example.org'],subject:'archive',text:'attached',attachments:[{filename:'file.txt',contentType:'text/plain',content:Buffer.from('archive bytes').toString('base64')}]},b.cookie,live),202);
             const archive=async()=>(await pool.query('SELECT id,source_attachment_id,storage_key,bucket FROM mail_attachments WHERE message_id=$1',[out.id])).rows[0];const pending=await archive();assert.ok(pending.source_attachment_id);assert.equal((await pool.query("SELECT 1 FROM sending_attachment_links WHERE owner_type='mailbox' AND owner_id=$1",[pending.id])).rowCount,1);
@@ -4424,6 +4424,24 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
 // rollback-only workspace. The external runner cannot observe these rows. Execute
 // selected durable jobs serially so each acceptance/feedback boundary is observable;
 // PostgreSQL now() is fixed inside the outer rollback transaction.
+// Local rollback-only instrumentation: every version written, including trigger writes.
+// pg_column_size(NEW) is logical heap tuple size, not index I/O or WAL. No row values logged.
+async function queryBudget(t:TestContext,db:pg.Client){
+  await db.query(`CREATE TEMP TABLE write_meter(stage text,n int) ON COMMIT DROP;
+    CREATE FUNCTION pg_temp.measure_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      INSERT INTO write_meter VALUES(CASE WHEN current_query() LIKE '%attempt-start:%' OR current_query() LIKE '%AS eligibility%' OR current_query() LIKE '%eligibility AS MATERIALIZED%' THEN 'claim'
+      WHEN current_query() LIKE '%simulated_callbacks AS%' THEN 'result' ELSE 'other' END,pg_column_size(NEW));RETURN NULL;END $$;
+    DO $$ DECLARE r record; BEGIN FOR r IN SELECT relname FROM pg_stat_user_tables WHERE schemaname='public' ORDER BY relname LOOP
+      EXECUTE format('CREATE TRIGGER meter AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION pg_temp.measure_write()',r.relname); END LOOP;END $$`);
+  return async <T>(label:string,work:()=>Promise<T>,max?:number)=>{
+    await db.query('TRUNCATE write_meter');const q=t.mock.method(db,'query');let value:T;
+    try{value=await work();}finally{q.mock.restore();}
+    const count=q.mock.callCount(),explicit=q.mock.calls.filter(c=>/^(begin|savepoint)\b/i.test(String((c.arguments[0] as any)?.text??c.arguments[0]))).length;
+    const rows=(await db.query('SELECT stage,count(*)::int AS rows,sum(n)::int AS bytes FROM write_meter GROUP BY stage ORDER BY stage')).rows;
+    t.diagnostic(`QUERY-BUDGET ${label}: ${count} calls, ${explicit} explicit tx; ${JSON.stringify(rows)}`);
+    if(max!==undefined)assert.ok(count<=max,`${label}: ${count} calls, budget ${max}`);return value;
+  };
+}
 async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime: import('./src/core.js').Runtime;
   db: pg.Client;
@@ -4627,7 +4645,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
   const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
-  cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);
+  cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   await t.test('deterministic read-only plan and strict inputs',async()=>{
     assert.deepEqual(await command('--plan'),first);assert.deepEqual(await database(),original);assert.match(hash,/^[a-f0-9]{64}$/);
     assert.deepEqual(first.domains,[...dom].sort());assert.deepEqual(first.workspaces,inventory);assert.deepEqual(first.unconnected,['default',personal]);assert.deepEqual(first.receivingHosts,['reply.e2e.example','reply.inbound.example']);
@@ -5216,7 +5234,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('regional-contact',$1,'reader@example.net','subscribed') RETURNING id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`,[wid,c.draft.audience.listId]);
       ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);await run('campaign.run');
       const reviewed=(await db.query(`SELECT r.draft->'binding' AS review,e.snapshot->'binding' AS queued,e.id FROM sending_emails e JOIN sending_campaign_reviews r ON r.id=e.review_id WHERE e.campaign_id=$1`,[c.id])).rows[0];
-      assert.deepEqual(reviewed.queued,reviewed.review);assert.equal(reviewed.review.domain,'va-domain');
+      assert.equal(reviewed.queued,null,'Pinned routing lives on the immutable review');assert.equal(reviewed.review.domain,'va-domain');
       const {createMailbox}=await import('./src/mailbox-store.js'),md=unique('mdom');
       await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,receiving_host,region,status,enabled_at) VALUES($1,$2,'va-domain','trusted.regional.example','trusted.regional.example',$3,'active',now())`,[md,wid,oh]);
       const inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`;
@@ -6133,6 +6151,49 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-bane-workspace':byo})).connection.sendingPause,null);
     });
   });
+  test('query budget: API key admission, dispatch, acceptance and delivery at one and 100 envelopes',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const {runDispatcher}=await import('./src/dispatcher.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId,acct='112223330000',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
+      const key=ok(await local('POST','/v1/api-keys',{name:'budget',permissions:['send','read']}),201);
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES($1,$2,10000,100000,0,clock_timestamp(),now()+interval '1 minute')`,[acct,REGION]);
+      const sink:import('./src/core.js').FeedbackItem[]=[];runtime.feedback={enqueue:async items=>{sink.push(...items);}};
+      const meter=await queryBudget(t,db);
+      for(const n of [1,100]){
+        const emails=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`to${i}@example.invalid`,subject:'Fixture',text:'Fixture'}));
+        await meter(`admit-${n}`,async()=>ok(await local('POST',`/v1/emails/${n===1?'send':'batch'}`,n===1?emails[0]:{emails},'live',{authorization:`Bearer ${key.secret}`,'Idempotency-Key':`bench-${n}`}),202),1);
+        const r=await meter(`dispatch-${n}`,()=>runDispatcher(runtime,{region:REGION,accountId:acct}),n===1?2:80);assert.equal(r.sent,n);
+        const items=sink.splice(0).filter(i=>i.messageId.endsWith(':Delivery'));assert.equal(items.length,n);
+        const outcomes=await meter(`delivery-${n}`,()=>ingestFeedbackBatch(runtime,items),1);assert.ok(outcomes.every(o=>o.ok));
+      }
+      const late={from:'late@new.invalid',to:'to@example.invalid',subject:'Not yet',text:'Fixture'},good={...late,from:'a@bench.invalid'};
+      const headers={authorization:`Bearer ${key.secret}`,'Idempotency-Key':'atomic-policy-retry'};
+      const before=await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid]);
+      const used=async()=>Number((await db.query('SELECT used FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2',[wid,key.id])).rows[0].used);
+      const credits=await used();
+      await meter('denied-batch',async()=>error(await local('POST','/v1/emails/batch',{emails:[good,late]},'live',headers),403,'SENDER_DOMAIN_NOT_VERIFIED'),1);
+      assert.equal(await used(),credits+1,'A rejected request is still charged exactly once');
+      error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND');
+      assert.deepEqual((await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid])).rows,before.rows);
+      const retry=()=>local('POST','/v1/emails/batch',{emails:[good]},'live',headers);
+      const saved=ok(await retry(),202);assert.deepEqual(ok(await retry(),202),saved); // No losing receipt from the previous failure.
+      error(await local('POST','/v1/emails/batch',{emails:[good,good]},'live',headers),409,'IDEMPOTENCY_CONFLICT');
+      await db.query('UPDATE sending_emails SET status=\'canceled\' WHERE id=$1',[saved.data[0].id]);
+      // The sender cannot force the fused fast path or opt out on Hosted live mail.
+      Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},hostedScreen:true});
+      const guarded=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'fixture@example.invalid',subject:'Receipt',text:'Fixture',screen:false},'live',{authorization:`Bearer ${key.secret}`}),202);
+      const {SESv2Client}=await import('@aws-sdk/client-sesv2');const calls=t.mock.method(SESv2Client.prototype,'send',async()=>assert.fail('No SES call expected with a warm quota and unavailable mandatory classifier'));
+      assert.equal((await runDispatcher(runtime,{region:REGION,accountId:acct})).sent,0);assert.equal(calls.mock.callCount(),0);
+      assert.deepEqual((await db.query('SELECT status,error_code,attempt_started_at FROM sending_emails WHERE id=$1',[guarded.id])).rows,[{status:'queued',error_code:'CONTENT_SCREEN_UNAVAILABLE',attempt_started_at:null}]);
+      assert.deepEqual((await db.query("SELECT hosted_burst_ok($1,'bench.invalid',50) ok",[wid])).rows,[{ok:true}]);
+      assert.deepEqual((await db.query("SELECT hosted_burst_ok($1,'other.invalid',1) ok",[wid])).rows,[{ok:false}]);
+    });
+  });
+
   test('MX: 100 emails across 100 workspaces share account-scoped quota and bounded dispatcher statements', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { runDispatcher } = await import('./src/dispatcher.js');
@@ -6832,7 +6893,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Headers are denylisted, not X- only: structural headers Bane/SES own are refused, everything else passes through.
       for (const name of ['X-SeS-CONFIGURATION-SET','From','content-type','In-Reply-To','List-Unsubscribe','Auto-Submitted','Resent-From','ARC-Seal','Authentication-Results','DomainKey-Signature','Feedback-ID']) error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no provider overrides',headers:[{name,value:'override'}] },agent),422);
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no injection',headers:[{name:'Precedence',value:'bulk\r\nBcc: victim@example.net'}] },agent),422);
-      const reply = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202);
+      const reply = await (await queryBudget(t,db))('inbound-reply',async()=>ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202));
       assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
       await dispatchDue(runtime, REGION);
@@ -7090,6 +7151,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(i<WEBHOOK_ATTEMPTS) horizon+=job.available_at.getTime()-start;
       }
       assert.ok(horizon>=86400000);
+    });
+  });
+
+  test('a 100k webhook storm stays off campaign lanes; capped fan-out and due selection are bounded', async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>{
+      const {processJobs}=await import('./src/jobs.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      for(let i=0;i<10;i++) ok(await local('POST','/v1/webhooks',{url:`https://example.com/h${i}`,eventTypes:['email.delivered']}),201);
+      error(await local('POST','/v1/webhooks',{url:'https://example.com/overflow'}),409,'WEBHOOK_LIMIT_REACHED');
+      const sink:import('./src/core.js').FeedbackItem[]=[];runtime.feedback={enqueue:async items=>{sink.push(...items);}};
+      ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:100},()=>mail())}),202);await run('email.dispatch');
+      const deliveries=sink.filter(item=>item.messageId.endsWith(':Delivery'));assert.equal(deliveries.length,100);
+      const t0=performance.now();assert.ok((await ingestFeedbackBatch(runtime,deliveries)).every(x=>x.ok));
+      t.diagnostic(`100 deliveries x 10 endpoints: ${(performance.now()-t0).toFixed(1)}ms`);
+      assert.equal((await db.query("SELECT count(*)::int n FROM jobs WHERE type='operation.webhook'")).rows[0].n,1000);
+      await db.query(`INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'storm-'||i,'fixture','operation.webhook','{}' FROM generate_series(1,99000)i;
+        INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'run-'||i,'fixture','campaign.fixture','{}' FROM generate_series(1,6)i; ANALYZE jobs`);
+      const query=t.mock.method(db,'query');const ids:string[]=[];
+      assert.equal(await processJobs(runtime,{'campaign.fixture':async(_r,_p,j)=>{ids.push(j.id);}},6,6,10000,'work'),6);query.mock.restore();
+      assert.ok(ids.every(id=>id.startsWith('run-')));
+      const claim=query.mock.calls.map(c=>c.arguments).find(([q]:any)=>q?.text?.includes('WITH exhausted AS')) as any;
+      assert.ok(claim);await db.query("UPDATE jobs SET status='pending' WHERE type='campaign.fixture'");
+      const plan=(await db.query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+claim[0].text,claim[1])).rows[0]['QUERY PLAN'][0];
+      const visit=(n:Json):Json[]=>[n,...(n.Plans??[]).flatMap(visit)];const nodes=visit(plan.Plan);
+      assert.ok(nodes.some(n=>String(n['Index Name']).includes('ready_page') || String(n['Index Name']).includes('job_class')));
+      assert.ok(!nodes.some(n=>n['Node Type']==='Sort' && n['Actual Rows']>100));assert.equal(plan.Plan['Temp Written Blocks'],0);
+      t.diagnostic(`100k webhook storm, select/claim six campaign jobs: ${plan['Execution Time']} ms DB; zero temp blocks`);
     });
   });
 
@@ -7870,8 +7958,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const tx=runtime.db;let attempts=0;const consumer={...runtime,db:Object.assign(Object.create(tx),{execute:()=>{attempts++;throw Object.assign(new Error('fault'),{cause:{code}});}})};
         const payload=code==='40P01'?[item]:[item,item,item], failures=await ingestFeedbackBatch(consumer,payload);
         assert.equal(attempts,code==='40P01'?2:1);let retry=0;
-        for(const failure of failures) settleFeedbackMessage({attempts:1,retry:()=>{retry++;},ack:()=>assert.fail('transient failure acknowledged')},failure);
-        assert.equal(retry,payload.length);assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+        for(const failure of failures) for(const attempts of [1,2,3,4,5,6]) settleFeedbackMessage({attempts,retry:()=>{retry++;},ack:()=>assert.fail('transient failure acknowledged')},failure);
+        assert.equal(retry,payload.length*6);assert.deepEqual(await ingestFeedbackBatch(runtime,[item,item]),[{ok:true},{ok:true}]);
         assert.equal((await db.query('SELECT suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,to])).rows[0].suppression_reason,'hard_bounce');
         assert.equal((await db.query('SELECT 1 FROM operation_feedback_failures WHERE topic_arn=$1',[topicArn])).rowCount,0);
       }
@@ -7937,7 +8025,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (const [attempts, outcome] of [[1,unmatched],[2,unmatched],[2,outcomes[5]],[1,outcomes[0]],[1,invalid],[1,unsupported],[2,{ok:false,error:'FEEDBACK_PERSIST_FAILED'}]] as const) {
         settleFeedbackMessage({ attempts, ack:()=>settled.push('ack'), retry:opts=>settled.push(opts!.delaySeconds!) }, outcome);
       }
-      assert.deepEqual(settled, [15,'ack','ack','ack','ack','ack',60]);
+      assert.deepEqual(settled, [30,60,'ack','ack','ack','ack',60]);
       const persisted = await receipts();
       assert.equal(persisted.length, 4, 'Exactly one receipt per distinct callback; duplicates and rejected items add none.');
       assert.ok(persisted.every(receipt => receipt.processed_at !== null));
@@ -8052,6 +8140,40 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('missing immutable attachment stops after five preflights without any SES attempt',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>{
+      runtime.storage={put:async()=>{},get:async()=>null,delete:async()=>{}};
+      const file=ok(await local('POST','/v1/attachments',{filename:'file.txt',content:'eA=='}),201);
+      const mailId=ok(await local('POST','/v1/emails/send',mail({attachments:[file.id]})),202).id;
+      for(let i=1;i<=5;i++){
+        await db.query('UPDATE sending_emails SET scheduled_at=NULL WHERE id=$1',[mailId]);await run('email.dispatch');
+        const row=(await db.query('SELECT status,error_code,attempt_started_at FROM sending_emails WHERE id=$1',[mailId])).rows[0];
+        assert.deepEqual(row,{status:i<5?'queued':'rejected',error_code:'ATTACHMENT_STORAGE_UNAVAILABLE',attempt_started_at:null});
+      }
+    });
+  });
+
+  test('query budget: immutable campaign preparation, release, dispatch and storage per recipient',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const {jobHandlers}=await import('./src/sending.js'),{JobDeferred}=await import('./src/jobs.js'),{dispatchDue}=await import('./src/dispatcher.js');
+      const ws=runtime.config.workspaceId,n=100,bytes=Buffer.from('fixture'),attachments:string[]=[];
+      runtime.feedback={enqueue:async()=>{}};runtime.storage={put:async()=>{},get:async()=>({body:bytes,contentType:'text/plain'}),delete:async()=>{}};
+      for(let i=0;i<20;i++)attachments.push(ok(await local('POST','/v1/attachments',{filename:`file${i}.txt`,content:bytes.toString('base64')}),201).id);
+      const list=ok(await local('POST','/v1/lists',{name:'budget'}),201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||i),$1,'to'||i||'@example.invalid','subscribed' FROM generate_series(1,100)i RETURNING id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`,[ws,list.id]);
+      const campaign=ok(await local('POST','/v1/campaigns',{name:'budget',from:'from@example.invalid',subject:'Fixture',html:'<p>Fixture</p>',attachments,audience:{listId:list.id}}),201);
+      const meter=await queryBudget(t,db);
+      await meter('campaign-launch',async()=>ok(await local('POST',`/v1/campaigns/${campaign.id}/schedule`,{revision:campaign.revision,scheduledAt:new Date(Date.now()+3600000).toISOString()}),202));
+      const run=async()=>{try{await jobHandlers['campaign.run']!(runtime,{campaignId:campaign.id},{workspaceId:ws,id:'campaign.run:'+campaign.id,attempts:1});}catch(e){if(!(e instanceof JobDeferred))throw e;}};
+      await meter('campaign-prepare',run);await db.query("UPDATE sending_campaigns SET state='sending',scheduled_at=NULL WHERE id=$1 AND state='scheduled'",[campaign.id]);
+      await meter('campaign-release',run);assert.equal((await meter('campaign-dispatch',()=>dispatchDue(runtime,REGION),42)).sent,n);
+      assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[campaign.id])).rows[0].state,'done');
+      const storage=(await db.query(`SELECT avg(pg_column_size(e)+pg_column_size(r)+coalesce((SELECT sum(pg_column_size(l)) FROM sending_attachment_links l WHERE l.owner_id=e.id AND l.owner_type='email'),0))::int AS bytes FROM sending_emails e JOIN sending_review_recipients r ON (r.review_id,r.ordinal)=(e.review_id,e.review_ordinal) WHERE e.campaign_id=$1`,[campaign.id])).rows[0];
+      assert.ok(storage.bytes<=1024,`Expected at most 1 KiB per recipient including review, envelope and asset links; got ${storage.bytes}`);
+      t.diagnostic(`CAMPAIGN-STORAGE 20 attachments accepted: ${storage.bytes} bytes per recipient (heap tuples, including email asset links)`);
+    });
+  });
+
   test('launching and completing a 2,000-recipient campaign is bounded in statements and job rows', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { jobHandlers } = await import('./src/sending.js');
@@ -8062,7 +8184,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
         SELECT 'con_' || md5($1 || n::text), $1, 'bench-' || n || '@example.com', 'subscribed' FROM generate_series(1, 2000) AS n`, [ws]);
       await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [ws, list.id]);
-      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('bench'), from: 'sender@example.com', subject: 'Bench', html: '<p>Bench</p>', audience: { listId: list.id } }), 201);
+      const body=Buffer.from('fixture'),assets:string[]=[];
+      runtime.storage={put:async()=>{},delete:async()=>{},get:async()=>({body,contentType:'text/plain'})};
+      for(let i=0;i<20;i++) assets.push(ok(await local('POST','/v1/attachments',{filename:`file-${i}.txt`,content:body.toString('base64')}),201).id);
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,checked_at) VALUES($1,$2,1000,now()) ON CONFLICT(workspace_id,region) DO UPDATE SET max_send_rate=1000,checked_at=now()`,[ws,REGION]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('bench'), from: 'sender@example.com', subject: 'Bench', html: '<p>Bench</p>',attachments:assets, audience: { listId: list.id } }), 201);
       const queries = t.mock.method(db, 'query');
       let start = queries.mock.callCount();
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 2000);
@@ -8072,7 +8198,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (let i = 0; i < 200; i++) {
         for (const job of (await jobRows()).filter(job => job.status === 'pending')) {
           await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = $1", [job.id]);
-          start = queries.mock.callCount(); jobRuns++;
+          start = queries.mock.callCount(); jobRuns++; const turn=performance.now();
           try { await jobHandlers[job.type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: ws }); }
           catch (error) {
             if (!(error instanceof JobDeferred)) throw error;
@@ -8081,6 +8207,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             continue;
           }
           jobStatements += queries.mock.callCount() - start;
+          t.diagnostic(`2,000 x 20 run turn: ${(performance.now()-turn).toFixed(1)}ms`);
           await db.query("UPDATE jobs SET status = 'completed' WHERE id = $1", [job.id]);
         }
         if ((await db.query('SELECT state FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].state === 'done') break;
@@ -8094,6 +8221,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const final = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(final.state, 'done');
       assert.equal(final.counts.byStatus.accepted, 2000);
+      assert.equal((await db.query(`SELECT count(*)::int n FROM sending_attachment_links l JOIN sending_emails e ON e.id=l.owner_id WHERE l.owner_type='email' AND e.campaign_id=$1`,[campaign.id])).rows[0].n,0);
+      assert.equal((await db.query(`SELECT count(*)::int n FROM sending_attachment_links WHERE owner_type='review' AND owner_id=(SELECT review_id FROM sending_campaigns WHERE id=$1)`,[campaign.id])).rows[0].n,20);
+      const storage=(await db.query(`SELECT max(pg_column_size(e.snapshot)) stub, avg(pg_column_size(e)+pg_column_size(r))::int bytes,
+        bool_or(e.snapshot ?| ARRAY['html','text','headers','attachments','subject','to']) duplicated FROM sending_emails e JOIN sending_review_recipients r ON (r.review_id,r.ordinal)=(e.review_id,e.review_ordinal) WHERE e.campaign_id=$1`,[campaign.id])).rows[0];
+      assert.equal(storage.duplicated,false);assert.ok(storage.stub<256);t.diagnostic(`accepted campaign storage: ${storage.bytes} tuple bytes/recipient incl prepared review row, max stub ${storage.stub} bytes`);
       assert.deepEqual([final.delivery.prepared, final.delivery.expanded], [2000, 2000]);
       assert.equal((await jobRows()).length, 1, 'A campaign has exactly one job row for its whole life.');
       t.diagnostic(`2,000-recipient campaign: launch ${launch} statements; ${jobRuns} job runs ${jobStatements} statements; ${dispatchRuns} dispatcher runs ${dispatchStatements} statements; total ${launch + jobStatements + dispatchStatements}`);
@@ -8253,6 +8385,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query("UPDATE jobs SET status = 'pending', attempts = 0 WHERE id = $1", [jobId]);
       }
     });
+  });
+
+  test('eight dispatch shards at 170ms synthetic SES latency measure per-shard capacity',async t=>{
+    const db=await fixtureDatabase(t),wid=unique('bench-capacity'),region='ap-south-2';
+    const [{nodeRuntime},{runDispatcher}]=await Promise.all([import('./src/adapters/node.js'),import('./src/dispatcher.js')]);
+    const instances=Array.from({length:8},()=>nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL,ENABLE_LIVE_SES:'false'}));
+    try {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+      // Not discoverable by the background runner; this fixture explicitly drives its private region.
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,'us-east-1','["us-east-1"]')`,[wid]);
+      const acct='123450000123';
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[region,acct,`arn:aws:sns:${region}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,tenant_state,region,aws_account_id) VALUES($1,$1,'shared','ready','ready',$2,$3)`,[wid,region,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('speed.example.invalid',$1,$1,'verified')`,[wid]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'fixture',$1,'fixture','["send"]','[]')`,[wid]);
+      for(const [quota,n] of [[50,250],[200,1000],[1000,1500]]){
+        for(const {runtime} of instances){runtime.config.workspaceId=wid;runtime.config.multiTenant=true;runtime.config.simulatedSes={latencyMs:170,maxSendRate:quota,deliveryDelayMs:0};runtime.config.dispatch.rateFactor=1.1;runtime.feedback={enqueue:async()=>{}};}
+        await db.query('DELETE FROM provider_account_limits WHERE aws_account_id=$1',[acct]);
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+          SELECT $1||$3::text||'-'||n,$1,$2,$1,'from@speed.example.invalid','["to@example.invalid"]','[]','[]','Fixture',jsonb_build_object('kind','transactional','from','from@speed.example.invalid','region',$2::text,'to',array['to@example.invalid'],'cc','[]'::jsonb,'bcc','[]'::jsonb,'replyTo','[]'::jsonb,'headers','[]'::jsonb,'attachments','[]'::jsonb,'subject','Fixture','text',n::text,'tracking',false),true FROM generate_series(1,$4::int)n`,[wid,region,quota,n]);
+        const start=performance.now();const reports=await Promise.all(instances.map(({runtime},index)=>runDispatcher(runtime,{region,accountId:acct,shard:{index,count:8},lanes:2})));
+        const sec=(performance.now()-start)/1000,sent=reports.reduce((s,r)=>s+r.sent,0);assert.equal(sent,n);
+        t.diagnostic(`170ms synthetic transport, quota ${quota}: ${sent}/${sec.toFixed(3)}s = ${(sent/sec).toFixed(1)}/s, ${(sent/sec/8).toFixed(1)}/shard/s`);
+      }
+    } finally {
+      await Promise.all(instances.map(i=>i.close()));
+      for(const table of ['sending_email_events','operation_events','sending_emails','sending_region_limits','sending_stream_depth','domain_claims','provider_connections','api_keys','ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[wid]);
+      await db.query('DELETE FROM provider_account_limits WHERE aws_account_id=$1',['123450000123']);await db.query('DELETE FROM provider_pool_regions WHERE aws_account_id=$1',['123450000123']);
+      await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);
+    }
   });
 
   test('four dispatcher shards on separate connections drain one campaign concurrently without serializing on its row', async t => {
@@ -8962,7 +9124,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await drizzle(client).transaction(async tx => {
             const wid = 'ws_' + 'd'.repeat(32), reg = 'me-central-1', acct = '999988887777', secret = 'bane_' + '2'.repeat(64);
             const topic = 'arn:aws:sns:' + reg + ':' + acct + ':bane-feedback';
-            const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_PLATFORM_AWS_ACCOUNT: acct, DEFAULT_SES_REGION: reg, SHARED_SENDING_REGIONS: reg, ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: acct, DEFAULT_SES_REGION: reg, SHARED_SENDING_REGIONS: reg, ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-do','cold-do-fixture')", [wid]);
             await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold_do',$2,$3::jsonb)", [wid, reg, JSON.stringify([reg])]);
             await client.query("INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier) VALUES($1,$2,$3,'ready','probation')", [reg, acct, topic]);
@@ -9066,6 +9228,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL);
           CREATE TABLE \${schema}.sending_emails (LIKE public.sending_emails INCLUDING ALL);
           CREATE TABLE \${schema}.sending_campaigns (LIKE public.sending_campaigns INCLUDING ALL);
+          CREATE TABLE \${schema}.sending_campaign_reviews (LIKE public.sending_campaign_reviews INCLUDING ALL);
           CREATE TABLE \${schema}.sending_email_events (LIKE public.sending_email_events INCLUDING ALL);
           CREATE TABLE \${schema}.operation_events (LIKE public.operation_events INCLUDING ALL);
           CREATE TABLE \${schema}.operation_webhooks (LIKE public.operation_webhooks INCLUDING ALL);
@@ -9073,6 +9236,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.provider_connections (LIKE public.provider_connections INCLUDING ALL);
           CREATE TABLE \${schema}.provider_connection_regions (LIKE public.provider_connection_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mail_messages (LIKE public.mail_messages INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_outbound_sync (LIKE public.mail_outbound_sync INCLUDING ALL);
           CREATE TABLE \${schema}.mail_message_ids (LIKE public.mail_message_ids INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_write_lanes (LIKE public.mailbox_write_lanes INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_events (LIKE public.mailbox_events INCLUDING ALL);

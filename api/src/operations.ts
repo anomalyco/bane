@@ -802,7 +802,12 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
-    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) }).returning();
+    const values = { ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) };
+    const [row] = await c.env.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(140913,hashtext(${a.workspaceId}))`);
+      if ((await tx.execute(sql`SELECT 1 FROM operation_webhooks WHERE workspace_id=${a.workspaceId} OFFSET 9 LIMIT 1`)).rowCount) throw new ApiError(409,'WEBHOOK_LIMIT_REACHED','A workspace can have at most 10 operation webhook endpoints (including paused endpoints).');
+      return tx.insert(webhooks).values(values).returning();
+    });
     return c.json(await metadata(c.env, row!, a), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
@@ -1251,9 +1256,11 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       }
       if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
       outcomes[entry.index] = { ok: true };
-      log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
     }
-    if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
+    try {
+      if(results.some(r=>r.recovery)) await runtime.wake?.(1);
+      if(results[0]?.hooks) await runtime.wake?.(results[0].hooks,'webhook');
+    }catch{log('warn',{code:'QUEUE_WAKE_FAILED',message:'Feedback recovery and webhook jobs remain durable.'});}
   };
   await persist(group);
   // Subscription changes include separate consent audit records; preserve their input order.

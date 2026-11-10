@@ -116,20 +116,21 @@ export type OutgoingMessage = {
 /** Enforces per-mailbox limits and loop guards. Caller holds the mailbox row lock. */
 async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
   const limits = sendLimitsFor(message.mailbox);
-  const counts = await tx.execute<{ hour: number; day: number }>(sql`SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour, count(*)::int AS day
+  const counts = await tx.execute<{ hour: number; day: number; thread:number; recent:string[][] }>(sql`SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour, count(*)::int AS day,
+    coalesce(jsonb_agg(jsonb_path_query_array("to"||cc||bcc,'$[*].address')) FILTER (WHERE created_at>now()-interval '1 hour'),'[]') AS recent,
+    (SELECT count(*)::int FROM mail_messages WHERE direction='outbound' AND sender_mailbox_id=${message.mailbox.id} AND thread_id=${message.threadId??null} AND created_at>now()-interval '10 minutes') AS thread
     FROM mail_messages WHERE sender_mailbox_id = ${message.mailbox.id} AND direction = 'outbound' AND created_at > now() - interval '1 day'`);
   const { hour, day } = counts.rows[0]!;
   if (hour >= limits.perHour) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perHour} messages per hour.`, undefined, true);
   if (day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
   const recipients = [...message.to, ...message.cc, ...message.bcc];
-  const recent = await tx.select({ to: mailMessages.to, cc: mailMessages.cc, bcc: mailMessages.bcc }).from(mailMessages).where(and(eq(mailMessages.senderMailboxId, message.mailbox.id), eq(mailMessages.direction, 'outbound'), gte(mailMessages.createdAt, sql`now() - interval '1 hour'`))).limit(limits.perHour);
+  const { recent,thread }=counts.rows[0]!;
   for (const recipient of recipients) {
-    const sent = recent.filter(row => [...row.to, ...row.cc, ...row.bcc].some(item => item.address === recipient)).length;
+    const sent = recent.filter(row=>row.includes(recipient)).length;
     if (sent >= limits.perRecipientPerHour) throw new ApiError(429, 'RECIPIENT_SEND_LIMIT', `This mailbox already sent ${sent} messages to ${recipient} in the last hour. This guards against reply loops.`, undefined, true);
   }
   if (message.threadId) {
-    const [thread] = await tx.select({ count: sql<number>`count(*)::int` }).from(mailMessages).where(and(eq(mailMessages.threadId, message.threadId), eq(mailMessages.senderMailboxId, message.mailbox.id), gte(mailMessages.createdAt, sql`now() - interval '10 minutes'`)));
-    if (thread!.count >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${thread!.count} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
+    if (thread >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${thread} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
   }
 }
 
@@ -276,9 +277,9 @@ export function safeForwardHtml(html: string) {
 
 /** Copies delivery status and the SES Message-ID from the sending pipeline onto outbound mailbox messages and emits events. Every minute. */
 export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
-  const result=await runtime.db.execute<{n:number;queued:number}>(sql`WITH batch AS MATERIALIZED (
+  const result=await runtime.db.execute<{n:number;queued:number;scanned:number}>(sql`WITH dirty AS (DELETE FROM mail_outbound_sync WHERE id IN (SELECT id FROM mail_outbound_sync ORDER BY due,id LIMIT ${limit} FOR UPDATE SKIP LOCKED) RETURNING id), batch AS MATERIALIZED (
     SELECT m.id,m.status AS previous,e.status,e.provider_id,e.error_code,e.suppression_reason,e.region FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id AND e.workspace_id=m.workspace_id
-    WHERE m.direction='outbound' AND m.status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') AND (e.status<>m.status OR (e.provider_id IS NOT NULL AND m.message_id IS NULL)) ORDER BY m.created_at,m.id LIMIT ${limit} FOR UPDATE OF m SKIP LOCKED
+    JOIN dirty ON dirty.id=m.id WHERE m.direction='outbound' AND m.status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') AND (e.status<>m.status OR (e.provider_id IS NOT NULL AND m.message_id IS NULL)) ORDER BY m.id FOR UPDATE OF m
   ), changed AS (UPDATE mail_messages m SET status=b.status,error_code=b.error_code,suppression_reason=b.suppression_reason,message_id=coalesce(m.message_id,b.provider_id||'@'||CASE b.region WHEN 'us-east-1' THEN 'email' ELSE b.region END||'.amazonses.com'),ses_message_id=coalesce(m.ses_message_id,b.provider_id),updated_at=now() FROM batch b WHERE m.id=b.id RETURNING m.*,b.previous
   ), ids AS (INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT workspace_id,message_id,id,thread_id FROM changed WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
   ), updates AS (SELECT c.*,e.type,e.ord FROM changed c CROSS JOIN LATERAL (VALUES
@@ -286,8 +287,10 @@ export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
     (CASE WHEN status IN ('accepted','sent') THEN 'message.sent' WHEN status IN ('delivered','bounced','complained','delayed') THEN 'message.'||status WHEN status IN ('rejected','rendering_failed','suppressed','canceled') THEN 'message.failed' END,2)) e(type,ord)
     WHERE c.sender_mailbox_id IS NOT NULL AND c.status<>c.previous AND e.type IS NOT NULL
   ), ${mailboxEventCtes(sql`SELECT workspace_id,type,sender_mailbox_id AS mailbox_id,thread_id,id AS message_id,row_number() OVER(ORDER BY id,ord) AS ord,jsonb_strip_nulls(jsonb_build_object('subject',subject,'status',CASE WHEN ord=2 THEN status END,'errorCode',CASE WHEN ord=2 THEN error_code END,'suppressionReason',CASE WHEN ord=2 THEN suppression_reason END)) AS data FROM updates`)}
-  SELECT (SELECT count(*)::int FROM changed) AS n,(SELECT count(*)::int FROM queued) AS queued`);
-  const {n,queued}=result.rows[0]!;
-  if (queued) try { await runtime.wake?.(queued); } catch { /* Webhook jobs are durable. */ }
+  , continuation AS (INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'sync:'||gen_random_uuid(),'default','mailbox.syncOutbound','{}' WHERE (SELECT count(*) FROM dirty)=${limit})
+  SELECT (SELECT count(*)::int FROM changed) AS n,(SELECT count(*)::int FROM dirty) AS scanned,(SELECT count(*)::int FROM queued) AS queued`);
+  const {n,queued,scanned}=result.rows[0]!;
+  if (queued) try { await runtime.wake?.(queued,'webhook'); } catch { /* Durable. */ }
+  if (scanned===limit) try {await runtime.wake?.(1);}catch{/* Durable continuation. */}
   return n;
 }

@@ -18,7 +18,8 @@ const values = z.object({
   BANE_TRUSTED_POOL: z.enum(['true','false']).default('false'),
   // Development installations only: let Hosted pools become ready while the AWS account is still in the SES sandbox.
   BANE_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
-  BANE_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).default('false'),
+  BANE_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).optional(),
+  BANE_HOSTED_SCREEN: z.enum(['true','false']).default('true'),
   BANE_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   BANE_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
@@ -110,7 +111,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.BANE_REGIONAL_SENDING==='true' && v.BANE_TRUSTED_POOL==='true',
     allowSesSandbox: v.MULTI_TENANT==='true' && v.BANE_ALLOW_SES_SANDBOX==='true',
-    requireDmarcForBulk: v.MULTI_TENANT === 'true' && v.BANE_REQUIRE_DMARC_FOR_BULK === 'true',
+    requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.BANE_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
+    hostedScreen: v.MULTI_TENANT==='true' && v.BANE_HOSTED_SCREEN==='true',
     placementShadow: v.MULTI_TENANT === 'true' && v.BANE_PLACEMENT_SHADOW === 'true', placementDblZone: v.BANE_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
