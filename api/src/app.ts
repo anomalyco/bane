@@ -10,8 +10,9 @@ import { authenticate, registerAuth } from './auth.js';
 import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections';
+type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats';
 function routeGroupFor(pathname: string): RouteGroup | null {
+  if (pathname === '/v1/public/stats') return 'public-stats';
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
@@ -62,6 +63,7 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'mailbox': return (await import('./mailbox.js')).registerMailbox;
       case 'workspaces': return (await import('./workspaces.js')).registerWorkspaces;
       case 'provider-connections': return (await import('./provider-connections.js')).registerProviderConnections;
+      case 'public-stats': return (await import('./public-stats.js')).registerPublicStats;
     }
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
@@ -111,6 +113,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (c.req.path.startsWith('/v1/inbound/')) return next();
+    // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
+    if (c.req.path === '/v1/public/stats') return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
@@ -178,15 +182,15 @@ export async function createOpenApiApp(): Promise<App> {
   const [
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
-    { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp },
+    { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats },
   ] = await wrapModuleLoad(() => Promise.all([
     import('./mcp-auth.js'), import('./google-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
-    import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'),
+    import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'),
   ]));
   registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
-  registerWorkspaces(full); registerProviderConnections(full); registerMcp(full);
+  registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full);
   return full;
 }
 

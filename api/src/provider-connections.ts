@@ -8,6 +8,7 @@ import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
+import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
 import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
@@ -22,6 +23,14 @@ const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), st
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
 export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant,
   sendingPause: z.object({ at: z.iso.datetime(), reason: z.string() }).nullable().describe('Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.'),
+  sendingLimit: z.object({
+    cap: z.number().int().nullable().describe('Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit.'),
+    used: z.number().int().describe('Recipients charged in the current rolling 24 hours. Simulator addresses are free.'),
+    resetAt: z.iso.datetime().nullable().describe('When capacity next frees up or the limit changes.'),
+    nextCap: z.number().int().nullable().describe('The next limit for a new workspace, or null once it has the mature limit.'),
+    nextCapAt: z.iso.datetime().nullable().describe('When nextCap applies.'),
+  }).nullable().optional().describe('Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
+  domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
 }).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
 
@@ -72,8 +81,19 @@ async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null}>(sql`SELECT kind, region, state, tenant_state, paused_at, pause_reason FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
-  return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null } : null;
+  // One statement: the same allowance admission charges against (incoming=1 reads the current usage).
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; allowance: HostedAllowance | null}>(sql`
+    SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason,
+      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id) AS domains,
+      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost')) AS verified_domains,
+      CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1)} END AS allowance
+    FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
+  if (!row) return null;
+  const iso = (value: string | null | undefined) => value ? new Date(value).toISOString() : null;
+  const allowance = row.allowance;
+  return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
+    sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
+    domains: { total: row.domains, verified: row.verified_domains } };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.

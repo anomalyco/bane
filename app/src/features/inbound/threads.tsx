@@ -69,7 +69,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         </span>
       </button>
       <p className="mailbox-message__context">
-        <span title={recipients.map(full).join(', ')}>to {recipients.map(person => own.has(person.address.toLowerCase()) ? person.address : nameOf(person)).join(', ') || '—'}</span>
+        <span title={recipients.map(full).join(', ')}>to {recipients.map(person => own.has(person.address.toLowerCase()) ? person.address : person.name || person.address).join(', ') || '—'}</span>
         {showAddresses && <span>via {message.addressIds.map(id => addressName(addresses, id)).join(', ')}</span>}
         {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : nameOf(parent.from)}</a> · {when(parent.receivedAt)}</span>
           : message.inReplyTo ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message</span> : null}

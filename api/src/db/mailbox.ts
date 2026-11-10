@@ -8,6 +8,10 @@ export type MxReport = {
   expected: { type: 'MX'; name: string; value: string; priority: number };
   records: { priority: number; host: string; provider: string | null }[];
   providers: string[];
+  /** The CNAME target when `state` is cname: an MX can't coexist with a CNAME (RFC 1034). */
+  target?: string;
+  /** Mail for the name may be split: several MX records, or another host at the same or better preference than SES. */
+  split?: boolean;
   message: string;
   checkedAt: string;
 };

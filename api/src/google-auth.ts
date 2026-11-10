@@ -29,6 +29,13 @@ export function approvedGoogleIdentity(runtime: Runtime, email: unknown, emailVe
     (typeof hostedDomain === 'string' && hostedDomain !== '' && runtime.config.allowedDomains.includes(hostedDomain.toLowerCase()));
 }
 
+// Operators invite from this list (SELECT email, last_requested_at FROM access_requests ORDER BY requested_at).
+// Only Google-verified addresses reach it, so it needs no separate form, spam check or confirmation email.
+async function recordAccessRequest(db: DbExecutor, user: DeniedSignup) {
+  await db.execute(sql`INSERT INTO access_requests(email, name, hosted_domain) VALUES (${user.email}, ${user.name.slice(0, 200)}, ${user.hostedDomain})
+    ON CONFLICT (email) DO UPDATE SET name=excluded.name, hosted_domain=excluded.hosted_domain, last_requested_at=now(), attempts=access_requests.attempts+1`);
+}
+
 export function currentGoogleIdentity(runtime: Runtime, email: string, verified: boolean, hd: string | null) {
   return runtime.config.multiTenant ? configured(runtime) && !!email && verified : approvedGoogleIdentity(runtime, email, verified, hd);
 }
@@ -74,10 +81,12 @@ export async function membershipForApprovedUser(db: DbExecutor, userId: string, 
 }
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
-export function createAuth(runtime: Runtime, options?: string | { consentWorkspace?: string; mcp?: boolean }) {
+type DeniedSignup = { email: string; name: string; hostedDomain: string | null };
+export function createAuth(runtime: Runtime, options?: string | { consentWorkspace?: string; mcp?: boolean; onDenied?: (user: DeniedSignup) => void }) {
   requireConfigured(runtime);
   const consentWorkspace = typeof options === 'string' ? options : options?.consentWorkspace;
   const includeMcp = typeof options === 'object' && options?.mcp === true;
+  const onDenied = typeof options === 'object' ? options?.onDenied : undefined;
   const origin = new URL(runtime.config.publicUrl).origin;
   // The dashboard preserves the invitation link in Better Auth's one-use, cookie-bound OAuth state.
   async function callbackInvitation() {
@@ -108,7 +117,11 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
         async function onboard<T>(pending: Promise<T>): Promise<T> {
           const result = await pending;
           const user = z.object({ id: z.string(), email: z.email(), name: z.string(), emailVerified: z.literal(true), googleHostedDomain: z.string().nullish() }).parse(result);
-          if (!await onboardNewUser(tx, user, approvedGoogleIdentity(runtime, user.email, true, user.googleHostedDomain), runtime.config.regions[0]!, await callbackInvitation())) throw new APIError('FORBIDDEN', { code: 'GOOGLE_ACCESS_DENIED', message: 'This account is not approved for sign-up.' });
+          if (!await onboardNewUser(tx, user, approvedGoogleIdentity(runtime, user.email, true, user.googleHostedDomain), runtime.config.regions[0]!, await callbackInvitation())) {
+            // A verified Google identity outside the allow-list: the route records it as an access request after this transaction rolls back.
+            onDenied?.({ email: user.email.toLowerCase(), name: user.name, hostedDomain: user.googleHostedDomain ?? null });
+            throw new APIError('FORBIDDEN', { code: 'GOOGLE_ACCESS_DENIED', message: 'This account is not approved for sign-up.' });
+          }
           return result;
         }
         scoped.create = input => input.model === 'user' ? onboard(create(input)) : create(input);
@@ -300,10 +313,18 @@ export function registerGoogleAuth(app: App) {
     }
     if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work))) return c.json(null);
     const started = performance.now();
+    let denied: DeniedSignup | null = null;
+    // Hosted sign-up is invite-only: say so, and keep the verified address as an access request.
+    // Recorded after Better Auth's transaction has ended, so a Workers request needs only its one connection.
+    const notApproved = async () => {
+      await recordAccessRequest(c.env.db, denied!).catch(() => log('warn', { operation: 'access-request', code: 'ACCESS_REQUEST_NOT_RECORDED' }));
+      return c.redirect(`${new URL(c.env.config.publicUrl).origin}/?auth=not_approved`, 302);
+    };
     try {
-      const result = await timed(c, 'auth-handler-db', () => createAuth(c.env).handler(c.req.raw));
+      const result = await timed(c, 'auth-handler-db', () => createAuth(c.env, { onDenied: user => { denied = user; } }).handler(c.req.raw));
       // Provider errors may contain arbitrary descriptions: never send them to a browser or log.
       const location = result.headers.get('location');
+      if (denied && location && new URL(location, c.env.config.publicUrl).searchParams.has('error')) return notApproved();
       if (location && new URL(location, c.env.config.publicUrl).searchParams.has('error')) {
         const headers = new Headers(result.headers);
         headers.set('location', `${new URL(c.env.config.publicUrl).origin}/?auth=error`);
@@ -314,6 +335,7 @@ export function registerGoogleAuth(app: App) {
       return result;
     } catch (error) {
       if (error instanceof ApiError) throw error;
+      if (denied) return notApproved();
       log('warn', { operation: 'google-auth', code: 'AUTH_FAILED' });
       throw new ApiError(503, 'AUTH_FAILED', 'Google sign-in failed. Please try again.');
     }

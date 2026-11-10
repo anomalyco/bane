@@ -18,7 +18,7 @@ const settingUp = (domain: MailboxDomain) => !['off', 'disabled'].includes(domai
 const plural = (count: number, word: string) => `${number(count)} ${word}${count === 1 ? '' : 's'}`
 
 function DomainsSection({ onOpen }: { onOpen: (id: string) => void }) {
-  const { canAdminister } = useWorkspaceAccess()
+  const { canAdminister, multiTenant } = useWorkspaceAccess()
   const domains = useApiDef(queries.inboundDomains(), { interval: rows => rows?.some(domain => ['provisioning', 'disabling'].includes(domain.status)) ? 15_000 : false })
   const [showWaiting, setShowWaiting] = useState(false)
   const all = domains.data ?? []
@@ -32,7 +32,7 @@ function DomainsSection({ onOpen }: { onOpen: (id: string) => void }) {
     <SectionHeader title={<span id="receiving-domains">Domains</span>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable loading={domains.isPending} skeletonRows={2} rows={rows} rowKey={domain => domain.id} onRowClick={domain => onOpen(domain.id)}
-        empty={<EmptyState title="No domain receives mail yet" description={canAdminister ? 'Open a verified domain in Domains and choose Enable receiving.' : undefined} action={canAdminister ? <Link to="/domains">Open Domains</Link> : undefined} />}
+        empty={<EmptyState title="No domain receives mail yet" description={!canAdminister ? undefined : multiTenant ? 'Add the receiving MX record shown on a domain’s page. Receiving turns on once it resolves; Check MX now there picks it up right away.' : 'Open a verified domain in Domains and choose Enable receiving.'} action={canAdminister ? <Link to="/domains">Open Domains</Link> : undefined} />}
         columns={[
           { key: 'name', label: 'Domain', width: '36%', render: domain => <div className="settings-cell-stack"><span>{domain.name}</span>{domain.subdomains?.enabled && <span className="muted receiving-clip">Subdomains too · {number(domain.subdomains.count)}</span>}</div> },
           { key: 'status', label: 'Status', width: '22%', render: domain => <StatusBadge status={receivingStatus[domain.status].label} tone={receivingStatus[domain.status].tone} /> },
@@ -42,7 +42,7 @@ function DomainsSection({ onOpen }: { onOpen: (id: string) => void }) {
       {domains.isPending ? <div className="receiving-foot"><SkeletonText width={240} /></div>
         : (folded || (canAdminister && sendOnly > 0)) && <div className="receiving-foot">
           {folded && <Button variant="ghost" size="sm" aria-expanded={showWaiting} onClick={() => setShowWaiting(!showWaiting)}>{showWaiting ? 'Hide' : 'Show'} {number(waiting)} waiting for MX</Button>}
-          {canAdminister && sendOnly > 0 && <span className="muted">{sendOnly === 1 ? '1 domain only sends' : `${number(sendOnly)} domains only send`}. Turn on receiving in <Link to="/domains">Domains</Link>.</span>}
+          {canAdminister && sendOnly > 0 && <span className="muted">{sendOnly === 1 ? '1 domain only sends' : `${number(sendOnly)} domains only send`}. {multiTenant ? 'Add a domain’s receiving MX record' : 'Turn on receiving'} in <Link to="/domains">Domains</Link>.</span>}
         </div>}
     </>}
   </section>

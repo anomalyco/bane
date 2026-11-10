@@ -162,7 +162,11 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     if (multiTenant) await loadHome()
     return multiTenant
   } })
-  const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
+  const authResult = new URLSearchParams(window.location.search).get('auth')
+  // not_approved: a verified Google account outside the invite list. The API has already saved it as an access request.
+  const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
+    : authResult === 'error' && <Alert tone="danger">Google sign-in didn’t finish. It may have been cancelled; try again.</Alert>
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
     {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>

@@ -30,11 +30,11 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   const reserve = regionalSending(runtime) ? sql`${sql.identifier(runtime.config.trustedPool?'reserve_placed_claim':'reserve_regional_claim')}(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`;
   // One reservation, one statement. The profiler never gates or runs inside the create route.
   const shadow = runtime.config.multiTenant && runtime.config.placementShadow;
-  const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null }) | null; fresh: boolean; recovering: boolean; error_code: string | null}>(
+  const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null; created_at?: string; ever_proven?: boolean }) | null; fresh: boolean; recovering: boolean; error_code: string | null; reserved_at: string}>(
     sql`${shadow ? sql`WITH reserved AS MATERIALIZED (SELECT * FROM ${reserve}), queued AS (
       INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.placement:'||id,'domain.placement',${workspace},jsonb_build_object('domainId',id)
       FROM reserved WHERE fresh AND id IS NOT NULL AND error_code IS NULL AND connection->>'kind'='shared' ON CONFLICT DO NOTHING)` : sql``}
-      SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim
+      SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim,now() AS reserved_at
       FROM ${shadow ? sql`reserved` : reserve} r
       LEFT JOIN domain_claims dc ON dc.token=r.token`)).rows[0]!;
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
@@ -44,7 +44,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   if (row.error_code==='DOMAIN_LIMIT_REACHED') throw new ApiError(409,row.error_code,'A workspace can have at most 10 unproven domains and 100 domains in total. Verify or remove a domain first.');
   if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
   if (!row.token || !row.id) throw new ApiError(409,'DOMAIN_CLAIMED','This domain overlaps an existing claim.');
-  return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null } };
+  return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null, created_at: row.reserved_at, ever_proven: false } }; // A new claim's created_at is this transaction's now().
 }
 
 export async function importByoClaims(db: DbExecutor, connection: { id: string; workspace_id: string; region: string }, domains: { name: string; ses: IdentityFacts['ses'] }[]) {
@@ -87,4 +87,4 @@ export function checkRoute(runtime: Runtime, route: SenderRoute | undefined, req
 }
 export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL) =>
   sql`EXISTS (SELECT FROM verified_sending_domains v WHERE v.workspace_id=${workspace} AND v.region=${region} AND ${within(host,sql`v.name`)})`;
-export const unverifiedSender = () => new ApiError(403, 'SENDER_DOMAIN_NOT_VERIFIED', 'Verify this sender domain or a parent domain in this workspace and region.', 'from');
+export const unverifiedSender = () => new ApiError(403, 'SENDER_DOMAIN_NOT_VERIFIED', 'The from address must use a domain verified in this workspace and region, or a subdomain of one. Add the domain with POST /v1/domains, publish its DNS records, and send once GET /v1/domains/{id} reports sending: "verified".', 'from');

@@ -6,6 +6,7 @@ import type { AgentTokenSummary, ApiKey, MailboxKey, McpConnection } from '../..
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { SecretDialog } from './shared'
+import { KeySendExample } from '../docs/first-send'
 import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './create-key'
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
@@ -90,7 +91,7 @@ export function ApiKeysPage() {
       </section>}
     </div>
     {open && <CreateKeyDialog open onOpenChange={setOpen} onCreated={(value, title) => setSecret({ value, title })} />}
-    <SecretDialog secret={secret?.value ?? null} title={secret?.title ?? 'Key created'} onClose={() => setSecret(null)} />
+    <SecretDialog secret={secret?.value ?? null} title={secret?.title ?? 'Key created'} onClose={() => setSecret(null)}>{secret?.title === 'API key created' && <KeySendExample apiKey={secret.value} />}</SecretDialog>
     <ConfirmDialog open={revokeKey !== null} onOpenChange={next => { if (!next) setRevokeKey(null) }} title={`Revoke ${revokeKey?.key.name ?? 'key'}?`}
       description={revokeKey?.kind === 'inbound' ? 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.' : 'Requests using this key will stop working. Revoking a key cannot be undone.'}
       confirmLabel="Revoke key" danger pending={revoke.isPending || revokeInbound.isPending} onConfirm={async () => { if (revokeKey?.kind === 'api') await revoke.mutateAsync(revokeKey.key.id); else if (revokeKey) await revokeInbound.mutateAsync(revokeKey.key.id) }} />

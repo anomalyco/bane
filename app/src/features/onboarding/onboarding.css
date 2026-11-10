@@ -218,3 +218,6 @@
   .onboarding-actions p { display: none; }
   .onboarding-actions .ui-button { flex: 1; height: 40px; }
 }
+
+.onboarding-key-scope { display: flex; flex-direction: column; gap: var(--space-8); }
+.onboarding-key-scope[inert] { opacity: .6; }

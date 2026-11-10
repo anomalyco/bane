@@ -325,6 +325,74 @@ describe('Public contract and authentication', () => {
     error(await http('GET', '/v1/api-keys'), 401);
   });
 
+  test('public stats are unauthenticated, cached installation aggregates with nothing workspace-scoped', async t => {
+    const reply = await http('GET', '/v1/public/stats');
+    const body = ok(reply);
+    assert.deepEqual(Object.keys(body).sort(), ['acceptedHourly', 'acceptedLast30Days', 'acceptedLastHour', 'deliveryRate', 'generatedAt', 'medianSendLatencyMs', 'regions']);
+    assert.equal(body.acceptedHourly.length, 24);
+    assert.equal(body.acceptedHourly.at(-1), body.acceptedLastHour);
+    assert.ok(body.regions.every((region: unknown) => typeof region === 'string'));
+    const again = await http('GET', '/v1/public/stats');
+    assert.equal(again.headers.get('x-bane-stats-cache'), 'hit');
+    assert.deepEqual(ok(again), body);
+    assert.deepEqual(ok(await http('GET', '/openapi.json')).paths['/v1/public/stats'].get.security, []);
+    error(await http('GET', '/v1/public/other'), 401); // Only the stats route is public.
+
+    // Exact aggregates on fixture mail from two workspaces at a fixed past instant, in a transaction that is rolled back.
+    const db = await fixtureDatabase(t);
+    const [{ drizzle }, { computeMonthStats, computePublicStats }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/public-stats.js')]);
+    const at = '2004-06-15T12:00:00.000Z', before = (minutes: number) => new Date(Date.parse(at) - minutes * 60_000).toISOString();
+    const pool = 'us-fixture-1', other = 'eu-fixture-1', [a, b] = [unique('acceptance-public-a'), unique('acceptance-public-b')];
+    type Fixture = { ws: string; region?: string; status: string; outcomes?: number; minutes: number; provider?: boolean; simulated?: boolean; campaign?: boolean; scheduled?: boolean; requeued?: boolean; latencyMs?: number };
+    const fixtures: Fixture[] = [
+      { ws: a, status: 'delivered', outcomes: 3, minutes: 10, latencyMs: 200 },
+      { ws: a, status: 'delivered', outcomes: 3, minutes: 30, latencyMs: 400 },
+      { ws: b, region: other, status: 'bounced', outcomes: 5, minutes: 90, latencyMs: 100 },
+      { ws: a, status: 'delivered', outcomes: 3, minutes: 50, requeued: true, latencyMs: 31_000 }, // Throttled and retried: still a direct send.
+      { ws: a, status: 'delivered', outcomes: 3, minutes: 125, campaign: true, latencyMs: 5_000 }, // Paced campaign mail: no latency sample.
+      { ws: a, status: 'delivered', outcomes: 3, minutes: 185, scheduled: true, latencyMs: 60_000 }, // Scheduled on purpose: no latency sample.
+      { ws: a, status: 'delivered', outcomes: 7, minutes: 245 }, // Delivered to one recipient, bounced for another.
+      { ws: b, region: other, status: 'delivered', outcomes: 3, minutes: 3 * 1440 },
+      { ws: a, status: 'delivered', outcomes: 3, minutes: 5, simulated: true, latencyMs: 50 },
+      { ws: a, status: 'suppressed', minutes: 20, provider: false },
+      { ws: a, status: 'rejected', minutes: 15, provider: false },
+      { ws: a, status: 'queued', minutes: 1, provider: false },
+      { ws: b, status: 'delivered', outcomes: 3, minutes: 31 * 1440 }, // Older than 30 days.
+      { ws: a, status: 'delivered', outcomes: 3, minutes: -1 }, // After the instant.
+    ];
+    await db.query('BEGIN');
+    try {
+      await db.query("INSERT INTO provider_pool_regions(region, aws_account_id, sending_state) VALUES ($1, '000000000000', 'ready')", [pool]);
+      for (const [index, f] of fixtures.entries()) {
+        const id = unique('public-stats-email'), created = before(f.minutes);
+        await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, scheduled_at, dispatch_version, created_at)
+          VALUES ($1,$2,$3,'fixture',$4,'sender@example.com','["recipient@example.com"]','[]','[]','Private subject','{}',$5,$6,$7,$8,$9,$10,$11)`,
+        [id, f.ws, f.region ?? pool, f.campaign ? unique('public-stats-campaign') : null, !!f.simulated, f.status, f.provider === false ? null : `provider-${index}`, f.outcomes ?? 0,
+          f.scheduled || f.requeued ? new Date(Date.parse(created) + 30_000).toISOString() : null, f.requeued ? 1 : 0, created]);
+        if (f.latencyMs !== undefined) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated, created_at) VALUES ($1,$2,$3,'accepted',$4,$5)",
+          [unique('public-stats-event'), f.ws, id, !!f.simulated, new Date(Date.parse(created) + f.latencyMs).toISOString()]);
+      }
+      const tx = drizzle(db);
+      const month = await computeMonthStats(tx, false, at);
+      const stats = await computePublicStats(tx, month, at);
+      assert.deepEqual(stats, {
+        generatedAt: at,
+        acceptedLast30Days: 8, // Both workspaces, one figure; simulated, suppressed, rejected, queued, old and future mail excluded.
+        acceptedLastHour: 3,
+        acceptedHourly: [...Array(19).fill(0), 1, 1, 1, 1, 3],
+        deliveryRate: 7 / 9, // 7 delivered ÷ (7 delivered + 2 bounced), each email once.
+        medianSendLatencyMs: 300, // Median of 100, 200, 400 and 31,000 ms.
+        regions: [other, pool],
+      });
+      // A hosted installation lists only ready shared-pool regions.
+      assert.deepEqual((await computeMonthStats(tx, true, at)).regions, [pool]);
+      // A 30-day pass taken 15 minutes earlier, advanced by mail accepted since, matches a fresh pass.
+      assert.equal((await computePublicStats(tx, await computeMonthStats(tx, false, before(15)), at)).acceptedLast30Days, 8);
+      const serialized = JSON.stringify(stats);
+      for (const secret of [a, b, 'sender@example.com', 'recipient@example.com', 'Private subject', 'provider-0']) assert.ok(!serialized.includes(secret), `Public stats must not expose ${secret}.`);
+    } finally { await db.query('ROLLBACK'); }
+  });
+
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
@@ -603,7 +671,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     let approvedCookie = '';
     const returningSub = unique('mock-returning-sub');
     const returningEmail = `${unique('mock-returning')}@example.com`;
-    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string }> = [
+    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string; notApproved?: boolean }> = [
       { allowed: true, email: emailAllowed, hd: undefined, verified: true },
       { allowed: true, email: `${unique('mock-domain')}@example.com`, hd: 'example.com', verified: true },
       { allowed: false, email: `${unique('mock-unverified')}@example.com`, hd: 'example.com', verified: false },
@@ -664,7 +732,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(me.id, users.rows[0].id);
         assert.equal(me.email, scenario.email);
       } else {
-        assert.equal(callback.headers.get('location'), `${origin}/?auth=error`);
+        // A verified identity outside the hosted allow-list is told sign-up is invite-only; every other failure stays generic.
+        assert.equal(callback.headers.get('location'), `${origin}/?auth=${scenario.notApproved ? 'not_approved' : 'error'}`);
         assert.equal(users.rowCount, userBefore.length, 'Denied profile/JWT must not provision another identity.');
         assert.deepEqual((await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows, userBefore);
         assert.deepEqual((await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows, subjectBefore, 'A denied returning profile must not replace the established identity or overwrite its last trusted hd.');
@@ -746,12 +815,17 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
       }
       runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
-      await login({ allowed: false, email: `${unique('mx-denied')}@outside.invalid`, verified: true });
+      const deniedEmail = `${unique('mx-denied')}@outside.invalid`;
+      cleanup(t, async () => { await pool.query('DELETE FROM access_requests WHERE email = ANY($1)', [[deniedEmail, guestEmail]]); });
+      await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
+      // The rolled-back sign-up leaves the verified address as an access request, and nothing else.
+      assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mock provider identity', hosted_domain: null, attempts: 1 }]);
       const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
       assert.equal(new URL(invitation.acceptUrl).searchParams.get('invitation'), invitation.id);
       const guestSub = unique('guest-sub');
-      await login({ allowed: false, email: guestEmail, verified: true, sub: guestSub });
-      await login({ allowed: false, email: guestEmail, verified: true, sub: guestSub }, unsolicited.acceptUrl);
+      await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub });
+      await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub }, unsolicited.acceptUrl);
+      assert.equal((await pool.query('SELECT attempts FROM access_requests WHERE email = $1', [guestEmail])).rows[0]?.attempts, 2);
       const guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
@@ -867,7 +941,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(pending.state, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
-        assert.deepEqual(ok(await local('GET','/v1/me',undefined,a.cookie)).connection,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null});
+        const {sendingLimit,domains:claimed,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
+        assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null}); assert.deepEqual(claimed,{total:0,verified:0});
+        assert.deepEqual({...sendingLimit,resetAt:undefined,nextCapAt:undefined},{cap:100,used:0,resetAt:undefined,nextCap:1000,nextCapAt:undefined}); assert.ok(Date.parse(sendingLimit.nextCapAt)>Date.now()+6*86400_000,'A new hosted workspace moves to 1,000 after a week.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
@@ -990,7 +1066,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const inherited=ok(await local('GET',detail,undefined,b.cookie));
           assert.equal(inherited.dmarc.status,'reject'); assert.equal(inherited.dmarc.source,zone,'The registrable parent is not co.uk.');
           assert.ok(!inherited.dns.some((r:Json)=>r.purpose==='dmarc'));
-          assert.deepEqual((await getSetup('?groups=receiving,receivingReply')).groups,['receiving'],'An empty domain needs only the MX at @.');
+          assert.deepEqual((await getSetup('?groups=receiving,receivingReply')).groups,['receivingReply'],'Even an empty domain gets its receiving MX on reply.<domain>, never at @.');
           existingMx=true; await checkMx();
           // Do not let this extra fixture take the next scenario's account-wide SES slot.
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
@@ -1083,7 +1159,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         // B owns a shared identity; later A connects BYO, and its discovery must skip B's claim.
         await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {
-          let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>();
+          let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>(), cnames=new Map<string,string>();
           const policies=new Map<string,string[]>(); let dmarcQueries=0,dmarcFailure=false;
           dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
             const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query');
@@ -1091,6 +1167,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             if (fault===url.searchParams.get('type')+'-503') return new Response(null,{status:503});
             if (fault===url.searchParams.get('type')+'-timeout') throw new DOMException('timed out','TimeoutError');
             if(url.searchParams.get('type')==='MX') {
+              if (cnames.has(url.searchParams.get('name')!)) return Response.json({Status:0,Answer:[{name:url.searchParams.get('name'),type:5,data:`${cnames.get(url.searchParams.get('name')!)}.`}]});
               const name=url.searchParams.get('name')!,host=activeMx.has(name)?`inbound-smtp.${region}.amazonaws.com`:name===domain?'existing.invalid':null;
               return Response.json({Status:0,Answer:host?[{name,type:15,data:`10 ${host}.`},...(fault==='mixed' && activeMx.has(name)?[{name,type:15,data:'20 other.invalid.'}]:[])]:[]});
             }
@@ -1141,7 +1218,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
           assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
           assert.equal(proof.name,`_bane.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
-          assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:domain,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
+          // Receiving defaults to reply.<domain>: a pasted root MX would take the domain's existing mail.
+          assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:`reply.${domain}`,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
           assert.equal(associations.size,0);
           for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
@@ -1287,6 +1365,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);
             }
             fault='MX-servfail';await assert.rejects(mxCheck(),{code:'DOMAIN_DNS_UNAVAILABLE'});assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);fault='';
+            // "Check now" (domain.verify) runs the same receiving checks: a CNAME appearing on the live host needs attention.
+            cnames.set(mx.name,'shop.vendor.invalid');await pace();await check().catch(e=>assert.ok(e instanceof JobDeferred));
+            const flagged=ok(await local('GET',detail,undefined,b.cookie));assert.equal(flagged.receivingIssue.code,'cname');assert.match(flagged.receivingIssue.message,/CNAME to shop\.vendor\.invalid/);
+            cnames.clear();await pace();await check().catch(e=>assert.ok(e instanceof JobDeferred));assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);
             assert.equal(await probe(`support@${domain}`),0,'Verifying the suggested reply host must not activate the conflicting root MX.');
             const moved=unique('moved'),moveMessage={notificationType:'Received',mail:{messageId:moved},receipt:{timestamp:new Date(Date.now()+60_000).toISOString(),recipients:[blind],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+moved}}};
             // An originally suggested host is relinquished before the other workspace creates and verifies its own claim.
@@ -5643,6 +5725,160 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX receiving hosts: DNS conflicts are checked when a host is suggested or chosen and in the hourly recheck', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const [{ operationJobs }, { baneRecordUse, receivingCandidates }] = await Promise.all([import('./src/operations.js'), import('./src/receiving-host.js')]);
+      const wid = runtime.config.workspaceId;
+      Object.assign(runtime.config, { multiTenant: true });
+      // A pool region that receives, and a ready Hosted connection on its account.
+      const account = (await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,receiving_state) VALUES ($1,'111122223333',$2,'ready','ready')
+        ON CONFLICT (region) DO UPDATE SET receiving_state='ready' RETURNING aws_account_id`, [REGION, `arn:aws:sns:${REGION}:111122223333:receiving-fixture`])).rows[0].aws_account_id;
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
+      // DNS stub (cloudflare-dns.com JSON): exact names first, then a *.domain wildcard for names without records of their own.
+      const zone = new Map<string, { mx?: string[]; cname?: string }>();
+      // Each claim publishes its _bane ownership TXT: the hourly recheck requires a fresh proof before a claim may receive.
+      const proofs = new Map<string, string>();
+      // Patched by hand and restored below: a second t.mock on fetch would restore to the fixture's guard and leak it.
+      const networkGuard = globalThis.fetch;
+      t.after(() => { globalThis.fetch = networkGuard; });
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const name = url.searchParams.get('name')!;
+        if (url.searchParams.get('type') === 'TXT' && name.startsWith('_bane.') && proofs.has(name.slice(6))) return Response.json({ Status: 0, Answer: [{ name, type: 16, data: JSON.stringify(proofs.get(name.slice(6))) }] });
+        if (url.searchParams.get('type') !== 'MX') return Response.json({ Status: 3 }); // DMARC and the legacy _opensend label: none.
+        const entry = zone.get(name) ?? (name.startsWith('*.') ? undefined : zone.get(`*.${name.split('.').slice(1).join('.')}`));
+        if (!entry) return Response.json({ Status: 3 });
+        if (entry.cname) return Response.json({ Status: 0, Answer: [{ name, type: 5, data: `${entry.cname}.` }] });
+        return Response.json({ Status: 0, Answer: (entry.mx ?? []).map(data => ({ name, type: 15, data })) });
+      };
+      const ses = '10 inbound-smtp.' + REGION + '.amazonaws.com.', tokens = ['tokena', 'tokenb', 'tokenc'];
+      type Claim = { id: string; token: string; name: string };
+      async function claim(name: string, options: { mailFrom?: string; receivingHost?: string } = {}): Promise<Claim> {
+        const identity = { proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true,
+          DkimAttributes: { SigningEnabled: true, Status: 'SUCCESS', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' },
+          ...(options.mailFrom ? { MailFromAttributes: { MailFromDomain: options.mailFrom, MailFromDomainStatus: 'SUCCESS', BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' } } : {}) } };
+        const { token } = (await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,receiving_host,ever_proven,identity)
+          VALUES ($1,$2,$2,'verified',$3,$4,true,$5) RETURNING token`, [name, wid, options.receivingHost ? 'active' : 'pending', options.receivingHost ?? null, JSON.stringify(identity)])).rows[0];
+        const id = unique('dom');
+        await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [id, wid, name, REGION]);
+        proofs.set(name, token);
+        return { id, token, name };
+      }
+      // The hourly sweep's job; "Check now" runs the same receiving check inside domain.verify.
+      const recheck = (d: Claim) => operationJobs['domain.mx']!(runtime, { domainId: d.id, token: d.token }, { id: unique('mx'), attempts: 1, workspaceId: wid });
+      const read = async (d: Claim) => ok(await local('GET', `/v1/domains/${d.id}`));
+      const receiving = (d: Json) => d.dns.find((r: Json) => r.purpose === 'receiving');
+      const choose = (d: Claim, host: string | null, confirm = false) => local('POST', `/v1/domains/${d.id}/receiving-host`, { host, confirm });
+
+      await t.test('CNAME and foreign MX: the suggestion moves to the first free subdomain, and choosing them is refused or confirmed', async () => {
+        const d = await claim(`${unique('rx-suggest')}.example`);
+        zone.set(d.name, { mx: ['1 smtp.google.com.'] });
+        zone.set(`reply.${d.name}`, { cname: 'shop.vendor.example' });
+        zone.set(`inbound.${d.name}`, { mx: ['10 mx.other.example.'] });
+        assert.equal(receiving(await read(d)).name, `reply.${d.name}`, 'Before any DNS check the suggestion is reply.<domain>, never the root.');
+        await recheck(d);
+        assert.equal((await db.query('SELECT receiving_state FROM domain_claims WHERE name=$1', [d.name])).rows[0].receiving_state, 'pending', 'The fresh _bane proof keeps the claim receivable, so later rechecks still read MX.');
+        const suggested = await read(d), record = receiving(suggested);
+        assert.equal(record.name, `mail.${d.name}`); assert.equal(suggested.receivingIssue, null);
+        assert.match(record.note, new RegExp(`reply\\.${d.name.replaceAll('.', '\\.')} is a CNAME to shop\\.vendor\\.example`));
+        assert.match(record.note, /mx\.other\.example receives mail for inbound\./); assert.match(record.note, /already routes mail to smtp\.google\.com/);
+        const cname = error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_CNAME');
+        assert.match(cname.message, /CNAME to shop\.vendor\.example.*RFC 1034/); assert.match(cname.message, new RegExp(`Use mail\\.${d.name.replaceAll('.', '\\.')} for receiving instead`));
+        const inUse = error(await choose(d, `inbound.${d.name}`), 409, 'RECEIVING_HOST_IN_USE');
+        assert.match(inUse.message, /^Move mail for inbound\..*\? mx\.other\.example receives mail for inbound\./);
+        assert.match(error(await choose(d, d.name), 409, 'RECEIVING_HOST_IN_USE').message, /\? Google Workspace receives mail for /, 'The root takes the same warning, naming its provider.');
+        const confirmed = ok(await choose(d, `inbound.${d.name}`, true));
+        assert.equal(receiving(confirmed).name, `inbound.${d.name}`); assert.deepEqual([confirmed.receivingIssue.code, confirmed.receivingIssue.provider, confirmed.receivingIssue.blocking], ['foreign_mx', 'mx.other.example', false]);
+        await recheck(d); assert.equal((await read(d)).receivingIssue.code, 'foreign_mx', 'A confirmed choice keeps its warning until the MX changes; it is never silently re-pointed.');
+        ok(await choose(d, null)); await recheck(d); assert.equal(receiving(await read(d)).name, `mail.${d.name}`);
+      });
+
+      await t.test("Bane's own names: MAIL FROM, ownership TXT and DKIM never carry the receiving MX", async () => {
+        const name = `${unique('rx-mailfrom')}.example`, d = await claim(name, { mailFrom: `reply.${name}` });
+        assert.equal(receiving(await read(d)).name, `inbound.${d.name}`, 'Record generation skips the custom MAIL FROM subdomain.');
+        zone.set(`reply.${d.name}`, { mx: [`10 feedback-smtp.${REGION}.amazonses.com.`] });
+        await recheck(d); const checked = await read(d);
+        assert.equal(receiving(checked).name, `inbound.${d.name}`); assert.match(receiving(checked).note, /reply\..* is the custom MAIL FROM subdomain/);
+        const reserved = error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_RESERVED');
+        assert.match(reserved.message, new RegExp(`MAIL FROM subdomain, so its MX must point to feedback-smtp\\.${REGION}`)); assert.match(reserved.message, /Use inbound\./);
+        error(await choose(d, `tokena._domainkey.${d.name}`), 422); // Underscore names (DKIM, _bane) are never valid receiving hosts.
+        const ses = { DkimAttributes: { Tokens: tokens }, MailFromAttributes: { MailFromDomain: `reply.${d.name}` } } as Json;
+        assert.deepEqual([`tokena._domainkey.${d.name}`, `_bane.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', 'custom MAIL FROM subdomain', null]);
+        assert.deepEqual(receivingCandidates('acme.example').slice(0, 3), ['reply.acme.example', 'inbound.acme.example', 'mail.acme.example']);
+        // The other direction: MAIL FROM can't take the suggested receiving host either (refused before any SES call).
+        error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `inbound.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT');
+      });
+
+      await t.test('split and wildcard MX are flagged; a wildcard CNAME does not block an explicit MX', async () => {
+        const splitName = `${unique('rx-split')}.example`, split = await claim(splitName, { receivingHost: `reply.${splitName}` });
+        zone.set(`reply.${split.name}`, { mx: [ses, '10 mx.backup.example.'] });
+        await recheck(split); let d = await read(split);
+        assert.equal(d.receiving, 'verified', 'Additional MX records are not proof that the verified record disappeared.');
+        assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /same or a better priority than Amazon SES, so mail for reply\..* is split/);
+        zone.set(`reply.${split.name}`, { mx: [ses, '20 mx.backup.example.'] });
+        await recheck(split); d = await read(split); assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /as a backup/);
+        zone.set(`reply.${split.name}`, { mx: [ses] }); await recheck(split); assert.equal((await read(split)).receivingIssue, null);
+
+        const wild = await claim(`${unique('rx-wildcard')}.example`);
+        zone.set(`*.${wild.name}`, { mx: ['10 catchall.mailhost.example.'] });
+        await recheck(wild); d = await read(wild);
+        assert.equal(receiving(d).name, `reply.${wild.name}`); assert.deepEqual([d.receivingIssue.code, d.receivingIssue.blocking], ['wildcard', false]);
+        assert.match(d.receivingIssue.message, new RegExp(`wildcard MX \\(\\*\\.${wild.name.replaceAll('.', '\\.')}, catchall\\.mailhost\\.example\\)`));
+        const parked = await claim(`${unique('rx-parked')}.example`);
+        zone.set(`*.${parked.name}`, { cname: 'parking.example' });
+        const chosen = ok(await choose(parked, `inbound.${parked.name}`));
+        assert.deepEqual([receiving(chosen).name, chosen.receivingIssue.code], [`inbound.${parked.name}`, 'wildcard'], 'A synthesized CNAME is not the host’s own record, so an explicit MX may be published.');
+        assert.match(chosen.receivingIssue.message, /wildcard CNAME .* to parking\.example/);
+        const several = await claim(`${unique('rx-several')}.example`);
+        zone.set(several.name, { mx: ['10 mx1.provider.example.', '20 mx2.provider.example.'] });
+        assert.match(error(await choose(several, several.name), 409, 'RECEIVING_HOST_IN_USE').message, /through 2 MX records/);
+      });
+
+      await t.test('one receiving host routes for one claim across workspaces', async () => {
+        const d = await claim(`${unique('rx-taken')}.example`);
+        // Claims without a connection are detached (054's trigger clears their state), so each workspace gets one.
+        const workspace = async () => { const id = unique('rx-other-workspace');
+          await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [id]);
+          await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, account]);
+          return id; };
+        // Another workspace claimed reply.<domain> itself (overlapping claims are refused through the API; SQL stands in).
+        const hold = (ws: string, name: string, host: string) => db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,receiving_state,receiving_host) VALUES ($1,$2,$2,'pending',$3)", [name, ws, host]);
+        const other = await workspace(), third = await workspace(), base = `${unique('rx-base')}.example`;
+        await hold(other, `reply.${d.name}`, `reply.${d.name}`);
+        // Two exclusive claims with different names in different workspaces, one host: only domain_claims_receiving_host stands in the way.
+        await hold(other, `reply.${base}`, `reply.${base}`);
+        await db.query('SAVEPOINT duplicate_host');
+        await assert.rejects(hold(third, base, `reply.${base}`),
+          (e: Json) => e.code === '23505' && e.constraint === 'domain_claims_receiving_host');
+        await db.query('ROLLBACK TO SAVEPOINT duplicate_host');
+        await recheck(d); const checked = await read(d);
+        assert.equal(receiving(checked).name, `inbound.${d.name}`); assert.match(receiving(checked).note, /reply\..* already receives mail in another Bane workspace/);
+        assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_TAKEN').message, /already receives mail in another Bane workspace\. Use inbound\./);
+      });
+
+      await t.test('conflicts that appear after setup mark receiving as needing attention in the domain and the list', async () => {
+        const name = `${unique('rx-later')}.example`, d = await claim(name, { receivingHost: `reply.${name}` });
+        zone.set(`reply.${d.name}`, { mx: [ses] });
+        await recheck(d); let current = await read(d); assert.equal(current.receiving, 'verified'); assert.equal(current.receivingIssue, null);
+        const listed = async () => ok(await local('GET', '/v1/domains?limit=10')).data.find((row: Json) => row.id === d.id);
+        zone.set(`reply.${d.name}`, { cname: 'shop.vendor.example' });
+        await recheck(d); current = await read(d);
+        assert.deepEqual([current.receivingIssue.code, current.receivingIssue.blocking, current.receivingIssue.target, current.receivingIssue.suggestion], ['cname', true, 'shop.vendor.example', `inbound.${d.name}`]);
+        assert.deepEqual((await listed()).receivingIssue, current.receivingIssue);
+        zone.set(`reply.${d.name}`, { mx: ['10 aspmx.l.google.com.'] });
+        await recheck(d); current = await read(d); assert.deepEqual([current.receivingIssue.code, current.receivingIssue.provider], ['foreign_mx', 'Google Workspace']);
+        assert.match(current.receivingIssue.message, /^Google Workspace receives mail for reply\./);
+        zone.delete(`reply.${d.name}`);
+        await recheck(d); assert.equal((await read(d)).receivingIssue.code, 'mx_missing');
+        zone.set(`reply.${d.name}`, { mx: [ses] });
+        await recheck(d); current = await read(d); assert.equal(current.receivingIssue, null); assert.equal(current.receiving, 'verified');
+        // MAIL FROM can't take the receiving host: refused before any SES call.
+        assert.match(error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `reply.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT').message, /needs its own MX to feedback-smtp/);
+        error(await choose(d, `inbound.${d.name}`), 409, 'RECEIVING_HOST_ACTIVE');
+      });
+    });
+  });
+
   test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
@@ -5661,7 +5897,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         SELECT 'email_'||md5($1||n),$1,'fixture',$2,$3,'["one@example.net"]',CASE WHEN n<=1000 THEN '["two@example.net"]'::jsonb ELSE '[]' END,'[]','Fixture','{}',false FROM generate_series(1,10000)n`, [wid,REGION,from]);
       const send = (to = 'real@example.net') => request('POST','/v1/emails/send',key,mail({from,to}));
       const simulator = 'success@simulator.amazonses.com';
-      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
+      const refused = error(await send(),429,'SEND_LIMIT_REACHED').message;
+      assert.match(refused, /100 recipients per rolling 24 hours; [\d,]+ are used\./); assert.match(refused, /The limit rises to 1,000 at \d{4}-/);
+      // The same limit is visible before a send hits it.
+      const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
+      assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,1000);
+      assert.ok(Date.parse(limit.nextCapAt)>Date.now() && Date.parse(limit.nextCapAt)<=Date.now()+3600_000, 'Week two starts an hour after this six-day, 23-hour-old connection.');
       assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
       await limits('11001','10001');
       error(await request('POST','/v1/connection',key,{kind:'shared',sendCapOverride:99999,pendingCapOverride:99999}),422,'VALIDATION_FAILED');
