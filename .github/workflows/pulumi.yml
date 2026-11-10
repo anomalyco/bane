@@ -7,6 +7,7 @@ on:
       - production
     paths:
       - "infra/pulumi/**"
+      - "infra/aws-shared/**"
       - ".github/workflows/pulumi.yml"
   workflow_dispatch:
     inputs:
@@ -20,21 +21,21 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pulumi-${{ github.ref_name }}
+  group: pulumi-${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'dev' || github.ref_name }}
   cancel-in-progress: false
 
 env:
-  STAGE: ${{ github.ref_name }}
+  # main has no stack of its own; a manual dispatch there exercises dev until
+  # the dev and production branches exist.
+  STAGE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'dev' || github.ref_name }}
   CF_ACCOUNT_ID: "15d29c8639fd3733b1b5486a2acfd968"
 
 jobs:
   deploy:
     name: Deploy
-    # workflow_dispatch from main has no matching environment; dispatch the
-    # dev or production branch instead.
-    if: github.ref_name == 'dev' || github.ref_name == 'production'
+    if: github.ref_name == 'dev' || github.ref_name == 'production' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'dev' || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -104,6 +105,22 @@ jobs:
             printf '\n[profile r2]\n'
             printf 'region = auto\n'
           } >> "$HOME/.aws/config"
+
+          # The Hyperdrive origin's password is never returned by Cloudflare, and
+          # the program ignores origin.password on adoption and updates. Only the
+          # runtime user, host, port and database matter, so the password here is
+          # a placeholder.
+          case "$STAGE" in
+            dev) hyperdrive=67bf6907a42a483da37f4d2256847281 ;;
+            production) hyperdrive=556aba191add406eaa58a0e26eebb6b1 ;;
+            *) echo "::error::unknown stage $STAGE"; exit 1 ;;
+          esac
+          origin=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/hyperdrive/configs/%s"\n' \
+            "$token" "$account" "$hyperdrive" |
+            curl --config - --silent --show-error --fail-with-body --max-time 20 |
+            jq -er '.result.origin | [.user, .host, (.port | tostring), .database] | @tsv')
+          IFS=$'\t' read -r db_user db_host db_port db_name <<< "$origin"
+          echo "BANE_HYPERDRIVE_DATABASE_URL=postgres://${db_user}:placeholder@${db_host}:${db_port}/${db_name}" >> "$GITHUB_ENV"
           echo "::notice::Cloudflare token ready; expires $expires"
 
       - name: Install Pulumi
