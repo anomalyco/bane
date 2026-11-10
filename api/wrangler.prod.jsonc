@@ -1,11 +1,10 @@
-// Bane production. Keep the legacy route for existing API clients and unsubscribe links.
+// Bane production. bane.mx is the only domain this Worker serves; opensend.mx stays on the old Worker.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // Keep the script name: production secrets (including BETTER_AUTH_SECRET for webhook secrets and sessions) live on this script; renaming requires a planned secret transfer.
-  "name": "opensend-mx",
+  "name": "bane-production",
   "account_id": "15d29c8639fd3733b1b5486a2acfd968",
   "workers_dev": false,
-  "routes": [{ "pattern": "bane.mx", "custom_domain": true }, { "pattern": "opensend.mx", "custom_domain": true }],
+  "routes": [{ "pattern": "bane.mx", "custom_domain": true }],
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
