@@ -78,8 +78,8 @@ function sdkSample(document: Json, path: string, method: string, pathItem: Json,
     if (operation.operationId === 'sendEmailBatch') options.body.emails = options.body.emails.map(completeEmail);
   }
   const renderedOptions = Object.entries(options).map(([key, value]) => `  ${key}: ${JSON.stringify(value, null, 2).replaceAll('\n', '\n  ')},`).join('\n');
-  if (operation.tags?.includes('Workspaces')) return `import { createClient } from 'banemx/client';\nimport { ${operation.operationId} } from 'banemx';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
-  return `import { createClient } from 'banemx/client';\nimport { ${operation.operationId} } from 'banemx';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
+  if (operation.tags?.includes('Workspaces')) return `import { createClient } from '@banemx/sdk/client';\nimport { ${operation.operationId} } from '@banemx/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
+  return `import { createClient } from '@banemx/sdk/client';\nimport { ${operation.operationId} } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
 }
 
 function curlSample(document: Json, path: string, method: string, pathItem: Json, operation: Json): string {
@@ -153,7 +153,7 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
   const entries = operationEntries(document);
   const selected = operationId ? entries.filter(entry => entry.operation.operationId === operationId) : entries;
   if (operationId && !selected.length) return null;
-  const intro = `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`banemx\`\n\n`;
+  const intro = `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`@banemx/sdk\`\n\n`;
   if (operationId) return `${intro}[All operations](/docs.md)\n\n${operationMarkdown(document, selected[0])}`;
   const index = [...new Set(entries.map(entry => entry.operation.tags?.[0] ?? 'API'))].map(tag => `## ${tag}\n\n${entries.filter(entry => (entry.operation.tags?.[0] ?? 'API') === tag).map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\``).join('\n')}`).join('\n\n');
   return `${intro}${index}\n\n${entries.map(entry => operationMarkdown(document, entry)).join('\n---\n\n')}`;
@@ -161,5 +161,5 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
 
 export function createLlmsText(document: Json): string {
   const entries = operationEntries(document);
-  return `# Bane\n\nBane is a transactional and marketing email API on Amazon SES.\n\n## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/banemx\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+  return `# Bane\n\nBane is a transactional and marketing email API on Amazon SES.\n\n## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/@banemx/sdk\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

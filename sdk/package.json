@@ -1,5 +1,5 @@
 {
-  "name": "banemx",
+  "name": "@banemx/sdk",
   "version": "0.4.1",
   "description": "TypeScript SDK for the Bane email API",
   "type": "module",

@@ -86,7 +86,7 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
         <div className="vp-actions">
           <Button variant="ghost" className="vp-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with Google</Button>
           <a className="vp-secondary" href="/docs">Read the docs</a>
-          <code className="vp-install">npm i banemx</code>
+          <code className="vp-install">npm i @banemx/sdk</code>
         </div>
         {notice}
       </div>
@@ -94,7 +94,7 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
 
     <footer className="vp-footer">
       <span>bane.mx</span>
-      <nav aria-label="Developer links"><a href="/openapi.json">openapi.json</a><a href="https://www.npmjs.com/package/banemx">npm</a><a href="/docs">docs</a></nav>
+      <nav aria-label="Developer links"><a href="/openapi.json">openapi.json</a><a href="https://www.npmjs.com/package/@banemx/sdk">npm</a><a href="/docs">docs</a></nav>
     </footer>
   </div>
 }

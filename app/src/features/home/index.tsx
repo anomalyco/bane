@@ -124,7 +124,7 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
     </main>
     <footer className="home-footer muted">
       <span>bane</span>
-      <nav aria-label="Developer links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/banemx">TypeScript SDK</a></nav>
+      <nav aria-label="Developer links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">TypeScript SDK</a></nav>
     </footer>
   </div>
 }

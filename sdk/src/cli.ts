@@ -6,7 +6,7 @@ import { uploadAttachmentBytes } from './upload.js'
 function fail(message: string): never { console.error(message); process.exit(1) }
 function value(args: string[], flag: string) { const index = args.indexOf(flag); return index < 0 ? undefined : args[index + 1] }
 const args = process.argv.slice(2)
-if (args[0] !== 'upload' || !args[1] || args.includes('--help')) fail('Usage: npx banemx upload <file> --api <url> --token <temporary-token> [--inline --content-id <id>] [--content-type <mime>]')
+if (args[0] !== 'upload' || !args[1] || args.includes('--help')) fail('Usage: npx @banemx/sdk upload <file> --api <url> --token <temporary-token> [--inline --content-id <id>] [--content-type <mime>]')
 const path = args[1]
 const apiUrl = value(args, '--api')
 const token = value(args, '--token')

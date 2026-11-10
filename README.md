@@ -35,10 +35,10 @@ Prefer a manual setup? Start with [Docker](api/README.md#docker-quickstart) or [
 
 ## TypeScript SDK
 
-Install [`banemx`](https://www.npmjs.com/package/banemx) from npm:
+Install [`@banemx/sdk`](https://www.npmjs.com/package/@banemx/sdk) from npm:
 
 ```sh
-npm install banemx
+npm install @banemx/sdk
 ```
 
 See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client](mcp/README.md).
@@ -46,8 +46,9 @@ See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client
 ## CI and deployments
 
 1. **Pull request:** `CI` builds the dashboard, SDK and MCP, dry-runs both Worker configs, checks types and generated docs, and runs acceptance against disposable PostgreSQL and S3 fixtures. A breaking OpenAPI change fails the build unless maintainers apply **`api-breaking`**. The label waives compatibility only. On a dev push, the waiver applies only when every pushed commit belongs to that merged PR.
-2. **Merge to `dev`:** after push CI passes, `Deploy dev` builds that SHA, then rechecks the dev tip under the deployment lock. Superseded commits are skipped before migration. The current commit migrates, deploys and runs live tests on `dev.bane.mx`; its summary and JSON report distinguish success, expected rejections, skips and failures. `Publish SDK` runs after a successful production deploy.
+2. **Merge to `dev`:** after push CI passes, `Deploy dev` builds that SHA, then rechecks the dev tip under the deployment lock. Superseded commits are skipped before migration. The current commit migrates, deploys and runs live tests on `dev.bane.mx`; its summary and JSON report distinguish success, expected rejections, skips and failures.
 3. **Production:** push `dev` to `production` (fast-forward only), or dispatch `Deploy production` from `production` with the desired branch, tag or SHA. It resolves the ref once and requires the commit to be reachable from `dev` and to have passed the dev live E2E. Require the `build` and `acceptance` checks on protected `dev` and the `production` environment on the `production` branch. The production Worker must pass health checks on both domains and the non-destructive live suite. Hosted infrastructure is a separate [Pulumi project](infra/pulumi/README.md), with `dev` and `production` stacks.
+4. **SDK release:** dispatch `Release SDK` from `production` with `bump` (`patch`, `minor` or `major`). It publishes `@banemx/sdk` through npm trusted publishing (the `release` environment's OIDC token; there is no npm token), then tags the released commit `v<version>` and creates the GitHub release. The version comes from the newest tag, or from `sdk/package.json` before the first tag, and is never committed back, so `production` stays fast-forward only. Only `production` may deploy the `release` environment.
 
 Configure **environment-scoped** variables (not repository-wide). The deploy secrets
 live in AWS Secrets Manager (`us-east-1`, account `604439173067`) and are read through

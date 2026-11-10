@@ -20,8 +20,8 @@ const samples = {
   },
   typescript: {
     label: 'typescript',
-    copy: `import { createClient } from 'banemx/client'
-import { sendEmail } from 'banemx'
+    copy: `import { createClient } from '@banemx/sdk/client'
+import { sendEmail } from '@banemx/sdk'
 
 const client = createClient({
   baseUrl: 'https://bane.mx',
@@ -132,7 +132,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
       <section className="vt-section" aria-label="Install">
         <h2 className="vt-heading">Install</h2>
         <div className="vt-facts">
-          <div><code className="vt-text">npm i banemx</code><span>typescript sdk</span></div>
+          <div><code className="vt-text">npm i @banemx/sdk</code><span>typescript sdk</span></div>
           <div><code className="vt-text">https://bane.mx/mcp</code><span>mcp server for coding agents</span></div>
         </div>
       </section>
@@ -144,7 +144,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
 
       <section className="vt-section" aria-label="See also">
         <h2 className="vt-heading">See also</h2>
-        <p className="vt-see"><a href="/docs">docs</a>, <a href="/openapi.json">openapi.json</a>, <a href="https://www.npmjs.com/package/banemx">banemx</a></p>
+        <p className="vt-see"><a href="/docs">docs</a>, <a href="/openapi.json">openapi.json</a>, <a href="https://www.npmjs.com/package/@banemx/sdk">npm</a></p>
       </section>
     </main>
 

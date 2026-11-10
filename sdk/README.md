@@ -5,7 +5,7 @@ TypeScript client for the [Bane email API](https://bane.mx). Includes generated 
 ## Install
 
 ```sh
-npm install banemx
+npm install @banemx/sdk
 ```
 
 This package uses ESM and the Fetch API. Use it on your server; never ship a Bane API key in a browser bundle.
@@ -15,8 +15,8 @@ This package uses ESM and the Fetch API. Use it on your server; never ship a Ban
 Set `BANE_API_KEY` to a Bane API key. Replace the example base URL with your deployment's public URL.
 
 ```ts
-import { createClient } from 'banemx/client';
-import { sendEmail, getEmail } from 'banemx';
+import { createClient } from '@banemx/sdk/client';
+import { sendEmail, getEmail } from '@banemx/sdk';
 
 const client = createClient({
   baseUrl: 'https://mail.example.com',
@@ -54,7 +54,7 @@ An **address** routes mail and authorizes a sender. A **message** is one email; 
 3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in Bane for the receiving region, while address keys may only use their own addresses. Bane sets `In-Reply-To` and `References`. `202` means queued, not delivered.
 
 ```ts
-import { getInboundThread, replyToInboundThread } from 'banemx';
+import { getInboundThread, replyToInboundThread } from '@banemx/sdk';
 
 // event is a verified message.received webhook; no address lookup is required.
 const { data: thread } = await getInboundThread({ client, path: { threadId: event.threadId }, throwOnError: true });
@@ -120,7 +120,7 @@ Single sends, each item in a batch, and inbound thread creation and reply accept
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
 
 ```sh
-npx --yes banemx upload ./invite.ics \
+npx --yes @banemx/sdk upload ./invite.ics \
   --api https://mail.example.com \
   --token 'bane_agent_…' \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
@@ -131,7 +131,7 @@ Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as
 Generated per-recipient content can use the same raw upload path without writing a temporary file:
 
 ```ts
-import { uploadAttachmentBytes } from 'banemx/upload';
+import { uploadAttachmentBytes } from '@banemx/sdk/upload';
 
 const attachment = await uploadAttachmentBytes({
   apiUrl: 'https://mail.example.com',

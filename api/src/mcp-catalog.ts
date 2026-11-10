@@ -388,7 +388,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   inbound(actionTool('sendInboundThread', `Queue real mail now from a receiving address. For replies, read the thread first. Pin body.addressId, body.replyToMessageId and body.expectedRecipients to the reviewed address, message and exact To/Cc/Bcc; do not guess recipients from participants. Never split a send across threads to bypass the 50-person limit. Reuse the same idempotencyKey only for a retry of the same confirmed send. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, threadSends, 'mode'));
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
-  direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx banemx upload so file bytes bypass model context.', 'uploadAttachment');
+  direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx @banemx/sdk upload so file bytes bypass model context.', 'uploadAttachment');
   direct('deleteAttachment', 'Delete an attachment that is not referenced by retained mail or campaigns.', 'deleteAttachment');
 
   const webhooks = need('getWebhooks');

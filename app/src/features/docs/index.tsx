@@ -102,12 +102,12 @@ function useAgentPrompt() {
 function DocsOverview({ document, all }: {document: Document; all: Operation[]}) {
   const prompt = useAgentPrompt()
   const groups = [...new Set(all.map(operation => operation.tag))]
-  const install = 'npm install banemx'
+  const install = 'npm install @banemx/sdk'
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>Bane API</h1><p>{document.info.description}</p></header>
     <AgentPrompt prompt={prompt} />
     <McpSetup chooseAccess />
-    <section className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/banemx">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
+    <section className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/@banemx/sdk">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
     <section className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>Complete API documentation for agents and text tools.</span></a>
       <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>
@@ -131,7 +131,7 @@ export function DocsPage() {
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const current = all.find(operation => operation.id === selected)
   return <div className="docs-page">
-    <header className="docs-header"><Link className="docs-brand" to="/"><strong>Bane</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/banemx">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
+    <header className="docs-header"><Link className="docs-brand" to="/"><strong>Bane</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
     <div className="docs-layout">
       <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
         <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && search.trim() ? <p className="muted docs-nav-empty">No matching operations.</p> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
