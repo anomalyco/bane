@@ -10,11 +10,16 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "ajv": "^8.17.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "body-parser": "2.4.0",
+    "proxy-addr": "2.0.8",
+    "zod": "4.6.7"
   }
 }

@@ -180,30 +180,42 @@ jobs:
         name: Decide whether Pulumi has work
         env:
           EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
           SHA: ${{ steps.pin.outputs.sha }}
+          STAGE: ${{ steps.stage.outputs.stage }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ $EVENT == workflow_dispatch ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
             echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # A push knows the previous tip. A workflow_run does not, so compare
-          # the first parent; merges of PRs are the usual shape on dev.
-          base=${BEFORE:-$SHA^}
-          if [[ ! $base =~ ^[0-9a-f]{40}$ || $base =~ ^0+$ ]] || ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-            base=$SHA^
+          # N12: compare against the commit the last applied Pulumi run deployed, not the previous
+          # tip or first parent. A superseded run stops at its tip check, so the next run would
+          # otherwise skip the infrastructure change it carried. Applied means that run's Pulumi
+          # and Worker jobs both succeeded (a preview skips the Worker job); anything else runs Pulumi.
+          repo="repos/$GITHUB_REPOSITORY"; base=
+          runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?branch=$STAGE&status=success&per_page=30" |
+            jq -r --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.head_repository.full_name == $repo) | [.id, .display_title] | @tsv')
+          while IFS=$'\t' read -r id title; do
+            [[ $title =~ ^Deploy\ $STAGE\ ([0-9a-f]{40})$ ]] || continue
+            applied=${BASH_REMATCH[1]}
+            if gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100" |
+              jq -e --arg p "Pulumi $STAGE" --arg d "Deploy $STAGE $applied" '[.jobs[] | select((.name == $p or .name == $d) and .conclusion == "success")] | length == 2' >/dev/null; then
+              base=$applied; break
+            fi
+          done <<< "$runs"
+          if [[ -z $base ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$base" "$SHA"; then
+            echo 'pulumi=true' >> "$GITHUB_OUTPUT"
+            echo "No applied Pulumi commit is an ancestor of $SHA; running Pulumi." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          if git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-            changed=$(git diff --name-only "$base" "$SHA")
-          else
-            changed=$(git show --name-only --format= "$SHA")
-          fi
-          if grep -Eq '^(infra/pulumi/|infra/aws-shared/|\.github/workflows/(deploy|pulumi)\.yml$)' <<< "$changed"; then
+          changed=$(git diff --name-only "$base" "$SHA")
+          # Pulumi also reads the shared mail-control documents and the receiving-set check.
+          if grep -Eq '^(infra/pulumi/|infra/aws-shared/|api/src/mail-controls\.ts$|\.github/scripts/receiving-rule-set\.sh$|\.github/workflows/(deploy|pulumi)\.yml$)' <<< "$changed"; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
           else
             echo 'pulumi=false' >> "$GITHUB_OUTPUT"
-            echo 'No infrastructure changes; skipping Pulumi.' >> "$GITHUB_STEP_SUMMARY"
+            echo "No infrastructure changes since the last applied commit $base; skipping Pulumi." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   pulumi:

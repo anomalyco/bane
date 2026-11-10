@@ -22,6 +22,11 @@ const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
 export { STAGING_PREFIX };
 export const workspacePrefix = (wid:string, kind:'raw'|'att') => `workspaces/${wid}/${kind}/`;
+// Attachment object keys. The runtime IAM policies (infra/aws-shared), the BYO template and the
+// acceptance suite authorize these exact shapes: change them together. Received files carry the
+// ingest batch digest; outbound archives and objects stored before the batch segment do not.
+export const receivedAttachmentKey = (wid:string, messageId:string, batch:string, attachmentId:string) => `${workspacePrefix(wid,'att')}${messageId}/${batch}/${attachmentId}`;
+export const sentAttachmentKey = (wid:string, messageId:string, attachmentId:string) => `${workspacePrefix(wid,'att')}${messageId}/${attachmentId}`;
 export function assertMailboxKey(wid:string,key:string,kind:'raw'|'att') {
   if (!key.startsWith(workspacePrefix(wid,kind)) || key.split('/').some(s=>!s || s==='.' || s==='..')) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The object is not in this workspace.');
 }
@@ -119,7 +124,7 @@ export type RegionResources = { account: string; bucket: string; topicArn: strin
 type Clients = { sts: STSClientType; s3: S3ClientType; sns: SNSClientType; ses: ReturnType<typeof pacedSes>; sdk: MailboxSetupSdk };
 async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses, sdk }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>): Promise<RegionResources & { rules: ReceiptRule[] }> {
   if (runtime.config.multiTenant && installationId===POOL_INSTALLATION) throw new ApiError(409,'POOL_RESOURCE_OWNERSHIP','Per-domain setup cannot manage hosted pool resources.');
-  const { DescribeActiveReceiptRuleSetCommand, CreateReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand } = sdk.ses;
+  const { DescribeActiveReceiptRuleSetCommand } = sdk.ses;
   const { HeadBucketCommand, CreateBucketCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand, PutBucketPolicyCommand, PutBucketLifecycleConfigurationCommand } = sdk.s3;
   const { CreateTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, ListSubscriptionsByTopicCommand, SubscribeCommand } = sdk.sns;
   const { GetCallerIdentityCommand } = sdk.sts;
@@ -170,15 +175,11 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     if(installationId===POOL_INSTALLATION && runtime.config.receivingRedrive && region==='us-east-2') await aws('sns:SetSubscriptionAttributes',()=>sns.send(new sdk.sns.SetSubscriptionAttributesCommand({SubscriptionArn:subscribed.SubscriptionArn,AttributeName:'RedrivePolicy',AttributeValue:JSON.stringify({deadLetterTargetArn:`arn:aws:sqs:${region}:${account}:bane-inbound-dead-letters`})}),{abortSignal:signal}));
 
     // One receipt rule set is active per account and region. Join an existing one; never replace it.
-    let active = await ses<{ Metadata?: { Name?: string }; Rules?: ReceiptRule[] }>('ses:DescribeActiveReceiptRuleSet', new DescribeActiveReceiptRuleSetCommand({}));
-    if (!active.Metadata?.Name) {
-      try { await ses('ses:CreateReceiptRuleSet', new CreateReceiptRuleSetCommand({ RuleSetName: names.ruleSetName })); }
-      catch (error) { if ((error as StepError).awsName !== 'AlreadyExistsException') throw error; }
-      await ses('ses:SetActiveReceiptRuleSet', new SetActiveReceiptRuleSetCommand({ RuleSetName: names.ruleSetName }));
-      active = await ses('ses:DescribeReceiptRuleSet', new DescribeReceiptRuleSetCommand({ RuleSetName: names.ruleSetName }));
-      if (!active.Metadata?.Name) active = { Metadata: { Name: names.ruleSetName }, Rules: active.Rules ?? [] };
-    }
-    return { account, bucket: names.bucket, topicArn: expectedTopic, ruleSetName: active.Metadata!.Name!, rules: active.Rules ?? [] };
+    // Activating a set changes how the whole account receives mail, so the runtime credentials cannot
+    // (L12): an administrator creates and activates one with their own credentials.
+    const active = await ses<{ Metadata?: { Name?: string }; Rules?: ReceiptRule[] }>('ses:DescribeActiveReceiptRuleSet', new DescribeActiveReceiptRuleSetCommand({}));
+    if (!active.Metadata?.Name) throw new ApiError(409, 'RECEIPT_RULE_SET_REQUIRED', `No SES receipt rule set is active in ${region}. With administrator credentials, run: aws ses create-receipt-rule-set --rule-set-name ${names.ruleSetName} --region ${region} && aws ses set-active-receipt-rule-set --rule-set-name ${names.ruleSetName} --region ${region}. Then enable receiving again.`);
+    return { account, bucket: names.bucket, topicArn: expectedTopic, ruleSetName: active.Metadata.Name, rules: active.Rules ?? [] };
   }
 }
 

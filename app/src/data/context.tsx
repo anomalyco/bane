@@ -37,11 +37,12 @@ function invitationError(error: unknown) {
   return `Couldn’t open the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-// Shown before anything changes. The slug tells apart workspaces that share a name.
-function InvitationReview({ invitation, email, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
+// Shown before anything changes. The slug tells apart workspaces that share a name. An account whose
+// only way in is this invitation has no workspace yet (M9): cancelling signs it out instead.
+function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
   return <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
     <h2>Join {invitation.workspaceName}?</h2>
-    <p>You were invited{email ? <> as <bdi>{email}</bdi></> : null}. Nothing changes until you join; you stay in your current workspace if you cancel.</p>
+    <p>You were invited{email ? <> as <bdi>{email}</bdi></> : null}. {firstWorkspace ? 'Your account has no workspace yet. Nothing changes until you join; cancelling signs you out.' : 'Nothing changes until you join; you stay in your current workspace if you cancel.'}</p>
     <dl className="invitation-facts">
       <dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi> <code>{invitation.workspaceSlug}</code></dd>
       <dt>Invited by</dt><dd><bdi>{invitation.inviterName}</bdi> <code>{invitation.inviterEmail}</code></dd>
@@ -49,7 +50,7 @@ function InvitationReview({ invitation, email, joining, error, onJoin, onCancel 
       <dt>Expires</dt><dd>{expiry.format(new Date(invitation.expiresAt))}</dd>
     </dl>
     {error ? <Alert tone="danger">{invitationError(error)}</Alert> : null}
-    <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>Cancel</Button></div>
+    <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
 }
 export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
@@ -120,7 +121,8 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   }, [invitation, review.error, review.data, identity.data])
   async function switchWorkspace(id: string, path?: string) {
     const previous = selectedWorkspace()
-    if (id === previous) return
+    // A first-time invitee has no identity yet, so a remembered ID equal to the joined workspace still loads it.
+    if (id === previous && cache.getQueryData(['identity'])) return
     await cache.cancelQueries()
     selectWorkspace(id)
     let next: Identity
@@ -199,10 +201,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
     : authResult === 'error' ? <Alert tone="danger">Google sign-in didn’t finish. It may have been cancelled; try again.</Alert>
+    : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited Google account to review it. You join only after you confirm.</Alert>
-  const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && identity.data && !identity.isError
+  // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
+  // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
+  const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
+  const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
-    {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={clearInvitation} /> : <BootLoader />
+    {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>

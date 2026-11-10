@@ -3,8 +3,8 @@ import * as cf from "@pulumi/cloudflare";
 import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
-import { receivingAlarm } from './receiving-alarm.js';
-import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
+import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
+import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
 
 const stages = {
   dev: {
@@ -105,12 +105,38 @@ const route = new aws.ses.ReceiptRule('pool-inbound-all',{ruleSetName:'bane-inbo
   recipients:rule.Recipients,s3Actions:[{position:1,bucketName:action.BucketName,objectKeyPrefix:action.ObjectKeyPrefix,topicArn:inbound.arn}]},
   {...opts('bane-inbound:bane-inbound-all',ohio),dependsOn:[access,lifecycle,sub]});
 const trustedPublish=config.requireBoolean('trustedFeedbackPublish');
-const feedback = [false,true].map(trusted=>{
+// Mythos 5.1 N-M3: SES bounce and complaint feedback reaches the Worker over HTTPS. SNS retries it
+// with backoff for up to an hour, then dead-letters it to a queue only that topic may write, and the
+// operator is paged on the first message. Alarm actions must be in the queue's region.
+const pagers = [config.require('receivingAlarmTopicArn'), config.require('virginiaAlarmTopicArn')];
+const feedback = [false,true].map((trusted,i)=>{
   const r=trusted?'us-east-1':region, prefix=trusted?'bane-trusted':'bane', name=prefix+'-feedback', arn=`arn:aws:sns:${r}:${account}:${name}`;
   const sets=['transactional','marketing'].map(stream=>`arn:aws:ses:${r}:${account}:configuration-set/${prefix}-${stream}`);
-  return new aws.sns.Topic(`pool-${name}`,{name,tags:{...tags('ses-feedback'),...(trusted?{'bane:owner':'bane'}:{})},
-    policy:JSON.stringify(feedbackPolicy(account,{topic:arn,sets},!trusted||trustedPublish))},opts(arn,trusted?iam:ohio));
+  const provider=trusted?iam:ohio, options={provider,protect:true};
+  const topic=new aws.sns.Topic(`pool-${name}`,{name,tags:{...tags('ses-feedback'),...(trusted?{'bane:owner':'bane'}:{})},
+    deliveryPolicy:JSON.stringify(deliveryPolicy),policy:JSON.stringify(feedbackPolicy(account,{topic:arn,sets},!trusted||trustedPublish))},opts(arn,provider));
+  const dlq=new aws.sqs.Queue(`${name}-dead-letters`,{name:`${name}-dead-letters`,sqsManagedSseEnabled:true,messageRetentionSeconds:14*86400},options);
+  new aws.cloudwatch.MetricAlarm(`${name}-dead-letter-alarm`,deadLetterAlarm(account,r,`${name}-dead-letters`,dlq.name,pagers[i]!),options);
+  const policy=new aws.sqs.QueuePolicy(`${name}-dead-letter-policy`,{queueUrl:dlq.url,policy:dlq.arn.apply(queue=>JSON.stringify({Version:'2012-10-17',Statement:[{
+    Effect:'Allow',Principal:{Service:'sns.amazonaws.com'},Action:'sqs:SendMessage',Resource:queue,Condition:{ArnEquals:{'aws:SourceArn':arn},StringEquals:{'aws:SourceAccount':account}}
+  }]}))},{provider});
+  const subscription=imports.find(id=>id.startsWith(arn+':'));
+  if (subscription && !/^[0-9a-f-]{36}$/i.test(subscription.slice(arn.length+1))) throw new Error(`Import only the confirmed Bane ${name} HTTPS subscription ARN`);
+  // Virginia's subscription is created and journaled by the Worker during trusted enrollment;
+  // Pulumi only adopts it afterwards. Ohio's is created here if the inventory found none.
+  if (subscription || !trusted) new aws.sns.TopicSubscription(`pool-${name}-https`,{topic:topic.arn,protocol:'https',endpoint:stage.origin+'/v1/events/ses',rawMessageDelivery:false,
+    endpointAutoConfirms:false,redrivePolicy:dlq.arn.apply(deadLetterTargetArn=>JSON.stringify({deadLetterTargetArn}))},{...(subscription?adopt(subscription,provider):options),dependsOn:[policy]});
+  return topic;
 });
+// N7: the runtime key can no longer write event destinations or suppression options on the pool
+// sets. An operator creates the four sets once (tenant suppression, docs/receiving-operations.md);
+// Pulumi owns their destinations, Virginia's only after its signed confirmation. The Worker verifies.
+const destinations = [false,true].flatMap((trusted,i)=>trusted && !trustedPublish ? [] : POOL_STREAMS.map(stream=>{
+  const prefix=trusted?'bane-trusted':'bane', set=`${prefix}-${stream}`, topic=feedback[i]!, d=poolEventDestination(prefix,'');
+  return new aws.sesv2.ConfigurationSetEventDestination(`pool-${set}-events`,{configurationSetName:set,eventDestinationName:d.Name,
+    eventDestination:{enabled:d.Enabled,matchingEventTypes:d.MatchingEventTypes,snsDestination:{topicArn:topic.arn}}},
+    {...opts(`${set}|${d.Name}`,trusted?iam:ohio),dependsOn:[topic]});
+}));
 const runtime = "bane-runtime";
 const user = new aws.iam.User(runtime, {
   name: runtime, path: "/", tags: { "bane:purpose": "hosted-runtime" }, permissionsBoundary,
@@ -119,14 +145,20 @@ const user = new aws.iam.User(runtime, {
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
 const attachments = Object.entries(policies).map(([name, document]) => {
   const arn = `arn:aws:iam::${stage.account}:policy/${name}`;
-  const policy = new aws.iam.Policy(name, { name, path: "/", policy: JSON.stringify(document) }, {...adopt(arn, iam),dependsOn:[route,...feedback]});
+  const policy = new aws.iam.Policy(name, { name, path: "/", policy: JSON.stringify(document) }, {...adopt(arn, iam),dependsOn:[route,...feedback,...destinations]});
   return new aws.iam.UserPolicyAttachment(name, { user: user.name, policyArn: policy.arn }, adopt(`${runtime}/${arn}`, iam));
 });
 
 // The operator owns the active set; the Worker still manages identities, sets and tenants.
 
 // Never import an IAM access key: AWS returns its secret only on creation.
-const key = new aws.iam.AccessKey("runtime-key", { user: user.name }, { provider: iam, dependsOn: attachments });
+// M5: rotate the long-lived runtime key by setting bane:runtimeKeyRotation to a new value (for example
+// the date). The update creates the new key, rewrites both Worker secrets, then deletes the old key.
+const rotation = config.get("runtimeKeyRotation");
+if (rotation !== undefined && (!/^[a-z0-9-]{1,32}$/.test(rotation) || !writeWorkerSecrets)) {
+  throw new Error("bane:runtimeKeyRotation needs 1-32 lowercase letters, digits or hyphens, and bane:writeWorkerSecrets");
+}
+const key = new aws.iam.AccessKey(rotation ? `runtime-key-${rotation}` : "runtime-key", { user: user.name }, { provider: iam, dependsOn: attachments });
 if (writeWorkerSecrets) {
   // v6 has account Secrets Store resources, not standalone script secrets, so these two PUTs use v5.
   const provider = new cfV5.Provider("worker-secrets", {});

@@ -8,7 +8,7 @@ import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, ty
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
-import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns } from './mailbox-setup.js';
+import { mailboxS3, receivedAttachmentKey, STAGING_PREFIX, workspacePrefix, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
@@ -448,7 +448,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     // Stable on retry. Reopening a processed receipt strictly grows its envelope, so a
     // cleanup already tagging the old batch can never touch the newly published keys.
     const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients])) : null;
-    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>`${workspacePrefix(scope.workspaceId,'att')}${messageRowId}/${batch}/matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`));
+    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`)));
     if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${receipt.bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
     for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);

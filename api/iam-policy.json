@@ -66,8 +66,6 @@
       "Action": [
         "ses:DescribeActiveReceiptRuleSet",
         "ses:DescribeReceiptRuleSet",
-        "ses:CreateReceiptRuleSet",
-        "ses:SetActiveReceiptRuleSet",
         "ses:CreateReceiptRule",
         "ses:UpdateReceiptRule",
         "ses:DeleteReceiptRule"

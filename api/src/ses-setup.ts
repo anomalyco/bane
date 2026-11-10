@@ -9,7 +9,7 @@ import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError } from 
 import type { Config, Runtime } from './core.js';
 import { claimNameAllowed, domainName } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
-import { feedbackPolicy } from './mail-controls.js';
+import { FEEDBACK_EVENTS, feedbackPolicy, poolEventDestination, poolSuppression } from './mail-controls.js';
 
 type SetupSdk = {
   sesv2: typeof import('@aws-sdk/client-sesv2');
@@ -60,7 +60,7 @@ export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId:
 // in sending.ts still disable instrumentation when tracking:false. Consent stays in Bane.
 // SEND is intentionally absent: provider acceptance is already recorded from the SendEmail response,
 // and the callback would double feedback volume at the full send rate.
-const EVENTS = ['DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'] as const;
+const EVENTS = FEEDBACK_EVENTS;
 const OWNER_TAG = 'bane:installation-id';
 const PURPOSE_TAG = 'bane:purpose';
 const PURPOSE = 'ses-feedback';
@@ -228,6 +228,20 @@ export function policyReady(policy: string | undefined, expected: unknown): bool
   try { return !!policy && canonical(normalizedPolicy(JSON.parse(policy))) === canonical(normalizedPolicy(expected)); } catch { return false; }
 }
 const poolSendingDrift = (resource:string) => new ApiError(409,'POOL_SENDING_DRIFT',`${resource} is missing or differs from the hosted configuration. An operator must run Pulumi provisioning.`);
+// N7: the runtime key cannot create pool sets, change their suppression or write event destinations.
+// An operator creates the sets and Pulumi owns the destinations; this only reads and compares them.
+type PoolSet = { Tags?: { Key?: string; Value?: string }[]; SendingOptions?: { SendingEnabled?: boolean }; SuppressionOptions?: NonNullable<Parameters<typeof autoValidationMode>[0]> & { SuppressionScope?: string; SuppressedReasons?: string[] } };
+type PoolDestination = { Name?: string; Enabled?: boolean; MatchingEventTypes?: string[]; SnsDestination?: { TopicArn?: string }; CloudWatchDestination?: unknown; KinesisFirehoseDestination?: unknown; EventBridgeDestination?: unknown; PinpointDestination?: unknown };
+function assertPoolSet(set: PoolSet, destinations: PoolDestination[] | undefined, stream: 'transactional' | 'marketing', arn: string, topicArn: string, options: SesSetupOptions, publish = true) {
+  const want = poolSuppression(stream), have = set.SuppressionOptions;
+  if (!owned(set.Tags, options) || set.SendingOptions?.SendingEnabled !== true || have?.SuppressionScope !== want.SuppressionScope
+    || canonical(have.SuppressedReasons ?? []) !== canonical(want.SuppressedReasons) || autoValidationMode(have) !== DEFAULT_AUTO_VALIDATION[stream]) throw poolSendingDrift(`${arn} SuppressionOptions`);
+  const expected = poolEventDestination(options.namespace === 'trusted' ? 'bane-trusted' : 'bane', topicArn), list = destinations ?? [];
+  // Any other destination (a disabled, redirected or extra copy) is drift for the pool, not a warning.
+  const wired = (d: PoolDestination) => d.Name === expected.Name && d.Enabled === true && d.SnsDestination?.TopicArn === topicArn && canonical(d.MatchingEventTypes ?? []) === canonical(expected.MatchingEventTypes)
+    && !d.CloudWatchDestination && !d.KinesisFirehoseDestination && !d.EventBridgeDestination && !d.PinpointDestination;
+  if (publish ? list.length !== 1 || !wired(list[0]!) : list.length !== 0) throw poolSendingDrift(`${arn} event destinations`);
+}
 function add(report: SesDiscovery, code: string, message: string, warning = false) { (warning ? report.warnings : report.blockers).push({ code, message }); }
 function pending(subscription: Subscription): boolean { return subscription.SubscriptionArn === 'PendingConfirmation' || subscription.SubscriptionArn === 'pending confirmation'; }
 function subscriptionArn(subscription: Subscription, topicArn: string): string | null {
@@ -602,6 +616,8 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
   const streams=['transactional','marketing'] as const;
   for (const [i,stream] of streams.entries()) {
     const s=report.resources[stream];
+    // N7: an operator creates the trusted sets and Pulumi their destinations; nothing here is journaled.
+    if (signedPool) { if (s.exists!==true) throw poolSendingDrift(a.sets[i]!); continue; }
     check('set',a.sets[i]!,s.exists===true);check('destination',a.sets[i]!+'/'+names.eventDestinationName,s.eventDestinationExists===true,a.topic);
     if (s.exists && (!s.owned || s.autoValidation!=='inherit' && s.autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) || s.eventDestinationExists && !s.eventWired || report.warnings.some(w=>w.code==='OTHER_EVENT_DESTINATIONS')) throw drift();
   }
@@ -614,8 +630,13 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
     // Virginia stays owner-only until signed confirmation. Pulumi, not the key,
     // opens the narrowly scoped SES grant for the second provisioning pass.
     if (signedPool && !policyReady((await c.sns.send(new GetTopicAttributesCommand({TopicArn:a.topic}),opts)).Attributes?.Policy,publish?finalPolicy:initialPolicy)) throw poolSendingDrift(`${a.topic} Policy`);
-    if (!publish && streams.some(s=>report.resources[s].eventDestinationExists)) throw drift();
-    for (const [i,stream] of streams.entries()) {
+    if (signedPool) for (const [i,stream] of streams.entries()) {
+      // Before signed confirmation the sets must have no destination; after it, exactly Pulumi's.
+      const set=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts), dest=await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:names[stream]}),opts);
+      assertPoolSet(set,dest.EventDestinations,stream,a.sets[i]!,a.topic,options,publish);
+    }
+    else if (!publish && streams.some(s=>report.resources[s].eventDestinationExists)) throw drift();
+    for (const [i,stream] of signedPool ? [] : streams.entries()) {
       if (!report.resources[stream].exists) {
         await record({kind:'set',resource:a.sets[i]!,state:'creating'});
         await fence();await c.ses.send(new CreateConfigurationSetCommand({ConfigurationSetName:names[stream],Tags:tags(options),SendingOptions:{SendingEnabled:true}}),opts);
@@ -640,7 +661,7 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
       if (publish) {await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);}
       await record({kind:'topic',resource:a.topic,state:'created'});
     }
-    for (const [i,stream] of streams.entries()) if (publish && !report.resources[stream].eventWired) {
+    for (const [i,stream] of streams.entries()) if (!signedPool && publish && !report.resources[stream].eventWired) {
       const set=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts), dest=await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:names[stream]}),opts);
       // SES omits EventDestinations entirely when a configuration set has none.
       if (!owned(set.Tags,options) || (dest.EventDestinations?.length??0)!==0) throw drift();
@@ -697,7 +718,14 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
     if (hosted && !policyReady(attrs.Policy,topicPolicy(accountId, options.region, names))) throw poolSendingDrift(`${expected.topic} Policy`);
   };
   try {
-    for (const kind of ['transactional', 'marketing'] as const) {
+    for (const [index, kind] of (['transactional', 'marketing'] as const).entries()) {
+      if (hosted) { // Verify only (N7): never create the pool set, rewrite its suppression or its destinations.
+        if (report.resources[kind].exists !== true) throw poolSendingDrift(expected.sets[index]!);
+        const set = await assertSetOwned(names[kind]);
+        const { EventDestinations } = await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ ConfigurationSetName: names[kind] }), { abortSignal: deadlineSignal });
+        assertPoolSet(set, EventDestinations, kind, expected.sets[index]!, expected.topic, options);
+        continue;
+      }
       if (report.resources[kind].exists === false) {
         try { await c.ses.send(new CreateConfigurationSetCommand({ ConfigurationSetName: names[kind], Tags: tags(options), SendingOptions: { SendingEnabled: true }, ...(options.installationId === POOL_INSTALLATION ? { SuppressionOptions: { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'] } } : {}) }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!collision(error)) throw error; }
@@ -715,7 +743,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
     // Exact policy replacement is limited to this installation's dedicated topic.
     // Unrelated topics, event destinations and subscriptions are never overwritten.
     if (!hosted && report.resources.topic.policyReady !== true) await c.sns.send(new SetTopicAttributesCommand({ TopicArn: expected.topic, AttributeName: 'Policy', AttributeValue: JSON.stringify(topicPolicy(accountId, options.region, names)) }), { abortSignal: deadlineSignal });
-    for (const name of [names.transactional, names.marketing]) {
+    for (const name of hosted ? [] : [names.transactional, names.marketing]) {
       await assertSetOwned(name);
       const destinations = await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ ConfigurationSetName: name }), { abortSignal: deadlineSignal });
       const input = { ConfigurationSetName: name, EventDestinationName: names.eventDestinationName, EventDestination: { Enabled: true, MatchingEventTypes: [...EVENTS], SnsDestination: { TopicArn: expected.topic } } };
@@ -750,6 +778,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
 }
 
 export async function setAutoValidation(runtime: Runtime, options: SesSetupOptions, stream: 'transactional' | 'marketing', mode: 'off' | 'managed' | 'medium' | 'high'): Promise<void> {
+  if (options.installationId === POOL_INSTALLATION || options.namespace) throw new ApiError(409, 'POOL_SENDING_MANAGED', 'Hosted pool configuration sets are managed by the operator.');
   const context = setupContext();
   const c = await clients(runtime, options.region, context);
   const { GetConfigurationSetCommand } = c.sdk.sesv2;

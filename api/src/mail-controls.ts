@@ -32,6 +32,15 @@ export function feedbackPolicy(account:string,arn:{topic:string;sets:string[]},p
     { Sid:'BaneSesPublish',Effect:'Allow',Principal:{Service:'ses.amazonaws.com'},Action:'sns:Publish',Resource:arn.topic,Condition:{StringEquals:{'AWS:SourceAccount':account,'AWS:SourceArn':arn.sets}} },
   ] : [])] };
 }
+// Pool configuration-set feedback (N7). Pulumi writes the event destinations and an operator
+// creates the sets with these suppression options; the hosted Worker only verifies them.
+// SEND is intentionally absent: acceptance is recorded from the SendEmail response.
+export const FEEDBACK_EVENTS = ['DELIVERY','BOUNCE','COMPLAINT','REJECT','RENDERING_FAILURE','DELIVERY_DELAY','OPEN','CLICK'] as const;
+export const POOL_STREAMS = ['transactional','marketing'] as const;
+export const poolEventDestination = (prefix:'bane'|'bane-trusted',topicArn:string) =>
+  ({ Name:`${prefix}-events`, Enabled:true, MatchingEventTypes:[...FEEDBACK_EVENTS], SnsDestination:{ TopicArn:topicArn } });
+export const poolSuppression = (stream:typeof POOL_STREAMS[number]) => ({ SuppressedReasons:['BOUNCE','COMPLAINT'], SuppressionScope:'TENANT',
+  ValidationOptions:{ ConditionThreshold: stream==='transactional' ? { ConditionThresholdEnabled:'DISABLED' } : { ConditionThresholdEnabled:'ENABLED', OverallConfidenceThreshold:{ ConfidenceVerdictThreshold:'MANAGED' } } } });
 export function receiptRule(name:string,recipients:string[],{bucket,topicArn}:{bucket:string;topicArn:string}) {
   return { Name:name, Enabled:true, TlsPolicy:'Optional' as const, ScanEnabled:true, Recipients:[...recipients].sort(), Actions:[{S3Action:{BucketName:bucket,ObjectKeyPrefix:STAGING_PREFIX,TopicArn:topicArn}}] };
 }
