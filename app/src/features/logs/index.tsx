@@ -12,7 +12,7 @@ import { EmailDetailSkeleton, logColumns } from './skeletons'
 import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
 
 function RecipientEmail({ email }: { email: string }) {
-  return <span className="log-recipient"><span aria-hidden="true">{email.slice(0, 2)}</span><span className="log-recipient__private" aria-hidden="true">{email.slice(2)}</span><span className="sr-only">{email}</span></span>
+  return <span className="log-recipient" title="Recipients stay blurred for privacy. Hover to read."><span aria-hidden="true">{email.slice(0, 2)}</span><span className="log-recipient__private" aria-hidden="true">{email.slice(2)}</span><span className="sr-only">{email}</span></span>
 }
 
 function logTimestamp(value: string) {

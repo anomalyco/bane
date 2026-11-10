@@ -13,7 +13,10 @@
 .home-counter { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-32); padding-bottom: var(--space-24); }
 .home-counter-label { display: flex; align-items: center; gap: var(--space-8); }
 .home-live { width: 6px; height: 6px; border-radius: 50%; background: var(--color-success-marker); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success-marker) 22%, transparent); }
+.home-live--idle { background: var(--color-neutral-marker); box-shadow: none; }
 .home-counter-value { margin-top: var(--space-8); font-family: var(--font-mono); font-size: 64px; line-height: 1; letter-spacing: -.03em; white-space: nowrap; }
+.home-board--loading .home-counter-value { display: flex; align-items: center; height: 1em; }
+.home-board--loading .metric-value { display: flex; align-items: center; height: var(--leading-xl); }
 .home-counter-chart { display: flex; flex-direction: column; align-items: flex-end; width: min(320px, 40%); }
 .home-volume { display: block; width: 100%; height: 56px; }
 .home-capabilities { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--color-border); }
@@ -23,7 +26,8 @@
 .home-capability p { flex: 1; text-wrap: pretty; }
 .home-capability code { color: var(--color-accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .home-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding-block: var(--space-20); border-top: 1px solid var(--color-border); font-size: var(--text-xs); }
-.home-footer span { font-family: var(--font-mono); }
+.home-by { display: flex; align-items: center; gap: var(--space-6); transition: color var(--motion-duration); }
+.home-by svg { flex-shrink: 0; }
 .home-footer nav { display: flex; gap: var(--space-16); }
 .home-footer a { color: inherit; text-decoration: none; }
 .home-footer a:hover { color: var(--color-text); }
@@ -48,3 +52,4 @@
   .home-capability + .home-capability { border-top: 1px solid var(--color-border); }
   .home-footer nav { gap: var(--space-12); }
 }
+.home-hero > .home-invite { margin-top: calc(-1 * var(--space-6)); font-size: var(--text-sm); line-height: var(--leading-sm); }

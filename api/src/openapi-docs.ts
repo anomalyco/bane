@@ -102,8 +102,29 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   return lines.join('\n');
 }
 
+// The first five minutes, shared by /docs (x-quickstart), /docs.md and /llms.txt.
+const quickstartCurl = `curl --request POST \\
+  --url 'https://bane.mx/v1/emails/send' \\
+  --header "Authorization: Bearer $BANE_API_KEY" \\
+  --header 'Content-Type: application/json' \\
+  --header 'Idempotency-Key: first-email' \\
+  --data '{"from":"hello@acme.com","to":"you@acme.com","subject":"Hello from Bane","text":"It works."}'`;
+export const quickstart: { title: string; text: string; code?: string }[] = [
+  { title: 'Add and verify your domain', text: 'In the dashboard, open Domains and add it, or call POST /v1/domains with {"name":"acme.com"}. Publish the DNS records it returns at your DNS provider. Sending works once GET /v1/domains/{id} reports sending: "verified", usually within minutes of the records resolving. A domain whose records are still unproven after 72 hours is released.' },
+  { title: 'Create an API key', text: 'In Settings → API keys. A Send only key restricted to your domain is enough to send. Store it as BANE_API_KEY on your server and never ship it to a browser.' },
+  { title: 'Send', text: '202 means queued, not delivered; read the outcome with GET /v1/emails/{id}. Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator addresses don’t count against hosted sending limits.', code: quickstartCurl },
+  { title: 'Receive (optional)', text: 'Publish the receiving MX record from the domain page. Hosted Bane suggests reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.' },
+  { title: 'Reply', text: 'POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References.' },
+];
+// Getting started first; account and installation plumbing last.
+const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Audience', 'Consent', 'ApiKeys', 'Inbound keys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
+const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
+
 export function createOpenApiDocument(app: App) {
-  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Sending is simulated when live SES is disabled or AWS credentials are not configured.' } }) as Json;
+  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0', description: 'Send, receive and reply to email on your own domains. 202 means queued, not delivered.' } }) as Json;
+  document.info['x-quickstart'] = quickstart;
+  const used = [...new Set(operationEntries(document).map(entry => entry.operation.tags?.[0] ?? 'API'))];
+  document.tags = used.sort((a, b) => tagRank(a) - tagRank(b)).map(name => ({ name }));
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {
     const operation = pathItem[method];
     if (!operation?.operationId) continue;
@@ -149,17 +170,30 @@ function operationMarkdown(document: Json, entry: ReturnType<typeof operationEnt
   return `## ${title(operation.operationId)}\n\n\`${method.toUpperCase()} ${path}\`\n\n${operation.description ?? ''}\n\nOperation ID: \`${operation.operationId}\`\n\n${parameterRows}\n${schemaMarkdown(document, body, 'Request body')}\n### TypeScript SDK\n\n\`\`\`ts\n${samples.TypeScript ?? ''}\n\`\`\`\n\n### cURL\n\n\`\`\`sh\n${samples.Shell ?? ''}\n\`\`\`\n\n### Responses\n\n| Status | Description | Schema |\n| --- | --- | --- |\n${responseRows}\n`;
 }
 
+// Tag groups in the document's tag order, operations in path order within each.
+function grouped(document: Json, entries: ReturnType<typeof operationEntries>) {
+  const tagOf = (entry: ReturnType<typeof operationEntries>[number]) => entry.operation.tags?.[0] ?? 'API';
+  const order: string[] = (document.tags ?? []).map((tag: Json) => tag.name);
+  const rank = (tag: string) => { const index = order.indexOf(tag); return index === -1 ? order.length : index; };
+  const tags = [...new Set(entries.map(tagOf))].sort((a, b) => rank(a) - rank(b));
+  return tags.map(tag => ({ tag, entries: entries.filter(entry => tagOf(entry) === tag) }));
+}
+function quickstartMarkdown() {
+  return `## Quickstart\n\n${quickstart.map((step, index) => `${index + 1}. **${step.title}.** ${step.text}${step.code ? `\n\n   \`\`\`sh\n${step.code.split('\n').map(line => `   ${line}`).join('\n')}\n   \`\`\`` : ''}`).join('\n')}\n\n`;
+}
+
 export function createMarkdownDocs(document: Json, operationId?: string): string | null {
   const entries = operationEntries(document);
   const selected = operationId ? entries.filter(entry => entry.operation.operationId === operationId) : entries;
   if (operationId && !selected.length) return null;
   const intro = `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`@banemx/sdk\`\n\n`;
   if (operationId) return `${intro}[All operations](/docs.md)\n\n${operationMarkdown(document, selected[0])}`;
-  const index = [...new Set(entries.map(entry => entry.operation.tags?.[0] ?? 'API'))].map(tag => `## ${tag}\n\n${entries.filter(entry => (entry.operation.tags?.[0] ?? 'API') === tag).map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\``).join('\n')}`).join('\n\n');
-  return `${intro}${index}\n\n${entries.map(entry => operationMarkdown(document, entry)).join('\n---\n\n')}`;
+  const groups = grouped(document, entries);
+  const index = groups.map(({ tag, entries }) => `## ${tag}\n\n${entries.map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\``).join('\n')}`).join('\n\n');
+  return `${intro}${quickstartMarkdown()}${index}\n\n${groups.flatMap(group => group.entries).map(entry => operationMarkdown(document, entry)).join('\n---\n\n')}`;
 }
 
 export function createLlmsText(document: Json): string {
-  const entries = operationEntries(document);
-  return `# Bane\n\nBane is a transactional and marketing email API on Amazon SES.\n\n## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/@banemx/sdk\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+  const entries = grouped(document, operationEntries(document)).flatMap(group => group.entries);
+  return `# Bane\n\nBane is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/@banemx/sdk\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

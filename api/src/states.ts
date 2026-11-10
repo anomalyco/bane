@@ -51,6 +51,10 @@ export type IdentityFacts = {
   dmarc?: import('./dmarc.js').DmarcObservation|null;
   ses: Pick<GetEmailIdentityCommandOutput, 'VerificationStatus' | 'VerifiedForSendingStatus' | 'DkimAttributes' | 'MailFromAttributes'>;
   proven: boolean; mx: MxReport | null; note: string | null;
+  /** The last receiving DNS check's conflict (CNAME, foreign or split MX, wildcard, Bane's own records, another claim), or null. */
+  issue?: import('./receiving-host.js').ReceivingIssue | null;
+  /** A receiving host the owner chose explicitly (POST /v1/domains/{id}/receiving-host), instead of the automatic suggestion. */
+  receivingChoice?: string | null;
   /** Verified by the exclusive BYO account, not an identity managed by the claim's ownership tag. */
   imported?: true;
   /** Immutable operator-attested SES fingerprint. Only the operator can restore a revoked adoption. */

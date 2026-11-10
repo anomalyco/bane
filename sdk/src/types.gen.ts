@@ -49,6 +49,38 @@ export type ConnectionSummary = {
         at: string;
         reason: string;
     } | null;
+    /**
+     * Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.
+     */
+    sendingLimit?: {
+        /**
+         * Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit.
+         */
+        cap: number | null;
+        /**
+         * Recipients charged in the current rolling 24 hours. Simulator addresses are free.
+         */
+        used: number;
+        /**
+         * When capacity next frees up or the limit changes.
+         */
+        resetAt: string | null;
+        /**
+         * The next limit for a new workspace, or null once it has the mature limit.
+         */
+        nextCap: number | null;
+        /**
+         * When nextCap applies.
+         */
+        nextCapAt: string | null;
+    } | null;
+    /**
+     * Domains claimed in this workspace and how many can send.
+     */
+    domains?: {
+        total: number;
+        verified: number;
+    };
 } | null;
 
 export type AgentToken = {
@@ -375,7 +407,7 @@ export type SendEmailInput = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Defaults to the installation’s persisted default region when omitted.
+     * Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -441,7 +473,7 @@ export type BatchSendEmailItem = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Defaults to the installation’s persisted default region when omitted.
+     * Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -1155,6 +1187,34 @@ export type DomainReadiness = {
         status: 'pending' | 'verified';
         note?: string;
     }>;
+    /**
+     * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
+     */
+    releasesAt?: string | null;
+    /**
+     * Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.
+     */
+    receivingIssue?: {
+        /**
+         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.
+         */
+        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'mx_missing' | 'wrong_region' | 'null_mx';
+        host: string;
+        /**
+         * True when receiving there cannot work until DNS or the choice changes.
+         */
+        blocking: boolean;
+        message: string;
+        provider?: string | null;
+        /**
+         * The existing CNAME target.
+         */
+        target?: string | null;
+        /**
+         * A free subdomain to use instead.
+         */
+        suggestion?: string | null;
+    } | null;
 };
 
 export type CreateDomain = {
@@ -1167,6 +1227,11 @@ export type CreateDomain = {
 
 export type ConfigureDomainMailFrom = {
     mailFromDomain: string;
+};
+
+export type ChooseReceivingHost = {
+    host: string | null;
+    confirm?: boolean;
 };
 
 export type DomainDnsSetup = {
@@ -1583,6 +1648,14 @@ export type InboundMxReport = {
     providers: Array<string>;
     message: string;
     checkedAt: string;
+    /**
+     * The existing CNAME target when state is cname.
+     */
+    target?: string;
+    /**
+     * Mail for the name may be split across several MX hosts.
+     */
+    split?: boolean;
 } | null;
 
 export type EnableInboundDomain = {
@@ -2319,6 +2392,37 @@ export type CreateConnection = {
     kind: 'shared' | 'byo';
     region?: string;
     awsAccountId?: string;
+};
+
+export type PublicStats = {
+    /**
+     * When the figures were computed. Responses are cached for up to 60 seconds.
+     */
+    generatedAt: string;
+    /**
+     * Emails Amazon SES accepted in the last 30 days, across the installation. Simulated, suppressed and rejected mail is excluded. Email history is kept for 30 days, so there is no all-time total.
+     */
+    acceptedLast30Days: number;
+    /**
+     * Emails Amazon SES accepted in the last 60 minutes.
+     */
+    acceptedLastHour: number;
+    /**
+     * Accepted emails per rolling hour over the last 24 hours, oldest first. The last entry is acceptedLastHour.
+     */
+    acceptedHourly: Array<number>;
+    /**
+     * delivered ÷ (delivered + bounced) for emails created in the last 30 days, each email counted once. Null without outcomes.
+     */
+    deliveryRate: number | null;
+    /**
+     * Median time from API acceptance to Amazon SES acceptance for the most recent 5,000 direct, unscheduled sends in the last 24 hours. Null without samples.
+     */
+    medianSendLatencyMs: number | null;
+    /**
+     * AWS regions that accepted mail in the last 30 days. Hosted installations list only their shared sending regions.
+     */
+    regions: Array<string>;
 };
 
 export type ListMcpConnectionsData = {
@@ -8068,6 +8172,69 @@ export type ConfigureDomainMailFromResponses = {
 
 export type ConfigureDomainMailFromResponse = ConfigureDomainMailFromResponses[keyof ConfigureDomainMailFromResponses];
 
+export type ChooseReceivingHostData = {
+    body: ChooseReceivingHost;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}/receiving-host';
+};
+
+export type ChooseReceivingHostErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ChooseReceivingHostError = ChooseReceivingHostErrors[keyof ChooseReceivingHostErrors];
+
+export type ChooseReceivingHostResponses = {
+    /**
+     * Success
+     */
+    200: DomainReadiness;
+};
+
+export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
+
 export type GetDomainDnsSetupData = {
     body?: never;
     path: {
@@ -13223,3 +13390,36 @@ export type VerifyConnectionResponses = {
 };
 
 export type VerifyConnectionResponse = VerifyConnectionResponses[keyof VerifyConnectionResponses];
+
+export type GetPublicStatsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/public/stats';
+};
+
+export type GetPublicStatsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetPublicStatsError = GetPublicStatsErrors[keyof GetPublicStatsErrors];
+
+export type GetPublicStatsResponses = {
+    /**
+     * Success
+     */
+    200: PublicStats;
+};
+
+export type GetPublicStatsResponse = GetPublicStatsResponses[keyof GetPublicStatsResponses];

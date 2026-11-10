@@ -1,7 +1,7 @@
 import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, type AudienceList, type Contact } from '../../data/types'
-import { Alert, DataTable, SkeletonText, StatusBadge } from '../../components/ui'
+import { Alert, DataTable, ErrorText, SkeletonText, StatusBadge } from '../../components/ui'
 import { Link } from 'react-router'
 import { contactColumns, memberColumns } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
@@ -11,7 +11,7 @@ export const date = (value: string | null) => value ? formatDate(value) : 'Never
 export { number }
 export const statusOptions = [{ value: 'subscribed', label: 'Subscribed' }, { value: 'unsubscribed', label: 'Unsubscribed' }, { value: 'suppressed', label: 'Suppressed' }, { value: 'unknown', label: 'Unknown consent' }]
 export function fieldError(error: unknown, field: string) { return error instanceof ApiError ? error.fields[field] : undefined }
-export function MutationError({ error }: { error: unknown }) { return error ? <Alert tone="danger">{error instanceof Error ? error.message : 'The request could not be completed.'}</Alert> : null }
+export function MutationError({ error }: { error: unknown }) { return error ? <Alert tone="danger"><ErrorText error={error} fallback="The request could not be completed." /></Alert> : null }
 export function useAudienceLists(search = '', cursor?: string) {
   return useApiDef(queries.audienceLists(search, cursor), { keepPrevious: true })
 }

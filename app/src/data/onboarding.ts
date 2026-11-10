@@ -3,7 +3,8 @@ import type { Identity } from './types'
 
 // The add-domain and agent steps follow a fresh connection until the user continues to the dashboard.
 // Stored per workspace so a reload returns to the same step: '' before a domain is added, then its ID,
-// then `agent:<ID>` once the user continues to the agent setup.
+// then `agent:<ID>` once the user continues to the agent setup, and `done` once they finish or skip.
+// Without a stored step (another browser, cleared storage) the server decides: no domain yet opens Add domain.
 const stepKey = (workspaceId: string) => `bane.onboarding.domain.${workspaceId}`
 const listeners = new Set<() => void>()
 const memory = new Map<string, string | null>()
@@ -25,11 +26,13 @@ export function useDomainStep(workspaceId: string | undefined) {
 export type OnboardingStage = { step: 'sending' } | { step: 'setup-required' } | { step: 'domain'; domainId: string } | { step: 'agent'; domainId: string } | null
 const agentPrefix = 'agent:'
 export const agentStep = (domainId: string) => `${agentPrefix}${domainId}`
+export const finishedStep = 'done'
 export function onboardingStage(identity: Identity | null | undefined, domainStep: string | null): OnboardingStage {
   if (!identity?.multiTenant) return null
   const admin = identity.role === 'owner' || identity.role === 'admin'
   if (identity.connection?.state !== 'ready') return { step: admin ? 'sending' : 'setup-required' }
-  if (!admin || domainStep === null) return null
+  if (!admin || domainStep === finishedStep) return null
+  if (domainStep === null) return identity.connection.domains?.total === 0 ? { step: 'domain', domainId: '' } : null
   return domainStep.startsWith(agentPrefix) ? { step: 'agent', domainId: domainStep.slice(agentPrefix.length) } : { step: 'domain', domainId: domainStep }
 }
 export const identityOnboardingStage = (identity: Identity | null | undefined) => onboardingStage(identity, identity ? readDomainStep(identity.workspaceId) : null)

@@ -9,7 +9,8 @@ import './docs.css'
 
 type Schema = Record<string, any>
 type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
-type Document = { info: {title: string; version: string; description?: string}; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
+type QuickstartStep = { title: string; text: string; code?: string }
+type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
 const methods = ['get', 'post', 'put', 'patch', 'delete']
 function operationTitle(value: string) {
   return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').map((word, index) => /^mcp$/i.test(word) ? 'MCP' : index === 0 ? word[0].toUpperCase() + word.slice(1).toLowerCase() : word.toLowerCase()).join(' ')
@@ -36,7 +37,17 @@ function operations(document?: Document): Operation[] {
     if (!operation?.operationId) continue
     result.push({ id: operation.operationId, method, path, tag: operation.tags?.[0] ?? 'API', summary: operation.summary ?? operationTitle(operation.operationId), description: operation.description ?? '', parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] })
   }
-  return result
+  // Groups follow the document's tag order (Emails and Domains first); operations keep path order within a group.
+  const order = (document.tags ?? []).map(tag => tag.name)
+  const rank = (tag: string) => { const index = order.indexOf(tag); return index === -1 ? order.length : index }
+  return result.map((operation, index) => ({ operation, index })).sort((a, b) => rank(a.operation.tag) - rank(b.operation.tag) || a.index - b.index).map(item => item.operation)
+}
+
+function Quickstart({ steps }: { steps: QuickstartStep[] }) {
+  return <section className="docs-section docs-quickstart" aria-labelledby="docs-quickstart"><h2 id="docs-quickstart">Quickstart</h2>
+    <ol>{steps.map(step => <li key={step.title}><strong>{step.title}.</strong> {step.text}
+      {step.code && <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0}><code>{step.code}</code></pre><CopyAction value={step.code} label={`Copy ${step.title} example`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>}</li>)}</ol>
+  </section>
 }
 
 function SchemaDefinition({ document, input }: {document: Document; input: Schema}) {
@@ -105,6 +116,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
   const install = 'npm install @banemx/sdk'
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>Bane API</h1><p>{document.info.description}</p></header>
+    {document.info['x-quickstart']?.length ? <Quickstart steps={document.info['x-quickstart']} /> : null}
     <AgentPrompt prompt={prompt} />
     <McpSetup chooseAccess />
     <section className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/@banemx/sdk">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
