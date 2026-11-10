@@ -32,6 +32,11 @@ export async function checkHostedHealth(runtime: Runtime) {
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
   try { await checkHostedHealth(runtime); } catch { log('error', { code: 'HOSTED_HEALTH_CHECK_FAILED', message: 'Continuing retention; the next hourly check will retry.' }); }
   const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
+  // A durable daily election prevents two reconcilers from applying the same
+  // snapshot difference. Dispatch continues adding deltas while this runs.
+  await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
+    VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
+    WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth() FROM elected`);
   if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
   const cutoff = sql`now() - interval '30 days'`;
   // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.
@@ -88,6 +93,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
       SELECT r.review_id, r.ordinal FROM sending_review_recipients r
       JOIN sending_campaign_reviews v ON v.id = r.review_id
       WHERE v.created_at < ${cutoff}
+        AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE (e.review_id,e.review_ordinal)=(r.review_id,r.ordinal))
         AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
           AND (c.updated_at >= ${cutoff} OR ${campaignActive()} OR c.review_id = v.id))
       LIMIT ${RETENTION_BATCH}
@@ -97,6 +103,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     WHERE l.owner_type = 'review' AND l.owner_id = v.id AND l.workspace_id = v.workspace_id
       AND v.created_at < ${cutoff}
       AND NOT EXISTS (SELECT 1 FROM sending_review_recipients r WHERE r.review_id = v.id)
+      AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE e.review_id = v.id)
       AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
         AND (${campaignActive()} OR c.review_id = v.id))`);
   await drain('operation_delivery_attempts', batch(sql`operation_delivery_attempts`, sql`created_at < ${cutoff}`));

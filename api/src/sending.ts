@@ -728,8 +728,12 @@ function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: Se
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate.
 // Malformed inputs, mailbox tracking and provider-rendered templates keep their normal
 // authenticated handler (including error ordering). No external I/O before admission.
-export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL) {
+export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL,recentlyVerified:boolean) {
   if(!/^application\/json(?:\s*;|$)/i.test(c.req.header('content-type')??''))return;
+  // Do not spend parser, HTML or hashing CPU on a large speculative request.
+  // Hono caches the body for the authenticated handler, including chunked POSTs.
+  const maxSpeculative=64*1024;
+  if(!recentlyVerified && (Number(c.req.header('content-length'))>maxSpeculative || Buffer.byteLength(await c.req.text())>maxSpeculative))return;
   const body=await c.req.json().catch(()=>undefined), batch=c.req.path==='/v1/emails/batch';
   const parsed=batch?BatchInput.safeParse(body):SingleSendInput.safeParse(body);
   if(!parsed.success)return;

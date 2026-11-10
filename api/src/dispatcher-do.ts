@@ -8,8 +8,8 @@ function initDeps() {
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
     import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey }, { ApiError, log }, { feedbackSink, workWake }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey, ApiError, log, feedbackSink, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log }, { feedbackSink, workWake }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, feedbackSink, workWake,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -104,8 +104,7 @@ export class DispatcherShard extends DurableObject<Env> {
       if (runtime.config.multiTenant && !identity.accountId) return;
       const report = await runDispatcher(runtime, {
         ...identity, gate: this.gate, priorityWake: this.priorityWake,
-        until: started + RUN_MS, lanes: 2, batchSize: this.gate.quota && identity.shard.count>1
-          ? Math.min(24,Math.max(1,Math.ceil(this.gate.quota.maxSendRate/identity.shard.count/2))) : 24, sendConcurrency: 6,
+        until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }

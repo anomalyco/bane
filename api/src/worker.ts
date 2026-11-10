@@ -102,7 +102,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, allowFeedbackTopic:async arn=>(await env.ADMISSION.limit({key:`feedback:${arn}`})).success, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
@@ -202,9 +202,10 @@ export default {
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
         const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
-        for (const [index, message] of messages.entries()) settleFeedbackMessage(message, outcomes[index]);
-        const failed=outcomes.filter(outcome=>!outcome.ok).length, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, oldestMs });
+        let retiredUnmatched=0;
+        for (const [index, message] of messages.entries()) if(settleFeedbackMessage(message, outcomes[index])==='retired_unmatched') retiredUnmatched++;
+        const failed=outcomes.filter(outcome=>!outcome.ok).length-retiredUnmatched, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
+        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, retiredUnmatched, oldestMs });
       });
       return;
     }

@@ -56,6 +56,19 @@ try {
       if (previous.rows[0]!.checksum !== hash) throw new Error(`MIGRATION_CHANGED: ${name} differs from the applied migration. Add a new migration instead.`);
       continue;
     }
+    // Marked files contain one restartable concurrent index build per line. Separate query
+    // messages matter: sending all the DDL together creates an implicit transaction in pg.
+    if(source.startsWith('-- bane:no-transaction\n')) {
+      for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {
+        const match=/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);
+        if(!match)throw new Error(`Invalid online index statement in ${name}`);
+        const idx=match[1]!;
+        if((await client.query('SELECT FROM pg_index WHERE indexrelid=to_regclass($1) AND NOT indisvalid',[idx])).rowCount)await client.query(`DROP INDEX CONCURRENTLY "${idx}"`);
+        await client.query(statement);
+      }
+      await client.query('INSERT INTO bane_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
+      log('info',{code:'MIGRATION_APPLIED',migration:name});continue;
+    }
     await client.query('BEGIN');
     try {
       await client.query(source);

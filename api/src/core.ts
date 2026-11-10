@@ -77,7 +77,7 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
+export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared' };
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   // Workers' public egress guards connect-time DNS; Node instead pins the checked IP in TLS.
@@ -90,6 +90,7 @@ export interface Runtime {
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
+  allowFeedbackTopic?: (arn:string)=>Promise<boolean>;
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.

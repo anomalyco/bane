@@ -27,12 +27,26 @@ export type ScreenResult = { spam: number; model: string };
 const cache = new Map<string, { expires: number; result: ScreenResult }>();
 const flights=new WeakMap<Runtime['storage'],Map<string,Promise<ScreenResult>>>();
 
-const textOf = (html: string) => html.replace(/<(script|style|head)\b[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<[^>]*>/g, ' ')
-  .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
-function body(snapshot: EmailSnapshot) {
-  // Stored-template sends keep only rendered MIME; screen its text rather than nothing.
-  const source = snapshot.text ?? (snapshot.html ? textOf(snapshot.html) : snapshot.raw ? textOf(snapshot.raw) : '');
-  return source.replace(/\s+/g, ' ').trim().slice(0, MAX_BODY);
+async function body(snapshot: EmailSnapshot) {
+  const parts = [snapshot.text, snapshot.raw];
+  if (snapshot.html) {
+    const { parseFragment } = await import('parse5');
+    const nodes = [...parseFragment(snapshot.html).childNodes].reverse(), text:string[]=[], links=new Set<string>();
+    while (nodes.length) {
+      const node=nodes.pop()!;
+      if ('value' in node) text.push(node.value); // Includes hidden/preheader text, not just visible copy.
+      if ('attrs' in node) for (const a of node.attrs) {
+        if (['href','src','srcset','background','action','style'].includes(a.name)) links.add(a.value);
+        if (['alt','title'].includes(a.name)) text.push(a.value);
+      }
+      const children='content' in node ? node.content.childNodes : 'childNodes' in node ? node.childNodes : [];
+      for (let i=children.length-1;i>=0;i--) nodes.push(children[i]!);
+    }
+    parts.push(text.join(' '),[...links].join(' '));
+  }
+  const content=parts.filter((p):p is string=>!!p).map(p=>p.replace(/\s+/g,' ').trim());
+  const n=Math.floor(MAX_BODY/Math.max(1,content.length))-1;
+  return content.map(p=>p.length<=n?p:p.slice(0,Math.floor(n/2)-1)+'…'+p.slice(-Math.floor(n/2))).join('\n');
 }
 async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
   // The deadline includes reading the response body. Never retry inside a send lease.
@@ -61,18 +75,17 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
 export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot): Promise<ScreenResult | null> {
   const settings = runtime.config.screen;
   if (!settings) return null;
-  const from = formattedSender(snapshot.from, snapshot.fromName), text = body(snapshot);
+  const from = formattedSender(snapshot.from, snapshot.fromName);
   const recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
-  const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,from,snapshot.kind,snapshot.subject,text,recipients]));
+  const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,from,snapshot.kind,snapshot.subject,snapshot.text,snapshot.html,snapshot.raw,recipients]));
   const now = Date.now();
   const hit = cache.get(key);
   if (hit && hit.expires > now) return hit.result;
   if (hit) cache.delete(key);
-  const state = { email: { from, kind:snapshot.kind, subject: snapshot.subject, body: text }, signals: { recipients } };
   // Concurrent copies share one request; failures are not cached so the next copy retries.
   let pending=flights.get(runtime.storage);if(!pending){pending=new Map();flights.set(runtime.storage,pending);}
   const existing=pending.get(key);if(existing)return existing;
-  const lookup=evaluate(settings.endpoint,settings.apiKey,settings.model,state);pending.set(key,lookup);
+  const lookup=body(snapshot).then(body=>evaluate(settings.endpoint,settings.apiKey,settings.model,{email:{from,kind:snapshot.kind,subject:snapshot.subject,body},signals:{recipients}}));pending.set(key,lookup);
   try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
     while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;
   }finally{pending.delete(key);}

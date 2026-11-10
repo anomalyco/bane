@@ -4648,9 +4648,11 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   cleanup(t,async()=>{await db.query(`ROLLBACK; RESET search_path; DROP SCHEMA ${schema} CASCADE`);});
   const {readFile,readdir}=await import('node:fs/promises'),dir=new URL('./migrations/',import.meta.url);
   for(const file of (await readdir(dir)).filter(f=>/^\d+_[a-z_]+\.sql$/.test(f)).sort()) {
+    const source=await readFile(new URL(file,dir),'utf8');
+    if(source.startsWith('-- bane:no-transaction\n')){for(const ddl of source.split('\n').filter(s=>s.startsWith('CREATE ')))await db.query(ddl);continue;}
     // Only the trigram index needs the harness's existing public extension/opclass.
     await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
-    await db.query(await readFile(new URL(file,dir),'utf8'));await db.query('COMMIT');
+    await db.query(source);await db.query('COMMIT');
   }
   await db.query('CREATE TABLE opensend_migrations (LIKE public.bane_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.bane_migrations WHERE name NOT LIKE \'092_%\'');
   await t.test('secretless migration preserves ciphertext and the legacy ledger; explicit rotation rewraps it',async mt=>{
@@ -4740,7 +4742,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   await t.test('deterministic read-only plan and strict inputs',async()=>{
     assert.deepEqual(await command('--plan'),first);assert.deepEqual(await database(),original);assert.match(hash,/^[a-f0-9]{64}$/);
@@ -4795,7 +4797,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
     // The old pool and tenants are ready: the exact README command reads the isolated DB and must not call AWS.
     await db.query('UPDATE provider_pool_regions SET receiving_checked_at=now()');
-    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:old,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
+    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:old,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
     // The generated Worker ProcessEnv includes deployment-only bindings; this Node child gets only the fixture allowlist.
     const result=(await import('node:child_process')).spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(guard),'--import','tsx','--input-type=module'],{input:code,env:env as unknown as NodeJS.ProcessEnv,encoding:'utf8',timeout:10000});
     assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'');
@@ -5161,7 +5163,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='bane-trusted-'+wid,
       topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
-    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
     cleanup(t,async()=>{
@@ -5492,7 +5494,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
     cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM provider_feedback_history WHERE aws_account_id=$1',[account]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);});
@@ -6407,6 +6409,88 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-bane-workspace':byo})).connection.sendingPause,null);
     });
   });
+  test('sending review benchmark: attachment preflight, exhausted burst and classifier outage',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('synthetic transports',async t=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
+      const wid=runtime.config.workspaceId,acct='112223330001',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
+      runtime.config.hostedSendCaps.firstWeek=10000;
+      const key=ok(await local('POST','/v1/api-keys',{name:'bench',permissions:['send','read']}),201);
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
+      runtime.storage={put:async()=>{},get:async()=>({body:Buffer.from('x'),contentType:'text/plain'}),delete:async()=>{}};
+      const asset=ok(await local('POST','/v1/attachments',{filename:'one.txt',content:'eA=='}),201);
+      let screens=0,outage=false,active=0,peak=0,score=.01;
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),origin);screens++;peak=Math.max(peak,++active);await new Promise(r=>setTimeout(r,20));active--;return outage?new Response(null,{status:503}):Response.json({answers:{spam:{noul:score}}});});
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
+      const gate=initialGate(),run=()=>runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
+      for(const [name,n] of [['attachment',24],['burst',48],['outage',96]] as const){
+        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50)`,[wid]);}
+        if(name==='outage'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);outage=true;}
+        const mail=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`r${i}@example.invalid`,subject:name+i,text:'Private fixture',attachments:[asset.id]}));
+        const ids=ok(await local('POST','/v1/emails/batch',{emails:mail},'live',{authorization:`Bearer ${key.secret}`}),202).data.map((x:Json)=>x.id);
+        const q=t.mock.method(db,'query');screens=peak=0;const start=Date.now(),report=await run();if(outage)await run();q.mock.restore();
+        const rewritten=(await db.query('SELECT count(*)::int n FROM sending_emails WHERE id=ANY($1) AND (scheduled_at IS NOT NULL OR lease_until IS NOT NULL)',[ids])).rows[0].n;
+        t.diagnostic(`REVIEW ${name}: ${Date.now()-start}ms, ${screens} screen calls, peak ${peak}, ${q.mock.callCount()} SQL, ${rewritten} rows deferred, ${report.sent} accepted`);
+        if(name==='attachment'){assert.equal(report.sent,n);assert.ok(peak>1 && peak<=6);}
+        if(name==='burst')assert.deepEqual([report.sent,screens,rewritten],[0,0,0]);
+        if(name==='outage'){assert.equal(report.sent,0);assert.ok(screens<=6 && rewritten<=24 && q.mock.callCount()<=8);}
+        await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[ids]);
+      }
+      gate.screenRetryAt=Date.now()-1;outage=false;score=.99;runtime.config.screen!.mode='flag';
+      const flagged=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'r@example.invalid',subject:'recovered',text:'fixture'},'live',{authorization:`Bearer ${key.secret}`}),202);
+      assert.equal((await run()).sent,0);assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1',[flagged.id])).rows[0].error_code,'CONTENT_REJECTED_SPAM');
+    }));
+  });
+
+  test('sending review benchmark: healthy hook tenant behind slow tenant',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {processJobs}=await import('./src/jobs.js');
+      await db.query(`INSERT INTO jobs(id,workspace_id,type,payload,available_at) SELECT 'slow-'||i,'slow','operation.webhook','{}'::jsonb,now()-interval '1 hour' FROM generate_series(1,60)i UNION ALL SELECT 'healthy','healthy','operation.webhook','{}'::jsonb,now()`);
+      let healthyAt=-1,prior=0;const start=Date.now();await processJobs(runtime,{'operation.webhook':async(_r,_p,j)=>{if(j.workspaceId==='healthy')healthyAt=Date.now()-start;else{if(healthyAt<0)prior++;await new Promise(r=>setTimeout(r,20));}}},61,6,5000,'webhooks');
+      t.diagnostic(`REVIEW hooks: healthy starts after ${prior} slow jobs, ${healthyAt}ms`);
+      assert.ok(healthyAt>=0 && prior<6,'Healthy tenant must start in the first six free lanes');
+    });
+  });
+
+  test('hosted screen covers independent parts, hidden copy and link targets with a bounded request and a full-content cache key',async t=>{
+    await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
+      const {screenSnapshot}=await import('./src/screen.js');
+      runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
+      const bodies:string[]=[];
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{bodies.push(JSON.parse(String(init.body)).state.email.body);return Response.json({answers:{spam:{noul:.1}}});});
+      const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,
+        text:'plain signal',raw:'rendered MIME signal',html:`<div hidden>${'x'.repeat(16000)} hidden signal</div><p>HTML signal</p><a href="https://link.example.invalid/path">read</a><img src="https://image.example.invalid/tracker">`};
+      await screenSnapshot(runtime,s);await screenSnapshot(runtime,s);
+      assert.equal(bodies.length,1);assert.ok(bodies[0]!.length<=8000);
+      for(const part of ['plain signal','rendered MIME signal','hidden signal','HTML signal','link.example.invalid/path','image.example.invalid/tracker'])assert.ok(bodies[0]!.includes(part),part);
+      await screenSnapshot(runtime,{...s,html:s.html.replace('x'.repeat(16000),'x'.repeat(8000)+'y'+'x'.repeat(7999))});assert.equal(bodies.length,2);
+    }));
+  });
+
+  test('only old or BYO unmatched feedback acks after a short retry; hosted and unavailable writes still retry',()=>import('./src/adapters/feedback-queue.js').then(({settleFeedbackMessage})=>{
+    const result=(attempts:number,kind:'shared'|'byo',days:number,error='SES_FEEDBACK_UNMATCHED')=>{
+      let settled:number|'ack'|undefined;
+      settleFeedbackMessage({attempts,body:{region:REGION,topicArn:'fixture',messageId:'fixture',topicKind:kind,message:{mail:{timestamp:new Date(Date.now()-days*86400000).toISOString()}}},
+        retry:opts=>{settled=opts?.delaySeconds;},ack:()=>{settled='ack';}},{ok:false,error});return settled;
+    };
+    assert.deepEqual([result(1,'byo',0),result(2,'byo',0),result(2,'shared',31),result(2,'shared',0),result(2,'byo',31,'FEEDBACK_PERSIST_FAILED')],[30,'ack','ack',60,60]);
+  }));
+
+  test('sending review benchmark: bounded lease across 5000 queued owners',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'q'||i,'owner'||(i%5000),'xx-test-1','fixture','a@example.invalid','[]','[]','[]','fixture','{"kind":"transactional"}',true FROM generate_series(1,15000)i;ANALYZE sending_emails`);
+      const q=t.mock.method(db,'query',async()=>({rows:[],rowCount:0}));await runDispatcher(runtime,{region:'xx-test-1',gate:initialGate(),batchSize:24});q.mock.restore();
+      const args=q.mock.calls.find(c=>(c.arguments[0] as any)?.text?.includes('queued_owners'))!.arguments as any;
+      const p=(await db.query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+args[0].text,args[1])).rows[0]['QUERY PLAN'][0];
+      t.diagnostic(`REVIEW 5000 owners: ${p['Execution Time']}ms, ${p.Plan['Shared Hit Blocks']} buffer hits`);
+      assert.ok(p.Plan['Shared Hit Blocks']<5000,'A 24-row lease must not visit all 5,000 owners');
+    });
+  });
+
   test('query budget: API key admission, dispatch, acceptance and delivery at one and 100 envelopes',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {runDispatcher}=await import('./src/dispatcher.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
@@ -6427,6 +6511,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const outcomes=await meter(`delivery-${n}`,()=>ingestFeedbackBatch(runtime,items),1);assert.ok(outcomes.every(o=>o.ok));
       }
       const late={from:'late@new.invalid',to:'to@example.invalid',subject:'Not yet',text:'Fixture'},good={...late,from:'a@bench.invalid'};
+      const large={...good,html:'<p>'+'fixture '.repeat(10000)+'</p>'};
+      const probe=t.mock.method(db,'query');
+      error(await local('POST','/v1/emails/send',large,'live',{authorization:'Bearer bane_'+'0'.repeat(64)}),401,'AUTH_INVALID');probe.mock.restore();
+      assert.equal(probe.mock.callCount(),1);assert.ok(JSON.stringify(probe.mock.calls[0]!.arguments).length<16000,'A cold, unknown key does not prepare the large envelope');
+      const warmLarge=await meter('warm-large-admission',async()=>ok(await local('POST','/v1/emails/send',large,'live',{authorization:`Bearer ${key.secret}`}),202),1);
+      await db.query("UPDATE sending_emails SET status='canceled' WHERE id=$1",[warmLarge.id]);
       const headers={authorization:`Bearer ${key.secret}`,'Idempotency-Key':'atomic-policy-retry'};
       const before=await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid]);
       const used=async()=>Number((await db.query('SELECT used FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2',[wid,key.id])).rows[0].used);
@@ -7549,7 +7639,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
 
   test('the pacing gate spaces slots evenly at the quota times the rate factor and brakes to the quota after throttling', async () => {
-    const { initialGate, reserve, brake, shardRate } = await import('./src/dispatcher.js');
+    const { initialGate, reserve, brake, shardRate,shardLeaseSize } = await import('./src/dispatcher.js');
+    assert.deepEqual([shardLeaseSize(14,8),shardLeaseSize(200,8),shardLeaseSize(1000,8)],[6,13,24]);
     const gate = initialGate();
     gate.quota = { maxSendRate: 20, max24HourSend: -1, sentLast24Hours: 0, checkedAt: Date.now() };
     const pacing = { rateFactor: 1.1, live: true } as const;
@@ -8479,6 +8570,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const storage=(await db.query(`SELECT avg(pg_column_size(e)+pg_column_size(r)+coalesce((SELECT sum(pg_column_size(l)) FROM sending_attachment_links l WHERE l.owner_id=e.id AND l.owner_type='email'),0))::int AS bytes FROM sending_emails e JOIN sending_review_recipients r ON (r.review_id,r.ordinal)=(e.review_id,e.review_ordinal) WHERE e.campaign_id=$1`,[campaign.id])).rows[0];
       assert.ok(storage.bytes<=1024,`Expected at most 1 KiB per recipient including review, envelope and asset links; got ${storage.bytes}`);
       t.diagnostic(`CAMPAIGN-STORAGE 20 attachments accepted: ${storage.bytes} bytes per recipient (heap tuples, including email asset links)`);
+      // The immutable review is no longer a draft's current review. Retained
+      // emails still need both their rendering inputs and the review's assets.
+      const review=(await db.query('SELECT review_id FROM sending_emails WHERE campaign_id=$1 LIMIT 1',[campaign.id])).rows[0].review_id;
+      await db.query("UPDATE sending_campaigns SET review_id=NULL,updated_at=now()-interval '31 days' WHERE id=$1",[campaign.id]);
+      await db.query("UPDATE sending_campaign_reviews SET created_at=now()-interval '31 days' WHERE id=$1",[review]);
+      await db.query('INSERT INTO sending_stream_depth VALUES($1,0,false,999) ON CONFLICT(workspace_id,stripe,marketing) DO UPDATE SET n=999',[ws]);
+      await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-depth'");
+      await (await import('./src/maintenance.js')).cleanup(runtime);
+      assert.equal((await db.query('SELECT sum(n)::int n FROM sending_stream_depth WHERE workspace_id=$1',[ws])).rows[0].n,0);
+      assert.equal((await db.query('SELECT FROM sending_review_recipients WHERE review_id=$1',[review])).rowCount,100);
+      assert.equal((await db.query("SELECT FROM sending_attachment_links WHERE owner_type='review' AND owner_id=$1",[review])).rowCount,20);
+      const retained=(await db.query('SELECT id FROM sending_emails WHERE review_id=$1 LIMIT 1',[review])).rows[0].id;
+      assert.deepEqual(ok(await local('GET',`/v1/emails/${retained}/content`)).attachments,attachments);
     });
   });
 
@@ -9109,6 +9213,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         import('@aws-sdk/client-sesv2'), import('./src/dispatcher.js'), import('./src/ses-region-state.js'), import('./src/config.js'),
       ]);
       const base = { BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
+      assert.throws(()=>loadConfig({...base,MULTI_TENANT:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'true'}),/requires TYPESAFE_API_KEY/);
       assert.equal(loadConfig(base).screen, undefined, 'Without TYPESAFE_API_KEY the screen is off.');
       for (const flag of ['BANE_REGIONAL_SENDING', 'BANE_TRUSTED_POOL', 'BANE_BYO_V2']) {
         assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true' }), { code: 'CONFIG_INVALID' }, `${flag} needs the platform account.`);
@@ -9684,7 +9789,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             await client.query("INSERT INTO provider_connection_regions(connection_id,region,managed_tenant,tenant_state,scan_revision,scan_state) VALUES($1,'us-east-2',false,'ready',1,'scanning')", [cid]);
             await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'byo.scan',$2,$3::jsonb)", [scanJobId, widByo, JSON.stringify({ connectionId: cid, region: 'us-east-2', revision: 1, stage: 'account', run: 'run_scan_1' })]);
 
-            const byoConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://example.com/v5.yaml', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const byoConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://example.com/v5.yaml', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             let failSts = true;
             faultResolver = (specifier) => {
               if (failSts && specifier === '@aws-sdk/client-sts') {
@@ -9752,7 +9857,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             await client.query("INSERT INTO provider_connection_regions(connection_id,region,legacy,managed_tenant,sending_state,tenant_state,pool_tenant_name) VALUES($1,'us-east-1',false,true,'unprovisioned','pending',$2)", [cidTrusted, tenantName]);
             const trustedJobId = 'hosted.trusted:' + cidTrusted;
             await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'hosted.trusted',$2,$3::jsonb)", [trustedJobId, widTrusted, JSON.stringify({ connectionId: cidTrusted })]);
-            const trustedConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_TRUSTED_POOL: 'true', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const trustedConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_TRUSTED_POOL: 'true', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             let failSesv2 = true;
             faultResolver = (specifier) => {
               if (failSesv2 && specifier === '@aws-sdk/client-sesv2') {

@@ -83,6 +83,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  if (v.MULTI_TENANT==='true' && v.ENABLE_LIVE_SES==='true' && v.BANE_HOSTED_SCREEN==='true' && !v.TYPESAFE_API_KEY)
+    throw new ApiError(503,'CONFIG_INVALID','Hosted live screening requires TYPESAFE_API_KEY.');
   if (v.MULTI_TENANT==='true' && (v.BANE_PLATFORM_AWS_ACCOUNT || [v.BANE_REGIONAL_SENDING,v.BANE_TRUSTED_POOL,v.BANE_BYO_V2].includes('true'))) requirePlatformAccount(v.BANE_PLATFORM_AWS_ACCOUNT);
   if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) throw new ApiError(503,'CONFIG_INVALID','Set both DOMAIN_CONNECT_PRIVATE_KEY and DOMAIN_CONNECT_KEY_ID, or neither.');
   let domainConnect: Config['domainConnect'];

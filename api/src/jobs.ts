@@ -171,7 +171,17 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const allowIngest=pool!=='webhooks' && !ingestReserved;
       // Only the head of each class enters the preference sort. The expression matches
       // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
-      const head = (kind:string, n:number) => sql`SELECT j.id,j.type,j.available_at FROM jobs j
+      // Seek over distinct queued hook owners (not over their backlog). Each gets
+      // one slot before anyone gets two; a single tenant can borrow idle slots.
+      const hookOwners=sql`public.job_class(type)='hook' AND status IN ('pending','running')`;
+      const head = (kind:string, n:number) => kind==='hook' ? sql`WITH RECURSIVE owners(wid) AS (
+        (SELECT workspace_id FROM jobs WHERE ${hookOwners} ORDER BY workspace_id LIMIT 1) UNION ALL
+        SELECT h.workspace_id FROM owners CROSS JOIN LATERAL (SELECT workspace_id FROM jobs WHERE ${hookOwners} AND workspace_id>wid ORDER BY workspace_id LIMIT 1) h
+      ), picks AS (SELECT h.*,t.served_at,row_number() OVER(PARTITION BY wid ORDER BY h.due,h.id) AS slot FROM owners
+        LEFT JOIN webhook_turns t ON t.workspace_id=wid CROSS JOIN LATERAL (SELECT j.id,${jobDue} AS due FROM jobs j WHERE ${hookOwners}
+          AND j.workspace_id=wid AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT ${n}) h)
+      SELECT j.id,j.type,j.available_at FROM picks p JOIN jobs j USING(id) WHERE ${due}
+        ORDER BY p.slot,p.served_at NULLS FIRST,p.due,p.id LIMIT ${n} FOR UPDATE OF j SKIP LOCKED` : sql`SELECT j.id,j.type,j.available_at FROM jobs j
         WHERE public.job_class(j.type)=${kind} AND j.status IN ('pending','running') AND ${jobDue}<=now()
         AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT ${n} FOR UPDATE SKIP LOCKED`;
       if(allowIngest) ingestReserved=true;
@@ -207,7 +217,8 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
       ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes'
         FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest'
-          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${webhookClaimCtes},${inboundHookClaim}
+          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
+          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
         SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config.multiTenant,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
       finally { if(allowIngest && !claimed?.rows.some(j=>j.type==='mailbox.ingest')) ingestReserved=false; }
       claimRequests++;

@@ -9,6 +9,13 @@ import { mailboxKeys } from './db/mailbox.js';
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
 const delegatedActor = Symbol('mcpActor');
+// A recent DB-verified fingerprint can spend CPU preparing a large body. This
+// hint never authorizes anything: even a hit authenticates inside admission SQL.
+const verifiedFingerprints=new Map<string,number>();
+function rememberFingerprint(hash:string) {
+  verifiedFingerprints.delete(hash);verifiedFingerprints.set(hash,Date.now()+60_000);
+  if(verifiedFingerprints.size>1024)verifiedFingerprints.delete(verifiedFingerprints.keys().next().value!);
+}
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
 export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
   if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
@@ -82,11 +89,12 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
         FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`;
       if(c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,sql`${credential} FOR NO KEY UPDATE`));
-        if(response)return response;
+        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,credential),(verifiedFingerprints.get(hash)??0)>Date.now());
+        if(response){rememberFingerprint(hash);return response;}
       }
       const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys,credential));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+      rememberFingerprint(hash);
       c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {

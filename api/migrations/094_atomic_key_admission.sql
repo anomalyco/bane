@@ -1,7 +1,6 @@
 -- Called only for a rate-budgeted, send-authorized key. VOLATILE is important:
 -- the state read after waiting for the workspace lock must see the previous commit.
--- The exception block is a server-local savepoint: on a policy denial roll back
--- the idempotency reservation but retain the outer statement's request charge.
+-- A policy denial releases only this call's reservation, not the request charge.
 CREATE FUNCTION key_admission_decision(wid text,kid text,domains jsonb,path text,idem text,hash text,receipt jsonb,
   wanted jsonb,asset_ids jsonb,sim boolean,cost int,marketing int,first_week int,second_week int,mature int,
   headroom numeric,regional boolean,trusted boolean,require_dmarc boolean,valid_content boolean)
@@ -53,7 +52,11 @@ BEGIN
       ok:=ok AND rows_ok;
     END IF;
   END LOOP;
-  IF ok IS NOT TRUE THEN RAISE EXCEPTION USING ERRCODE='BN001',MESSAGE='Admission denied'; END IF;
+  IF ok IS NOT TRUE THEN
+    IF idem IS NOT NULL THEN
+      DELETE FROM sending_idempotency i WHERE i.workspace_id=wid AND i.actor_key_id=kid AND i.path=key_admission_decision.path AND i.request_key=idem;
+    END IF;
+    RETURN s||jsonb_build_object('allowed',false,'invalidMime',invalid_mime,'bulk',bulk);
+  END IF;
   RETURN s||jsonb_build_object('allowed',true);
-EXCEPTION WHEN SQLSTATE 'BN001' THEN RETURN s||jsonb_build_object('allowed',false,'invalidMime',invalid_mime,'bulk',bulk);
 END $$;

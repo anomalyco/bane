@@ -1074,8 +1074,10 @@ function registerPublicEvents(app: App) {
       return c.json({ accepted: true }, 202);
     }
     verifySesAccount(c.env, message, envelope.TopicArn);
+    if (binding?.kind==='byo' && c.env.allowFeedbackTopic && !await c.env.allowFeedbackTopic(envelope.TopicArn))
+      throw new ApiError(503,'FEEDBACK_TOPIC_BUSY','Feedback for this topic is temporarily rate limited; retry.',undefined,true);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
-    const item = { ...payload, message: message as Record<string, unknown> };
+    const item = { ...payload, topicKind:binding?.kind, message: message as Record<string, unknown> };
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
     // ingested in batches by the feedback consumer; nothing here touches the database or the jobs table.
     if (c.env.feedback) {
