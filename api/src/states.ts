@@ -231,7 +231,7 @@ export const campaignEditable = (row: { state: CampaignState; expanded: number }
 export const campaignResumable = (row: { state: CampaignState; expanded: number }) => row.state === 'paused' || (row.state === 'failed' && row.expanded > 0);
 export const campaignActive = (c: SQL = sql`c`) => sql`${c}.state IN ('preparing','scheduled','sending','paused')`;
 /** Holds a recipient reservation: active, or failed after releasing some recipients (resumable, so still counted). */
-export const campaignReserved = (c: SQL = sql`c`) => sql`(${campaignActive(c)} OR (${c}.state='failed' AND ${c}.expanded>0))`;
+export const campaignReserved = (c: SQL = sql`c`) => sql`(${campaignActive(c)} OR (${c}.state='failed' AND ${c}.expanded>0 AND (${c}.error->>'code') IS DISTINCT FROM 'JOB_LEASE_EXHAUSTED'))`;
 const editableRow = sql`(state='draft' OR (state='failed' AND expanded=0))`;
 /** Where a launched campaign continues from its cursors: preparing until every recipient is validated, then its schedule, then sending. */
 export function runningState(row: { prepared: number; total: number; scheduledAt: string | null }, now = Date.now()): RunningState {
@@ -242,9 +242,9 @@ type CampaignRef = { workspaceId: string; id: string };
 const campaignRow = (ref: CampaignRef) => sql`workspace_id=${ref.workspaceId} AND id=${ref.id}`;
 const states = (list: readonly CampaignState[]) => sql.join(list.map(state => sql`${state}`), sql`,`);
 /** One fenced statement: the row moves to `to` only from one of `from`, with `set` as the only other change. Returns the row's id when it moved. */
-export function moveCampaign(ref: CampaignRef, from: readonly CampaignState[], to: CampaignState, set: SQL = sql``, guard: SQL = sql`true`) {
+export function moveCampaign(ref: CampaignRef | SQL, from: readonly CampaignState[], to: CampaignState, set: SQL = sql``, guard: SQL = sql`true`) {
   for (const state of from) assertCampaignTransition(state, to);
-  return sql`UPDATE sending_campaigns SET state=${to},updated_at=now()${set} WHERE ${campaignRow(ref)} AND state IN (${states(from)}) AND ${guard} RETURNING id`;
+  return sql`UPDATE sending_campaigns SET state=${to},updated_at=now()${set} WHERE ${'workspaceId' in ref ? campaignRow(ref) : ref} AND state IN (${states(from)}) AND ${guard} RETURNING id`;
 }
 /** Cursor or setting changes that keep the state; fenced on it so a paused or canceled campaign is never advanced. */
 export const progressCampaign = (ref: CampaignRef, state: CampaignState, set: SQL) => sql`UPDATE sending_campaigns SET updated_at=now()${set} WHERE ${campaignRow(ref)} AND state=${state} RETURNING id`;
@@ -260,7 +260,7 @@ export const pauseCampaign = (ref: CampaignRef, reason: PauseReason) => moveCamp
 /** paused, or failed after releasing some recipients, continues from its cursors on the same snapshot; the failure is cleared. */
 export const resumeCampaign = (ref: CampaignRef, to: RunningState) => moveCampaign(ref, ['paused', 'failed'], to, sql`,paused_at=NULL,pause_reason=NULL,error=NULL,health_checked_at=now()`, sql`(state='paused' OR expanded>0)`);
 export const cancelCampaign = (ref: CampaignRef, error: { code: string; message: string } | null) => moveCampaign(ref, [...CAMPAIGN_ACTIVE, 'failed'], 'canceled', sql`,canceled=canceled+(total-expanded),paused_at=NULL,pause_reason=NULL,waiting_reason=NULL,waiting_until=NULL${error ? sql`,error=${JSON.stringify(error)}::jsonb` : sql``}`);
-export const failCampaign = (ref: CampaignRef, error: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'failed', sql`,error=${JSON.stringify(error)}::jsonb,scheduled_at=NULL,waiting_reason=NULL,waiting_until=NULL`);
+export const failCampaign = (ref: CampaignRef | SQL, error: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'failed', sql`,error=${JSON.stringify(error)}::jsonb,scheduled_at=NULL,waiting_reason=NULL,waiting_until=NULL`);
 /** Preparation advanced to `prepared`; when the whole list is validated the campaign moves to its schedule or straight to sending. */
 export const recordPrepared = (ref: CampaignRef, prepared: number, next: RunningState) => next === 'preparing' ? progressCampaign(ref, 'preparing', sql`,prepared=${prepared}`) : moveCampaign(ref, ['preparing'], next, sql`,prepared=${prepared}`);
 export const startSending = (ref: CampaignRef) => moveCampaign(ref, ['scheduled'], 'sending');

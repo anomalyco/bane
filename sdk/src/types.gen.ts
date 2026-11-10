@@ -397,7 +397,7 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -463,7 +463,7 @@ export type BatchSendEmailItem = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1934,7 +1934,7 @@ export type CreateInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1983,7 +1983,7 @@ export type ReplyToInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;

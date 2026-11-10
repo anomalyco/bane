@@ -2,13 +2,14 @@ import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
+import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { sendingConnections, verifiedClaim } from './domain-claims.js';
 import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
+import { wakeWebhooks } from './jobs.js';
 import { screenSnapshot } from './screen.js';
 
 // The dispatcher is a long-lived loop, hosted by a Durable Object on Cloudflare and by the
@@ -28,7 +29,7 @@ const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === '
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; dailyBlockedUntil?: number; tailExhausted?: boolean }
+export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; accountPauseAt?:number; dailyBlockedUntil?: number; tailExhausted?: boolean }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
@@ -67,8 +68,9 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 export function providerClient(runtime: Runtime, region: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client {
   return isSimulatedSes(runtime) ? simulatedSes(runtime, region) : getSes(runtime, region, connection, runClients);
 }
-async function fetchQuota(ses: SESv2Client): Promise<QuotaSnapshot> {
+async function fetchQuota(ses: SESv2Client,gate:GateState): Promise<QuotaSnapshot> {
   const account = await ses.send(new GetAccountCommand({})), quota = account.SendQuota;
+  if (account.SendingEnabled) delete gate.accountPauseAt;
   if (!account.SendingEnabled || !quota || !quota.MaxSendRate || quota.MaxSendRate <= 0 || quota.Max24HourSend === undefined || quota.SentLast24Hours === undefined) throw new ApiError(503, 'SES_SENDING_NOT_READY', 'SES sending is disabled or regional quota information is unavailable.', undefined, true);
   return { maxSendRate: quota.MaxSendRate, max24HourSend: quota.Max24HourSend, sentLast24Hours: quota.SentLast24Hours, checkedAt: Date.now() };
 }
@@ -79,6 +81,8 @@ function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number,
     // Even our own post-send GetAccount can lag SES. Carry provisional sends and a
     // definitive denial into that sample once; an ordinary later refresh releases them.
     gate.quota = sample; gate.sentSinceRefresh = overlappingSends;
+    // A sibling's successful GetAccount is evidence too, but not a sample predating the pause.
+    if (gate.accountPauseAt!==undefined && Date.now()-ageMs>gate.accountPauseAt) delete gate.accountPauseAt;
     if (!overlappingSends) delete gate.dailyBlockedUntil;
     delete gate.tailExhausted; delete gate.staleSampleUsed;
   }
@@ -106,7 +110,7 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: str
     SELECT fence,NULL::text AS checked,NULL::float8 AS rate,NULL::float8 AS max,NULL::float8 AS sent,NULL::float8 AS age_ms FROM elected UNION ALL ${cached} LIMIT 1`);
   let row = result.rows[0];
   if (row?.fence) {
-    const q = await fetchQuota(ses);
+    const q = await fetchQuota(ses,gate);
     const saved = await runtime.db.execute<{ checked: string }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
       max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours} WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked`);
     if (!saved.rowCount) return false;
@@ -271,7 +275,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     ) ${simple ? sql`, ${claimCtes(runtime,region,simple)}, slow AS (
       UPDATE sending_emails e SET lease_until=clock_timestamp()+interval '2 minutes' FROM due WHERE e.workspace_id=due.workspace_id AND e.id=due.id AND NOT EXISTS(SELECT 1 FROM input WHERE id=e.id)
     )` : sql``}
-    SELECT ${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,
+    SELECT ${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
       ${simple ? sql`CASE WHEN EXISTS(SELECT 1 FROM input WHERE id=leased.id) THEN coalesce((SELECT status FROM claimed WHERE id=leased.id),'lost') END` : sql`NULL`} AS claim_status,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
@@ -281,6 +285,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     LEFT JOIN reviews r ON r.carrier = leased.id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
+  if (result.rows[0]?.webhooks) await wakeWebhooks(runtime,Number(result.rows[0].webhooks));
   const owners = new Map<string, Owner>();
   const reviews = new Map<string, Pick<Review, 'draft' | 'rendered'>>();
   const reviewKey = (row: Record<string, unknown>) => JSON.stringify([row.workspaceId, row.campaignId, row.reviewId]);
@@ -288,7 +293,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     reviews.set(reviewKey(row), { draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
   }
   return result.rows.map(row => {
-    const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, claim_status, ...fields } = row;
+    const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, claim_status, webhooks, ...fields } = row;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
     const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState; paused_at?: string | null }) | null;
     const ready = regionReady && !pc0?.paused_at && !(mx && !isSimulatedSes(runtime) && pc0?.kind === 'shared' && pc0.tenant_state !== 'ready');
@@ -379,7 +384,7 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
 }
 
 // Preflight failures (storage, rendering, hash mismatch) cannot have sent email: reject the row.
-async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: unknown) {
+async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
   const code = error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED';
   const retryable = error instanceof ApiError ? error.retryable : true;
   if (retryable) {
@@ -389,11 +394,11 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
     log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' });
     return;
   }
-  await runtime.db.execute(sql`WITH rejected AS (
+  const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
-      WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING id
-    ) INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated, data)
-    SELECT ${id('event')}, ${a.workspaceId}, id, 'reject', ${`preflight-failed:${mail.id}`}, ${isSimulatedSes(runtime)}::boolean, ${JSON.stringify({ code, providerCalled: false, ...(error instanceof ScreenRejected ? { screen: error.screen } : {}) })}::jsonb FROM rejected ON CONFLICT DO NOTHING`);
+      WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING ${terminalColumns}
+    ), ${terminalEvents(sql`SELECT * FROM rejected`,sql`${JSON.stringify({providerCalled:false,...(error instanceof ScreenRejected ? { screen: error.screen } : {})})}::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
+  await wakeWebhooks(runtime,rejected.rows[0]!.n);
   // Screen rejections are an expected policy outcome, not a dispatcher fault.
   if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
   else log('error', { code, emailId: mail.id, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
@@ -425,7 +430,7 @@ async function originDecisions(prepared: Prepared[], db: DbExecutor) {
 // is kept to the provider in-flight width: a platform reset can only strand what was actually mid-call.
 // Campaign rows are shared-locked before their email rows (cancel and the run job take the campaign row
 // first too); the campaign itself is never written here, so concurrent shards never serialize on it.
-async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<string, boolean>, db: DbExecutor = runtime.db): Promise<Map<string, EmailStatus>> {
+async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<string, boolean>, db: DbExecutor) {
   const input = prepared.map(item => ({
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
@@ -436,8 +441,8 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
-  const claimed = await db.execute<{ id: string; status: EmailStatus }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id, status FROM claimed`);
-  return new Map(claimed.rows.map(row => [row.id, row.status]));
+  const claimed = await db.execute<{ id: string; status: EmailStatus; webhooks:number }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id,status,(SELECT count(*)::int FROM webhook_jobs) AS webhooks FROM claimed`);
+  return {statuses:new Map(claimed.rows.map(row => [row.id, row.status])),webhooks:claimed.rows[0]?.webhooks??0};
 }
 function claimCtes(runtime: Runtime, region: string, input: SQL) {
   return sql`input AS MATERIALIZED (${input}
@@ -451,7 +456,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
     ), consent AS MATERIALIZED (
       SELECT workspace_id, email, suppressed, suppression_reason, deleted_at, marketing_consent FROM audience_contacts
       WHERE (workspace_id, email) IN (SELECT workspace_id, email FROM dest)
-      ORDER BY id FOR UPDATE
+      ORDER BY workspace_id,email FOR UPDATE
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed
@@ -489,7 +494,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       FROM input x JOIN eligibility el ON el.id = x.id
       WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
         ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=x.workspace_id AND pc.paused_at IS NULL FOR SHARE)` : sql``}
-      RETURNING e.id, e.workspace_id, e.status, e.suppression_reason
+      RETURNING e.id,e.workspace_id,e.status,e.region,e.simulated,e.error_code,e.suppression_reason,e.dispatch_version
     ), token AS (
       INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, email)
       SELECT x.token_hash, c.workspace_id, x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
@@ -499,11 +504,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       SELECT x.event_id, c.workspace_id, c.id, 'dispatch_attempt', x.external_id, ${isSimulatedSes(runtime)}::boolean,
         jsonb_build_object('attempt', x.attempt, 'providerCallPlanned', true, 'providerCallSimulated', ${isSimulatedSes(runtime)}::boolean), clock_timestamp()
       FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'attempting' ON CONFLICT DO NOTHING
-    ), suppressed AS (
-      INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated,data)
-      SELECT x.event_id, c.workspace_id, c.id, 'suppressed', 'suppressed:' || c.id, ${isSimulatedSes(runtime)}::boolean,jsonb_build_object('suppressionReason',c.suppression_reason)
-      FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'suppressed' ON CONFLICT DO NOTHING
-    )`;
+    ), ${terminalEvents(sql`SELECT * FROM claimed WHERE status IN ('suppressed','canceled')`)}`;
 }
 
 function redactDenial(runtime: Runtime, failure: { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } }) {
@@ -523,6 +524,9 @@ function redactDenial(runtime: Runtime, failure: { name?: string; message?: stri
 
 async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepared): Promise<Outcome> {
   const s = item.snapshot, mail = item.mail;
+  const expires=mail.errorCode==='SES_ACCOUNT_SENDING_PAUSED' && mail.accountPauseStartedAt ? Date.parse(mail.accountPauseStartedAt)+86400000 : Infinity;
+  const expired=(providerCalled:boolean):Outcome=>({mail,type:'reject',errorCode:'SES_ACCOUNT_PAUSE_EXPIRED',data:{code:'SES_ACCOUNT_PAUSE_EXPIRED',providerCalled,retryable:false}});
+  if (Date.now()>=expires) return expired(false);
   const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
     ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
@@ -543,6 +547,11 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     const pause = /\b(?:paused|disabled|suspended)\b/i;
     if (definitive && item.owner.tenantName && /\btenant\b/i.test(failure.message ?? '') && (failure.name === 'SendingPausedException' || pause.test(failure.message ?? ''))) {
       return { mail, type: 'reject', errorCode: 'SES_TENANT_SENDING_PAUSED', data: { code: 'SES_TENANT_SENDING_PAUSED', retryable: false } };
+    }
+    if (definitive && (failure.name==='SendingPausedException' || failure.name==='AccountSuspendedException' ||
+      (/\baccount\b/i.test(failure.message??'') && /\bsend(?:ing)?\b/i.test(failure.message??'') && pause.test(failure.message??'')))) {
+      if (Date.now()>=expires) return expired(true);
+      return {mail,type:'provider_throttled',errorCode:'SES_ACCOUNT_SENDING_PAUSED',data:{code:'SES_ACCOUNT_SENDING_PAUSED',retryable:true},requeueAt:new Date(Math.min(expires,Date.now()+300000)).toISOString()};
     }
     // SES distinguishes its rolling daily ceiling from ordinary per-second throttling by message.
     // Daily exhaustion is not a failed delivery and must never burn the five rate-retry attempts.
@@ -565,12 +574,12 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
   const simulated = isSimulatedSes(runtime);
   const input = outcomes.map(o => ({
     email_id: o.mail.id, workspace_id: o.mail.workspaceId, dispatch_version: o.mail.dispatchVersion, type: o.type, provider_id: o.providerId ?? null,
-    event_id: id('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.data, error_code: o.errorCode ?? null,
+    event_id: id('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.type === 'acceptance_unknown' ? {...o.data,status:o.type} : o.data, error_code: o.errorCode ?? null,
     next_status: requeued(o) ? 'queued' : statusForEvent[o.type] ?? null,
     next_rank: requeued(o) ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
     wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null,
   }));
-  const result = await runtime.db.execute<{ webhooks: number }>(sql`WITH input AS (
+  const statement = sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, wait_ms float8)
     ), mail AS MATERIALIZED (
@@ -579,10 +588,11 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
     ), inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
       SELECT x.event_id, m.workspace_id, m.id, x.type, x.provider_id, x.external_id, x.data, ${simulated}::boolean, clock_timestamp()
-      FROM input x JOIN mail m ON m.id = x.email_id ON CONFLICT DO NOTHING RETURNING *
+      FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *
     ), updated AS (
       UPDATE sending_emails e SET
-        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code = 'SES_DAILY_QUOTA_EXHAUSTED' THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
+        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
+        account_pause_started_at = CASE WHEN x.error_code='SES_ACCOUNT_SENDING_PAUSED' THEN coalesce(e.account_pause_started_at,clock_timestamp()) END,
         dispatch_version = CASE WHEN x.next_status = 'queued' THEN e.dispatch_version + 1 ELSE e.dispatch_version END,
         scheduled_at = CASE WHEN x.next_status = 'queued' THEN clock_timestamp() + x.wait_ms * interval '1 millisecond' ELSE e.scheduled_at END,
         attempt_started_at = CASE WHEN x.next_status = 'queued' THEN NULL ELSE e.attempt_started_at END,
@@ -618,8 +628,26 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
         jsonb_build_object('topicArn', r.topic_arn, 'messageId', r.message_id, 'region', r.region,
           'message', jsonb_build_object('eventType', r.kind, 'mail', jsonb_build_object('messageId', r.provider_id), lower(r.kind), jsonb_build_object('timestamp', r.created_at)))
       FROM simulated_callbacks r RETURNING id
-    ) SELECT (SELECT count(*) FROM inserted)::int AS events, (SELECT count(*) FROM updated)::int AS updated, (SELECT count(*) FROM webhook_jobs)::int AS webhooks, (SELECT count(*) FROM simulated_jobs)::int AS simulated`);
-  const readyJobs = result.rows[0]!.webhooks;
+    ) SELECT (SELECT count(*) FROM inserted)::int AS events, (SELECT count(*) FROM updated)::int AS updated, (SELECT count(*) FROM webhook_jobs)::int AS webhooks, (SELECT count(*) FROM simulated_jobs)::int AS simulated`;
+  // Retry only the fenced, external-id-deduplicated write. Never reacquire a send slot or call SES again.
+  let readyJobs: number;
+  for (let attempt=0; ; attempt++) {
+    try { readyJobs = (await runtime.db.execute<{webhooks:number}>(statement)).rows[0]!.webhooks; break; }
+    catch (error) {
+      const pg = error as {code?:string;cause?:{code?:string}};
+      if (!['40P01','40001'].includes(pg.cause?.code ?? pg.code ?? '')) throw error;
+      if (attempt>=3) {
+        if (outcomes.length===1) throw error;
+        // A repeatedly contended mixed write must not strand its neighbors. Keep one
+        // writer per run, and attempt the second half even if the first cannot settle.
+        const mid=Math.ceil(outcomes.length/2);
+        try { await recordOutcomes(runtime,outcomes.slice(0,mid)); }
+        finally { await recordOutcomes(runtime,outcomes.slice(mid)); }
+        return;
+      }
+      await sleep((10+Math.random()*20)*2**attempt);
+    }
+  }
   if (readyJobs > 0) try { await runtime.wake?.(readyJobs, 'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
   // With a feedback sink, simulated Send/Delivery callbacks travel the same queue live SNS feedback does.
   if (simulated && runtime.feedback) {
@@ -685,10 +713,11 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
     const queuedAt = Date.now(), s = item.snapshot;
     queues[s.kind].push({ deadline, defer() {
       held.recipients -= cost(item);
-      const daily = gate.dailyBlockedUntil;
-      if (!daily) counters.idle = false; // Work is still due, possibly on a different shard.
-      resolve({ mail: item.mail, type: 'dispatch_deferred', ...(daily ? { errorCode: 'SES_DAILY_QUOTA_EXHAUSTED' } : {}),
-        data: { code: daily ? 'SES_DAILY_QUOTA_EXHAUSTED' : 'PACING_WAIT', providerCalled: false }, requeueAt: new Date(daily ?? Date.now()).toISOString() });
+      const accountUntil=(gate.accountPauseAt??0)+300000;
+      const until=accountUntil>Date.now()?accountUntil:gate.dailyBlockedUntil;
+      const code=accountUntil>Date.now()?'SES_ACCOUNT_SENDING_PAUSED':gate.dailyBlockedUntil?'SES_DAILY_QUOTA_EXHAUSTED':undefined;
+      if (!until) counters.idle = false; // Work is still due, possibly on a different shard.
+      resolve({ mail: item.mail, type: 'dispatch_deferred', errorCode:code, data:{code:code??'PACING_WAIT',providerCalled:false}, requeueAt:new Date(until??Date.now()).toISOString() });
     }, start() {
       held.recipients -= cost(item);
       active++;
@@ -696,6 +725,10 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       reserve(gate, cost(item), options.shard, pacing);
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         if (outcome.type === 'provider_throttled') brake(gate);
+        if (outcome.errorCode==='SES_ACCOUNT_SENDING_PAUSED' || (outcome.errorCode==='SES_ACCOUNT_PAUSE_EXPIRED' && outcome.data.providerCalled)) {
+          gate.accountPauseAt=Date.now();gate.brakeUntil=gate.nextAllowedAt=Math.max(gate.nextAllowedAt,gate.accountPauseAt+300000);
+          counters.paceRetryAt=gate.nextAllowedAt;
+        } else if (outcome.data.providerCalled!==false) delete gate.accountPauseAt;
         if (outcome.errorCode === 'SES_DAILY_QUOTA_EXHAUSTED') {
           const period = Math.max(options.accountId ? 1000 : 0, options.quotaRefreshMs ?? QUOTA_REFRESH_MS);
           gate.refreshAt = gate.dailyBlockedUntil = Math.ceil(Math.max(Date.now() + period, gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -808,7 +841,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   const loadAttachments = batchAttachments(base, ready);
   const prepare = async (item: typeof ready[number]) => {
     try { return await prepareMail(item, loadAttachments); }
-    catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.owner.a, item.mail, error); }
+    catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error); }
   };
   if (ready.some(({mail, owner}) => mail.snapshot.screen && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
     // Start every preflight together, but don't gate unrelated sends on the slowest classifier.
@@ -893,7 +926,10 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
     // Hold MX grant/membership SHARE locks through the durable attempt, never during SES I/O.
     // Direct dashboard/API-key batches still need just the single claim statement.
     const checkMcp = base.config.multiTenant && group.some(item => item.mail.actorKeyId.startsWith('mcp_'));
-    const claim = async (items: Prepared[], db: DbExecutor) => claimGroup(base, items, checkMcp ? await originDecisions(items, db) : origins, db);
+    let webhooks=0;
+    const claim = async (items: Prepared[], db: DbExecutor) => {
+      const result=await claimGroup(base,items,checkMcp ? await originDecisions(items,db) : origins,db); webhooks=result.webhooks; return result.statuses;
+    };
     const credits = marketingCredits(gate.quota!, base.config.dispatch.dailyHeadroomPercent);
     const statuses = await phase('claim', async () => {
       if (credits > 0 && credits < (options.shard?.count ?? 1) && group.some(item => item.snapshot.kind === 'marketing')) {
@@ -906,6 +942,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       }
       return checkMcp ? base.db.transaction(tx => claim(group, tx)) : claim(group, base.db);
     });
+    if (webhooks) pendingRecords.push(wakeWebhooks(base,webhooks));
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
     for (const item of group) if (statuses.get(item.mail.id) !== 'attempting') lane.held.recipients -= cost(item);
     const lost = group.filter(item => !statuses.has(item.mail.id));

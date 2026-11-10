@@ -1563,8 +1563,8 @@
           },
           "contentType": {
             "type": "string",
-            "maxLength": 100,
-            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?:\\s*;[ -~]*)?$",
+            "maxLength": 78,
+            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$",
             "default": "application/octet-stream"
           },
           "disposition": {
@@ -1578,7 +1578,7 @@
           "contentId": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 120,
+            "maxLength": 78,
             "pattern": "^[a-zA-Z0-9_.@-]+$"
           },
           "content": {
@@ -1627,7 +1627,7 @@
           "contentId": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 120,
+            "maxLength": 78,
             "pattern": "^[a-zA-Z0-9_.@-]+$"
           }
         },
@@ -1819,8 +1819,8 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 20,
-            "description": "Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "maxItems": 15,
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "screen": {
             "type": "boolean",
@@ -2048,8 +2048,8 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 20,
-            "description": "Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "maxItems": 15,
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "screen": {
             "type": "boolean",
@@ -2433,8 +2433,8 @@
           },
           "contentType": {
             "type": "string",
-            "maxLength": 100,
-            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?:\\s*;[ -~]*)?$",
+            "maxLength": 78,
+            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$",
             "default": "application/octet-stream"
           },
           "disposition": {
@@ -2448,7 +2448,7 @@
           "contentId": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 120,
+            "maxLength": 78,
             "pattern": "^[a-zA-Z0-9_.@-]+$"
           },
           "content": {
@@ -7627,9 +7627,9 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 20,
+            "maxItems": 15,
             "default": [],
-            "description": "Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "autoSubmitted": {
             "type": "string",
@@ -7707,8 +7707,8 @@
               },
               "contentType": {
                 "type": "string",
-                "maxLength": 100,
-                "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?:\\s*;[ -~]*)?$"
+                "maxLength": 78,
+                "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$"
               },
               "disposition": {
                 "type": "string",
@@ -7720,7 +7720,7 @@
               "contentId": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 120,
+                "maxLength": 78,
                 "pattern": "^[a-zA-Z0-9_.@-]+$"
               }
             },
@@ -7809,9 +7809,9 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 20,
+            "maxItems": 15,
             "default": [],
-            "description": "Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "autoSubmitted": {
             "type": "string",
@@ -10924,8 +10924,9 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 320,
+              "maxLength": 254,
               "format": "email",
+              "pattern": "^[\\x21-\\x7e]+$",
               "description": "Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address."
             },
             "required": false,
@@ -11137,8 +11138,9 @@
                 "properties": {
                   "email": {
                     "type": "string",
-                    "maxLength": 320,
-                    "format": "email"
+                    "maxLength": 254,
+                    "format": "email",
+                    "pattern": "^[\\x21-\\x7e]+$"
                   },
                   "name": {
                     "type": "string",
@@ -13206,8 +13208,9 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 320,
+              "maxLength": 254,
               "format": "email",
+              "pattern": "^[\\x21-\\x7e]+$",
               "description": "Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address."
             },
             "required": false,

@@ -4,7 +4,12 @@ import { ApiError, id, log } from './core.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
+import { failCampaign } from './states.js';
 export const MAX_ATTEMPTS = 6;
+export const WEBHOOK_ATTEMPTS = 10;
+export async function wakeWebhooks(runtime:Runtime,count:number) {
+  if (count) try { await runtime.wake?.(count,'webhook'); } catch { log('warn',{code:'QUEUE_WAKE_FAILED',message:'Webhook jobs remain durable.'}); }
+}
 // Wake messages drain the installation, not a tenant. Reuse the existing singleton reservation on upgrade.
 export const WAKE_SCHEDULE_KEY = 'default';
 
@@ -80,14 +85,14 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const regionalRuntime = workspaceRuntimes(runtime);
-  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; webhook: ClaimedWebhook | null };
+  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null };
   const handle = async (job: Claimed, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
     peakActiveJobs = Math.max(peakActiveJobs, ++activeJobs);
     // A job row that is requeued under the same id (campaign runs) carries a fresh payload.run token; fencing on it keeps
     // a worker that still holds the retired run from completing or requeueing the row the new run now owns.
-    const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
+    const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), sql`${jobs.leaseUntil}=${job.lease_fence}::timestamptz`, typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
     const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     let records: SQL | undefined, settling = false;
     const settle = (update: SQLWrapper) => {
@@ -106,16 +111,18 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
     } catch (error) {
       if (settling) throw error; // Outcome and job settle atomically. Let the durable lease recover a failed commit.
       if (error instanceof JobDeferred) {
-        // The claim incremented attempts; undo it so intentional polling never reaches MAX_ATTEMPTS.
-        await runtime.db.update(jobs).set({ status: 'pending', attempts: sql`${jobs.attempts} - 1`, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(error.payload ? { payload: error.payload } : {}) }).where(fence);
+        // A successful polling turn breaks a streak of failures/evictions.
+        await runtime.db.update(jobs).set({ status: 'pending', attempts: 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(error.payload ? { payload: error.payload } : {}) }).where(fence);
         log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
         return;
       }
       const code = error instanceof ApiError ? error.code : 'JOB_INTERNAL_ERROR';
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
-      const retry = error instanceof ApiError && error.retryable && (job.attempts < MAX_ATTEMPTS || error.code === 'JOB_FINALIZATION_FAILED');
-      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + Math.min(3600000, 15000 * 4 ** (job.attempts - 1))).toISOString() }).where(fence));
+      const hook=job.type==='operation.webhook';
+      const retry = error instanceof ApiError && error.retryable && (job.attempts < (hook ? WEBHOOK_ATTEMPTS : MAX_ATTEMPTS) || error.code === 'JOB_FINALIZATION_FAILED');
+      const delay=Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
+      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString() }).where(fence));
       log('error', { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: error instanceof ApiError ? error.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
     } finally {
       activeJobs--;
@@ -130,13 +137,27 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       const claimBatchSize = Math.min(freeLanes.size, maximumClaims - claims);
       const activeAtClaim = active.size;
       const claimStarted = Date.now();
-      const claimed = await runtime.db.execute<Claimed>(sql`WITH feedback AS (
+      // The claim already charged the attempt before the isolate died. Retire exhausted
+      // leases separately from this batch's slots so healthy jobs can run in the same claim.
+      const exhausted=sql`j.attempts >= CASE WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
+      const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
+      const claimed = await runtime.db.execute<Claimed>(sql`WITH exhausted AS (
+        SELECT j.id,j.workspace_id,CASE WHEN starts_with(j.type,'campaign.') THEN j.payload->>'campaignId' END AS campaign_id
+        FROM jobs j WHERE j.status='running' AND j.lease_until < now() AND ${exhausted} ORDER BY j.id LIMIT 100 FOR UPDATE SKIP LOCKED
+      ), parents AS MATERIALIZED (
+        SELECT c.workspace_id,c.id FROM sending_campaigns c WHERE (c.workspace_id,c.id) IN (SELECT workspace_id,campaign_id FROM exhausted)
+        ORDER BY c.id FOR NO KEY UPDATE SKIP LOCKED
+      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL FROM exhausted x WHERE j.id=x.id AND
+        (x.campaign_id IS NULL OR EXISTS(SELECT FROM parents p WHERE (p.workspace_id,p.id)=(x.workspace_id,x.campaign_id)) OR NOT EXISTS(SELECT FROM sending_campaigns c WHERE (c.workspace_id,c.id)=(x.workspace_id,x.campaign_id)))
+        RETURNING j.workspace_id,j.type,j.payload,x.campaign_id), campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
+      deliveries_failed AS (UPDATE operation_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f
+        WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), feedback AS (
         SELECT j.id FROM jobs j WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
           AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
-          AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+          AND ${due}
         ORDER BY j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
       ), regular AS (
-        SELECT j.id FROM jobs j WHERE ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+        SELECT j.id FROM jobs j WHERE ${due}
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
@@ -144,8 +165,8 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM regular
-      ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
-        FROM due WHERE jobs.id = due.id RETURNING jobs.*), ${webhookClaimCtes} ${claimedWithWebhooks}`);
+      ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes'
+        FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), ${webhookClaimCtes} ${claimedWithWebhooks}`);
       claimRequests++;
       const claimMs = Date.now() - claimStarted;
       if (!claimed.rows.length) {

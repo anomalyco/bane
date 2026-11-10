@@ -18,7 +18,7 @@ export function workWake(queue: Queue, concurrency: number): NonNullable<Runtime
 
 const invalidFeedback = new Set(['SES_INVALID_EVENT', 'SES_UNSUPPORTED_EVENT', 'SES_ACCOUNT_MISMATCH', 'SES_ENVIRONMENT_MISMATCH', 'SIMULATED_FEEDBACK_FORBIDDEN', 'SIMULATED_FEEDBACK_UNSUPPORTED']);
 export function settleFeedbackMessage(message: Pick<Message, 'attempts' | 'retry' | 'ack'>, outcome?: { ok: boolean; error?: string }) {
-  if (outcome?.ok || (outcome?.error && invalidFeedback.has(outcome.error))) return message.ack();
+  if (outcome?.ok || outcome?.error === 'SES_FEEDBACK_QUARANTINED' || (outcome?.error && invalidFeedback.has(outcome.error))) return message.ack();
   if (outcome?.error === 'SES_FEEDBACK_UNMATCHED') {
     // Allow one short dispatch/feedback race, not a full retry chain for an unknown message.
     return message.attempts === 1 ? message.retry({ delaySeconds: 15 }) : message.ack();

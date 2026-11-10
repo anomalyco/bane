@@ -2829,6 +2829,33 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('GET', `/v1/emails/${allowed.id}`, sender.secret), 403, 'PERMISSION_DENIED');
   });
 
+  test('SES wire limits are enforced at admission including generated headers and stored attachment metadata', async t => {
+    await simulatedSesFixture(t, async ({runtime,local,db}) => {
+      const headers = (n:number) => Array.from({length:n},(_,i)=>({name:`X-Fixture-${i}`,value:'v'}));
+      const send = (extra:Json) => local('POST','/v1/emails/send',mail(extra));
+      error(await send({headers:headers(16)}),422);
+      error(await local('POST','/v1/emails/batch',{emails:[mail(),mail({headers:headers(14),kind:'marketing'})]}),422,'TOO_MANY_HEADERS');
+      error(await send({to:'x'.repeat(65)+'@example.net'}),422);
+      error(await send({bcc:['a@'+'x'.repeat(64)+'.net']}),422);
+      error(await send({to:Array.from({length:50},address),cc:[address()]}),422);
+      error(await send({text:'x'.repeat(512*1024+1)}),422);
+      for (const extra of [{contentId:'x'.repeat(79),disposition:'inline'},{contentType:'text/'+'x'.repeat(74)}]) {
+        error(await local('POST','/v1/attachments',{filename:'x.txt',content:'YQ==',...extra}),422);
+      }
+      const asset=unique('old-upload');
+      await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,storage_key,checksum,size,disposition) VALUES($1,$2,'x.txt',$3,$1,'fixture',1,'attachment')`,[asset,runtime.config.workspaceId,'text/'+'x'.repeat(74)]);
+      error(await send({attachments:[asset]}),422,'ATTACHMENT_METADATA_INVALID');
+      assert.equal((await db.query('SELECT id FROM sending_emails WHERE workspace_id=$1',[runtime.config.workspaceId])).rowCount,0);
+      ok(await send({headers:headers(15),to:'a@example.xn--p1ai'}),202); ok(await send({headers:headers(13),kind:'marketing'}),202);
+      const list=ok(await local('POST','/v1/lists',{name:'Wire limits'}),201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('wire-contact',$1,'test@example.net','subscribed') RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`,[runtime.config.workspaceId,list.id]);
+      const c=ok(await local('POST','/v1/campaigns',{name:'Wire',from:'a@example.net',subject:'Wire',html:'<p>Wire</p>',attachments:[asset],audience:{listId:list.id}}),201);
+      error(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),422,'ATTACHMENT_METADATA_INVALID');
+      assert.equal(ok(await local('GET',`/v1/campaigns/${c.id}`)).state,'draft');
+    });
+  });
+
   test('batch results retain individual IDs and retries, while test templates are rejected without AWS rendering', async t => {
     const key = await keyFixture(t);
     const payload = { emails: [mail(), mail()] };
@@ -3406,7 +3433,7 @@ describe('Dashboard API capabilities', () => {
       { status: 'complained', events: ['delivery', 'complaint', 'open'], accepted: true },
       { status: 'bounced', events: ['bounce'], accepted: true },
       { status: 'delayed', events: ['delivery_delay'], accepted: true },
-      { status: 'rejected', events: ['reject'] }, { status: 'rendering_failed', events: ['rendering_failure'] },
+      { status: 'rejected', events: ['reject','non_permanent_bounce'] }, { status: 'rendering_failed', events: ['rendering_failure'] },
       { status: 'suppressed', events: [] }, { status: 'canceled', events: [] }, { status: 'acceptance_unknown', events: [] },
       { status: 'sent', events: ['send'], accepted: true }, { status: 'accepted', events: [], accepted: true },
       // SES Auto Validation drop: the provider accepted the call but never sent; neither accepted nor bounced.
@@ -3446,10 +3473,10 @@ describe('Dashboard API capabilities', () => {
     assert.equal(stats.delivery.total, 13);
     assert.equal(stats.delivery.expanded, 11);
     assert.equal(stats.delivery.canceled, 2, 'Unmaterialized cancellations are separate from email counts.');
-    assert.deepEqual(stats.totals, { accepted: 6, delivered: 3, bounced: 1, complained: 1, opened: 3, clicked: 2, failed: 2, deliveryDelayed: 1, simulated: 1 });
-    assert.deepEqual(stats.rates.delivery, { value: 2 / 6, numerator: 2, denominator: 6 });
-    assert.deepEqual(stats.rates.bounce, { value: 1 / 6, numerator: 1, denominator: 6 });
-    assert.deepEqual(stats.rates.complaint, { value: 1 / 6, numerator: 1, denominator: 6 });
+    assert.deepEqual(stats.totals, { accepted: 7, delivered: 3, bounced: 1, complained: 1, opened: 3, clicked: 2, failed: 2, deliveryDelayed: 2, simulated: 1 });
+    assert.deepEqual(stats.rates.delivery, { value: 2 / 7, numerator: 2, denominator: 7 });
+    assert.deepEqual(stats.rates.bounce, { value: 1 / 7, numerator: 1, denominator: 7 });
+    assert.deepEqual(stats.rates.complaint, { value: 1 / 7, numerator: 1, denominator: 7 });
     assert.deepEqual(stats.rates.open, { value: 1, numerator: 2, denominator: 2 });
     assert.deepEqual(stats.rates.click, { value: 0.5, numerator: 1, denominator: 2 });
     const disabled = ok(await http('GET', `/v1/campaigns/${untracked.id}/stats`, live.secret));
@@ -3683,6 +3710,27 @@ describe('Campaign authorization and dispatch credentials', () => {
 });
 
 describe('Hosted unsubscribe and dispatch-time consent', () => {
+  test('punycode TLDs work for contact lookup, template replies, one-click and SES unsubscribeAll',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,request,db})=>{
+      const {ingestFeedbackBatch}=await import('./src/operations.js');
+      const to='a@example.xn--p1ai', contact=ok(await local('POST','/v1/contacts',{email:` ${to.toUpperCase()} `}),201);
+      assert.equal(contact.email,to);assert.equal(page(await local('GET',`/v1/contacts?email=${to.toUpperCase()}`))[0].id,contact.id);
+      const tpl=ok(await local('POST','/v1/templates',{name:'IDN fixture'}),201);
+      ok(await local('PATCH',`/v1/templates/${tpl.id}`,{revision:tpl.revision,draft:{...tpl.draft,replyTo:[to]}}));
+      const queued=ok(await local('POST','/v1/emails/send',mail({kind:'marketing',to})),202);
+      const content=ok(await local('GET',`/v1/emails/${queued.id}/content`)),path=new URL(/Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text)![1]!).pathname;
+      ok(await request('POST',path,undefined,'List-Unsubscribe=One-Click',{'content-type':'application/x-www-form-urlencoded'}));
+      assert.equal(ok(await local('GET',`/v1/contacts/${contact.id}`)).marketingConsent,'unsubscribed');
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',confirmResubscribe:true,source:'test',policyVersion:'test',evidence:'Explicit consent in the synthetic fixture.',occurredAt:new Date().toISOString()}));
+      const provider=unique('provider'),account='111122223333',topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      await db.query("UPDATE sending_emails SET status='delivered',provider_id=$2,simulated=false WHERE id=$1",[queued.id,provider]);
+      const item={region:REGION,topicArn,messageId:unique('sns'),message:{eventType:'Subscription',mail:{messageId:provider,sendingAccountId:account},subscription:{newTopicPreferences:{unsubscribeAll:true}}}};
+      assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+      assert.equal(ok(await local('GET',`/v1/contacts/${contact.id}`)).marketingConsent,'unsubscribed');
+      assert.equal(page(await local('GET',`/v1/contacts/${contact.id}/consent`)).filter(r=>r.source==='ses-subscription').length,1);
+      assert.equal((await db.query('SELECT 1 FROM operation_feedback_failures WHERE topic_arn=$1',[topicArn])).rowCount,0);
+    });
+  });
   test('footer GET and provider POST are idempotent, private, and block queued marketing but not transactional mail', async t => {
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
@@ -5343,6 +5391,40 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [{old:false,new:true,reason:'Synthetic exemption'},{old:true,new:false,reason:'Completed review'}]);
     });
   });
+  for (const kind of ['Bounce','Complaint'] as const) test(`MX: ${kind==='Bounce'?'non-permanent bounces':'only explicit not-spam reports'} do not suppress or charge reputation on either feedback path`,async t=>{
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`, to=address();
+      const email=ok(await local('POST','/v1/emails/send',mail({to})),202), provider=unique('fixture-provider');
+      ok(await local('POST','/v1/contacts',{email:to}),201);
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`UPDATE sending_emails SET status='delivered',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,provider,topicArn]);
+      for (const path of ['batch','job']) for (const value of kind==='Bounce'?['Transient','Undetermined']:['not-spam','  NoT-SpAm  ']) {
+        const item={topicArn,region:REGION,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:provider,sendingAccountId:account},
+          ...(kind==='Bounce'?{bounce:{bounceType:value,bounceSubType:'MailboxFull',bouncedRecipients:[{emailAddress:to}]}}:{complaint:{complaintFeedbackType:value,complainedRecipients:[{emailAddress:to}]}})}};
+        if (path==='batch') assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+        else {
+          await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+          await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
+        }
+        assert.deepEqual((await db.query('SELECT status,event_outcomes & 12 AS adverse_bits FROM sending_emails WHERE id=$1',[email.id])).rows,[{status:'delivered',adverse_bits:0}]);
+        assert.deepEqual((await db.query('SELECT suppressed FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,to])).rows,[{suppressed:false}]);
+        const recorded=(await db.query(`SELECT type,data FROM sending_email_events WHERE workspace_id=$1 AND external_id=$2`,[wid,`${topicArn}:${item.messageId}`])).rows[0];
+        assert.equal(recorded.type,kind==='Bounce'?'non_permanent_bounce':'complaint_feedback');assert.equal(recorded.data[kind==='Bounce'?'bounceType':'complaintFeedbackType'],value);
+      }
+      assert.equal((await db.query('SELECT 1 FROM hosted_health_hourly WHERE workspace_id=$1 AND (bounces>0 OR complaints>0)',[wid])).rowCount,0);
+      if (kind==='Complaint') assert.equal((await db.query("SELECT 1 FROM operation_events WHERE workspace_id=$1 AND type='email.complained'",[wid])).rowCount,0);
+      if (kind==='Complaint') for (const value of [undefined,'',42,'AbUse','fraud','virus','other','auth-failure','unknown']) {
+        const item:import('./src/core.js').FeedbackItem={topicArn,region:REGION,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:provider,sendingAccountId:account},complaint:{complaintFeedbackType:value,complainedRecipients:[{emailAddress:to}]}}};
+        assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+        assert.equal((await db.query('SELECT type FROM sending_email_events WHERE workspace_id=$1 AND external_id=$2',[wid,`${topicArn}:${item.messageId}`])).rows[0].type,'complaint');
+        assert.equal((await db.query('SELECT suppressed FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,to])).rows[0].suppressed,true);
+      }
+    });
+  });
+
   test('MX: multi-recipient SES feedback uses real destinations, yesterday’s volume and the last operator resume', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const { ingestFeedbackBatch } = await import('./src/operations.js');
@@ -6294,6 +6376,71 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('expired final leases fail without rerunning the job or blocking other workspaces', async t => {
+    await simulatedSesFixture(t,async ({runtime,db})=>{
+      const {processJobs,MAX_ATTEMPTS}=await import('./src/jobs.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      await db.query(`INSERT INTO jobs(id,workspace_id,type,payload,status,attempts,lease_until) VALUES
+        ('a','poison','operation.ses','{}','running',$1,now()-interval '1 minute'),('b','poison','fixture','{}','running',$1,now()-interval '1 minute'),
+        ('c','healthy','fixture','{}','running',$1::int-1,now()-interval '1 minute')`,[MAX_ATTEMPTS]);
+      const calls:string[]=[];
+      assert.equal(await processJobs(runtime,{fixture:async (_r,_p,j)=>{calls.push(j.id);}},1,2),1);
+      assert.deepEqual(calls,['c']);
+      assert.deepEqual((await db.query('SELECT id,status,attempts,last_error,lease_until FROM jobs ORDER BY id')).rows,
+        ['a','b','c'].map(id=>({id,status:id==='c'?'completed':'failed',attempts:MAX_ATTEMPTS,last_error:id==='c'?null:'JOB_LEASE_EXHAUSTED',lease_until:null})));
+    });
+  });
+
+  test('exhausted leases settle campaign and webhook state; polling and finalization get fresh turns',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs,MAX_ATTEMPTS,WEBHOOK_ATTEMPTS,JobDeferred}=await import('./src/jobs.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId,c=ok(await local('POST','/v1/campaigns',{name:'Expired',from:'a@example.net',subject:'Test',html:'<p>Test</p>',audience:{}}),201);
+      await db.query("UPDATE sending_campaigns SET state='preparing',total=1,review_id='test-review' WHERE id=$1",[c.id]);
+      const hook=ok(await local('POST','/v1/webhooks',{url:'https://example.com/fixture'}),201), delivery=ok(await local('POST',`/v1/webhooks/${hook.id}/test`),202);
+      await db.query(`UPDATE jobs SET status='running',attempts=$1,lease_until=now()-interval '1 second' WHERE payload->>'deliveryId'=$2`,[WEBHOOK_ATTEMPTS,delivery.id]);
+      await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until,last_error) VALUES
+        ('lease-campaign','campaign.run',$1,$2,'running',$3,now()-interval '1 second',NULL),('final','fixture',$1,'{}','running',$3,now()-interval '1 second','JOB_FINALIZATION_FAILED')`,[wid,{campaignId:c.id},MAX_ATTEMPTS]);
+      const partial=ok(await local('POST','/v1/campaigns',{name:'Partial',from:'a@example.net',subject:'Test',html:'<p>Test</p>',audience:{}}),201);
+      await db.query("UPDATE sending_campaigns SET state='sending',total=2,prepared=2,expanded=1,review_id='partial-review' WHERE id=$1",[partial.id]);
+      await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('lease-partial','campaign.run',$1,$2,'running',$3,now()-interval '1 second')`,[wid,{campaignId:partial.id},MAX_ATTEMPTS]);
+      const calls:string[]=[];
+      await processJobs(runtime,{fixture:async(_r,_p,j)=>{calls.push(j.id);}},3,1);
+      assert.deepEqual(calls,['final']);
+      assert.deepEqual((await db.query('SELECT state,error->>\'code\' AS code FROM sending_campaigns WHERE id=$1',[c.id])).rows,[{state:'failed',code:'JOB_LEASE_EXHAUSTED'}]);
+      ok(await local('PATCH',`/v1/campaigns/${c.id}`,{revision:c.revision,draft:c.draft}));
+      assert.deepEqual((await db.query('SELECT status,last_error FROM operation_deliveries WHERE id=$1',[delivery.id])).rows,[{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'}]);
+      const {campaignReserved}=await import('./src/states.js'),{sql}=await import('drizzle-orm');
+      assert.equal((await runtime.db.execute(sql`SELECT FROM sending_campaigns c WHERE id=${partial.id} AND ${campaignReserved()}`)).rowCount,0);
+      await db.query(`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('poll','poll',$1,'{}')`,[wid]);
+      for(let i=0;i<=MAX_ATTEMPTS;i++) {
+        await db.query(`UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()-interval '1 second' WHERE id='poll'`);
+        assert.equal(await processJobs(runtime,{poll:async()=>{throw new JobDeferred(new Date().toISOString());}},1,1),1);
+        assert.deepEqual((await db.query("SELECT status,attempts FROM jobs WHERE id='poll'")).rows,[{status:'pending',attempts:0}]);
+      }
+      assert.equal(ok(await local('POST',`/v1/campaigns/${partial.id}/resume`,{})).state,'sending');
+      assert.equal((await runtime.db.execute(sql`SELECT FROM sending_campaigns c WHERE id=${partial.id} AND ${campaignReserved()}`)).rowCount,1);
+    });
+  });
+
+  test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const hook=ok(await local('POST','/v1/webhooks',{url:'https://example.com/fixture'}),201), delivery=ok(await local('POST',`/v1/webhooks/${hook.id}/test`),202);
+      runtime.webhookFetch=async()=>({status:503}); let horizon=0;
+      for(let i=1;i<=WEBHOOK_ATTEMPTS;i++) {
+        await db.query("UPDATE jobs SET available_at=now() WHERE payload->>'deliveryId'=$1",[delivery.id]);
+        const start=Date.now();assert.equal(await processJobs(runtime,operationJobs,1,1),1);
+        const job=(await db.query("SELECT status,available_at FROM jobs WHERE payload->>'deliveryId'=$1",[delivery.id])).rows[0];
+        assert.equal(job.status,i===WEBHOOK_ATTEMPTS?'failed':'pending');
+        assert.equal((await db.query('SELECT status FROM operation_deliveries WHERE id=$1',[delivery.id])).rows[0].status,job.status);
+        if(i<WEBHOOK_ATTEMPTS) horizon+=job.available_at.getTime()-start;
+      }
+      assert.ok(horizon>=86400000);
+    });
+  });
+
   test('job scheduling serves every class', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { processJobs, enqueue } = await import('./src/jobs.js');
@@ -6939,6 +7086,152 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await receipts()).length, index + 1);
       }
       for (const type of ['operation.ses', 'operation.simulatedFeedbackRecovery', 'operation.publish', 'operation.webhook']) assert.equal((await jobs(type)).length, 0);
+    });
+  });
+
+  test('terminal send outcomes publish once to the email timeline and subscribed webhook', async t => {
+    await simulatedSesFixture(t,async ({runtime,local,run,db})=>{
+      const {dispatchPartitions}=await import('./src/dispatch.js');
+      ok(await local('POST','/v1/webhooks',{url:'https://example.com/fixture',eventTypes:['email.rejected']}),201);
+      const send=async(extra:Json={})=>ok(await local('POST','/v1/emails/send',mail(extra)),202).id;
+      const suppressed=await send({kind:'marketing'}), canceled=await send(), stale=await send(), ambiguous=await send();
+      await db.query(`UPDATE sending_emails SET actor_key_id='revoked-fixture' WHERE id=$1`,[canceled]);
+      await db.query(`UPDATE sending_emails SET status='attempting',attempt_started_at=now()-interval '4 minutes' WHERE id=$1`,[stale]);
+      Object.assign(runtime.config.simulatedSes,{outcomes:['timeout']});
+      const wakes:number[]=[]; runtime.wake=async(n,mode)=>{assert.equal(mode,'webhook');wakes.push(n!);};
+      await run('email.dispatch'); await dispatchPartitions(runtime,true); await dispatchPartitions(runtime,true); await run('email.dispatch');
+      assert.equal(wakes.reduce((a,b)=>a+b,0),4,'Each terminal delivery wakes after commit, including claim and sweep.');
+      for (const [id,status,code] of [[suppressed,'suppressed','RECIPIENT_INELIGIBLE'],[canceled,'canceled','ORIGIN_KEY_REVOKED'],[stale,'acceptance_unknown','INTERRUPTED_PROVIDER_ATTEMPT'],[ambiguous,'acceptance_unknown','SES_ACCEPTANCE_UNKNOWN']]) {
+        assert.equal(ok(await local('GET',`/v1/emails/${id}`)).status,status);
+        const events=page(await local('GET',`/v1/emails/${id}/events`)).filter(e=>e.type===status);
+        assert.equal(events.length,1); assert.equal(events[0].data.code,code);
+        const result=await db.query(`SELECT d.payload FROM operation_events e JOIN operation_deliveries d ON d.event_id=e.id AND d.workspace_id=e.workspace_id
+          JOIN jobs j ON j.payload->>'deliveryId'=d.id AND j.workspace_id=d.workspace_id WHERE e.id=$1 AND e.type='email.rejected'`,[events[0].id]);
+        assert.equal(result.rowCount,1);assert.deepEqual(result.rows[0].payload.data,{...events[0].data,emailId:id,simulated:true});
+      }
+    });
+  });
+
+  test('campaign cancel returns the full count and fans out exactly once in bounded pages',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db,run,jobs})=>{
+      const wid=runtime.config.workspaceId,c=ok(await local('POST','/v1/campaigns',{name:'Paged',from:'a@example.net',subject:'Test',html:'<p>Test</p>',audience:{}}),201);
+      for(let i=0;i<2;i++) ok(await local('POST','/v1/webhooks',{url:`https://example.com/fixture${i}`,eventTypes:['email.rejected']}),201);
+      await db.query("UPDATE sending_campaigns SET state='sending',total=2200,prepared=2200,expanded=2005,review_id='test-review' WHERE id=$1",[c.id]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||n,$1,$2,'fixture',$3,'a@example.net','["r@example.net"]','[]','[]','Fixture','{}',true FROM generate_series(1,2005)n`,[wid,REGION,c.id]);
+      const wakes:number[]=[];runtime.wake=async(n,mode)=>{assert.equal(mode,'webhook');wakes.push(n!);};
+      const result=ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));assert.deepEqual(result,{id:c.id,state:'canceled',canceled:2200,inFlight:0});
+      const counts=async()=> (await db.query(`SELECT (SELECT count(*)::int FROM sending_emails WHERE campaign_id=$1 AND status='canceled') AS settled,
+        (SELECT count(*)::int FROM operation_deliveries WHERE workspace_id=$2) AS deliveries`,[c.id,wid])).rows[0];
+      assert.deepEqual(await counts(),{settled:1000,deliveries:2000});assert.equal((await jobs('sending.cancelPage')).length,1);
+      await run('sending.cancelPage');assert.deepEqual(await counts(),{settled:2000,deliveries:4000});
+      await run('sending.cancelPage');assert.deepEqual(await counts(),{settled:2005,deliveries:4010});assert.deepEqual(wakes,[2001,2000,10]);
+      ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));assert.deepEqual(await counts(),{settled:2005,deliveries:4010});
+    });
+  });
+
+  test('SES account pauses expire only continuously held mail and clear on recovery',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),{dispatchDue,initialGate}=await import('./src/dispatcher.js');
+      const original=SESv2Client.prototype.send;let sends=0,paused=true;
+      const gate=initialGate();
+      t.mock.method(SESv2Client.prototype,'send',function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(cmd instanceof SendEmailCommand){sends++;if(paused)throw Object.assign(new Error('Account sending disabled'),{name:sends%2?'SendingPausedException':'AccountSuspendedException',$metadata:{httpStatusCode:400}});}
+        return Reflect.apply(original,this,[cmd]);
+      });
+      const id=ok(await local('POST','/v1/emails/send',mail()),202).id;
+      // Existing queue age is not a hold. The first denial starts a new per-envelope clock.
+      await db.query("UPDATE sending_emails SET created_at=now()-interval '26 hours' WHERE id=$1",[id]);
+      let firstHeld:string|undefined;
+      for(let i=0;i<6;i++) {
+        gate.nextAllowedAt=0;await dispatchDue(runtime,REGION,{gate});assert.ok(gate.nextAllowedAt>Date.now()+240000);
+        assert.deepEqual((await db.query(`SELECT status,error_code,scheduled_at>now()+interval '4 minutes' AS delayed FROM sending_emails WHERE id=$1`,[id])).rows,[{status:'queued',error_code:'SES_ACCOUNT_SENDING_PAUSED',delayed:true}]);
+        const at=(await db.query('SELECT account_pause_started_at::text AS at FROM sending_emails WHERE id=$1',[id])).rows[0].at;assert.ok(at);firstHeld??=at;assert.equal(at,firstHeld);
+        await db.query('UPDATE sending_emails SET scheduled_at=now() WHERE id=$1',[id]);await dispatchDue(runtime,REGION,{gate});assert.equal(sends,i+1);
+      }
+      // A retry after more than a day held must never reach the provider, even on a fresh shard.
+      await db.query("UPDATE sending_emails SET account_pause_started_at=now()-interval '25 hours' WHERE id=$1",[id]);
+      await dispatchDue(runtime,REGION);assert.equal(sends,6);assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[id])).rows,[{status:'rejected',error_code:'SES_ACCOUNT_PAUSE_EXPIRED'}]);
+
+      const brieflyHeld=ok(await local('POST','/v1/emails/send',mail()),202).id;
+      gate.nextAllowedAt=0;await dispatchDue(runtime,REGION,{gate});assert.ok(gate.accountPauseAt);
+      const backlog=ok(await local('POST','/v1/emails/send',mail()),202).id;
+      await db.query("UPDATE sending_emails SET created_at=now()-interval '26 hours' WHERE id=$1",[backlog]);
+      await db.query("UPDATE sending_emails SET scheduled_at=now(),account_pause_started_at=now()-interval '5 minutes' WHERE id=$1",[brieflyHeld]);
+      // Reproduce a persisted pause marker more than a day old, with a still-valid quota sample.
+      paused=false;gate.nextAllowedAt=0;gate.accountPauseAt=Date.now()-25*3600000;
+      await dispatchDue(runtime,REGION,{gate});assert.equal(gate.accountPauseAt,undefined);assert.equal(sends,9);
+      assert.deepEqual((await db.query('SELECT status,error_code,account_pause_started_at FROM sending_emails WHERE id=ANY($1)',[[brieflyHeld,backlog]])).rows,Array(2).fill({status:'accepted',error_code:null,account_pause_started_at:null}));
+    });
+  });
+
+  test('deadlock and serialization retries persist the accepted provider id without repeating SES',async t=>{
+    await simulatedSesFixture(t,async ({local,run,db})=>{
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
+      const sends=t.mock.method(SESv2Client.prototype,'send');
+      const emails=ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:6},()=>mail())}),202).data;
+      const query=db.query.bind(db), faults=['40P01','40001','40P01','40001'];
+      let parent:string[]=[];const children:string[][]=[];
+      t.mock.method(db,'query',function(q:any,...args:any[]){
+        const param=args[0]?.find?.((v:unknown)=>typeof v==='string' && v.includes('"external_id":"attempt-result:'));
+        if (param) {
+          const ids=JSON.parse(param).map((r:Json)=>r.email_id);
+          if (faults.length && ids.length>1) {parent=ids;throw Object.assign(new Error('injected outcome abort'),{code:faults.shift()});}
+          if (!faults.length && ids.every((id:string)=>parent.includes(id))) children.push(ids);
+        }
+        return Reflect.apply(query,db,[q,...args]);
+      });
+      await run('email.dispatch'); await run('email.dispatch');
+      assert.deepEqual(faults,[]);assert.equal(children.length,2);assert.deepEqual(children.flat(),parent);
+      assert.equal(sends.mock.calls.filter(c=>c.arguments[0] instanceof SendEmailCommand).length,emails.length);
+      for (const email of emails) {
+        const result=ok(await local('GET',`/v1/emails/${email.id}`));assert.match(result.providerId,/^sim_/);assert.equal(result.status,'accepted');
+        assert.deepEqual((await db.query(`SELECT data->>'providerId' AS provider FROM operation_events WHERE data->>'emailId'=$1 AND type='email.sent'`,[email.id])).rows,[{provider:result.providerId}]);
+      }
+    });
+  });
+
+  test('schema and transient feedback failures redeliver and NUL diagnostics do not lose a hard bounce',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {ingestFeedbackBatch}=await import('./src/operations.js'),{settleFeedbackMessage}=await import('./src/adapters/feedback-queue.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      for(const code of ['08006','40P01','42P01']) {
+        const to=address(), email=ok(await local('POST','/v1/emails/send',mail({to})),202), provider=unique('provider');
+        await db.query("UPDATE sending_emails SET status='delivered',provider_id=$2,simulated=false WHERE id=$1",[email.id,provider]);
+        const item={topicArn,region:REGION,messageId:unique('sns'),message:{eventType:'Bounce',mail:{messageId:provider,sendingAccountId:account},bounce:{bounceType:'Permanent',bouncedRecipients:[{emailAddress:to,diagnosticCode:'misbehaving MTA\0status'}]}}};
+        const tx=runtime.db;let attempts=0;const consumer={...runtime,db:Object.assign(Object.create(tx),{execute:()=>{attempts++;throw Object.assign(new Error('fault'),{cause:{code}});}})};
+        const payload=code==='40P01'?[item]:[item,item,item], failures=await ingestFeedbackBatch(consumer,payload);
+        assert.equal(attempts,code==='40P01'?2:1);let retry=0;
+        for(const failure of failures) settleFeedbackMessage({attempts:1,retry:()=>{retry++;},ack:()=>assert.fail('transient failure acknowledged')},failure);
+        assert.equal(retry,payload.length);assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+        assert.equal((await db.query('SELECT suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,to])).rows[0].suppression_reason,'hard_bounce');
+        assert.equal((await db.query('SELECT 1 FROM operation_feedback_failures WHERE topic_arn=$1',[topicArn])).rowCount,0);
+      }
+    });
+  });
+
+  test('mixed-workspace feedback commits healthy siblings and quarantines only the unpersistable message',async t=>{
+    await simulatedSesFixture(t,async ({runtime,local,run,db})=>{
+      const {ingestFeedbackBatch}=await import('./src/operations.js'), {settleFeedbackMessage}=await import('./src/adapters/feedback-queue.js');
+      const sink:import('./src/core.js').FeedbackItem[]=[];runtime.feedback={enqueue:async items=>{sink.push(...items);}};
+      const ids=ok(await local('POST','/v1/emails/batch',{emails:[mail(),mail(),mail()]}),202).data.map((e:Json)=>e.id);
+      await run('email.dispatch');
+      await db.query(`UPDATE sending_emails SET workspace_id='other-fixture' WHERE id=$1`,[ids[1]]);
+      const batch=ids.map((id:string)=>sink.find(x=>x.messageId===`${id}:Delivery`)!);
+      batch[1]={...batch[1],message:{...batch[1].message,diagnostic:'unpaired surrogate \ud800'}};
+      // The fixture runs inside one rollback-only tx. Give each consumer statement the
+      // same independent abort boundary it has on a real autocommit connection.
+      const tx=runtime.db; const consumer={...runtime,db:Object.assign(Object.create(tx),{execute:(q:any)=>tx.transaction(sp=>sp.execute(q))})};
+      const results=await ingestFeedbackBatch(consumer,batch);
+      assert.deepEqual(results,[{ok:true},{ok:false,error:'SES_FEEDBACK_QUARANTINED'},{ok:true}]);
+      let ack=0;for (const result of results) settleFeedbackMessage({attempts:1,retry:()=>assert.fail('durable outcomes must not retry'),ack:()=>{ack++;}},result);assert.equal(ack,3);
+      assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)',[ids])).rows.map(r=>r.status),['delivered','accepted','delivered']);
+      assert.deepEqual((await db.query('SELECT payload FROM operation_feedback_failures WHERE id=encode(sha256(convert_to($1,\'UTF8\')),\'hex\')',[JSON.stringify([batch[1].topicArn,batch[1].messageId])])).rows.map(r=>JSON.parse(r.payload)),[batch[1]]);
+      assert.deepEqual((await db.query('SELECT topic_arn,workspace_id FROM operation_feedback_failures WHERE payload=$1',[JSON.stringify(batch[1])])).rows,[{topic_arn:batch[1].topicArn,workspace_id:'other-fixture'}]);
+      await db.query(`INSERT INTO operation_feedback_failures(id,payload,created_at) VALUES ('expired','{}',now()-interval '31 days')`);
+      await (await import('./src/maintenance.js')).cleanup(runtime);
+      assert.equal((await db.query("SELECT 1 FROM operation_feedback_failures WHERE id='expired'")).rowCount,0);
+      assert.equal((await db.query('SELECT 1 FROM operation_feedback_failures WHERE payload=$1',[JSON.stringify(batch[1])])).rowCount,1);
     });
   });
 

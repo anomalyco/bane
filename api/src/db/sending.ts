@@ -39,7 +39,7 @@ export const emails = pgTable('sending_emails', {
   subject: text('subject').notNull(), status: text('status').$type<EmailStatus>().notNull().default('queued'), providerId: text('provider_id'),
   snapshot: jsonb('snapshot').$type<EmailSnapshot>().notNull(), simulated: boolean('simulated').notNull(),
   attemptStartedAt: time('attempt_started_at'), errorCode: text('error_code'), suppressionReason: text('suppression_reason'), scheduledAt: time('scheduled_at'), dispatchVersion: integer('dispatch_version').notNull().default(0),
-  leaseUntil: time('lease_until'),
+  leaseUntil: time('lease_until'), accountPauseStartedAt: time('account_pause_started_at'),
   // Union of public event outcomes as bit flags (migration 031 trigger); see OUTCOME in operations.ts.
   eventOutcomes: smallint('event_outcomes').notNull().default(0),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
