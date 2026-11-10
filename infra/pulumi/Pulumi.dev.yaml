@@ -2,5 +2,21 @@ config:
   bane:deployRoleArn: arn:aws:iam::905840579680:role/bane-deploy
   bane:permissionsBoundary: arn:aws:iam::905840579680:policy/bane-runtime-boundary
   bane:writeWorkerSecrets: "true"
+  bane:mailControlImports:
+    - "bane-905840579680-mail-us-east-2"
+    - "bane-inbound:bane-inbound-all"
+    - "arn:aws:sns:us-east-2:905840579680:bane-inbound"
+    - "arn:aws:sns:us-east-2:905840579680:bane-inbound:f9b7bc01-2781-4076-b42f-48d9a614be05"
+    - "arn:aws:sns:us-east-2:905840579680:bane-feedback"
+    - "arn:aws:sns:us-east-2:905840579680:bane-feedback:20ce6fb6-5847-4252-a360-32f382762df7"
+    - "arn:aws:sns:us-east-1:905840579680:bane-trusted-feedback"
+    - "arn:aws:sns:us-east-1:905840579680:bane-trusted-feedback:d5f6a557-32d4-4b09-9d14-1065cb2e5d88"
+    - "bane-transactional|bane-events"
+    - "bane-marketing|bane-events"
+    - "bane-trusted-transactional|bane-trusted-events"
+    - "bane-trusted-marketing|bane-trusted-events"
+  bane:receivingAlarmTopicArn: arn:aws:sns:us-east-2:905840579680:bane-alerts
+  bane:trustedFeedbackPublish: "true"
+  bane:virginiaAlarmTopicArn: arn:aws:sns:us-east-1:905840579680:bane-alerts
 secretsprovider: awskms://alias/pulumi/bane-dev?region=us-east-1
 encryptedkey: AQICAHgxsMoDSHZiPVd3xDI7IEfU+5/H4iFjyKiOQa+eBRtbBwG6niOeLudjEmGTLJ+zGpKfAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMP30FZYCmgGDBdFpBAgEQgDtbVatvh07FP4zZNtPNJZRtK82Bjr+2DGOeE+/kY6eUZytIWnTHkeV0BSivAvX9+gCIhi8DoAHNK2T9Uw==
