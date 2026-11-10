@@ -13,16 +13,16 @@ const values = z.object({
   AUTH_ALLOWED_EMAILS: z.string().default(''),
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
-  MX_PLATFORM_AWS_ACCOUNT: optional(accountId),
-  MX_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
-  MX_TRUSTED_POOL: z.enum(['true','false']).default('false'),
+  BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
+  BANE_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
+  BANE_TRUSTED_POOL: z.enum(['true','false']).default('false'),
   // Development installations only: let Hosted pools become ready while the AWS account is still in the SES sandbox.
-  MX_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
-  MX_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).default('false'),
-  MX_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
+  BANE_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
+  BANE_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).default('false'),
+  BANE_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
-  MX_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
-  MX_BYO_V2: z.enum(['true','false']).default('false'),
+  BANE_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  BANE_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   DOMAIN_CONNECT_PRIVATE_KEY: optional(z.string().min(1)),
@@ -61,9 +61,15 @@ const values = z.object({
   JEV_SCREEN_MODE: z.preprocess(v => v === '' ? undefined : v, z.enum(['reject', 'flag']).default('reject')),
   JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.7)),
 });
-export const CONFIG_KEYS = Object.keys(values.shape);
+const baneKeys = Object.keys(values.shape).filter(key => key.startsWith('BANE_'));
+const legacyKey = (key: string) => `MX_${key.slice(5)}`;
+export const CONFIG_KEYS = [...Object.keys(values.shape), ...baneKeys.map(legacyKey)];
+export function migrationSettings(input: Record<string, unknown>) {
+  return {workspaceId: 'default', regions: [values.shape.DEFAULT_SES_REGION.parse(input.DEFAULT_SES_REGION)]};
+}
 export function requirePlatformAccount(account: Config['platformAccount']): string {
-  if (!account || !accountId.safeParse(account).success) throw new ApiError(503,'CONFIG_INVALID','Set MX_PLATFORM_AWS_ACCOUNT to the 12-digit platform AWS account ID.');
+  if (!account || !accountId.safeParse(account).success) throw new ApiError(503,'CONFIG_INVALID','Set BANE_PLATFORM_AWS_ACCOUNT to the 12-digit platform AWS account ID.');
+  if (account==='438095551154') throw new ApiError(503,'PLATFORM_ACCOUNT_RETIRED','This release cannot use the retired Hosted AWS account. Switch the runtime key and BANE_PLATFORM_AWS_ACCOUNT together.');
   return account;
 }
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
@@ -72,10 +78,10 @@ export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
 export function loadConfig(input: Record<string, unknown>): Config {
-  const parsed = values.safeParse(input);
+  const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
-  if (v.MULTI_TENANT==='true' && [v.MX_REGIONAL_SENDING,v.MX_TRUSTED_POOL,v.MX_BYO_V2].includes('true')) requirePlatformAccount(v.MX_PLATFORM_AWS_ACCOUNT);
+  if (v.MULTI_TENANT==='true' && (v.BANE_PLATFORM_AWS_ACCOUNT || [v.BANE_REGIONAL_SENDING,v.BANE_TRUSTED_POOL,v.BANE_BYO_V2].includes('true'))) requirePlatformAccount(v.BANE_PLATFORM_AWS_ACCOUNT);
   if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) throw new ApiError(503,'CONFIG_INVALID','Set both DOMAIN_CONNECT_PRIVATE_KEY and DOMAIN_CONNECT_KEY_ID, or neither.');
   let domainConnect: Config['domainConnect'];
   if (v.DOMAIN_CONNECT_PRIVATE_KEY && v.DOMAIN_CONNECT_KEY_ID) {
@@ -101,12 +107,12 @@ export function loadConfig(input: Record<string, unknown>): Config {
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
-    platformAccount: v.MX_PLATFORM_AWS_ACCOUNT, byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.MX_REGIONAL_SENDING === 'true',
-    trustedPool: v.MULTI_TENANT==='true' && v.MX_REGIONAL_SENDING==='true' && v.MX_TRUSTED_POOL==='true',
-    allowSesSandbox: v.MULTI_TENANT==='true' && v.MX_ALLOW_SES_SANDBOX==='true',
-    requireDmarcForBulk: v.MULTI_TENANT === 'true' && v.MX_REQUIRE_DMARC_FOR_BULK === 'true',
-    placementShadow: v.MULTI_TENANT === 'true' && v.MX_PLACEMENT_SHADOW === 'true', placementDblZone: v.MX_PLACEMENT_DBL_ZONE,
-    byoV2: v.MULTI_TENANT === 'true' && v.MX_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
+    platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
+    trustedPool: v.MULTI_TENANT==='true' && v.BANE_REGIONAL_SENDING==='true' && v.BANE_TRUSTED_POOL==='true',
+    allowSesSandbox: v.MULTI_TENANT==='true' && v.BANE_ALLOW_SES_SANDBOX==='true',
+    requireDmarcForBulk: v.MULTI_TENANT === 'true' && v.BANE_REQUIRE_DMARC_FOR_BULK === 'true',
+    placementShadow: v.MULTI_TENANT === 'true' && v.BANE_PLACEMENT_SHADOW === 'true', placementDblZone: v.BANE_PLACEMENT_DBL_ZONE,
+    byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,

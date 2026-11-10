@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useState } from 'react'
 
 // The fitted page size of each list is remembered, so the next session can warm that exact first page.
-const sizeKey = (scope: string) => `opensend.page-size.${scope}`
+const sizeKey = (scope: string) => `bane.page-size.${scope}`
 export function rememberedPageSize(scope: string) {
   try { const size = Number(localStorage.getItem(sizeKey(scope))); return Number.isInteger(size) && size > 0 ? size : null } catch { return null }
 }

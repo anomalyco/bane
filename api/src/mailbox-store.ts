@@ -3,7 +3,7 @@ import { ApiError, id, type DbExecutor } from './core.js';
 import { mailboxAddresses, mailboxes, mailboxWriteLanes, mailMessages, type MailAddress, type SendLimits } from './db/mailbox.js';
 
 export type Scope = { workspaceId: string };
-/** SES assigns the wire Message-ID independently of OpenSend's durable receipt. */
+/** SES assigns the wire Message-ID independently of Bane's durable receipt. */
 export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
 /** ON CONFLICT locks even when its WHERE rejects the update: one trip, no idle tuple churn. */
 export async function lockMailboxLane(tx: DbExecutor, workspaceId:string, lane: typeof mailboxWriteLanes.$inferSelect.lane) {

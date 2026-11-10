@@ -1,9 +1,9 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The dashboard's selected workspace (multi-tenant installations only). Sent with every request.
-const workspaceStorageKey = 'opensend.workspace'
+const workspaceStorageKey = 'bane.workspace'
 let workspaceSelection: string | null = (() => { try { return localStorage.getItem(workspaceStorageKey) } catch { return null } })()
 export const selectedWorkspace = () => workspaceSelection
 export function selectWorkspace(id: string | null) {
@@ -16,7 +16,7 @@ type EarlyRequests = { workspace: string | null; at: number; responses: Record<s
 const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
 // A request that is aborted before it reads the response (React StrictMode's first mount) puts it back for the next one.
 async function takeEarly(path: string, signal?: AbortSignal) {
-  const early = (window as { __opensendEarly?: EarlyRequests }).__opensendEarly
+  const early = (window as { __baneEarly?: EarlyRequests }).__baneEarly
   const pending = early?.responses[path]
   if (!early || !pending) return null
   delete early.responses[path]
@@ -36,7 +36,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   try {
     const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
     response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-OpenSend-Workspace': workspaceSelection } : {}) },
+      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
@@ -55,7 +55,7 @@ export async function request<T = Json>(path: string, options: { method?: string
     const error = data?.error
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
     const message = typeof error?.message === 'string' ? error.message : 'The request could not be completed.'
-    if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('opensend:unauthorized'))
+    if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('bane:unauthorized'))
     throw new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
   }
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
@@ -91,7 +91,7 @@ function regionCatalog(value: unknown): RegionCatalog {
   return value as RegionCatalog
 }
 
-export function createLiveApi(): OpenSendApi {
+export function createLiveApi(): BaneApi {
   const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal })
   const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => call<T>(`/inbound${path}`, method, body, signal)
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.

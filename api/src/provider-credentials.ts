@@ -30,7 +30,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
   if (!verify && cached && cached.expiration.getTime() - Date.now() > 60_000) return cached;
   const client = sts(region, platform);
   try {
-    const input = { RoleArn: roleArn, RoleSessionName: 'OpenSendMX', DurationSeconds: policy ? 900 : 3600, Policy: policy };
+    const input = { RoleArn: roleArn, RoleSessionName: 'Bane', DurationSeconds: policy ? 900 : 3600, Policy: policy };
     const opts = { abortSignal: AbortSignal.timeout(4000) };
     const probe = async (ExternalId?: string) => {
       try { await client.send(new AssumeRoleCommand({ ...input, ExternalId }), opts); }
@@ -44,7 +44,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
     const c = result.Credentials;
     if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) throw new ApiError(503, 'AWS_SESSION_INVALID', 'STS returned incomplete session credentials.');
     if (verify) {
-      const expected = /^arn:aws:iam::(\d{12}):role\/(OpenSendMX-[a-f0-9]{20})$/.exec(roleArn);
+      const expected = /^arn:aws:iam::(\d{12}):role\/(Bane-[a-f0-9]{20})$/.exec(roleArn);
       if (!expected || result.AssumedRoleUser?.Arn !== `arn:aws:sts::${expected[1]}:assumed-role/${expected[2]}/${input.RoleSessionName}`) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'STS did not return the expected customer role and account.');
     }
     const value = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
@@ -76,7 +76,7 @@ async function deliveryCredentials(runtime:Runtime,region:string,row:ReadyConnec
     if (!bound.name || !/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/.test(bound.name)) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','Missing bound SES domain.');
     statements=[allow(['ses:SendEmail'],[prefix+'identity/'+bound.name,...[names.transactional,names.marketing].map(n=>prefix+'configuration-set/'+n)],{'ses:ApiVersion':'2'}),allow(['ses:ApplyTrackingConfigurationOverrides'],'*',{'ses:OpenTrackingEnabled':'${ses:ClickTrackingEnabled}'})];
   } else if (scope.purpose==='template') {
-    if (!/^opensend-[A-Za-z0-9_-]+$/.test(scope.name)) throw new ApiError(422,'TEMPLATE_SCOPE_REQUIRED','Regional BYO may render only opensend- templates.');
+    if (!/^bane-[A-Za-z0-9_-]+$/.test(scope.name)) throw new ApiError(422,'TEMPLATE_SCOPE_REQUIRED','Regional BYO may render only bane- templates.');
     statements=[allow(['ses:GetEmailTemplate','ses:TestRenderEmailTemplate'],prefix+'template/'+scope.name)];
   } else statements=[allow(['ses:GetAccount'],'*')];
   return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:statements}));

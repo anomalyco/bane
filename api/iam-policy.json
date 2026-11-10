@@ -24,7 +24,7 @@
       "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*"
     },
     {
-      "Sid": "ProvisionOpenSendConfigurationSets",
+      "Sid": "ProvisionBaneConfigurationSets",
       "Effect": "Allow",
       "Action": [
         "ses:CreateConfigurationSet",
@@ -35,7 +35,7 @@
         "ses:PutConfigurationSetSuppressionOptions",
         "ses:TagResource"
       ],
-      "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*"
+      "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-*"
     },
     {
       "Sid": "SendFromAccountIdentities",
@@ -43,7 +43,7 @@
       "Action": ["ses:SendEmail", "ses:SendRawEmail"],
       "Resource": [
         "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*",
-        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*",
+        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-*",
         "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:template/*"
       ]
     },
@@ -85,16 +85,16 @@
         "s3:PutBucketPolicy",
         "s3:PutLifecycleConfiguration"
       ],
-      "Resource": "arn:aws:s3:::opensend-*-mail-*"
+      "Resource": "arn:aws:s3:::bane-*-mail-*"
     },
     {
       "Sid": "ReadWriteMailboxObjects",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:PutObjectTagging", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::opensend-*-mail-*/*"
+      "Resource": "arn:aws:s3:::bane-*-mail-*/*"
     },
     {
-      "Sid": "ProvisionOpenSendFeedbackTopics",
+      "Sid": "ProvisionBaneFeedbackTopics",
       "Effect": "Allow",
       "Action": [
         "sns:CreateTopic",
@@ -106,13 +106,13 @@
         "sns:GetSubscriptionAttributes",
         "sns:SetSubscriptionAttributes"
       ],
-      "Resource": "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:opensend-*"
+      "Resource": "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:bane-*"
     },
     {
-      "Sid": "SubscribeOpenSendHttpsFeedback",
+      "Sid": "SubscribeBaneHttpsFeedback",
       "Effect": "Allow",
       "Action": "sns:Subscribe",
-      "Resource": "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:opensend-*",
+      "Resource": "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:bane-*",
       "Condition": {
         "StringEquals": {"sns:Protocol": "https"},
         "StringLike": {"sns:Endpoint": "https://*/v1/events/ses"}

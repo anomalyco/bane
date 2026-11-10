@@ -79,7 +79,7 @@ export function ApiKeysPage() {
             ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} /> },
           { key: 'access', label: 'Access', width: '30%', render: row => row.kind === 'mcp'
-            ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('opensend:', '')), true)} second={row.item.scopes.map(scope => scope.replace('opensend:', '').replaceAll('_', ' ')).join(', ')} />
+            ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)} second={row.item.scopes.map(scope => scope.replace('bane:', '').replaceAll('_', ' ')).join(', ')} />
             : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} /> },
           { key: 'when', label: 'Connected / expires', width: '18%', render: row => row.kind === 'mcp' ? `Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
           { key: 'used', label: 'Last used', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },

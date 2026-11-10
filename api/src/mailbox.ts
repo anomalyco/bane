@@ -38,8 +38,8 @@ async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermissi
 
 async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   const token = c.req.header('authorization')?.match(/^Bearer (.+)$/i)?.[1];
-  if (token?.startsWith('os_mbx_')) {
-    if (!/^os_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
+  if (token && /^(?:bane|os)_mbx_/.test(token)) {
+    if (!/^(?:bane|os)_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
     const key = await chargeCredential<{ id: string; workspace_id: string; mailbox_ids: string[] | null; permissions: MailboxPermission[] }>(c, mailboxKeys, sql`
       SELECT id, workspace_id, id AS key_id, mailbox_ids, permissions, ${c.env.config.apiRateLimitPerMinute}::int AS max_requests
       FROM mailbox_keys WHERE hash = ${await digest(token)} AND revoked_at IS NULL`);
@@ -131,7 +131,7 @@ async function subdomainViews(runtime: Runtime, parent: typeof mailboxDomains.$i
   return rows.map(row => ({ id: row.id, name: row.name, parentDomainId: parent.domainId, parentName: parent.name, status: row.status === 'active' ? 'active' as const : 'disabled' as const, metadata: row.metadata,
     dns: [expectedMx(`*.${parent.name}`, parent.region)], mx: row.mx ?? null, catchAll: row.catchAll, addressCount: counts.find(item => item.domainId === row.id)?.count ?? 0, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! }));
 }
-/** The receiving top-level row for an OpenSend domain, which subdomains hang off. */
+/** The receiving top-level row for a Bane domain, which subdomains hang off. */
 async function receivingParent(c: Ctx, domainId: string) {
   const row = await operationDomain(c, domainId);
   const [parent] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, row.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
@@ -601,7 +601,7 @@ function registerInboundKeys(app: App) {
       const found = await c.env.db.select({ id: mailboxes.id }).from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), inArray(mailboxes.id, mailboxIds)));
       if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', 'addressIds');
     }
-    const secret = randomSecret('os_mbx_');
+    const secret = randomSecret('bane_mbx_');
     const [row] = await c.env.db.insert(mailboxKeys).values({ id: id('mbk'), workspaceId: value.workspaceId, name: input.name, hash: await digest(secret), prefix: secret.slice(0, 14), mailboxIds, permissions: [...new Set(input.permissions)] }).returning();
     c.header('Cache-Control', 'no-store');
     return c.json({ ...keyView(row!), secret }, 201);

@@ -1,11 +1,11 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
-const STORAGE_KEY = 'opensend.demo.v1'
+const STORAGE_KEY = 'bane.demo.v1'
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 const ATTACHMENT_EXTENSIONS = ['pdf', 'txt', 'csv', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'ics', 'docx', 'xlsx', 'pptx']
 const ATTACHMENT_FILENAME = /^[^\x00-\x1f\x7f/\\]+$/
@@ -448,7 +448,7 @@ function parseSnapshot(stored: string): DemoState | undefined {
   } catch { return undefined }
 }
 
-export function createMockApi(): OpenSendApi {
+export function createMockApi(): BaneApi {
   let state: DemoState | undefined
   let storage: Storage | undefined
   let storageError = false
@@ -883,7 +883,7 @@ export function createMockApi(): OpenSendApi {
       keys: (includeRevoked, signal) => run(signal, false, s => (s.mailboxKeys ??= demoMailboxAccess().keys).filter(key => includeRevoked || !key.revokedAt)),
       createKey: (input, signal) => run(signal, true, s => {
         if (!input.name.trim()) invalid('name', 'Enter a name for this key.')
-        const secret = `os_mbx_demo_${id('secret').slice(-12)}`
+        const secret = `bane_mbx_demo_${id('secret').slice(-12)}`
         const key = { id: id('mbk'), name: input.name.trim(), prefix: secret.slice(0, 14), addressIds: input.addressIds, permissions: input.permissions, createdAt: now(), lastUsedAt: null, revokedAt: null }
         ;(s.mailboxKeys ??= demoMailboxAccess().keys).unshift(key)
         return { key, secret }

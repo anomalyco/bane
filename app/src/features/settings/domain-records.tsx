@@ -16,7 +16,7 @@ export function useDomain(id: string, recheckUntil = 0) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
-    queryKey: ['opensend', api.mode, 'domain', id],
+    queryKey: ['bane', api.mode, 'domain', id],
     queryFn: ({ signal }) => api.domains.get(id, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
@@ -38,7 +38,7 @@ export function useDnsSetup(domain: Domain | undefined) {
   const needed = !!domain && domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')
   const enabled = api.mode !== 'demo' && multiTenant && canAdminister && needed
   const query = useQuery({
-    queryKey: ['opensend', api.mode, 'domain', domain?.id, 'dns-setup'],
+    queryKey: ['bane', api.mode, 'domain', domain?.id, 'dns-setup'],
     queryFn: ({ signal }) => request<DnsSetup>(`/v1/domains/${encodeURIComponent(domain!.id)}/dns-setup`, { signal }),
     // gcTime 0: each page asks afresh, since pending groups change between onboarding and the domain page.
     enabled, retry: false, staleTime: Infinity, gcTime: 0, refetchOnWindowFocus: false,

@@ -12,8 +12,10 @@ import { agentTokens } from './db/core.js';
 import { authAccount, authUser } from './db/google-auth.js';
 import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
 
-const scopes = ['opensend:read', 'opensend:send', 'opensend:manage', 'offline_access'];
-const stripLegacyScope = (scope: string) => scope.split(' ').filter(value => value && value !== 'opensend:live').join(' ');
+const scopes = ['bane:read', 'bane:send', 'bane:manage', 'offline_access'];
+const canonicalScope = (value: string) => value.replace(/^opensend:(read|send|manage|live)$/, 'bane:$1');
+const scopeList = (scope: string) => scope.split(' ').map(canonicalScope);
+const stripLegacyScope = (scope: string) => scopeList(scope).filter(value => value && value !== 'bane:live').join(' ');
 const permissions: Permission[] = ['read', 'send', 'manage'];
 const originOf = (runtime: Runtime) => new URL(runtime.config.publicUrl).origin;
 const resourceOf = (runtime: Runtime) => `${originOf(runtime)}/mcp`;
@@ -27,14 +29,14 @@ function originalGrant(reference: string | null) {
   const match = reference?.match(/^mcp_(v2_)?[0-9a-f-]{36}\|([^|]+)(?:\|([^|]*)(\|member)?)?$/);
   if (!match) return null;
   const legacy = !match[1];
-  if (legacy && !match[2]!.split(' ').includes('opensend:live')) return null;
+  if (legacy && !scopeList(match[2]!).includes('bane:live')) return null;
   const values = stripLegacyScope(match[2]!).split(' ').filter(Boolean);
   if (!values.length || !values.every(value => scopes.includes(value))) return null;
   try { return { scopes: values, legacy, workspaceId: match[3] ? decodeURIComponent(match[3]) : 'default', memberCeiling: !!match[4] }; }
   catch { return null; }
 }
 function grantPermissions(values: readonly string[]): Permission[] {
-  return permissions.filter(permission => values.includes(`opensend:${permission}`));
+  return permissions.filter(permission => values.includes(`bane:${permission}`));
 }
 function invalidGrant(): never {
   throw new APIError('BAD_REQUEST', { error: 'invalid_grant', error_description: 'This Bane approval is no longer valid.' });
@@ -54,7 +56,7 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
     refreshTokenExpiresIn: 30 * 24 * 60 * 60, refreshTokenReuseInterval: 0, codeExpiresIn: 600,
     allowDynamicClientRegistration: true, allowUnauthenticatedClientRegistration: true,
     allowPublicClientPrelogin: true, clientRegistrationRequirePKCE: true,
-    clientRegistrationDefaultScopes: ['opensend:read'], clientRegistrationAllowedScopes: scopes,
+    clientRegistrationDefaultScopes: ['bane:read'], clientRegistrationAllowedScopes: scopes,
     enforcePerClientResources: true, storeTokens: 'hashed', storeClientSecret: 'hashed',
     clientPrivileges: () => false, resourcePrivileges: () => false,
     postLogin: {
@@ -62,7 +64,7 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
       consentReferenceId: async ({ user, scopes: requested }) => {
         if (!user || !await isApprovedUser(runtime, user.id) || !requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length) invalidGrant();
         const member = await membershipForApprovedUser(runtime.db, user.id, { multiTenant: runtime.config.multiTenant, workspaceId: consentWorkspace, bootstrapDefaultOwner: false });
-        if (!member || (member.role === 'member' && requested.includes('opensend:manage'))) invalidGrant();
+        if (!member || (member.role === 'member' && requested.includes('bane:manage'))) invalidGrant();
         const tag = workspaceTag(member.workspaceId);
         return `mcp_v2_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}`;
       },
@@ -73,8 +75,8 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
         .where(and(eq(oauthConsent.userId, user.id), eq(oauthConsent.clientId, client.clientId), eq(oauthConsent.referenceId, referenceId))).limit(1);
       if (!consent) invalidGrant();
       const grant = await loadGrant(runtime, `mcp_${consent.id}`);
-      if (!grant || (grant.legacy && !requested.includes('opensend:live')) || !requested.every(scope => scope === 'opensend:live' || grant.scopes.includes(scope))) invalidGrant();
-      return { opensend_grant: grant.actor.keyId };
+      if (!grant || (grant.legacy && !requested.includes('bane:live')) || !requested.every(scope => scope === 'bane:live' || grant.scopes.includes(scope))) invalidGrant();
+      return { bane_grant: grant.actor.keyId };
     } } }],
   });
 }
@@ -101,11 +103,12 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   const original = originalGrant(row.referenceId);
   if (!original) return null;
   // Before v2, live authority had to survive every policy intersection, not just the original consent.
-  if (original.legacy && [row.scopes, row.clientScopes, row.resourceScopes].some(policy => policy && !policy.includes('opensend:live'))) return null;
+  const policies = [row.scopes, row.clientScopes, row.resourceScopes].map(list => list?.map(canonicalScope));
+  if (original.legacy && policies.some(policy => policy && !policy.includes('bane:live'))) return null;
   const member = await membershipForApprovedUser(db, row.userId, { multiTenant: runtime.config.multiTenant, workspaceId: original.workspaceId, bootstrapDefaultOwner: false });
   if (!member) return null;
   const role = original.memberCeiling ? 'member' : member.role;
-  const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'opensend:manage') && row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
+  const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'bane:manage') && policies.every(list => (list ?? scopes).includes(scope)));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
   const actor: Actor = { keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
@@ -117,7 +120,7 @@ export async function getMcpGrantActor(runtime: Runtime, keyId: string, db: DbEx
 }
 function deniedToken(runtime: Runtime) {
   return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bane authorization is required.' }, id: null }, {
-    status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${originOf(runtime)}/.well-known/oauth-protected-resource/mcp", scope="opensend:read"` },
+    status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${originOf(runtime)}/.well-known/oauth-protected-resource/mcp", scope="bane:read"` },
   });
 }
 export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor) => Promise<Response>): Promise<Response> {
@@ -140,16 +143,17 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
       });
     } catch (error) {
       if (!isDpopBindingError(error)) throw error;
-      const challenge = createResourceServerChallenge(new APIError('UNAUTHORIZED', { error: error.code, message: error.message, error_description: error.message }), resourceOf(runtime), { challengeScopes: ['opensend:read'] });
+      const challenge = createResourceServerChallenge(new APIError('UNAUTHORIZED', { error: error.code, message: error.message, error_description: error.message }), resourceOf(runtime), { challengeScopes: ['bane:read'] });
       if (!challenge) return deniedToken(runtime);
       const headers = new Headers(challenge.headers); headers.set('Cache-Control', 'no-store');
       return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: challenge.message }, id: null }, { status: challenge.statusCode, headers });
     }
     const audience = claims.aud;
     if (audience !== resourceOf(runtime) && !(Array.isArray(audience) && audience.length === 1 && audience[0] === resourceOf(runtime))) return deniedToken(runtime);
-    if (typeof claims.opensend_grant !== 'string' || typeof claims.scope !== 'string' || !claims.scope || stripLegacyScope(claims.scope).split(' ').some(scope => !scopes.includes(scope))) return deniedToken(runtime);
-    const grant = await loadGrant(runtime, claims.opensend_grant);
-    if (!grant || claims.sub !== grant.userId || claims.client_id !== grant.clientId || (grant.legacy && !claims.scope.split(' ').includes('opensend:live'))) return deniedToken(runtime);
+    const keyId = claims.bane_grant ?? claims.opensend_grant;
+    if (typeof keyId !== 'string' || typeof claims.scope !== 'string' || !claims.scope || stripLegacyScope(claims.scope).split(' ').some(scope => !scopes.includes(scope))) return deniedToken(runtime);
+    const grant = await loadGrant(runtime, keyId);
+    if (!grant || claims.sub !== grant.userId || claims.client_id !== grant.clientId || (grant.legacy && !scopeList(claims.scope).includes('bane:live'))) return deniedToken(runtime);
     const tokenScopes = stripLegacyScope(claims.scope).split(' ').filter(scope => grant.scopes.includes(scope));
     const granted = grantPermissions(tokenScopes);
     if (!granted.length) return deniedToken(runtime);
@@ -207,7 +211,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
     if (url.search.length > 16 * 1024) return oauthError(400, 'invalid_request', 'OAuth request is too large.');
     if (path === '/oauth2/register') {
       // Node and Workers overwrite this header with the socket/edge peer, never X-Forwarded-For.
-      const peer = await digest(request.headers.get('x-opensend-client-ip') ?? 'unknown');
+      const peer = await digest(request.headers.get('x-bane-client-ip') ?? request.headers.get('x-opensend-client-ip') ?? 'unknown');
       const { rows: [budget] } = await runtime.db.execute<{used: number; reset_at: string}>(sql`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used)
         VALUES (${runtime.config.workspaceId},${`public:oauth-register:${peer}`},date_trunc('hour',now()),1)
         ON CONFLICT (workspace_id,key_id) DO UPDATE SET
@@ -260,19 +264,19 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
     }
     if (path === '/oauth2/token' && body && headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) {
       const params = new URLSearchParams(body), scope = params.get('scope');
-      if (scope?.split(' ').includes('opensend:live')) {
+      if (scope && stripLegacyScope(scope) !== scope) {
         params.set('scope', stripLegacyScope(scope)); body = params.toString(); headers.delete('content-length');
       }
     }
     if (path === '/oauth2/authorize') {
-      url.searchParams.set('scope', stripLegacyScope(url.searchParams.get('scope') ?? 'opensend:read'));
+      url.searchParams.set('scope', stripLegacyScope(url.searchParams.get('scope') ?? 'bane:read'));
       if (!url.searchParams.has('resource')) url.searchParams.set('resource', resourceOf(runtime));
       const resources = url.searchParams.getAll('resource');
       if (resources.length !== 1 || resources[0] !== resourceOf(runtime)) return oauthError(400, 'invalid_target', 'Request the canonical Bane MCP resource.');
     }
     const result = await auth.handler(new Request(url, { method: request.method, headers, body }));
     // OAuth errors and redirect state belong to the protocol, not the Google
-    // dashboard error page. Do not rewrite them into OpenSend API envelopes.
+    // dashboard error page. Do not rewrite them into Bane API envelopes.
     return cors ? publicCors(result) : result;
   } catch (error) {
     const result = error instanceof ApiError ? oauthError(error.status, 'invalid_request', error.message) :
@@ -292,9 +296,9 @@ function page(title: string, content: string) {
   });
 }
 const scopeLabels: Record<string, string> = {
-  'opensend:read': 'Read email, audience, delivery, and account data',
-  'opensend:send': 'Send email and manage campaigns',
-  'opensend:manage': 'Full account access, including sending and managing credentials',
+  'bane:read': 'Read email, audience, delivery, and account data',
+  'bane:send': 'Send email and manage campaigns',
+  'bane:manage': 'Full account access, including sending and managing credentials',
   'offline_access': 'Stay connected for up to 30 days without signing in again',
 };
 function consentFormHeaders(runtime: Runtime, request: Request) {
@@ -353,7 +357,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     const session = await auth.api.getSession({ headers: requestHeaders, query: { disableCookieCache: true, disableRefresh: true } });
     const member = session && runtime.config.multiTenant ? await membershipForApprovedUser(runtime.db, session.user.id, { multiTenant: true, workspaceId: consentWorkspace, bootstrapDefaultOwner: false }) : null;
     const approvedSession = session && (!runtime.config.multiTenant || member) && await isApprovedUser(runtime, session.user.id) ? session : null;
-    if (member?.role === 'member' && requested.includes('opensend:manage')) return page('Administrator approval required', '<p>Reconnect requesting read or send access instead of manage access.</p>');
+    if (member?.role === 'member' && requested.includes('bane:manage')) return page('Administrator approval required', '<p>Reconnect requesting read or send access instead of manage access.</p>');
     const action = form?.get('action');
     if (action === 'signin') {
       const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
@@ -380,7 +384,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     const hostname = host.replace(/:\d+$/, '');
     const destination = ['localhost', '127.0.0.1', '[::1]'].includes(hostname) ? `an app on this computer (${escapeHtml(host)})` : `<strong>${escapeHtml(host)}</strong>`;
     const warning = `<p class="warn"><strong>Self-registered client.</strong> Bane has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
-    const labels = requested.filter(scope => !(requested.includes('opensend:manage') && ['opensend:read', 'opensend:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
+    const labels = requested.filter(scope => !(requested.includes('bane:manage') && ['bane:read', 'bane:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
     return page(`Allow ${name} to access Bane?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
   } catch (error) {
     if (error instanceof ApiError) return oauthError(error.status, 'access_denied', error.message);
@@ -401,7 +405,7 @@ export function registerMcpAuth(app: App): void {
     const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
       .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
       .where(and(like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
-    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, scopes: row.scopes.filter(scope => scope !== 'opensend:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, scopes: row.scopes.map(canonicalScope).filter(scope => scope !== 'bane:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';

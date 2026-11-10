@@ -15,13 +15,13 @@
       "dashboardSession": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "opensend.session_token",
+        "name": "bane.session_token",
         "description": "Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
       },
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "__Secure-opensend.session_token",
+        "name": "__Secure-bane.session_token",
         "description": "Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin."
       }
     },
@@ -34425,7 +34425,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Lists your memberships. Dashboard requests can select a membership with X-OpenSend-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
+        "description": "Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
         "responses": {
           "200": {
             "description": "Success",
@@ -34575,7 +34575,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-OpenSend-Workspace.",
+        "description": "Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-Bane-Workspace.",
         "requestBody": {
           "required": true,
           "content": {

@@ -4,7 +4,7 @@ import type { Identity } from './types'
 // The add-domain and agent steps follow a fresh connection until the user continues to the dashboard.
 // Stored per workspace so a reload returns to the same step: '' before a domain is added, then its ID,
 // then `agent:<ID>` once the user continues to the agent setup.
-const stepKey = (workspaceId: string) => `opensend.onboarding.domain.${workspaceId}`
+const stepKey = (workspaceId: string) => `bane.onboarding.domain.${workspaceId}`
 const listeners = new Set<() => void>()
 const memory = new Map<string, string | null>()
 export function readDomainStep(workspaceId: string) {
@@ -36,7 +36,7 @@ export const identityOnboardingStage = (identity: Identity | null | undefined) =
 
 // Remembers which workspace last opened the dashboard, so boot only prefetches dashboard data
 // alongside /v1/me when that workspace is unlikely to need onboarding.
-const readyKey = 'opensend.dashboard-ready'
+const readyKey = 'bane.dashboard-ready'
 const readyValue = (workspaceId: string | null) => workspaceId ?? '*'
 export function rememberDashboardReady(workspaceId: string | null, ready: boolean) {
   try { if (ready) localStorage.setItem(readyKey, readyValue(workspaceId)); else if (localStorage.getItem(readyKey) === readyValue(workspaceId)) localStorage.removeItem(readyKey) } catch { /* Boot then waits for /v1/me. */ }

@@ -56,11 +56,11 @@ const job=(db:DbExecutor,c:V5Connection,type:string,jobId:string,extra:Record<st
 
 export function v5Link(r:Runtime,c:{id:string;workspace_id:string;external_id:string|null;region:string}) {
   if (!r.config.byoV5TemplateUrl) throw new ApiError(503,'BYO_NOT_CONFIGURED','The v5 role template URL is not configured.');
-  const params=new URLSearchParams({templateURL:r.config.byoV5TemplateUrl,stackName:'OpenSendMX-'+c.id.slice(-20),param_ExternalId:c.external_id!,param_ConnectionId:c.id,param_WorkspaceId:c.workspace_id,param_ResourcePrefix:setupResources(c.id,'byo').topicName.slice(0,-9)});
+  const params=new URLSearchParams({templateURL:r.config.byoV5TemplateUrl,stackName:'Bane-'+c.id.slice(-20),param_ExternalId:c.external_id!,param_ConnectionId:c.id,param_WorkspaceId:c.workspace_id,param_ResourcePrefix:setupResources(c.id,'byo').topicName.slice(0,-9)});
   return `https://${c.region}.console.aws.amazon.com/cloudformation/home?region=${c.region}#/stacks/create/review?${params}`;
 }
 export async function enrollV5(r:Runtime,wid:string,account:string) {
-  const platformAccount=requirePlatformAccount(r.config.platformAccount),platformArn=`arn:aws:iam::${platformAccount}:user/opensend-mx`;
+  const platformAccount=requirePlatformAccount(r.config.platformAccount),platformArn=`arn:aws:iam::${platformAccount}:user/bane-runtime`;
   if (account===platformAccount) throw conflict('AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
   const cid=id('conn'),roleRegion='us-east-2',external=crypto.randomUUID();
   v5Link(r,{id:cid,region:roleRegion,workspace_id:wid,external_id:external});
@@ -79,13 +79,13 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
 // scanner can send, provision, or read an email address identity; provisioning cannot
 // read other sets/topics. The proof probes use the same limited policy.
 async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision'|'cleanup',verify=false) {
-  const account=c.requested_account, role=`arn:aws:iam::${account}:role/OpenSendMX-${c.id.slice(-20)}`;
+  const account=c.requested_account, role=`arn:aws:iam::${account}:role/Bane-${c.id.slice(-20)}`;
   if (account===requirePlatformAccount(r.config.platformAccount) || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
   const names=setupResources(c.id,'byo'),ses=`arn:aws:ses:${region}:${account}:`,sets=[names.transactional,names.marketing].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
   const allow=(Action:string[],Resource:string|string[])=>({Effect:'Allow',Action,Resource,Condition:{StringEquals:{'aws:RequestedRegion':region}}});
   const Statement=purpose==='cleanup'?[
     allow(['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations','ses:DeleteConfigurationSet'],sets),allow(['sns:GetTopicAttributes','sns:ListTagsForResource','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'],topic)
-  ]:purpose==='scan'?[allow(['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet'],'*'),allow(['ses:GetEmailIdentity'],ses+'identity/?*.??*'),allow(['ses:GetConfigurationSet'],[...sets,ses+'configuration-set/opensend-*'])]:[
+  ]:purpose==='scan'?[allow(['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet'],'*'),allow(['ses:GetEmailIdentity'],ses+'identity/?*.??*'),allow(['ses:GetConfigurationSet'],[...sets,ses+'configuration-set/bane-*'])]:[
     allow(['ses:GetAccount'],'*'),allow(['ses:GetConfigurationSet','ses:CreateConfigurationSet','ses:TagResource','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination'],sets),
     allow(['sns:CreateTopic','sns:TagResource','sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:Subscribe'],topic)];
   const aws=await assume(r,region,role,c.external_id,verify,JSON.stringify({Version:'2012-10-17',Statement}));
@@ -125,7 +125,7 @@ const prove=runV5(async(r,c,p)=>{
   }
   try {
     await r.db.transaction(async db=>{
-      if (!(await db.execute(sql`UPDATE provider_connections SET aws_account_id=requested_account,role_arn=${`arn:aws:iam::${c.requested_account}:role/OpenSendMX-${c.id.slice(-20)}`},state='scanning' WHERE id=${c.id} AND aws_account_id IS NULL`)).rowCount) return;
+      if (!(await db.execute(sql`UPDATE provider_connections SET aws_account_id=requested_account,role_arn=${`arn:aws:iam::${c.requested_account}:role/Bane-${c.id.slice(-20)}`},state='scanning' WHERE id=${c.id} AND aws_account_id IS NULL`)).rowCount) return;
       await beginScan(db,c);
     });
   } catch(e) {

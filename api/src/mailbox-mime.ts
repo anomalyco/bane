@@ -53,7 +53,7 @@ export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:stri
   const headerLimit=()=>new ApiError(422,'MAILBOX_RAW_HEADERS_TOO_LARGE','The raw headers exceed the bounded workspace scrub budget.');
   if(large && !hasEnd(original)){original=await get(0,FIRST_PART,true);if(!hasEnd(original))throw headerLimit();}
   const bytes=workspaceMime(original,region,recipients),removed=original.length-bytes.length;
-  const destination={Bucket:bucket,Key:key,Tagging:`opensend-kind=${kind}`};
+  const destination={Bucket:bucket,Key:key,Tagging:`bane-kind=${kind}`};
   const copy={CopySource:`${bucket}/${source}`,CopySourceIfMatch:head.ETag};
   if(!removed) await client.send(new CopyObjectCommand({...destination,...copy,TaggingDirective:'REPLACE'}));
   else if(!large) await client.send(new PutObjectCommand({...destination,Body:bytes,ContentType:'message/rfc822'}));

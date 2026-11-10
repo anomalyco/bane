@@ -1,4 +1,4 @@
-# OpenSend MX account resources on the Anomaly Cloudflare account: queues, the attachment
+# Bane account resources on the Anomaly Cloudflare account: queues, the attachment
 # bucket and the Hyperdrive connection. The Worker itself (routes, Durable Objects, rate
 # limiter, vars) is deployed by wrangler from api/wrangler.<environment>.jsonc, which binds
 # these resources by name and ID.
@@ -17,9 +17,9 @@ terraform {
   required_providers {
     cloudflare = { source = "cloudflare/cloudflare", version = "~> 5.28" }
   }
-  # State lives in R2 (bucket created once with `cf r2 buckets create opensend-tofu-state`).
+  # State lives in R2 (bucket created once with `cf r2 buckets create bane-tofu-state`).
   backend "s3" {
-    bucket                      = "opensend-tofu-state"
+    bucket                      = "bane-tofu-state"
     region                      = "auto"
     endpoints                   = { s3 = "https://15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com" }
     use_path_style              = true
@@ -89,7 +89,8 @@ variable "database" {
 variable "domain_connect" {
   description = "Public half of the Domain Connect signing key (DOMAIN_CONNECT_KEY_ID / DOMAIN_CONNECT_PRIVATE_KEY Worker secrets), published as chunked TXT records at <key_id>.<host> per the Domain Connect spec."
   type = object({
-    zone_id    = string
+    zone_id    = optional(string)
+    zone_name  = optional(string)
     host       = string
     key_id     = string
     public_key = string # base64 DER (SubjectPublicKeyInfo), no PEM armor
@@ -98,7 +99,7 @@ variable "domain_connect" {
 }
 
 variable "dns_records" {
-  description = "Extra records in the deployment's own zone, e.g. the shared e2e.opensend.mx test domain (its OpenSend DKIM, ownership and inbound MX records)."
+  description = "Extra records in the deployment's own zone, e.g. the shared e2e.bane.mx test domain (its Bane DKIM, ownership and inbound MX records)."
   type = list(object({
     zone_id  = string
     name     = string
@@ -110,7 +111,7 @@ variable "dns_records" {
 }
 
 locals {
-  prefix = "opensend-mx-${var.environment}"
+  prefix = "bane-${var.environment}"
   # The spec splits the key into p=1..n TXT records of at most 200 base64 characters.
   domain_connect_chunks = var.domain_connect == null ? [] : [for i in range(0, length(var.domain_connect.public_key), 200) : substr(var.domain_connect.public_key, i, 200)]
 }
@@ -151,9 +152,17 @@ resource "cloudflare_hyperdrive_config" "db" {
   origin_connection_limit = var.origin_connection_limit
 }
 
+data "cloudflare_zone" "domain_connect" {
+  count = try(var.domain_connect.zone_name, null) == null ? 0 : 1
+  filter = {
+    name    = var.domain_connect.zone_name
+    account = { id = var.account_id }
+  }
+}
+
 resource "cloudflare_dns_record" "domain_connect_key" {
   count   = length(local.domain_connect_chunks)
-  zone_id = var.domain_connect.zone_id
+  zone_id = coalesce(var.domain_connect.zone_id, one(data.cloudflare_zone.domain_connect[*].id))
   name    = "${var.domain_connect.key_id}.${var.domain_connect.host}"
   type    = "TXT"
   content = "\"p=${count.index + 1},a=RS256,d=${local.domain_connect_chunks[count.index]}\""

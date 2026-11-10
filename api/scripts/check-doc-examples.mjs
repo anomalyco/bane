@@ -20,7 +20,7 @@ for (const [path, pathItem] of Object.entries(document.paths ?? {})) for (const 
 }
 if (!operations.length || new Set(operations.map(operation => operation.id)).size !== operations.length) throw new Error('OpenAPI operations must have unique operation IDs.');
 
-const directory = await mkdtemp(join(tmpdir(), 'opensend-doc-examples-'));
+const directory = await mkdtemp(join(tmpdir(), 'bane-doc-examples-'));
 try {
   const files = [];
   for (const operation of operations) {

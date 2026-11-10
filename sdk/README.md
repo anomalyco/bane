@@ -122,7 +122,7 @@ Use a short-lived `createAgentToken` token to upload a local file without puttin
 ```sh
 npx --yes banemx upload ./invite.ics \
   --api https://mail.example.com \
-  --token 'os_agent_…' \
+  --token 'bane_agent_…' \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
 ```
 

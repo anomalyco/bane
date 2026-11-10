@@ -26,14 +26,13 @@ export function createApp() {
     if (!result.success) throw new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid.', result.error.issues.map(i => i.path.join('.')).filter(Boolean).join(', '));
   } });
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
-  app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'opensend.session_token', description: 'Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
-  app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Secure-opensend.session_token', description: 'Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin.' });
+  app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
+  app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Secure-bane.session_token', description: 'Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin.' });
   app.use('*', async (c, next) => {
     const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
-    const selected = c.req.header('X-OpenSend-Environment');
-    if (selected !== undefined && selected.trim().toLowerCase() !== 'live') throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-OpenSend-Environment. SES simulation is configured for the deployment, not the request.');
+    if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
@@ -113,7 +112,7 @@ export function createApp() {
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
-  app.get('/health', c => c.json({ status: 'ok', service: 'opensend', multiTenant: c.env.config.multiTenant }));
+  app.get('/health', c => c.json({ status: 'ok', service: 'bane', multiTenant: c.env.config.multiTenant }));
   registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerAudienceQuery(app); registerTemplates(app); registerSending(app); registerOperations(app); registerSesRegions(app); registerMailbox(app);
   registerWorkspaces(app); registerProviderConnections(app); registerMcp(app);
   let openApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;

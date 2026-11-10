@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { lazy, useEffect, useState, type ReactNode } from 'react'
 import { ArrowUpRight } from 'lucide-react'
 import { Button } from '../../components/ui'
 import { ThemeToggle } from '../../components/ThemeToggle'
@@ -49,8 +49,21 @@ function VolumeBars({ values }: { values: readonly number[] }) {
   </svg>
 }
 
-export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean; notice?: ReactNode }) {
-  const sent = useLiveCount(publicStats.emailsSent, publicStats.sendsPerMinute)
+export type HomeProps = { onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean; notice?: ReactNode }
+
+// Design studies for review, chosen with /?home=terminal|editorial|protocol. Without the parameter the current page renders.
+const variants = {
+  terminal: lazy(() => import('./variant-terminal').then(module => ({ default: module.TerminalHome }))),
+  editorial: lazy(() => import('./variant-editorial').then(module => ({ default: module.EditorialHome }))),
+  protocol: lazy(() => import('./variant-protocol').then(module => ({ default: module.ProtocolHome }))),
+}
+function selectedVariant() {
+  const name = new URLSearchParams(window.location.search).get('home')
+  return name && Object.hasOwn(variants, name) ? variants[name as keyof typeof variants] : null
+}
+
+export function HomePage(props: HomeProps) {
+  const [Variant] = useState(selectedVariant)
   useEffect(() => { document.title = 'bane · Email sending infrastructure' }, [])
   // The first screen after signing in: fetch its code while the visitor reads, so it is already cached on return.
   useEffect(() => {
@@ -58,6 +71,11 @@ export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn:
     if (typeof requestIdleCallback === 'function') { const idle = requestIdleCallback(load, { timeout: 3000 }); return () => cancelIdleCallback(idle) }
     const timer = setTimeout(load, 1500); return () => clearTimeout(timer)
   }, [])
+  return Variant ? <Variant {...props} /> : <CurrentHome {...props} />
+}
+
+function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
+  const sent = useLiveCount(publicStats.emailsSent, publicStats.sendsPerMinute)
   const intent = { onPointerDown: onSignInIntent }
   return <div className="home-page">
     <header className="home-header">

@@ -12,7 +12,7 @@ const fenced=(count:number|null)=>{if (!count) throw new ApiError(409,'PROVISION
 
 // Shared across every workspace. Never call the legacy pool reconciler (it provisions receiving).
 async function ensureFeedback(r:Runtime,platformAccount:string) {
-  const topic=`arn:aws:sns:${virginia}:${platformAccount}:opensendmx-trusted-feedback`;
+  const topic=`arn:aws:sns:${virginia}:${platformAccount}:bane-trusted-feedback`;
   const target=sql`region=${virginia} AND aws_account_id=${platformAccount} AND NOT legacy_names AND pool_tier='trusted'`;
   await r.db.execute(sql`INSERT INTO provider_pool_regions(region,aws_account_id,pool_tier,legacy_names) VALUES(${virginia},${platformAccount},'trusted',false) ON CONFLICT DO NOTHING`);
   const state=(await r.db.execute(sql`SELECT sending_state,feedback_topic_arn,confirmed_generation,generation FROM provider_pool_regions WHERE ${target}`)).rows[0];
@@ -45,7 +45,7 @@ export const trustedProvision:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
     WHERE c.workspace_id=${wid} AND c.id=${cid} AND c.kind='shared' AND c.state='ready' AND c.aws_account_id=${platformAccount} AND r.region=${virginia} AND r.pool_tenant_name=${name} AND NOT r.legacy`)).rows[0];
   if (!row || row.sending_state==='ready' || row.sending_state==='disabled') return;
   const principal=await caller(virginia,platformCredentials(r));
-  if (principal.Arn!==`arn:aws:iam::${platformAccount}:user/opensend-mx` || principal.Account!==platformAccount) throw new ApiError(409,'AWS_ACCOUNT_MISMATCH','Use only the Hosted runtime principal for pool setup.');
+  if (principal.Arn!==`arn:aws:iam::${platformAccount}:user/bane-runtime` || principal.Account!==platformAccount) throw new ApiError(409,'AWS_ACCOUNT_MISMATCH','Use only the Hosted runtime principal for pool setup.');
   await ensureFeedback(r,platformAccount);
   const ref={connectionId:cid,region:virginia};
   const lease=(await r.db.execute(acquireRegionProvisioning(ref,target))).rows[0];if (!lease) throw pending();

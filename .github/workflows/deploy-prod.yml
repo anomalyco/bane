@@ -1,0 +1,114 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA already verified on dev
+        default: main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  gate:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+    steps:
+      # Environment variables are available inside an environment job, not in
+      # its job-level if. A shell equality check is case-sensitive; Actions' == isn't.
+      - &account-switch
+        name: Require production account switch
+        env:
+          PROD_DEPLOY_ENABLED: ${{ vars.PROD_DEPLOY_ENABLED }}
+        run: |
+          if [ "$PROD_DEPLOY_ENABLED" != 'true' ]; then
+            echo 'Production deploys are frozen until the account switch.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - id: gate
+        name: Pin ref and verify a successful dev deployment of that commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          [[ $GITHUB_REF == refs/heads/main ]] || { echo 'Dispatch this workflow from main' >&2; exit 1; }
+          ref=$(jq -rn --arg ref "$REF" '$ref | @uri')
+          repo="repos/$GITHUB_REPOSITORY"
+          sha=$(gh api "$repo/commits/$ref" --jq .sha)
+          [[ $sha =~ ^[0-9a-f]{40}$ ]]
+          gh api "$repo/compare/$sha...main?per_page=1" | jq -e --arg sha "$sha" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$sha is not reachable from main"; exit 1; }
+          # workflow_run's own head_sha can point at a newer main. The job name
+          # is derived from the very same immutable output as checkout.ref.
+          for ((page=1; ; page++)); do
+            runs=$(gh api "$repo/actions/workflows/deploy-dev.yml/runs?status=success&branch=main&per_page=100&page=$page")
+            if [[ $(jq '.workflow_runs | length' <<< "$runs") == 0 ]]; then break; fi
+            ids=$(jq -r --arg title "Dev $sha" --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.display_title == $title and .conclusion == "success" and .head_branch == "main" and .head_repository.full_name == $repo and (.event == "workflow_run" or .event == "workflow_dispatch")) | .id' <<< "$runs")
+            for id in $ids; do
+              jobs=$(gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100")
+              if jq -e --arg job "Verify dev $sha" 'any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live dev E2E" and .conclusion == "success"))' <<< "$jobs"; then
+                echo "Verified dev run $id for $sha"; echo "sha=$sha" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+            done
+          done
+          echo "::error::No successful deploy-dev.yml job for exactly $sha"; exit 1
+
+  deploy:
+    needs: gate
+    name: Deploy production ${{ needs.gate.outputs.sha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    steps:
+      # Also protect a rerun of only this job or a freeze restored during approval.
+      - *account-switch
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/build-release
+      - run: npm run migrate
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          PUBLIC_URL: https://bane.mx
+          DEFAULT_SES_REGION: us-east-2
+          MULTI_TENANT: 'true'
+      - run: bash ../.github/scripts/deploy-worker.sh wrangler.prod.jsonc
+        working-directory: api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AUTH_ALLOWED_DOMAINS: ${{ vars.PROD_AUTH_ALLOWED_DOMAINS }}
+          AUTH_ALLOWED_EMAILS: ${{ vars.PROD_AUTH_ALLOWED_EMAILS }}
+      - run: bash .github/scripts/health.sh https://bane.mx https://opensend.mx
+      - name: Live production E2E (safe subset)
+        id: e2e
+        working-directory: api
+        timeout-minutes: 5
+        env:
+          BANE_E2E_URL: https://bane.mx
+          BANE_E2E_API_KEY: ${{ secrets.PROD_E2E_API_KEY }}
+          BANE_E2E_DOMAIN: ${{ vars.PROD_E2E_DOMAIN }}
+          BANE_E2E_DOMAIN_ID: ${{ vars.PROD_E2E_DOMAIN_ID }}
+          BANE_E2E_REGION: us-east-2
+        run: npm run e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}
+        with:
+          name: prod-e2e-${{ needs.gate.outputs.sha }}-${{ github.run_attempt }}
+          path: api/e2e-report.json
+          if-no-files-found: error

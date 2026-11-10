@@ -10,7 +10,7 @@ import { drain } from '../src/dispatch.js';
 
 // Deliberately refuses production, existing development databases and real AWS.
 const url = new URL(process.env.DATABASE_URL ?? '');
-assert(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname.startsWith('/opensend_perf_'), 'Use a dedicated local opensend_perf_ database.');
+assert(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname.startsWith('/bane_perf_'), 'Use a dedicated local bane_perf_ database.');
 assert(String(process.env.ENABLE_LIVE_SES) === 'false' && !process.env.AWS_ACCESS_KEY_ID && !process.env.AWS_SECRET_ACCESS_KEY, 'Disable live SES and remove AWS credentials.');
 const count = Number(process.env.BENCHMARK_RECIPIENTS ?? 1000);
 const replicas = Number(process.env.BENCHMARK_REPLICAS ?? 4);
@@ -71,8 +71,8 @@ try {
   assert.equal(active.rows[0].n, 0, 'Previous workload must drain before measuring.');
   // No active work exists; discard this isolated run's cached simulated quota.
   await pool.query("DELETE FROM sending_region_limits WHERE workspace_id='default'");
-  const keyId = id('key'), secret = `os_${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().replaceAll('-', '')}`;
-  await pool.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default',$2,$3,'os_', '[\"read\",\"send\",\"manage\"]','[]')", [keyId, runId, await digest(secret)]);
+  const keyId = id('key'), secret = `bane_${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().replaceAll('-', '')}`;
+  await pool.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default',$2,$3,'bane_', '[\"read\",\"send\",\"manage\"]','[]')", [keyId, runId, await digest(secret)]);
   const listId = id('lst');
   await pool.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,'default',$2)", [listId, runId]);
   await pool.query(`WITH inserted AS (

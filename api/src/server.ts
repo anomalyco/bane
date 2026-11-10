@@ -10,7 +10,7 @@ import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFai
 try {
   const { runtime, close } = nodeRuntime(process.env);
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
-    if (priority) await runtime.db.execute(sql`SELECT pg_notify('opensend_priority', ${dispatchWakeKey(region, account)})`);
+    if (priority) await runtime.db.execute(sql`SELECT pg_notify('bane_priority', ${dispatchWakeKey(region, account)})`);
   };
   const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
   const assets = serveStatic({ root: publicRoot });
@@ -33,7 +33,8 @@ try {
     const count = (peers.get(key) ?? 0) + 1; peers.set(key, count);
     if (count > 6000) return admissionDenied();
     const headers = new Headers(request.headers);
-    headers.set('x-opensend-client-ip', address);
+    headers.delete('x-opensend-client-ip');
+    headers.set('x-bane-client-ip', address);
     const response = await app.fetch(new Request(request, { headers }), runtime);
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
