@@ -677,7 +677,11 @@ function registerInboundWebhooks(app: App) {
       const { row } = await getWebhook(c, webhookId, admin(c), tx);
       checkScope(mailboxIds === undefined ? row.mailboxIds : mailboxIds, input.eventTypes ?? row.eventTypes);
       const eventTypes = input.eventTypes && [...new Set(input.eventTypes)];
-      if(row.paused && input.paused===false){await hookCapacity(tx,row.workspaceId);await tx.execute(redeliver(row.workspaceId,row.id,sql`status='paused'`));c.get('actor').wakeJobs=1;}
+      if(row.paused && input.paused===false){
+        await hookCapacity(tx,row.workspaceId);
+        await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${row.workspaceId},jsonb_build_object('hook',${row.id}::text))`);
+        c.get('actor').wakeJobs=1;
+      }
       const [result] = await tx.update(mailboxWebhooks).set({ mailboxIds, description: input.description, paused: input.paused, url: input.url ? webhookUrl(c.env, input.url) : undefined, eventTypes, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });

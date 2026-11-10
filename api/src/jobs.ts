@@ -80,7 +80,8 @@ export const inboundHookClaim=sql`inbound_hooks AS MATERIALIZED (SELECT j.id AS 
   inbound_parked AS (UPDATE mailbox_webhook_deliveries d SET status=CASE WHEN h.blocked='ENDPOINT_PAUSED' THEN 'paused' ELSE 'failed' END,last_error=h.blocked,updated_at=now() FROM inbound_hooks h WHERE h.blocked IS NOT NULL AND d.id=h.delivery_id AND d.generation=h.generation AND d.status='pending')`;
 export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM claimed j ${hookJoin}`;
 // Reserve before awaiting the claim, so overlapping drains in one isolate cannot both lease MIME work.
-let ingestReserved=false;
+const ingestSlots=3;
+let ingestReserved=0;
 export type JobHandlerResolver = Record<string, JobHandler> | ((type: string) => Promise<JobHandler | undefined> | JobHandler | undefined);
 export type JobPool = 'all' | 'work' | 'webhooks';
 const classes = (pool: JobPool) => pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool === 'all' ? ['hook'] : [])];
@@ -167,8 +168,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // The claim already charged the attempt before the isolate died. Retire exhausted
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
       const exhausted=sql`j.attempts >= CASE WHEN j.type IN ('operation.webhook','mailbox.webhook') THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
-      const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
-      const allowIngest=pool!=='webhooks' && !ingestReserved;
+      const slots=pool==='webhooks'?0:Math.min(claimBatchSize,ingestSlots-ingestReserved);
       // Only the head of each class enters the preference sort. The expression matches
       // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
       // Seek over distinct queued hook owners (not over their backlog). Each gets
@@ -184,7 +184,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         ORDER BY p.slot,p.served_at NULLS FIRST,p.due,p.id LIMIT ${n} FOR UPDATE OF j SKIP LOCKED` : sql`SELECT j.id,j.type,j.available_at FROM jobs j
         WHERE public.job_class(j.type)=${kind} AND j.status IN ('pending','running') AND ${jobDue}<=now()
         AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT ${n} FOR UPDATE SKIP LOCKED`;
-      if(allowIngest) ingestReserved=true;
+      ingestReserved+=slots;
       let claimed:{rows:Claimed[]}|undefined;
       try { claimed = await runtime.db.execute<Claimed>(sql`WITH exhausted AS (
         SELECT j.id,j.workspace_id,CASE WHEN starts_with(j.type,'campaign.') THEN j.payload->>'campaignId' END AS campaign_id
@@ -200,12 +200,11 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         UPDATE mailbox_webhook_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f WHERE f.type='mailbox.webhook' AND d.id=f.payload->>'deliveryId' AND d.workspace_id=f.workspace_id AND d.status='pending' AND d.generation=coalesce((f.payload->>'generation')::int,0)), feedback AS (
         SELECT id FROM (${head('feedback', pool!=='webhooks' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
       ), ingest_head AS MATERIALIZED (
-        SELECT h.id FROM mail_ingest_turns t CROSS JOIN LATERAL (
-          SELECT j.id FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now()
-            AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT 1
-        ) h WHERE ${allowIngest} AND t.active>0 ORDER BY t.served_at,t.workspace_id LIMIT 1
+        SELECT t.workspace_id FROM mail_ingest_turns t WHERE t.active>0 AND EXISTS(
+          SELECT FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})))
+        ORDER BY t.served_at,t.workspace_id LIMIT (SELECT least(${slots}::int,${claimBatchSize}-count(*)) FROM feedback) FOR UPDATE OF t SKIP LOCKED
       ), ingest AS (
-        SELECT j.id FROM ingest_head JOIN jobs j USING(id) WHERE ${due} FOR UPDATE OF j SKIP LOCKED LIMIT (SELECT least(1,${claimBatchSize}-count(*)) FROM feedback)
+        SELECT h.id FROM ingest_head t CROSS JOIN LATERAL (SELECT j.id FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED) h
       ), regular AS (
         SELECT j.id FROM (${sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
         WHERE NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
@@ -220,7 +219,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
         SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config.multiTenant,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
-      finally { if(allowIngest && !claimed?.rows.some(j=>j.type==='mailbox.ingest')) ingestReserved=false; }
+      finally { ingestReserved-=slots-(claimed?.rows.filter(j=>j.type==='mailbox.ingest').length??0); }
       claimRequests++;
       const claimMs = Date.now() - claimStarted;
       if (!claimed.rows.length) {
@@ -243,7 +242,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           active.delete(task);
           freeLanes.add(index);
           if (feedback) activeFeedback--;
-          if (job.type==='mailbox.ingest') ingestReserved=false;
+          if (job.type==='mailbox.ingest') ingestReserved--;
         });
         active.add(task);
       }

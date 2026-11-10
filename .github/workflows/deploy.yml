@@ -318,7 +318,7 @@ jobs:
         working-directory: infra/pulumi
         run: bun install --frozen-lockfile
 
-      - name: Bootstrap the Ohio receiving set without replacing active rules
+      - name: Verify the operator-activated Ohio receiving set
         if: steps.guard.outputs.skip != 'true' && !inputs.preview
         run: |
           case "$STAGE" in production) account=009882681002;; dev) account=905840579680;; *) exit 1;; esac

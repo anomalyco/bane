@@ -2,15 +2,8 @@ SET LOCAL lock_timeout='2s';
 ALTER TABLE provider_pool_regions ADD COLUMN receiving_checked_at timestamptz;
 ALTER TABLE domain_claims ADD COLUMN receiving_proved_at timestamptz;
 ALTER TABLE domain_claims ADD COLUMN receiving_identity_at timestamptz;
-CREATE INDEX mailbox_domains_receiving_lookup ON mailbox_domains(receiving_host,region);
-CREATE INDEX mailbox_domains_name_lookup ON mailbox_domains(name,region);
-CREATE INDEX domain_claims_receiving_lookup ON domain_claims(receiving_host) WHERE claim_scope<>'account';
--- Global class heads and the exhausted-lease probe already have their indexes in 093.
--- Replace 084's available_at-only ingest index: an expired lease is due at lease_until.
-DROP INDEX jobs_ingest_due;
-CREATE INDEX jobs_ingest_workspace_head ON jobs(workspace_id,(CASE WHEN status='running' THEN lease_until ELSE available_at END),id) WHERE type='mailbox.ingest' AND status IN ('pending','running');
+ALTER TABLE domain_claims ADD COLUMN receiving_proof_missed_at timestamptz;
 ALTER TABLE mail_ingest_turns ADD COLUMN active bigint NOT NULL DEFAULT 0;
-CREATE INDEX mail_ingest_turn_order ON mail_ingest_turns(served_at,workspace_id) WHERE active>0;
 -- Job ownership and type are immutable for ingest. Count every writer, including receipt replay,
 -- lease exhaustion, manual deletion and migration of already queued work.
 CREATE FUNCTION mail_ingest_head_change() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -22,14 +15,9 @@ BEGIN
  IF added THEN INSERT INTO mail_ingest_turns(workspace_id,served_at,active) VALUES(NEW.workspace_id,'-infinity',1) ON CONFLICT(workspace_id) DO UPDATE SET active=mail_ingest_turns.active+1; END IF;
  RETURN NULL;
 END $$;
-CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OF status,workspace_id,type OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change();
-INSERT INTO mail_ingest_turns(workspace_id,served_at,active) SELECT workspace_id,'-infinity',count(*) FROM jobs WHERE type='mailbox.ingest' AND status IN ('pending','running') GROUP BY workspace_id ON CONFLICT(workspace_id) DO UPDATE SET active=excluded.active;
 CREATE TABLE mail_ignored_staging(bucket text NOT NULL,ses_message_id text NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(bucket,ses_message_id));
 CREATE INDEX mail_ignored_expiry ON mail_ignored_staging(created_at);
 ALTER TABLE mailbox_webhook_deliveries ADD COLUMN generation integer NOT NULL DEFAULT 0;
-CREATE INDEX mailbox_webhooks_active ON mailbox_webhooks(workspace_id,id) WHERE NOT paused;
-CREATE INDEX mailbox_events_prune ON mailbox_events(created_at);
-CREATE INDEX mailbox_delivery_prune ON mailbox_webhook_deliveries(created_at) WHERE status IN ('failed','delivered');
 CREATE TABLE mail_receive_limits(workspace_id text PRIMARY KEY,spam_policy text NOT NULL DEFAULT 'store' CHECK(spam_policy IN ('store','quarantine')),message_limit integer NOT NULL DEFAULT 600000,backlog_limit integer NOT NULL DEFAULT 50000,byte_limit bigint NOT NULL DEFAULT 68719476736);
 CREATE TABLE mail_receive_windows(workspace_id text PRIMARY KEY,window_at timestamptz NOT NULL,messages bigint NOT NULL,bytes bigint NOT NULL);
 ALTER TABLE mail_receipts ADD COLUMN reserved_bytes bigint;
@@ -46,5 +34,5 @@ BEGIN
  RETURN NEW;
 END $$;
 CREATE TRIGGER mail_receive_admit BEFORE INSERT ON mail_receipts FOR EACH ROW EXECUTE FUNCTION mail_receive_admit();
-CREATE TABLE mail_candidate_uploads(workspace_id text NOT NULL,ses_message_id text NOT NULL,bucket text NOT NULL,region text NOT NULL,message_id text NOT NULL,keys text[] NOT NULL,check_at timestamptz NOT NULL DEFAULT now()+interval '1 hour',PRIMARY KEY(workspace_id,ses_message_id));
+CREATE TABLE mail_candidate_uploads(batch text PRIMARY KEY,workspace_id text NOT NULL,ses_message_id text NOT NULL,bucket text NOT NULL,region text NOT NULL,message_id text NOT NULL,keys text[] NOT NULL,check_at timestamptz NOT NULL DEFAULT now()+interval '1 hour');
 CREATE INDEX mail_candidate_due ON mail_candidate_uploads(check_at);

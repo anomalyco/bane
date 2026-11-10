@@ -26,7 +26,8 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
     WHERE ${replay?sql`e.expires_at>now() AND (e.owners->e.addr) ? m.workspace_id` : sql`NOT EXISTS (SELECT FROM mail_receipt_holds h WHERE h.bucket=e.bucket AND h.ses_message_id=e.mid AND h.binding_workspace IS NOT DISTINCT FROM e.wid AND h.topic_arn=e.topic_arn AND h.recipients ? e.addr AND (h.expires_at<=now() OR NOT (h.owners->e.addr) ? m.workspace_id))`} AND ${hosted ? sql`EXISTS (
       SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.receiving_host=e.host AND ${claimReceives()}
       JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=e.kind AND c.region=m.region AND ${connectionReady(sql`c`)} AND c.aws_account_id=split_part(e.topic_arn,':',5)
-      AND dc.receiving_proved_at>now()-interval '24 hours' AND dc.receiving_identity_at>now()-interval '72 hours' AND (dc.receiving_lost_since IS NULL OR dc.receiving_lost_since>now()-interval '2 hours')
+      AND dc.receiving_proved_at>now()-interval '72 hours' AND dc.receiving_identity_at>now()-interval '96 hours'
+      AND (dc.receiving_proof_missed_at IS NULL OR dc.receiving_proof_missed_at>now()-interval '48 hours') AND (dc.receiving_lost_since IS NULL OR dc.receiving_lost_since>now()-interval '2 hours')
       WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.created_at<=e.at AND dc.created_at<=e.at AND (d.region=m.region OR
         (c.kind='shared' AND m.region='us-east-2' AND m.status='active' AND EXISTS
           (SELECT FROM domain_sending_bindings sb WHERE sb.domain_id=d.id AND sb.connection_id=c.id AND sb.region=d.region))))` : sql`m.status IN ('provisioning','waiting_for_mx','active') AND (m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}

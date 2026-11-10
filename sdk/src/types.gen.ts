@@ -1196,9 +1196,9 @@ export type DomainReadiness = {
      */
     receivingIssue?: {
         /**
-         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail.
+         * Receiving host conflict, missing ownership proof, or stale SES verification.
          */
-        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'mx_missing' | 'wrong_region' | 'null_mx';
+        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
         host: string;
         /**
          * True when receiving there cannot work until DNS or the choice changes.

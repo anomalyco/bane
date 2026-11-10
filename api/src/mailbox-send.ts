@@ -41,7 +41,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
     } else if(item.id.startsWith('matt_')){
       const [{ GetObjectCommand }, { storeAttachmentBytes }] = await wrapModuleLoad(() => Promise.all([import('@aws-sdk/client-s3'), import('./sending.js')]));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
-        .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`${mailMessages.verdicts}->>'virus' IS DISTINCT FROM 'FAIL'`));
+        .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`coalesce(${mailMessages.verdicts}->>'virus',CASE WHEN ${mailMessages.direction}='outbound' THEN 'PASS' END)='PASS'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
       const s3=await mailboxS3(runtime,scope.workspaceId,file.region,file.file.bucket);
       let bytes:Uint8Array;

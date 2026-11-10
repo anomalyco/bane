@@ -1,5 +1,46 @@
 # Receiving audit fix: measurements and release evidence
 
+## Review 5.1 / 5.2 follow-up (base `5f4060a`)
+
+Local PostgreSQL 17.11 and Node's Worker entry-point harness; no hosted service contacted. Measurements below are milliseconds, not production SLOs.
+
+Verification: API type-check, OpenAPI/SDK generation, Pulumi type-check and `actionlint` passed. The full isolated harness (`inbound_2eacbf9e774f.out`) ran 213 tests: **211 passed, 0 failed, 2 skipped**. The two-/three-statement ingest budget passed. Both local PostgreSQL clusters were stopped after verification.
+
+| Measurement | Base | Revised |
+|---|---:|---:|
+| 095 on copies of 2,000,000 queued non-ingest jobs; sampled `ACCESS EXCLUSIVE` on `jobs` | 63.0 | none observed |
+| Longest concurrent indexed single-row job update during migration | 63.2 | 2.8 |
+| 095 elapsed (including concurrent index validation) | 80.2 | 154.4 |
+| 100,000 non-ingest inserts, identical indexed temp heap, four interleaved runs | 278.7–287.9 | 249.6–257.4 |
+| Time in ingest trigger / calls per 100,000 non-ingest inserts | 32.5–35.7 / 100,000 | 0 / 0 |
+| `/health`, 320 GETs, 16 concurrent, SQL queries | 320 | 0 |
+| `/health`, elapsed / p50 / p95 | 227.6 / 11.11 / 13.04 | 5.34 / 0.25 / 0.42 |
+
+The seeded migration used two clones of the same pre-095 database, a continuous `pg_locks` sampler and a separate writer. The replacement builds held `SHARE UPDATE EXCLUSIVE` (writer-compatible) for ~132 ms; trigger installation/backfill held `SHARE ROW EXCLUSIVE` for ~0.52 ms. Larger *active ingest* populations can extend that last fence. An uncontrolled insert series on the two big clones was slower after (680–773 vs 823–884 ms including all indexes); to isolate trigger cost, the paired EXPLAIN test above truncated the same heap between runs and toggled only the trigger. Health used the actual Worker method with synthetic live-SES config, local pg socket and no receiving binding. Its new 200 is liveness, not proof that receiving works. Raw results: `final-meter.txt`, `trigger-paired.txt`, `health-final.txt` in the private harness `pgdata-review-recv-measure` directory.
+
+Ingest now reserves up to three slots across overlapping drains. Each claim takes at most one due job per least-recently-served, unlocked workspace; the HEAD check reserves parser input before GET. The combined raw input budget is 6 MiB, with full-budget reservations for large streamed mail. The historical measurements below describe the previous one-slot implementation.
+
+### Review findings and acceptance evidence
+
+Paths below are relative to `api/` unless marked otherwise. Test names refer to `api.acceptance.test.ts`.
+
+| Finding | Fix and implementation | Acceptance test |
+|---|---|---|
+| 5.1 M1, L7; 5.2 M4 | Build indexes online before the writer fence; keep the old ingest index during mixed-version rollout (`migrations/095_receiving_indexes.sql:2`, `migrations/095_receiving_turns.sql:2`). | `095 preserves both claim indexes and counts only ingest job transitions`; 2M-job lock measurement above |
+| 5.1 M2; 5.2 H3 | Backfill bound, proven receivers and queue re-verification (`migrations/095_receiving_rollout.sql:4`); retain last good proof and warn before an existing host stops matching (`src/operations.ts:315`, `src/mailbox-receipts.ts:29`). | `receiving rollout and TXT grace warn before admission expires` |
+| 5.1 M3; 5.2 M3 | Static liveness; separate admitted, cached readiness (`src/worker.ts:142`, `src/app.ts:169`, `src/receiving-health.ts:17`). | `cold isolates initialize every lazy AWS client and entry point on first use`; `cold hosted receiving confirms without a workspace or a sending-ready pool` |
+| 5.1 M5 | Filter INSERT, UPDATE and DELETE in `WHEN` before calling PL/pgSQL (`migrations/095_receiving_turns.sql:4`). | `095 preserves both claim indexes and counts only ingest job transitions`; paired insert measurement above |
+| 5.1 L1 | Persist terminal receipt status after a successful quarantine copy (`src/mailbox-ingest.ts:339`). | `scan barriers precede MIME, including unknown verdicts and workspace spam policy` |
+| 5.1 L2; 5.2 L4 | Journal keys by immutable receipt batch; snapshot refs, tag outside PostgreSQL, then recheck terminal state (`src/mailbox-ingest.ts:389`, `src/mailbox-staging.ts:89`, `migrations/096_mail_store_incoming.sql:84`). | `deduplicated uploads are reclaimed without expiring the owned attachment` |
+| 5.1 L4 | Skip locked workspace turns; reserve slots and MIME bytes before large reads (`src/jobs.ts:192`, `src/mailbox-ingest.ts:450`). | `concurrent inbound drains reserve only claimed rows and rotate past a flooded workspace`; `MIME byte reservations admit small siblings and defer before an over-budget GET`; `claimed ingest uses two DB trips with no files and three with files, including a reply` |
+| 5.2 M6 | Worker-compatible manual redirect mode, with non-2xx retryable (`src/reputation-alerts.ts:113`). | `regional identity capacity is terminal and alerts the operator once` |
+| 5.2 M8 | CI only describes the Ohio active set; bootstrap stays operator-only (repo `.github/scripts/receiving-rule-set.sh:9`, `infra/aws-shared/receiving-deploy-policy.json:5`). | `receiving CI only describes the active Ohio set and refuses a missing or foreign set` |
+| 5.2 L3 | Require PASS before signing raw/attachment URLs or reusing received attachment bytes (`src/inbound-threads.ts:134,210`, `src/mailbox-send.ts:44`). | `thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays` |
+| 5.2 L5 | Apply the existing 30-day delivery horizon to paused records; resume in generation-fenced pages of 100 (`src/mailbox-events.ts:81,88`, `src/mailbox.ts:680`). | `inbound pause parks queued delivery; resume and terminal lease retry are generation fenced` |
+| 5.2 L9 | A single visible DLQ message triggers an Ohio CloudWatch alarm targeting the configured pager (repo `infra/pulumi/index.ts:76`, `infra/pulumi/receiving-alarm.ts:5`). | `one visible inbound dead letter pages the same-account Ohio operator topic` |
+
+## Earlier receiving audit
+
 The one hosted rule still takes zero per-domain or per-address conditions. [Production cause, operator commands and expected results](receiving-operations.md). No deployment, live delivery, database inspection or AWS/Cloudflare mutation was performed.
 
 Verification on `fix-recv` off `bb00802`: `bun run check`, `bun run sdk`, the Pulumi TypeScript check and workflow `actionlint` passed. The full isolated acceptance harness ran 197 tests: **195 passed, 0 failed, 2 skipped** (`inbound_0fde4d9b91d5.out`). The benchmark cluster was stopped after measurement. Its JSON plans, query-meter logs and fixture drivers are under `~/dev/opensend-harness/pgdata-bench-fix-recv/`.
