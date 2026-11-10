@@ -614,6 +614,13 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, region: s.region, ...diagnostics });
     const providerRetries = item.rateRetries;
     const definitive = status !== undefined && status >= 400 && status < 500;
+    // Only a definitive provider refusal proves non-acceptance. A transport error,
+    // 5xx or missing message ID remains ambiguous and must not be auto-replayed.
+    if (definitive && (['InvalidClientTokenId','SignatureDoesNotMatch','UnrecognizedClientException','ExpiredToken','ExpiredTokenException'].includes(failure.name ?? '') ||
+      (status === 403 && /security token included in the request is (?:invalid|expired)|request signature we calculated does not match|access key id you provided does not exist/i.test(failure.message ?? '')))) {
+      const backoff = Math.min(300_000, 5000 * 2 ** Math.min(6,mail.dispatchVersion));
+      return {mail,type:'provider_throttled',errorCode:'SES_CREDENTIALS_INVALID',data:{code:'SES_CREDENTIALS_INVALID',retryable:true},requeueAt:new Date(Date.now()+backoff).toISOString()};
+    }
     const pause = /\b(?:paused|disabled|suspended)\b/i;
     if (definitive && item.owner.tenantName && /\btenant\b/i.test(failure.message ?? '') && (failure.name === 'SendingPausedException' || pause.test(failure.message ?? ''))) {
       return { mail, type: 'reject', errorCode: 'SES_TENANT_SENDING_PAUSED', data: { code: 'SES_TENANT_SENDING_PAUSED', retryable: false } };
@@ -661,7 +668,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *
     ), updated AS (
       UPDATE sending_emails e SET
-        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
+        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','SES_CREDENTIALS_INVALID','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
         account_pause_started_at = CASE WHEN x.error_code='SES_ACCOUNT_SENDING_PAUSED' THEN coalesce(e.account_pause_started_at,clock_timestamp()) END,
         dispatch_version = CASE WHEN x.next_status = 'queued' THEN e.dispatch_version + 1 ELSE e.dispatch_version END,
         scheduled_at = CASE WHEN x.next_status = 'queued' THEN clock_timestamp() + x.wait_ms * interval '1 millisecond' ELSE e.scheduled_at END,

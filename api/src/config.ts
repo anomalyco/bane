@@ -51,6 +51,7 @@ const values = z.object({
   // Absolute live SES target in recipients per second; replaces the quota-derived rate when set.
   DISPATCH_TARGET_RATE: optional(z.coerce.number().int().min(1).max(100000)),
   AWS_ACCESS_KEY_ID: optional(z.string()), AWS_SECRET_ACCESS_KEY: optional(z.string()), AWS_SESSION_TOKEN: optional(z.string()),
+  AWS_RUNTIME_CREDENTIALS: z.string().optional(),
   // Requests per minute allowed for each API key, agent token, MCP grant and mailbox key.
   API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100000).default(1200),
   // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
@@ -83,6 +84,11 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  let aws: Config['aws'] = v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId:v.AWS_ACCESS_KEY_ID, secretAccessKey:v.AWS_SECRET_ACCESS_KEY, sessionToken:v.AWS_SESSION_TOKEN } : undefined;
+  if (v.AWS_RUNTIME_CREDENTIALS !== undefined) {
+    try { aws = z.object({accessKeyId:z.string().min(1), secretAccessKey:z.string().min(1)}).strict().parse(JSON.parse(v.AWS_RUNTIME_CREDENTIALS)); }
+    catch { throw new ApiError(503,'CONFIG_INVALID','AWS_RUNTIME_CREDENTIALS must contain a complete runtime key pair.'); }
+  }
   if (v.MULTI_TENANT==='true' && v.ENABLE_LIVE_SES==='true' && v.BANE_HOSTED_SCREEN==='true' && !v.TYPESAFE_API_KEY)
     throw new ApiError(503,'CONFIG_INVALID','Hosted live screening requires TYPESAFE_API_KEY.');
   if (v.MULTI_TENANT==='true' && (v.BANE_PLATFORM_AWS_ACCOUNT || [v.BANE_REGIONAL_SENDING,v.BANE_TRUSTED_POOL,v.BANE_BYO_V2].includes('true'))) requirePlatformAccount(v.BANE_PLATFORM_AWS_ACCOUNT);
@@ -126,7 +132,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT },
-    aws: v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId: v.AWS_ACCESS_KEY_ID, secretAccessKey: v.AWS_SECRET_ACCESS_KEY, sessionToken: v.AWS_SESSION_TOKEN } : undefined,
+    aws,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,

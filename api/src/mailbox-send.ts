@@ -1,6 +1,7 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { S3Client } from '@aws-sdk/client-s3';
-import { defaultTreeAdapter, parseFragment, serialize, type DefaultTreeAdapterMap } from 'parse5';
+import { serialize, type DefaultTreeAdapterMap } from 'parse5';
+import { boundedHtmlFragment } from './bounded-html.js';
 import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
@@ -288,10 +289,7 @@ function quoteUrl(value: string, image: boolean) {
 // HTML can grow by N x M nodes, and nesting makes its scope checks quadratic. Every quote is bounded
 // before and during parsing; over any bound the caller quotes the escaped plain text instead.
 const QUOTE_MAX_INPUT = 256 * 1024; // Characters of received HTML.
-const QUOTE_MAX_NODES = 20_000; // Elements (clones included) and comments the parser may create. Text is linear in the input.
-const QUOTE_MAX_DEPTH = 256;
 const QUOTE_MAX_ATTRIBUTES = 512 * 1024; // Attribute characters visited, cloned elements included.
-const QUOTE_MAX_MS = 250;
 class QuoteBudgetExceeded extends Error {}
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
 function cleanAttributes(tag: string, attrs: QuoteElement['attrs'], spend: (n: number) => void) {
@@ -308,11 +306,14 @@ function cleanAttributes(tag: string, attrs: QuoteElement['attrs'], spend: (n: n
 // Iterative and post-order, so any depth the parser produced costs no call stack. Children are
 // cleaned before their parent splices unwrapped (html, body, form, unknown) elements into place.
 function cleanQuoteNodes(root: QuoteParent, spend: (n: number) => void): void {
-  const order: QuoteParent[] = [], stack: QuoteParent[] = [root];
+  const order: QuoteParent[] = [], stack = [{parent: root, depth: 0}];
   while (stack.length) {
-    const parent = stack.pop()!;
+    const {parent, depth} = stack.pop()!;
+    // Formatting repair can move whole subtrees. Check the final tree before
+    // unwrapping nodes or passing it to parse5's recursive serializer.
+    if (depth > 256) throw new QuoteBudgetExceeded();
     order.push(parent);
-    for (const node of parent.childNodes) if ('tagName' in node && node.namespaceURI === HTML_NS && !QUOTE_DROP.has(node.tagName.toLowerCase())) stack.push(node);
+    for (const node of parent.childNodes) if ('tagName' in node && node.namespaceURI === HTML_NS && !QUOTE_DROP.has(node.tagName.toLowerCase())) stack.push({parent:node, depth:depth+1});
   }
   for (let i = order.length - 1; i >= 0; i--) {
     const parent = order[i]!, next: QuoteNode[] = [];
@@ -334,23 +335,10 @@ type QuoteElement = DefaultTreeAdapterMap['element'];
 /** Allow-listed copy of received HTML for a reply quote, or null when it exceeds the quote bounds. */
 export function safeForwardHtml(html: string): string | null {
   if (html.length > QUOTE_MAX_INPUT) return null;
-  const started = performance.now(), depth = new WeakMap<object, number>();
-  let nodes = 0, attributes = 0;
-  const tick = () => { if (++nodes > QUOTE_MAX_NODES || ((nodes & 255) === 0 && performance.now() - started > QUOTE_MAX_MS)) throw new QuoteBudgetExceeded(); };
-  const place = (parent: QuoteParent, child: QuoteNode) => {
-    const level = (depth.get(parent) ?? 0) + 1;
-    if (level > QUOTE_MAX_DEPTH) throw new QuoteBudgetExceeded();
-    depth.set(child, level);
-  };
-  const treeAdapter: typeof defaultTreeAdapter = {
-    ...defaultTreeAdapter,
-    createElement: (tagName, namespaceURI, attrs) => { tick(); return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs); },
-    createCommentNode: data => { tick(); return defaultTreeAdapter.createCommentNode(data); },
-    appendChild: (parent, child) => { place(parent, child); defaultTreeAdapter.appendChild(parent, child); },
-    insertBefore: (parent, child, reference) => { place(parent, child); defaultTreeAdapter.insertBefore(parent, child, reference); },
-  };
+  const fragment = boundedHtmlFragment(html);
+  if (!fragment) return null;
+  let attributes = 0;
   try {
-    const fragment = parseFragment(html, { treeAdapter });
     cleanQuoteNodes(fragment, n => { attributes += n; if (attributes > QUOTE_MAX_ATTRIBUTES) throw new QuoteBudgetExceeded(); });
     return serialize(fragment);
   } catch (error) {

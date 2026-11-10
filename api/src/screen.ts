@@ -61,11 +61,17 @@ async function body(snapshot: EmailSnapshot, required: boolean) {
   const plain=copy(snapshot.text), raw=copy(snapshot.raw), hosts=new Set<string>(), mismatches=new Set<string>();
   let rendered='';
   if (snapshot.html) {
-    const { parseFragment } = await import('parse5');
+    const { boundedHtmlFragment, flatScreenText } = await import('./bounded-html.js');
     // Never remove the middle of required mail to fit the parser's memory budget.
     if (required && snapshot.html.length>512*1024) throw tooLarge();
     const html=snapshot.html.length<=512*1024?snapshot.html:snapshot.html.slice(0,448*1024)+' '+snapshot.html.slice(-64*1024);
-    const nodes = [...parseFragment(html).childNodes].reverse().map(node=>({node,anchor:''})), text:string[]=[];
+    const fragment = boundedHtmlFragment(html);
+    const nodes = (fragment?.childNodes ?? []).slice().reverse().map(node=>({node,anchor:''})), text:string[]=[];
+    if (!fragment) {
+      const flat = normalize(flatScreenText(html));
+      text.push(flat);
+      for (const m of flat.matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
+    }
     while (nodes.length) {
       const item=nodes.pop()!, {node}=item; let anchor=item.anchor;
       if ('tagName' in node && ['style','script','template','head'].includes(node.tagName)) continue;

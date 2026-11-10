@@ -67,7 +67,10 @@
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
   // Rate limiter namespaces are per account.
-  "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793301", "simple": { "limit": 6000, "period": 60 } }],
+  "ratelimits": [
+    { "name": "ADMISSION", "namespace_id": "8793301", "simple": { "limit": 6000, "period": 60 } },
+    { "name": "SNS_CERT_MISSES", "namespace_id": "8793302", "simple": { "limit": 60, "period": 60 } }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

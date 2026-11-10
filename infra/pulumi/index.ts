@@ -152,23 +152,23 @@ const attachments = Object.entries(policies).map(([name, document]) => {
 // The operator owns the active set; the Worker still manages identities, sets and tenants.
 
 // Never import an IAM access key: AWS returns its secret only on creation.
-// M5: rotate the long-lived runtime key by setting bane:runtimeKeyRotation to a new value (for example
-// the date). The update creates the new key, rewrites both Worker secrets, then deletes the old key.
+// Keep the previous key active while old Worker versions and in-flight sends drain.
 const rotation = config.get("runtimeKeyRotation");
 if (rotation !== undefined && (!/^[a-z0-9-]{1,32}$/.test(rotation) || !writeWorkerSecrets)) {
   throw new Error("bane:runtimeKeyRotation needs 1-32 lowercase letters, digits or hyphens, and bane:writeWorkerSecrets");
 }
-const key = new aws.iam.AccessKey(rotation ? `runtime-key-${rotation}` : "runtime-key", { user: user.name }, { provider: iam, dependsOn: attachments });
+const drainKey = new pulumi.ResourceHook('drain-runtime-key', async () => {
+  await new Promise<void>(resolve => setTimeout(resolve, 5 * 60_000));
+});
+const key = new aws.iam.AccessKey(rotation ? `runtime-key-${rotation}` : "runtime-key", { user: user.name }, {
+  provider: iam, dependsOn: attachments, hooks: { beforeDelete: [drainKey] },
+});
 if (writeWorkerSecrets) {
-  // v6 has account Secrets Store resources, not standalone script secrets, so these two PUTs use v5.
+  // One PUT publishes one version containing the complete pair. Pulumi must
+  // finish this dependent update before retiring its previous key dependency.
   const provider = new cfV5.Provider("worker-secrets", {});
   const target = { accountId: cloudflareAccountId, scriptName: stage.worker };
-  // A secret PUT creates a Worker version. Serialize the pair; never DELETE a live binding on replacement.
-  const opts = { provider, retainOnDelete: true };
-  const accessKeyId = new cfV5.WorkersSecret("worker-access-key-id", {
-    ...target, name: "AWS_ACCESS_KEY_ID", secretText: pulumi.secret(key.id),
-  }, opts);
-  new cfV5.WorkersSecret("worker-secret-access-key", {
-    ...target, name: "AWS_SECRET_ACCESS_KEY", secretText: key.secret,
-  }, { ...opts, dependsOn: [accessKeyId] });
+  new cfV5.WorkersSecret("worker-runtime-credentials", {
+    ...target, name: "AWS_RUNTIME_CREDENTIALS", secretText: pulumi.secret(pulumi.jsonStringify({ accessKeyId: key.id, secretAccessKey: key.secret })),
+  }, { provider, retainOnDelete: true });
 }
