@@ -1,5 +1,6 @@
 config:
   bane:deployRoleArn: arn:aws:iam::905840579680:role/bane-deploy
   bane:permissionsBoundary: arn:aws:iam::905840579680:policy/bane-runtime-boundary
-  bane:writeWorkerSecrets: true
+  bane:writeWorkerSecrets: "true"
 secretsprovider: awskms://alias/pulumi/bane-dev?region=us-east-1
+encryptedkey: AQICAHgxsMoDSHZiPVd3xDI7IEfU+5/H4iFjyKiOQa+eBRtbBwG6niOeLudjEmGTLJ+zGpKfAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMP30FZYCmgGDBdFpBAgEQgDtbVatvh07FP4zZNtPNJZRtK82Bjr+2DGOeE+/kY6eUZytIWnTHkeV0BSivAvX9+gCIhi8DoAHNK2T9Uw==
