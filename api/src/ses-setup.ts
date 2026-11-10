@@ -531,8 +531,8 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
       const s=await present(()=>c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:name}),request));
       if (s) {
         if (entry?.state!=='created' || s.ConfigurationSetName!==name || !owned(s.Tags,opts)) throw drift();
-        const ds=(await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:name}),request)).EventDestinations;
-        if (!ds || ds.length!==(destination?1:0)) throw drift();
+        const ds=(await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:name}),request)).EventDestinations??[];
+        if (ds.length!==(destination?1:0)) throw drift();
         if (destination && (destination.state!=='created' || canonical(ds[0])!==canonical({Name:destName,Enabled:true,MatchingEventTypes:EVENTS,SnsDestination:{TopicArn:arn.topic}}))) throw drift();
       }
       if (entry && !chosen) chosen={resource,name,exists:!!s};
@@ -612,7 +612,8 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
     if (signedPool && publish && !topic.policyReady) {await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);}
     for (const [i,stream] of streams.entries()) if (publish && !report.resources[stream].eventWired) {
       const set=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts), dest=await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:names[stream]}),opts);
-      if (!owned(set.Tags,options) || dest.EventDestinations?.length!==0) throw drift();
+      // SES omits EventDestinations entirely when a configuration set has none.
+      if (!owned(set.Tags,options) || (dest.EventDestinations?.length??0)!==0) throw drift();
       await record({kind:'destination',resource:a.sets[i]!+'/'+names.eventDestinationName,target:a.topic,state:'creating'});
       await fence();await c.ses.send(new CreateConfigurationSetEventDestinationCommand({ConfigurationSetName:names[stream],EventDestinationName:names.eventDestinationName,EventDestination:{Enabled:true,MatchingEventTypes:[...EVENTS],SnsDestination:{TopicArn:a.topic}}}),opts);
       await record({kind:'destination',resource:a.sets[i]!+'/'+names.eventDestinationName,target:a.topic,state:'created'});

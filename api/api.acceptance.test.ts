@@ -4572,7 +4572,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'GetAccountCommand':return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:true,SendQuota:{Max24HourSend:100000,MaxSendRate:100}};
         case 'GetConfigurationSetCommand':if(!sets.has(i.ConfigurationSetName))throw missing();return sets.get(i.ConfigurationSetName);
         case 'CreateConfigurationSetCommand':assert.ok(!sets.has(i.ConfigurationSetName));checkTags(i.Tags,'ses-feedback');sets.set(i.ConfigurationSetName,{...i,dest:[]});return {};
-        case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:sets.get(i.ConfigurationSetName)!.dest};
+        case 'GetConfigurationSetEventDestinationsCommand':{const d=sets.get(i.ConfigurationSetName)!.dest;return d.length?{EventDestinations:d}:{};} // Real SES omits an empty list.
         case 'PutConfigurationSetSuppressionOptionsCommand':assert.equal(i.SuppressionScope,'TENANT');sets.get(i.ConfigurationSetName)!.SuppressionOptions=i;return {};
         case 'CreateConfigurationSetEventDestinationCommand':assert.ok(confirmed);assert.equal(i.EventDestination.SnsDestination.TopicArn,topic);sets.get(i.ConfigurationSetName)!.dest.push({Name:i.EventDestinationName,...i.EventDestination});return {};
         case 'CreateTenantCommand':assert.equal(i.TenantName,tenant);checkTags(i.Tags,'workspace-tenant');assert.deepEqual(i.SuppressionAttributes,{SuppressionScope:'TENANT',SuppressedReasons:['BOUNCE','COMPLAINT']});return {TenantName:tenant,TenantArn:tenantArn};
@@ -4900,7 +4900,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);if(failDelete){failDelete=false;throw Object.assign(Error('synthetic delete denied'),{name:'AccessDenied'});}createdIdentity=undefined;return {};
         case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='opensend:owner'&&t.Value==='mx'));sets.set(key,{...i,dest:[]});return {};
         case 'PutConfigurationSetSuppressionOptionsCommand':sets.get(key)!.SuppressionOptions=i;return {};
-        case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:sets.get(key)!.dest};
+        case 'GetConfigurationSetEventDestinationsCommand':{const d=sets.get(key)!.dest;return d.length?{EventDestinations:d}:{};} // Real SES omits an empty list.
         case 'CreateConfigurationSetEventDestinationCommand':sets.get(key)!.dest.push({Name:i.EventDestinationName,...i.EventDestination});return {};
         default:throw Error('unexpected SES call '+op);
       }
