@@ -318,6 +318,15 @@ jobs:
         working-directory: infra/pulumi
         run: bun install --frozen-lockfile
 
+      - name: Bootstrap the Ohio receiving set without replacing active rules
+        if: steps.guard.outputs.skip != 'true' && !inputs.preview
+        run: |
+          case "$STAGE" in production) account=009882681002;; dev) account=905840579680;; *) exit 1;; esac
+          aws configure set profile.receiving-bootstrap.role_arn "arn:aws:iam::$account:role/bane-deploy"
+          aws configure set profile.receiving-bootstrap.credential_source Environment
+          # --profile (rather than AWS_PROFILE) suppresses ambient credentials as final credentials.
+          bash .github/scripts/receiving-rule-set.sh "$account" receiving-bootstrap
+
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0

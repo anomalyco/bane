@@ -45,6 +45,12 @@ const DATABASE_FIXTURE_SKIP = false; // Bootstrap already requires an explicitly
 const mail = (extra: Json = {}): Json => ({ from: 'sender@example.com', to: address(), region: REGION, subject: unique('Acceptance'), text: 'Synthetic acceptance message; no SES send is authorized.', ...extra });
 type Json = Record<string, any>;
 type Reply = { status: number; body: any; headers: Headers };
+const cleanScans={virusVerdict:{status:'PASS'},spamVerdict:{status:'PASS'}};
+async function expandFixtureOutbox(runtime:import('./src/core.js').Runtime,wid:string){
+  const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{sql}=await import('drizzle-orm');
+  const rows=await runtime.db.execute<{id:string;payload:Json}>(sql`UPDATE jobs SET status='completed' WHERE type='mailbox.fanout' AND workspace_id=${wid} AND status='pending' RETURNING id,payload`);
+  for(const row of rows.rows)await mailboxEventJobs['mailbox.fanout']!(runtime,row.payload,{id:row.id,workspaceId:wid,attempts:1});
+}
 // Shared SNS/SES control-plane store for cold Ohio pool provisioning and legacy BYO repair.
 function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:string) {
   const missing=()=>{throw Object.assign(Error('Missing fixture resource'),{name:'NotFoundException'});};
@@ -789,7 +795,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             default:throw Error(cmd.constructor.name);
           }
         });
-        let loseCreateResponse = false, failTenantOnce = false, dropCreate = false;
+        let loseCreateResponse = false, failTenantOnce = false, dropCreate = false,quotaFull=false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
         const importParent=`${unique('import')}.invalid`,imported=`mail.${importParent}`, reserved=`${unique('reserved')}.invalid`;
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
@@ -803,6 +809,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           switch (name) {
             case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
             case 'CreateEmailIdentityCommand': {
+              if(quotaFull)throw Object.assign(Error('fixture regional identity quota'),{name:'LimitExceededException',$metadata:{httpStatusCode:429}});
               if (dropCreate) { dropCreate=false; throw new Error('Synthetic connection reset before SES received Create'); }
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
               assert.equal(i.Tags[0].Key,'bane:domain-claim');
@@ -907,6 +914,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
         assert.equal((await (await getSes(scoped(a.org.id), region)).config.credentials()).accessKeyId, platformKey.accessKeyId);
         const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
+        await providerTest.test('regional identity capacity is terminal and alerts the operator once',async()=>{quotaFull=true;try{
+          for(let i=0;i<2;i++){const r=await add(b.cookie,unique('over-cap')+'.invalid');error(r,409,'SES_IDENTITY_QUOTA_EXHAUSTED');assert.equal(r.body.error.retryable,false);}
+          assert.equal((await pool.query("SELECT FROM jobs WHERE id LIKE $1",[`identity-quota:${platform}:${region}:%`])).rowCount,1);
+        }finally{quotaFull=false;}});
         const discovery = `/v1/regions/${region}/discovery`;
         await providerTest.test('MX refuses public suffixes and reserved domain trees before reserving or contacting SES',async()=>{
           const own=new URL(runtime.config.publicUrl).hostname, start=calls.length;
@@ -1266,7 +1277,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               assert.deepEqual((await pool.query('SELECT workspace_id,recipients FROM mail_receipts WHERE bucket=$1 AND ses_message_id=$2',[bucket,held.ses_message_id])).rows,[{workspace_id:b.org.id,recipients:[custom]}]);
               assert.deepEqual((await pool.query('SELECT status,error FROM mail_receipt_holds WHERE bucket=$1 AND ses_message_id=$2',[bucket,expired])).rows,[{status:'failed',error:'MAILBOX_UNROUTED_HOST'}]);
             });
-            assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly DNS upkeep must use neither SES nor ownership TXT.');
+            assert.equal(calls.length,awsBefore);assert.ok(lookups>txtBefore,'Hourly DNS upkeep must re-prove the exact claim without consuming SES control-plane quota.');
+            await it.test('receipt admission expires ownership without waiting for a verifier',async()=>{
+              await pool.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '25 hours' WHERE token=$1",[proof.value]);assert.equal(await probe(custom),0);await mxCheck();assert.equal(await probe(custom),1);
+            });
             const stable=ok(await local('GET',detail,undefined,b.cookie));
             fault='mixed';for(let i=0;i<3;i++)await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified','Additional MX records are not proof that the verified record disappeared.');fault='';await mxCheck();
             for (fault of ['MX-timeout','MX-503','TXT-servfail','TXT-503']) {
@@ -1301,14 +1315,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const sesMessageId=unique('incoming'),trace=`Received: from sender.invalid by inbound-smtp.${region}.amazonaws.com with SMTP id ${sesMessageId}\r\n for <${blind}>; Tue, 3 Nov 2026 00:00:00 +0000\r\n`;
             const body=Buffer.from(`Received: from original.invalid by sender.invalid; Tue, 3 Nov 2026 00:00:00 +0000\r\nFrom: sender@example.org\r\nTo: ${custom}\r\nMessage-ID: <${sesMessageId}@example.org>\r\nSubject: Incoming\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nMessage\r\n--part\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n/wA=\r\n--part--\r\n`);
             const raw=Buffer.concat([Buffer.from(trace),body]);objects.set(`${bucket}/staging/${sesMessageId}`,Buffer.concat([Buffer.from(`Bcc: ${blind},\r\n ${dropped}\r\nResent-Bcc: ${blind}\r\n`),raw]));
-            const message={notificationType:'Received',mail:{messageId:sesMessageId,source:'sender@example.org',destination:[blind,custom,dropped],commonHeaders:{bcc:[blind]}},receipt:{timestamp:new Date().toISOString(),recipients:[blind,custom,dropped],action:{type:'S3',bucketName:bucket,topicArn,objectKey:`staging/${sesMessageId}`}}};
+            const message={notificationType:'Received',mail:{messageId:sesMessageId,source:'sender@example.org',destination:[blind,custom,dropped],commonHeaders:{bcc:[blind]}},receipt:{...cleanScans,timestamp:new Date().toISOString(),recipients:[blind,custom,dropped],action:{type:'S3',bucketName:bucket,topicArn,objectKey:`staging/${sesMessageId}`}}};
             const accept=()=>acceptInboundNotification(runtime,{topicArn,region,message});
             await runtime.db.transaction(async tx=>{const count=queries.mock.callCount();assert.equal(await acceptInboundNotification({...runtime,db:tx},{topicArn,region,message}),2);it.diagnostic(`MX inbound notification: ${queries.mock.callCount()-count} pg statement(s) for 2 workspaces`);
               const {sql}=await import('drizzle-orm');await tx.execute(sql`UPDATE jobs SET available_at=now()+interval '1 day' WHERE type='mailbox.ingest' AND payload->>'sesMessageId'=${sesMessageId}`);});assert.equal(await accept(),0);
             const receipts=await pool.query('SELECT * FROM mail_receipts WHERE ses_message_id=$1',[sesMessageId]);assert.equal(receipts.rowCount,2);
             for(const [user,recipient,expected] of [[a,blind,raw],[b,custom,body]] as const){
               const wid=user.org.id,r=receipts.rows.find(r=>r.workspace_id===wid);assert.deepEqual(r.recipients,[recipient]);assert.ok(!JSON.stringify(r.notification).includes(blind));assert.ok(!JSON.stringify(r.notification).includes(dropped));
-              const n=queries.mock.callCount();await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),workspaceId:wid,attempts:1});it.diagnostic(`MX inbound ingest: ${queries.mock.callCount()-n} pg statements including transaction for new address, 1 attachment`);assert.equal(queries.mock.callCount()-n,5);
+              const n=queries.mock.callCount();await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),workspaceId:wid,attempts:1});it.diagnostic(`MX inbound ingest: ${queries.mock.callCount()-n} pg statements for new address, 1 attachment`);assert.equal(queries.mock.callCount()-n,4);await expandFixtureOutbox(runtime,wid);
               const {rows:[stored]}=await pool.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);assert.deepEqual(stored.envelope_to,[recipient]);assert.deepEqual(stored.bcc,[]);assert.equal(stored.to[0].address,custom);assert.deepEqual(objects.get(`${bucket}/${stored.raw_key}`),expected);
               assert.equal(stored.raw_key,`workspaces/${wid}/raw/${sesMessageId}.eml`);assert.equal((await pool.query('SELECT 1 FROM mailboxes WHERE workspace_id=$1 AND address=$2 AND origin=\'auto\'',[wid,recipient])).rowCount,1);
               const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
@@ -1355,7 +1369,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.deepEqual(await claimState(),steady);
             answer='';for(let i=0;i<2;i++){await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);}
             assert.deepEqual(await claimState(),{...steady,sending_state:'lost',lost:true},'Receiving is held by the same grace as the ownership it depends on.');
-            assert.equal(await probe(custom),1,'Routing continues through the grace period.');
+            assert.equal(await probe(custom),0,'Sending grace must not grant receipt after a definitive negative ownership answer.');
             await pool.query("WITH gone AS (DELETE FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id LIKE 'probe-%' RETURNING ses_message_id) DELETE FROM jobs USING gone WHERE jobs.workspace_id=$1 AND jobs.type='mailbox.ingest' AND jobs.payload->>'sesMessageId'=gone.ses_message_id",[b.org.id]);
             answer=proof.value;await pace();await check();assert.deepEqual(await claimState(),steady);
             answer='';await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);
@@ -1640,7 +1654,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const {rows:[r]}=await pool.query('SELECT bucket,topic_arn AS arn FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,region]);
           const sesMessageId=unique('byo'),recipient=`byo@${domain}`,other='hidden@unclaimed.invalid';
           const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
-          const message={notificationType:'Received',mail:{messageId:sesMessageId},receipt:{timestamp:new Date().toISOString(),recipients:[recipient,other],action:{type:'S3',bucketName:r.bucket,topicArn:r.arn,objectKey:'staging/'+sesMessageId}}};
+          const message={notificationType:'Received',mail:{messageId:sesMessageId},receipt:{...cleanScans,timestamp:new Date().toISOString(),recipients:[recipient,other],action:{type:'S3',bucketName:r.bucket,topicArn:r.arn,objectKey:'staging/'+sesMessageId}}};
           const {JobDeferred}=await import('./src/jobs.js');
           assert.equal(await acceptInboundNotification(runtime,{topicArn:r.arn,region,message}),1);
           await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),attempts:1,workspaceId:wid});
@@ -4680,6 +4694,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const doc=await readFile(new URL('./README.md',import.meta.url),'utf8'),code=doc.match(/node --import tsx --input-type=module <<'RECONCILE'\n([\s\S]*?)\n *RECONCILE\n/)?.[1];assert.ok(code);
     const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
     // The old pool and tenants are ready: the exact README command reads the isolated DB and must not call AWS.
+    await db.query('UPDATE provider_pool_regions SET receiving_checked_at=now()');
     const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:old,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
     // The generated Worker ProcessEnv includes deployment-only bindings; this Node child gets only the fixture allowlist.
     const result=(await import('node:child_process')).spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(guard),'--import','tsx','--input-type=module'],{input:code,env:env as unknown as NodeJS.ProcessEnv,encoding:'utf8',timeout:10000});
@@ -4829,7 +4844,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     assert.equal((await notify(topic(old),delivered('email_old'))).status,202);assert.notEqual((await notify(topic(old),delivered('fixture-new-send'))).status,202);
     assert.deepEqual((await db.query(`SELECT status FROM sending_emails ORDER BY id='email_old'`)).rows,[{status:'accepted'},{status:'delivered'}]);
     assert.equal((await envelope({Message:'fixture',MessageId:randomUUID(),SubscribeURL:`https://sns.${r}.amazonaws.com/?Action=ConfirmSubscription&TopicArn=${encodeURIComponent(topic(old))}&Token=fixture`,Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic(old),Type:'SubscriptionConfirmation'})).status,403);
-    const recv='rehome-incoming',staging='staging/'+recv,incoming=(acct:string)=>({notificationType:'Received',mail:{messageId:recv,source:'sender@example.org',destination:[mailboxAddress]},receipt:{timestamp:new Date().toISOString(),recipients:[mailboxAddress],action:{type:'S3',bucketName:bucket(acct),topicArn:topic(acct,'inbound'),objectKey:staging}}});
+    const recv='rehome-incoming',staging='staging/'+recv,incoming=(acct:string)=>({notificationType:'Received',mail:{messageId:recv,source:'sender@example.org',destination:[mailboxAddress]},receipt:{...cleanScans,timestamp:new Date().toISOString(),recipients:[mailboxAddress],action:{type:'S3',bucketName:bucket(acct),topicArn:topic(acct,'inbound'),objectKey:staging}}});
     assert.equal((await notify(topic(old,'inbound'),incoming(old))).status,403);assert.equal((await notify(topic(dest,'inbound'),incoming(dest))).status,202);
     objects.set(staging,Buffer.from(`From: sender@example.org\r\nTo: ${mailboxAddress}\r\nSubject: fixture\r\n\r\nnew mail`));const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
     const receiptJob=(await db.query(`SELECT * FROM jobs WHERE type='mailbox.ingest' AND payload->>'sesMessageId'=$1`,[recv])).rows[0];assert.ok(receiptJob);
@@ -5224,7 +5239,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {acceptInboundNotification}=await import('./src/mailbox-ingest.js');
       const receive=()=>acceptInboundNotification(runtime,{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:'cross-region-fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['reply@trusted.regional.example'],action:{type:'S3',bucketName:'ohio-fixture',topicArn:inbound,objectKey:'staging/cross-region-fixture'}}}});
       assert.equal(await receive(),0); // Sending proof cannot grant receiving.
-      await db.query(`UPDATE domain_claims SET receiving_state='active',receiving_host=name WHERE token=$1`,[reserved.token]);
+      await db.query(`UPDATE domain_claims SET receiving_state='active',receiving_host=name,receiving_proved_at=now(),receiving_identity_at=now() WHERE token=$1`,[reserved.token]);
       await db.query(`UPDATE mailbox_domains SET enabled_at=clock_timestamp()+interval '1 second' WHERE id=$1`,[md]);
       await (await import('./src/mailbox-receipts.js')).recoverHeldReceipts(runtime);
       assert.equal((await db.query("SELECT FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='cross-region-fixture'",[wid])).rowCount,1,'Ohio activation after receipt releases held Virginia mail.');assert.equal(await receive(),0);
@@ -6251,10 +6266,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       async function receive(to: string, timestamp = new Date().toISOString()) {
         const receiptId = unique('fixture'), inboundId = `${receiptId}@example.net`;
         mime = `From: Customer <customer@example.net>\r\nTo: ${to}\r\nSubject: Re: Case 42\r\nMessage-ID: <${inboundId}>\r\nIn-Reply-To: <${wire}>\r\nReferences: <${wire}>\r\n\r\nThank you.`;
-        const message = { notificationType: 'Received', mail: { messageId: receiptId, source: 'customer@example.net' }, receipt: { timestamp, recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey: `raw/${receiptId}`, topicArn: topic } } };
+        const message = { notificationType: 'Received', mail: { messageId: receiptId, source: 'customer@example.net' }, receipt: { ...cleanScans,timestamp, recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey: `raw/${receiptId}`, topicArn: topic } } };
         await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message });
         await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
-        return inboundId;
+        await expandFixtureOutbox(runtime,scope);return inboundId;
       }
       const inboundId = await receive(support.address), deliveries = await jobs('mailbox.webhook'); assert.equal(deliveries.length, 1);
       let event: Json | undefined;
@@ -6322,7 +6337,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const message = {
           notificationType: 'Received',
           mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: commonFrom, subject, messageId: `<${messageId}>` } },
-          receipt: { timestamp: new Date().toISOString(), recipients: [box.address], spfVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } },
+          receipt: { ...cleanScans,timestamp: new Date().toISOString(), recipients: [box.address], spfVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } },
         };
         assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message }), 1);
         await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
@@ -6557,6 +6572,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('cold hosted receiving confirms without a workspace or a sending-ready pool',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const [{health},{reconcileSharedConnections},{STSClient},{SESClient},{SESv2Client},{S3Client},{SNSClient}]=await Promise.all([import('./src/receiving-health.js'),import('./src/provider-connections.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-s3'),import('@aws-sdk/client-sns')]);
+      const account='333344445555',topic=`arn:aws:sns:us-east-2:${account}:bane-inbound`,sub=topic+':fixture';let confirmed=false,rule:Json|undefined,redriven=false,tags:Json[]=[];
+      await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE provider_connections (LIKE public.provider_connections INCLUDING ALL) ON COMMIT DROP');
+      Object.assign(runtime.config,{workspaceId:'no-such-workspace',platformAccount:account,multiTenant:true,regionalSending:true,liveEnabled:true,receivingRedrive:true,publicUrl:'https://fixture.bane.mx',allowSesSandbox:false,aws:{accessKeyId:'synthetic-no-workspace',secretAccessKey:'fixture'}});
+      t.mock.method(STSClient.prototype,'send',()=>({Account:account,Arn:`arn:aws:iam::${account}:user/fixture`}));t.mock.method(SESv2Client.prototype,'send',()=>{throw Object.assign(Error('sending unavailable'),{name:'AccessDeniedException'})});t.mock.method(S3Client.prototype,'send',()=>({}));
+      t.mock.method(SNSClient.prototype,'send',async(cmd:any)=>{const i=cmd.input;switch(cmd.constructor.name){case 'CreateTopicCommand':tags=i.Tags;return {TopicArn:topic};case 'ListTagsForResourceCommand':return {Tags:tags};case 'ListSubscriptionsByTopicCommand':return {Subscriptions:confirmed?[{Protocol:'https',Endpoint:'https://fixture.bane.mx/v1/events/ses',SubscriptionArn:sub}]:[]};case 'SubscribeCommand':return {SubscriptionArn:'pending confirmation'};case 'SetTopicAttributesCommand':return {};case 'SetSubscriptionAttributesCommand':redriven=i.SubscriptionArn===sub && JSON.parse(i.AttributeValue).deadLetterTargetArn===`arn:aws:sqs:us-east-2:${account}:bane-inbound-dead-letters`;return {};default:throw Error(cmd.constructor.name);}});
+      t.mock.method(SESClient.prototype,'send',async(cmd:any)=>{if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'bane-inbound'},Rules:[]};assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');rule=cmd.input.Rule;return {};});
+      assert.equal((await health(runtime)).status,'unready');await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).status,'unready');confirmed=true;await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).receiving,'ready');assert.equal(redriven,true);assert.deepEqual(rule?.Recipients,[]);assert.equal(rule?.Actions[0].S3Action.TopicArn,topic);assert.deepEqual((await db.query('SELECT sending_state,receiving_state FROM provider_pool_regions')).rows,[{sending_state:'pending',receiving_state:'ready'}]);
+    });
+  });
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
@@ -6564,7 +6591,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
       await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')",[domain,wid,REGION]);
-      const submit=(mid:string,recipients:string[],subject='Subject')=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
+      const submit=(mid:string,recipients:string[],subject='Subject',scans:Json=cleanScans)=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{...scans,timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
       const run=(type:string,p:Json,attempts=1)=>mailboxIngestJobs[type]!(runtime,p,{id:unique('job'),workspaceId:wid,attempts});
       const raw=new Map<string,Buffer>(),quarantined:string[]=[],parts:Json[]=[],largeReads:string[]=[];let page=0,stageError='',quarantineDenied=false,interruptCopy=false;
       const old=new Date(Date.now()-2*3600_000),listed=(mid:string)=>({Key:'staging/'+mid,ETag:'"fixture"',LastModified:old});
@@ -6581,7 +6608,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           case 'ListObjectsV2Command': assert.equal(i.Prefix,'staging/');assert.ok(i.MaxKeys<=1000);page++;return i.StartAfter?{Contents:[listed('spoof')]}:{Contents:[listed('orphan')],IsTruncated:true};
           case 'HeadObjectCommand': if(mid==='denied')throw Object.assign(Error(),{name:'AccessDenied'});if(mid==='unavailable')throw Error('synthetic temporary outage');return {ContentLength:raw.get(mid)!.length,ETag:'"fixture"'};
           case 'GetObjectCommand': if(i.Range)assert.equal(i.Range,'bytes=0-16383');assert.equal(i.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>raw.get(mid)!}};
-          case 'CopyObjectCommand': if(i.Key.startsWith('quarantine/')){if(quarantineDenied)throw Object.assign(Error(),{name:'AccessDenied'});assert.equal(i.CopySourceIfMatch,'"fixture"');quarantined.push(i.Key);}if(i.CopySource.endsWith('/large')){assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.TaggingDirective,'REPLACE');assert.equal(i.Tagging,'bane-kind=raw');largeReads.push('copy');}return {};
+          case 'CopyObjectCommand': if(i.Key.startsWith('quarantine/')){if(quarantineDenied)throw Object.assign(Error(),{name:'AccessDenied'});if(i.Key.endsWith('spoof'))assert.equal(i.CopySourceIfMatch,'"fixture"');quarantined.push(i.Key);}if(i.CopySource.endsWith('/large')){assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.TaggingDirective,'REPLACE');assert.equal(i.Tagging,'bane-kind=raw');largeReads.push('copy');}return {};
+          case 'PutObjectTaggingCommand':parts.push({tagged:i.Key,tags:i.Tagging});return {};
           case 'CreateMultipartUploadCommand':assert.equal(i.Tagging,'bane-kind=raw');return {UploadId:'upload'};
           case 'UploadPartCommand':assert.ok(i.Body.length>=5*1024*1024);assert.equal(i.Body.subarray(0,14).toString(),'Auto-Submitted');parts.push({size:i.Body.length});return {ETag:'first'};
           case 'UploadPartCopyCommand':assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.CopySourceRange,`bytes=${5.25*1024*1024}-${39*1024*1024-1}`);if(interruptCopy)throw Error('interrupted copy');return {CopyPartResult:{ETag:'second'}};
@@ -6608,6 +6636,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         for(stageError of ['NoSuchKey','NotFound','PreconditionFailed']) await run(spoof.type,spoof.payload);
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
         stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
+      });
+      await t.test('scan barriers precede MIME, including unknown verdicts and workspace spam policy',async()=>{
+        for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='unsafe-'+String(status);await submit(mid,['a@receive.example'],'Bad',{...cleanScans,virusVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
+        ok(await local('PATCH','/v1/inbound/policy',{spam:'quarantine'},'live'));for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='spam-'+String(status);await submit(mid,['a@receive.example'],'Spam',{...cleanScans,spamVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
+        assert.equal((await db.query("SELECT FROM mail_messages WHERE workspace_id=$1 AND ses_message_id LIKE ANY(ARRAY['unsafe-%','spam-%'])",[wid])).rowCount,0);ok(await local('PATCH','/v1/inbound/policy',{spam:'store'},'live'));
+      });
+      await t.test('noisy workspace budgets do not suppress a neighbor and never fetch over-budget MIME',async()=>{
+        await db.query('UPDATE mail_receive_limits SET backlog_limit=0 WHERE workspace_id=$1',[wid]);assert.equal(await submit('blocked',['a@receive.example']),0);assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].error,'MAILBOX_RECEIVE_BUDGET');
+        const other=wid+'-neighbor';await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,'healthy',$2,$3,'key','[]','{}')",[other,REGION,bucket]);assert.equal((await db.query('SELECT status FROM mail_receipts WHERE workspace_id=$1',[other])).rows[0].status,'pending');
+        await db.query('UPDATE mail_receive_limits SET backlog_limit=50000,byte_limit=1 WHERE workspace_id=$1',[wid]);raw.set('big',Buffer.from('test'));await submit('big',['a@receive.example']);await run('mailbox.ingest',{sesMessageId:'big'});assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='big'",[wid])).rows[0].error,'MAILBOX_BYTE_BUDGET');await db.query('UPDATE mail_receive_limits SET byte_limit=68719476736 WHERE workspace_id=$1',[wid]);
+      });
+      await t.test('deduplicated uploads are reclaimed without expiring the owned attachment',async()=>{
+        const mime=Buffer.from('From: fixture@example.net\r\nMessage-ID: <same@fixture.invalid>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbody\r\n--p--\r\n');for(const mid of ['physical-1','physical-2']){raw.set(mid,mime);await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid});}
+        await db.query("UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1 AND ses_message_id='physical-2'",[wid]);await assert.rejects(run('mailbox.cleanUploads',{}),(await import('./src/jobs.js')).JobDeferred);const orphan=parts.pop();assert.deepEqual(orphan?.tags?.TagSet,[{Key:'bane-kind',Value:'orphan'}]);assert.equal((await db.query('SELECT FROM mail_attachments WHERE workspace_id=$1 AND storage_key=$2',[wid,orphan!.tagged])).rowCount,0);
       });
       await t.test('inbound PostgreSQL boundary repairs NUL, split surrogate pairs, and filenames',async()=>{
         const mid='unicode';raw.set(mid,Buffer.from('From: A\0B <a@example.net>\r\nSubject: x\0y\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n'+ 'x=00y'+'a'.repeat(999996)+'=F0=9F=98=80\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="a\0b"\r\n\r\ndata\r\n--p--\r\n'));
@@ -6645,7 +6687,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('inbound ingest keeps accepted mail pending after an unclassified database disconnect',async it=>{
         const mid='disconnect';raw.set(mid,Buffer.from('Subject: retry\r\n\r\nbody'));await submit(mid,['a@receive.example']);
-        const fault=it.mock.method(runtime.db,'transaction',async()=>{throw Error('Connection terminated unexpectedly');});
+        const exec=runtime.db.execute.bind(runtime.db);let stmt=0;const fault=it.mock.method(runtime.db,'execute',async(query:Parameters<typeof exec>[0])=>{if(++stmt===3)throw Error('Connection terminated unexpectedly');return exec(query);});
         await assert.rejects(run('mailbox.ingest',{sesMessageId:mid}),{code:'MAILBOX_INGEST_UNAVAILABLE',retryable:true});
         const receipt=()=>db.query('SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);
         assert.deepEqual((await receipt()).rows,[{status:'pending',error:null}]);
@@ -6659,6 +6701,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await recoverMailReceipts(runtime);
         assert.deepEqual((await db.query("SELECT ses_message_id,recovery_attempts,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id IN ('lost-1','lost-101','lost-2') ORDER BY ses_message_id",[wid])).rows,[{ses_message_id:'lost-1',recovery_attempts:0,error:null},{ses_message_id:'lost-101',recovery_attempts:4,error:'MAILBOX_RECOVERY_EXHAUSTED'},{ses_message_id:'lost-2',recovery_attempts:1,error:null}]);
         await recoverMailReceipts(runtime);assert.equal((await jobs('mailbox.ingest')).filter(j=>j.payload.sesMessageId.startsWith('lost-')).length,100);
+      });
+      await t.test('claimed ingest uses two DB trips with no files and three with files, including a reply',async it=>{
+        const {processJobs}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL) ON COMMIT DROP;CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change()');
+        const queries=it.mock.method(pg.Client.prototype,'query');
+        for(const [i,mid] of ['parent-count','reply-count'].entries()){
+          raw.set(mid,Buffer.from(`From: a@example.net\r\nMessage-ID: <${mid}@example.net>\r\n${i?'In-Reply-To: <parent-count@example.net>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbytes\r\n--p--':'\r\nplain text'}`));let n=queries.mock.callCount();assert.equal(await submit(mid,['a@receive.example']),1);assert.equal(queries.mock.callCount()-n,1);
+          n=queries.mock.callCount();assert.equal(await processJobs(runtime,mailboxIngestJobs,1,1),1);assert.equal(queries.mock.callCount()-n,2+(i?3:2),'claim + ingest + settlement');
+        }
+        assert.equal((await db.query("SELECT count(DISTINCT thread_id)::int AS n FROM mail_messages WHERE workspace_id=$1 AND ses_message_id IN ('parent-count','reply-count')",[wid])).rows[0].n,1);
       });
     });
   });
@@ -6693,7 +6744,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await a.query(`CREATE SCHEMA ${schema}`);
       try {
         for(const c of [a,b])await c.query(`SET search_path TO ${schema}, public`);
-        await a.query(`CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL);CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL)`);
+        await a.query(`CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL);CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change()`);
         await a.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'a'||i,'mailbox.ingest','A','{}'::jsonb,now()-interval '1 hour' FROM generate_series(1,50)i UNION ALL SELECT 'b','mailbox.ingest','B','{}',now() UNION ALL SELECT 'other','fixture.other','B','{}',now()-interval '2 hours'");
         const unavailable=drizzle(a),fault=t.mock.method(unavailable,'execute',()=>{throw Error('claim unavailable');});
         await assert.rejects(processJobs({...runtime,db:unavailable},{},1,1),/claim unavailable/);fault.mock.restore();
@@ -6723,7 +6774,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
   test('inbound claim leaves waiting ingest jobs unleased while sibling lanes serve other work',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
-      const {processJobs,enqueue}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const {processJobs,enqueue}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL) ON COMMIT DROP;CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change()');
       const wid=runtime.config.workspaceId;
       for(const type of ['mailbox.ingest','mailbox.ingest','fixture.other']) await enqueue(runtime.db,{type,workspaceId:wid,payload:{}});
       let release!:()=>void,enter!:()=>void;const signal=new Promise<void>(r=>{release=r;}),entered=new Promise<void>(r=>{enter=r;});
@@ -6770,9 +6821,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='HeadObjectCommand') return {ContentLength:Buffer.byteLength(raw.get(cmd.input.Key)!),ETag:'"fixture"'};if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
       async function receive(to: string | string[], mime: string, dmarc: string | null = 'PASS', dkim?: string, timestamp = new Date().toISOString(), verdicts:{spam?:string;spf?:string}={}) {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
-        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp, recipients: Array.isArray(to) ? to : [to], ...(dmarc ? {dmarcVerdict:{status:dmarc}} : {}), dkimVerdict:{status:dkim}, spfVerdict:{status:verdicts.spf??'PASS'}, spamVerdict:{status:verdicts.spam??'PASS'}, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { ...cleanScans,timestamp, recipients: Array.isArray(to) ? to : [to], ...(dmarc ? {dmarcVerdict:{status:dmarc}} : {}), dkimVerdict:{status:dkim}, spfVerdict:{status:verdicts.spf??'PASS'}, spamVerdict:{status:verdicts.spam??'PASS'}, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
         assert.equal(await acceptInboundNotification(runtime,input),1); assert.equal(await acceptInboundNotification(runtime,input),0);
         await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,attempts:1});
+        await expandFixtureOutbox(runtime,scope);
       }
       const mime = (id: string, body: string, extra: string[]) => [`From: Customer <from@example.net>`,`To: ${publicAddress}`,'Subject: Widget issue',`Message-ID: <${id}@example.net>`,...extra,'',body].join('\r\n');
       const firstMime = mime('initial','original zebra',['Reply-To: first@example.net']);
@@ -6817,6 +6869,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return { status: 204 };
       };
       const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,attempts:attempt });
+      await t.test('inbound pause parks queued delivery; resume and terminal lease retry are generation fenced',async()=>{
+        const {processJobs}=await import('./src/jobs.js');const clone=unique('fixture-delivery');
+        await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload) SELECT $1,workspace_id,webhook_id,-1,payload FROM mailbox_webhook_deliveries WHERE id=$2",[clone,delivery.id]);
+        const state=async()=>(await db.query('SELECT status,generation,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[clone])).rows[0];
+        ok(await local('PATCH',`${base}/webhooks/${allHook.id}`,{paused:true}));await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:clone},{id:'old',attempts:1,workspaceId:scope});assert.equal((await state()).status,'paused');assert.equal(attempts,0);
+        ok(await local('PATCH',`${base}/webhooks/${allHook.id}`,{paused:false}));assert.equal((await state()).generation,1);await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:clone},{id:'old',attempts:1,workspaceId:scope});assert.equal(attempts,0);
+        // The reaper runs in a savepoint with only the spent lease visible; no unrelated delivery is dispatched.
+        await runtime.db.transaction(async tx=>{const {sql}=await import('drizzle-orm');await tx.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('spent','mailbox.webhook',${scope},${JSON.stringify({deliveryId:clone,generation:1})}::jsonb,'running',10,now()-interval '1 minute')`);assert.equal(await processJobs({...runtime,db:tx},{},1,1),0);await tx.execute(sql`DROP TABLE pg_temp.jobs`);});
+        assert.equal((await state()).last_error,'JOB_LEASE_EXHAUSTED');error(await post(`${base}/webhooks/${boxHook.id}/deliveries/${clone}/retry`,{}),409,'DELIVERY_NOT_FAILED');ok(await post(`${base}/webhooks/${allHook.id}/deliveries/${clone}/retry`,{}),202);assert.equal((await state()).generation,2);
+      });
       try {
         await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' });
         ok(await local('PATCH', `${base}/webhooks/${allHook.id}`, { headers: [{ name: 'Authorization', value: updatedAuth }] }));
@@ -9077,6 +9139,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.mailbox_write_lanes (LIKE public.mailbox_write_lanes INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_events (LIKE public.mailbox_events INCLUDING ALL);
           CREATE TABLE \${schema}.mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);
+          CREATE FUNCTION \${schema}.job_claim_class(text) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT public.job_claim_class($1)';
+          CREATE TABLE \${schema}.mail_receipts (LIKE public.mail_receipts INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_receive_limits (LIKE public.mail_receive_limits INCLUDING ALL);
+          CREATE TABLE \${schema}.mailbox_regions (LIKE public.mailbox_regions INCLUDING ALL);
+          CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);
           CREATE VIEW \${schema}.regional_simulated_connections AS SELECT * FROM public.regional_simulated_connections WHERE false;\`);

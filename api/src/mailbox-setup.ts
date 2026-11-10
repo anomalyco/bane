@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { and, eq, inArray, isNull, sql,type SQLWrapper } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { SESClient as SESClientType, ReceiptRule } from '@aws-sdk/client-ses';
 import type { S3Client as S3ClientType } from '@aws-sdk/client-s3';
 import type { SNSClient as SNSClientType } from '@aws-sdk/client-sns';
@@ -45,14 +45,8 @@ async function awsConfig(region:string, credentials:NonNullable<Runtime['config'
   const sdk = await loadMailboxSetupSdk();
   return { sdk, config: { region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new sdk.FetchHttpHandler({ requestTimeout: 15000 }) } };
 }
-export function storageBinding(wid:string,region:string|SQLWrapper,bucket:string|SQLWrapper) {
-  return sql<ReadyConnection|null>`(SELECT to_jsonb(matched) FROM (
-      SELECT 'shared' AS kind,NULL AS id,aws_account_id,NULL AS role_arn,NULL::uuid AS external_id,NULL::text AS template_version FROM provider_pool_regions
-      WHERE region=${region} AND inbound_bucket=${bucket}
-      UNION ALL SELECT c.kind,c.id,c.aws_account_id,c.role_arn,c.external_id,c.template_version FROM provider_connections c JOIN mailbox_regions r
-      ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
-      WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND r.bucket=${bucket}) matched)`;
-}
+import {storageBinding} from './mailbox-ingest-input.js';
+export {storageBinding};
 export async function mailboxS3(runtime: Runtime, wid:string, region: string, bucket:string, db:DbExecutor=runtime.db, resolved?:ReadyConnection|null) {
   let credentials=platformCredentials(runtime);
   if (runtime.config.multiTenant) {
@@ -171,6 +165,7 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     await aws('s3:PutLifecycleConfiguration', () => s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: names.bucket, LifecycleConfiguration: { Rules: [
       { ID:'bane-staging',Status:'Enabled',Filter:{Prefix:STAGING_PREFIX},Expiration:{Days:3} },
       { ID:'bane-unattributed',Status:'Enabled',Filter:{Prefix:'quarantine/'},Expiration:{Days:30} },
+      { ID:'bane-unreferenced-upload',Status:'Enabled',Filter:{Tag:{Key:'bane-kind',Value:'orphan'}},Expiration:{Days:1} },
       { ID: 'bane-raw-retention', Status: 'Enabled', Filter: { Tag:{Key:'bane-kind',Value:'raw'} }, Expiration: { Days: RAW_RETENTION_DAYS } },
       { ID:'bane-legacy-raw',Status:'Enabled',Filter:{Prefix:'raw/'},Expiration:{Days:RAW_RETENTION_DAYS} },
       ...(installationId!==POOL_INSTALLATION ? [{ID:'bane-legacy-downloads',Status:'Enabled' as const,Filter:{Tag:{Key:'bane-kind',Value:'legacy-raw'}},Expiration:{Days:1}}] : []),
@@ -193,6 +188,7 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     const subscription=subscriptions.Subscriptions?.find(sub => sub.Protocol === 'https' && sub.Endpoint === endpoint);
     const subscribed=subscription ?? await aws('sns:Subscribe', () => sns.send(new SubscribeCommand({ TopicArn: expectedTopic, Protocol: 'https', Endpoint: endpoint, ReturnSubscriptionArn: false, Attributes: { RawMessageDelivery: 'false' } }), { abortSignal: signal }));
     if (installationId===POOL_INSTALLATION && !subscribed.SubscriptionArn?.startsWith(expectedTopic+':')) throw new ApiError(503,'INBOUND_CONFIRMATION_PENDING','Waiting for confirmation of the inbound SNS subscription.',undefined,true);
+    if(installationId===POOL_INSTALLATION && runtime.config.receivingRedrive && region==='us-east-2') await aws('sns:SetSubscriptionAttributes',()=>sns.send(new sdk.sns.SetSubscriptionAttributesCommand({SubscriptionArn:subscribed.SubscriptionArn,AttributeName:'RedrivePolicy',AttributeValue:JSON.stringify({deadLetterTargetArn:`arn:aws:sqs:${region}:${account}:bane-inbound-dead-letters`})}),{abortSignal:signal}));
 
     // One receipt rule set is active per account and region. Join an existing one; never replace it.
     let active = await ses<{ Metadata?: { Name?: string }; Rules?: ReceiptRule[] }>('ses:DescribeActiveReceiptRuleSet', new DescribeActiveReceiptRuleSetCommand({}));
@@ -360,7 +356,10 @@ const scheduleDnsPage:JobHandler=async(runtime,payload)=>{
       JOIN domain_claims dc ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.connection_id=dc.connection_id
       JOIN regional_connections pc ON pc.id=d.connection_id AND pc.region=d.region AND ${connectionReady()}
       LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.identity IS NOT NULL AND (${claimReceivable()} OR dc.sending_state IN ('verified','lost')) AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
-      ORDER BY last_attempt,j.created_at NULLS FIRST,dc.token LIMIT ${dnsBatch}), queued AS (
+      ORDER BY last_attempt,j.created_at NULLS FIRST,dc.token LIMIT ${dnsBatch}), verify AS (
+      INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||dc.token,'domain.verify',d.workspace_id,jsonb_build_object('domainId',d.id,'token',dc.token) FROM due d JOIN domain_claims dc ON dc.token=d.token JOIN provider_connections pc ON pc.id=dc.connection_id
+      WHERE dc.receiving_host IS NOT NULL AND (dc.receiving_identity_at IS NULL OR dc.receiving_identity_at<now()-CASE WHEN pc.kind='byo' THEN interval '8 hours' ELSE interval '24 hours' END)
+      ON CONFLICT(id) DO UPDATE SET status='pending',payload=excluded.payload,available_at=now(),attempts=0,lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed')), queued AS (
       INSERT INTO jobs(id,type,workspace_id,payload,available_at)
       SELECT 'domain.mx:'||token,'domain.mx',workspace_id,jsonb_build_object('domainId',id,'token',token),
         now()+interval '1 hour'*(row_number() OVER(ORDER BY last_attempt,token)-1)/${dnsBatch} FROM due

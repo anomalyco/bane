@@ -42,6 +42,7 @@ export interface Config {
   platformAccount?: string;
   regionalSending?: boolean;
   trustedPool?: boolean;
+  receivingRedrive?:boolean;
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   placementShadow?: boolean;
@@ -79,7 +80,7 @@ export interface Runtime {
   db: Database; storage: Storage; config: Config;
   // Workers' public egress guards connect-time DNS; Node instead pins the checked IP in TLS.
   placementEdge?: { probesPerJob:number };
-  wake?: (readyJobs?: number, immediate?: 'webhook') => Promise<void>;
+  wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
@@ -99,6 +100,7 @@ export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type ClaimedWebhook = { delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
+  ingest?:import('./mailbox-ingest-input.js').IngestInput|null;
   webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
 
 export class ApiError extends Error {

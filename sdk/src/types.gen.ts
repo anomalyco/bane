@@ -1516,6 +1516,10 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type InboundScanPolicy = {
+    spam: 'store' | 'quarantine';
+};
+
 export type InboundDomainList = {
     data: Array<InboundDomain>;
 };
@@ -1881,6 +1885,7 @@ export type InboundMessageDetail = InboundMessage & {
     region?: string | null;
     spam?: boolean;
     rawUrl?: string | null;
+    rawExpiresAt?: string | null;
     sentAt?: string | null;
     sizeBytes?: number | null;
     headers?: Array<{
@@ -2163,7 +2168,7 @@ export type InboundWebhookDelivery = {
     id: string;
     webhookId: string;
     eventId: string;
-    status: 'pending' | 'delivered' | 'failed';
+    status: 'pending' | 'delivered' | 'failed' | 'paused';
     attemptCount: number;
     lastStatusCode: number | null;
     lastError: string | null;
@@ -9655,6 +9660,128 @@ export type ConfigureRegionAutoValidationResponses = {
 
 export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];
 
+export type GetInboundScanPolicyData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/policy';
+};
+
+export type GetInboundScanPolicyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundScanPolicyError = GetInboundScanPolicyErrors[keyof GetInboundScanPolicyErrors];
+
+export type GetInboundScanPolicyResponses = {
+    /**
+     * Success
+     */
+    200: InboundScanPolicy;
+};
+
+export type GetInboundScanPolicyResponse = GetInboundScanPolicyResponses[keyof GetInboundScanPolicyResponses];
+
+export type UpdateInboundScanPolicyData = {
+    body: InboundScanPolicy;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/policy';
+};
+
+export type UpdateInboundScanPolicyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundScanPolicyError = UpdateInboundScanPolicyErrors[keyof UpdateInboundScanPolicyErrors];
+
+export type UpdateInboundScanPolicyResponses = {
+    /**
+     * Success
+     */
+    200: InboundScanPolicy;
+};
+
+export type UpdateInboundScanPolicyResponse = UpdateInboundScanPolicyResponses[keyof UpdateInboundScanPolicyResponses];
+
 export type ListInboundDomainsData = {
     body?: never;
     path?: never;
@@ -11890,6 +12017,70 @@ export type RotateInboundWebhookSecretResponses = {
 };
 
 export type RotateInboundWebhookSecretResponse = RotateInboundWebhookSecretResponses[keyof RotateInboundWebhookSecretResponses];
+
+export type RetryInboundWebhookDeliveryData = {
+    body?: never;
+    path: {
+        id: string;
+        deliveryId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}/deliveries/{deliveryId}/retry';
+};
+
+export type RetryInboundWebhookDeliveryErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RetryInboundWebhookDeliveryError = RetryInboundWebhookDeliveryErrors[keyof RetryInboundWebhookDeliveryErrors];
+
+export type RetryInboundWebhookDeliveryResponses = {
+    /**
+     * Success
+     */
+    202: InboundOk;
+};
+
+export type RetryInboundWebhookDeliveryResponse = RetryInboundWebhookDeliveryResponses[keyof RetryInboundWebhookDeliveryResponses];
 
 export type ListInboundWebhookDeliveriesData = {
     body?: never;

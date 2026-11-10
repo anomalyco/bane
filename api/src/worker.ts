@@ -141,8 +141,9 @@ export default {
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-Bane-Environment') && !request.headers.has('X-OpenSend-Environment')) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      const body = request.method === 'HEAD' ? null : JSON.stringify({ status: 'ok', service: 'bane', multiTenant });
-      return fastSecure(new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId, 'server-timing': 'runtime;dur=0.0' } }));
+      const required=multiTenant && ('ENABLE_LIVE_SES' in env && env.ENABLE_LIVE_SES==='true');
+      const h=required ? await withRuntime(env,async r=>(await import('./receiving-health.js')).health(r)).catch(()=>({status:'unready',service:'bane',multiTenant,receiving:'not_ready'})) : {status:'ok',service:'bane',multiTenant,receiving:'not_required'};
+      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify(h), { status: h.status==='ok'?200:503, headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
@@ -239,11 +240,11 @@ export default {
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
+      await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));
-      await reconcileSharedConnections(runtime);
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

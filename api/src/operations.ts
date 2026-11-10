@@ -68,12 +68,16 @@ const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQ
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
-async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>): Promise<T> {
+async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
   const sesv2 = await loadOperationsSesv2();
   try { return await operation(sesv2); } catch (error) {
     if (error instanceof ModuleLoadError || error instanceof ApiError) throw error;
     const provider = error as { name?: string; $metadata?: { httpStatusCode?: number } };
     const name = provider?.name ?? '', status = provider?.$metadata?.httpStatusCode;
+    if (creatingIdentity && name==='LimitExceededException') {
+      log('error',{code:'SES_IDENTITY_QUOTA_EXHAUSTED',operation:'CreateEmailIdentity',message:'Request additional regional SES identity capacity.'});
+      throw new ApiError(409,'SES_IDENTITY_QUOTA_EXHAUSTED','The regional SES identity quota is full. An account operator must request a quota increase before adding another domain.');
+    }
     if (status === 403 || /AccessDenied|Unauthorized|InvalidClientTokenId|UnrecognizedClient|ExpiredToken/.test(name)) throw new ApiError(403, 'SES_ACCESS_DENIED', 'AWS denied the SES operation. Check deployment credentials and IAM permissions.');
     if (status === 429 || /TooManyRequests|Throttl|LimitExceeded/.test(name)) throw new ApiError(429, 'SES_RATE_LIMITED', 'The SES control-plane quota was exceeded. Retry after a short delay.', undefined, true);
     if (status === 404 || name === 'NotFoundException') throw new ApiError(404, 'SES_IDENTITY_NOT_FOUND', 'The requested identity does not exist in this SES region.');
@@ -235,6 +239,10 @@ async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=
   return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
 const dnsUnavailable = () => new ApiError(503,'DOMAIN_DNS_UNAVAILABLE','DNS did not return a definitive answer. Verification will retry.',undefined,true);
+async function identityQuotaAlert(runtime:Runtime,region:string,account:string,error:unknown){
+  if(!(error instanceof ApiError) || error.code!=='SES_IDENTITY_QUOTA_EXHAUSTED')return;
+  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('identity-quota:'||${account}::text||':'||${region}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${runtime.config.workspaceId},jsonb_build_object('code','SES_IDENTITY_QUOTA_EXHAUSTED','region',${region}::text)) ON CONFLICT DO NOTHING`);
+}
 async function txtProof(name: string, token: string) {
   try {
     const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'manual' }); // Workers reject 'error'; a 3xx fails !r.ok below.
@@ -350,7 +358,7 @@ const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFac
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
 async function ensureIdentity(client: Awaited<ReturnType<typeof getSes>>, name: string, token: string,installation?:string,regionalByo=false) {
   try {
-    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})));
+    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})),true);
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
@@ -553,6 +561,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
           if (trusted && !await exclusive()) defer(5000);
         }
       }
+      await db.execute(sql`UPDATE domain_claims SET receiving_proved_at=CASE WHEN ${positive} THEN now() END, receiving_identity_at=CASE WHEN ${current.connection.legacy===false} THEN receiving_identity_at WHEN ${identityVerified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
       return saveObservation(db,current,job.workspaceId,sesFacts(identity),observation,{sending:report.ready,sendingRevoked:current.identity?.imported && !report.ready,identityVerified,proven:positive},dmarc);
     });
     if (!outcome || (outcome.sending_state==='verified' && report.mailFromStatus!=='PENDING' && outcome.receiving_state!=='lost')) return; // MX-only upkeep owns receiving changes after sending verifies.
@@ -576,7 +585,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     } else if (e instanceof ApiError && e.code==='DOMAIN_DNS_UNAVAILABLE') {
       // Transport failures never count as evidence against a working domain.
       defer(Math.min(3_600_000,30_000*2**Math.min(poll,7)),nextPoll);
-    } else if (!(e instanceof ApiError) || !e.retryable) throw e;
+    } else if (!(e instanceof ApiError) || !e.retryable) {await identityQuotaAlert(runtime,row.region,row.connection.aws_account_id,e);throw e;}
   }
   defer(backoff(poll),nextPoll);
 };
@@ -588,15 +597,29 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
   // A definitive missing/invalid/ambiguous answer must still replace it.
-  const [observation,dmarc]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;})]);
+  const [observation,dmarc,proof]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;}), row.connection.kind==='shared' && (checkReceiving || row.receiving_host) ? ownershipTxt(row.name,row.token) : undefined]);
   if(!observation && dmarc===undefined) throw dnsUnavailable();
+  // A sending promotion to Virginia doesn't move the existing Ohio ingress. Re-attest the
+  // original account/host in Ohio; a successful Virginia SES read is not evidence for it.
+  let retainedIdentity:boolean|undefined;
+  if(row.connection.kind==='shared' && row.connection.legacy===false && row.receiving_host && row.region!=='us-east-2'){
+    const due=await runtime.db.execute(sql`SELECT FROM domain_claims dc JOIN mailbox_domains m ON m.workspace_id=dc.workspace_id AND m.domain_id=${row.id} AND m.region='us-east-2' AND m.status='active' AND m.receiving_host=dc.receiving_host WHERE dc.workspace_id=${job.workspaceId} AND dc.token=${row.token} AND coalesce(dc.receiving_identity_at,'-infinity')<now()-interval '24 hours'`);
+    if(due.rowCount){
+      if(!(await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before) VALUES('domain.verify:platform',clock_timestamp()+interval '1 second') ON CONFLICT(workspace_id) DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount)throw new JobDeferred(new Date(Date.now()+1500).toISOString());
+      const client=await getSes({...runtime,config:{...runtime.config,regions:['us-east-2']}},'us-east-2',{...row.connection,identitySession:{name:row.name,purpose:'verify'}});
+      try{const identity=await sesCall(({GetEmailIdentityCommand})=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));retainedIdentity=identity.VerificationStatus==='SUCCESS' && !!ownsIdentity(identity,row.token);}
+      catch(e){if(!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND')throw e;retainedIdentity=false;}
+    }
+  }
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
     if (!current?.identity || current.token!==row.token || current.receiving_host!==row.receiving_host) return;
     assertSharedAccount(runtime,current.connection);
+    if(proof!==undefined) await db.execute(sql`UPDATE domain_claims SET receiving_proved_at=CASE WHEN ${proof} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
+    if(retainedIdentity!==undefined)await db.execute(sql`UPDATE domain_claims SET receiving_identity_at=CASE WHEN ${retainedIdentity} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
     // Never grant receiving rights (notably to a Virginia sending binding) from a DMARC check.
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
-    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:current.identity.proven},dmarc);
+    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:proof??current.identity.proven},dmarc);
   });
   if(dmarc===undefined) throw dnsUnavailable(); // Retry after committing any independent MX change.
 };
@@ -673,6 +696,7 @@ export function registerOperations(app: App) {
       }
       catch(e) {
         if (e instanceof ModuleLoadError) throw e;
+        await identityQuotaAlert(runtime,row.region,claim.connection.aws_account_id,e);
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
@@ -999,7 +1023,7 @@ function registerPublicEvents(app: App) {
     // Mailbox receipt notifications arrive on a separate Bane-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
       const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
-      if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
+      if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
     verifySesAccount(c.env, message, envelope.TopicArn);

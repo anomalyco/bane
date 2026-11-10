@@ -1,13 +1,14 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
+import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
-import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageBinding } from './mailbox-setup.js';
+import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
@@ -326,16 +327,35 @@ export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
 const ingestJob: JobHandler = async (runtime, payload, job) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
-  const [read] = await runtime.db.select({receipt:mailReceipts,binding:runtime.config.multiTenant ? storageBinding(scope.workspaceId,sql`mail_receipts.region`,sql`mail_receipts.bucket`) : sql<null>`NULL`}).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
-  const receipt=read?.receipt;
-  if (!receipt || receipt.status !== 'pending') return;
+  const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config.multiTenant,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
+  if(!receipt)return;
   const notification = receipt.notification as ReceivedNotification;
-  const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,read!.binding);
+  const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
   const rawKey=workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
+  const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
+  const spam=verdicts.spam!=='PASS';
+  const quarantine=verdicts.virus!=='PASS'?'MAILBOX_VIRUS_QUARANTINED':spam && receipt.spamPolicy==='quarantine'?'MAILBOX_SPAM_QUARANTINED':null;
+  if(quarantine){
+    try {
+      const {CopyObjectCommand}=await loadIngestS3();
+      await s3.send(new CopyObjectCommand({Bucket:receipt.bucket,Key:'quarantine/'+sesMessageId,CopySource:`${receipt.bucket}/${sourceKey}`,CopySourceIfMatch:receipt.notification.stagingEtag as string|undefined,TaggingDirective:'REPLACE'}));
+      log('warn',{code:quarantine,workspaceId:scope.workspaceId,virus:verdicts.virus??'missing',spam:verdicts.spam??'missing'});
+      throw new ApiError(422,quarantine,'The scan did not permit delivery.');
+    } finally {s3.destroy();}
+  }
+  const readStarted=performance.now();
   let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;
   try {
-    copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined);
+    copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
+      const reserved=await runtime.db.execute(sql`WITH r AS MATERIALIZED (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE),
+        debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=coalesce((SELECT byte_limit FROM mail_receive_limits WHERE workspace_id=${scope.workspaceId}),68719476736)
+          ON CONFLICT(workspace_id) DO UPDATE SET bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
+          WHERE (CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END)+excluded.bytes<=coalesce((SELECT byte_limit FROM mail_receive_limits WHERE workspace_id=${scope.workspaceId}),68719476736) RETURNING 1),
+        charged AS (UPDATE mail_receipts SET reserved_bytes=${size} WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND EXISTS(SELECT FROM debit) RETURNING 1)
+        SELECT FROM charged UNION ALL SELECT FROM r WHERE reserved_bytes=${size}`);
+      if(!reserved.rowCount)throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
+    });
   } catch (error) {
     s3.destroy();
     if (error instanceof ModuleLoadError || error instanceof ApiError) throw error;
@@ -343,15 +363,13 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     if (error instanceof Error && error.name==='AccessDenied') throw new ApiError(403,'MAILBOX_RAW_ACCESS_DENIED','Access to the mailbox object was denied.');
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
   }
-  const {bytes:raw,sizeBytes}=copied;
+  const rawMs=performance.now()-readStarted,{bytes:raw,sizeBytes}=copied;
   const email = copied.large ? null : await parseInboundMime(raw);
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
-  const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
-  const spam = verdicts.spam === 'FAIL' || verdicts.virus === 'FAIL';
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
   const inReplyTo = normalizeMessageId(email?.inReplyTo);
   const references = messageIdList(email?.references);
@@ -367,6 +385,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const skipAttachments = (email?.attachments.length ?? 0) > MAX_ATTACHMENTS;
   if (skipAttachments) log('warn', { code: 'MAILBOX_ATTACHMENTS_SKIPPED', count: email!.attachments.length, limit: MAX_ATTACHMENTS });
   try {
+    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>`${workspacePrefix(scope.workspaceId,'att')}${messageRowId}/matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`));
+    if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${scope.workspaceId},${sesMessageId},${receipt.bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET check_at=now()+interval '1 hour'`);
     for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);
       const attachmentId = `matt_${(await digest(`${messageRowId}:${index}`)).slice(0, 32)}`;
@@ -382,9 +402,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
   } finally { s3.destroy(); }
 
-  const runnable = await runtime.db.transaction(async tx => {
-    await tx.execute(sql`INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(${scope.workspaceId},'ingest'),(${scope.workspaceId},'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false`);
-    return storeIncoming(tx,{
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,{
         id: messageRowId, ...scope, direction: 'inbound', region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
          fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
@@ -392,8 +410,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: receipt.bucket, rawKey,
         verdicts, spam, automated: automated(email, raw, from.address), status,
       },attachments,verifiedFrom,!receipt.notification.stagingEtag);
-  });
-  log('info', { code: 'MAILBOX_MESSAGE_INGESTED', status, bytes:sizeBytes, attachments: attachments.length });
+  log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
 

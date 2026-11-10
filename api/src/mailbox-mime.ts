@@ -36,7 +36,7 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
 }
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
-export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string) {
+export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string,reserve?:(bytes:number)=>Promise<void>) {
   const { HeadObjectCommand, GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
   const location={Bucket:bucket,Key:source};
   const head=await client.send(new HeadObjectCommand(location));
@@ -44,6 +44,7 @@ export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:stri
   if (etag && head.ETag!==etag) throw new ApiError(409,'MAILBOX_STAGING_CHANGED','The recovered message no longer matches the inspected object.');
   const size=head.ContentLength;
   if (size>40*MiB) throw new ApiError(413,'RAW_MESSAGE_TOO_LARGE','The raw message exceeds 40 MiB.');
+  await reserve?.(size); // Before GET, copy, MIME or attachment work. Idempotent by receipt.
   // Pin the checked object and do not let fetch transparently expand BYO Content-Encoding metadata.
   const get=async(start:number,end:number,range:boolean)=>{
     const object=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,ResponseContentEncoding:'identity',Range:range?`bytes=${start}-${end-1}`:undefined}));

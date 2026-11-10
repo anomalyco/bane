@@ -16,6 +16,7 @@ const values = z.object({
   BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
   BANE_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
   BANE_TRUSTED_POOL: z.enum(['true','false']).default('false'),
+  BANE_RECEIVING_REDRIVE: z.enum(['true','false']).default('false'),
   // Development installations only: let Hosted pools become ready while the AWS account is still in the SES sandbox.
   BANE_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
   BANE_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).default('false'),
@@ -107,7 +108,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
-    platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
+    platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, receivingRedrive:v.BANE_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.BANE_REGIONAL_SENDING==='true' && v.BANE_TRUSTED_POOL==='true',
     allowSesSandbox: v.MULTI_TENANT==='true' && v.BANE_ALLOW_SES_SANDBOX==='true',
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && v.BANE_REQUIRE_DMARC_FOR_BULK === 'true',

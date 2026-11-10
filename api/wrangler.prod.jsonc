@@ -20,6 +20,7 @@
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",
     "BANE_REGIONAL_SENDING": "true",
     "BANE_TRUSTED_POOL": "true",
+    "BANE_RECEIVING_REDRIVE": "true",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",
@@ -53,7 +54,7 @@
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
-      { "queue": "bane-prod-work", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
+      { "queue": "bane-prod-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
       { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1 }
     ]

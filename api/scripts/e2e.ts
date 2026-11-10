@@ -52,6 +52,8 @@ const SKIP: Partial<Record<Op,string>> = destructive ? {
   completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating Google session for the success flow.',
   receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
 } : safeModeSkips;
+SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
+SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
 
 const started = Date.now();
 const prefix = `e2e-${started}-${randomUUID().slice(0, 12)}`;
@@ -585,6 +587,7 @@ async function inboundKey(addressId: string, otherId: string) {
 }
 
 async function inboundWebhook(addressId: string, threadId: string) {
+  await api('getInboundScanPolicy',{});
   // Only this address's thread-state metadata, never message.received/stored or mail content.
   const item = await api('createInboundWebhook', { body: { url: webhookUrl, description: prefix, addressIds: [addressId], eventTypes: ['thread.updated'], paused: true } });
   const path = { id: item.id };
