@@ -19,7 +19,7 @@ import { screenSnapshot } from './screen.js';
 // so the hot path costs three database statements per batch rather than ten per email.
 
 export type Mail = typeof emails.$inferSelect;
-type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
+type Review = { version:number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; sendClient?:(domainId:string)=>SESv2Client; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
@@ -269,7 +269,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       LEFT JOIN ses_installation_settings s USING (workspace_id)
       ${mx ? sql`JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=p.workspace_id AND pc.region=${region} AND pc.aws_account_id=${accountId}` : !isSimulatedSes(runtime) ? sql`LEFT JOIN ses_region_discovery d ON d.workspace_id = p.workspace_id AND d.region = ${region}` : sql``}
     ), reviews AS (
-      SELECT carrier, r.draft, r.rendered FROM (
+      SELECT carrier, r.renderer_version, r.draft, r.rendered FROM (
         SELECT workspace_id, campaign_id, review_id, min(id) AS carrier FROM selected WHERE review_id IS NOT NULL GROUP BY 1,2,3
       ) refs JOIN sending_campaign_reviews r ON r.workspace_id=refs.workspace_id AND r.campaign_id=refs.campaign_id AND r.id=refs.review_id
     ) ${simple ? sql`, ${claimCtes(runtime,region,simple)}, slow AS (
@@ -279,7 +279,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       ${simple ? sql`CASE WHEN EXISTS(SELECT 1 FROM input WHERE id=leased.id) THEN coalesce((SELECT status FROM claimed WHERE id=leased.id),'lost') END` : sql`NULL`} AS claim_status,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
-      r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
+      r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM selected leased
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
     LEFT JOIN reviews r ON r.carrier = leased.id
@@ -287,13 +287,13 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
   if (result.rows[0]?.webhooks) await wakeWebhooks(runtime,Number(result.rows[0].webhooks));
   const owners = new Map<string, Owner>();
-  const reviews = new Map<string, Pick<Review, 'draft' | 'rendered'>>();
+  const reviews = new Map<string, Pick<Review, 'version' | 'draft' | 'rendered'>>();
   const reviewKey = (row: Record<string, unknown>) => JSON.stringify([row.workspaceId, row.campaignId, row.reviewId]);
   for (const row of result.rows) if (row.review_draft && row.review_rendered) {
-    reviews.set(reviewKey(row), { draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
+    reviews.set(reviewKey(row), { version:Number(row.review_version), draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
   }
   return result.rows.map(row => {
-    const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, claim_status, webhooks, ...fields } = row;
+    const { review_version, review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, claim_status, webhooks, ...fields } = row;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
     const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState; paused_at?: string | null }) | null;
     const ready = regionReady && !pc0?.paused_at && !(mx && !isSimulatedSes(runtime) && pc0?.kind === 'shared' && pc0.tenant_state !== 'ready');
@@ -313,7 +313,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
       owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
         sendClient:pc?.template_version==='v5'?domainId=>providerClient(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
-        tenantName: pc?.kind === 'shared' ? pc.pool_tenant_name ?? (pc.managed_tenant ? mxResourceName(workspaceId) : `opensend-${workspaceId}`) : undefined, feedbackTopic: pc?.feedback_topic_arn };
+        tenantName: pc?.kind === 'shared' ? pc.pool_tenant_name ?? (pc.managed_tenant ? mxResourceName(workspaceId) : `bane-${workspaceId}`) : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
@@ -528,7 +528,7 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
   const expired=(providerCalled:boolean):Outcome=>({mail,type:'reject',errorCode:'SES_ACCOUNT_PAUSE_EXPIRED',data:{code:'SES_ACCOUNT_PAUSE_EXPIRED',providerCalled,retryable:false}});
   if (Date.now()>=expires) return expired(false);
   const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
-    ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
+    ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'bane_email_id', Value: mail.id }, { Name: 'bane_workspace_id', Value: a.workspaceId }, { Name: 'bane_priority', Value: s.kind }],
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
     ...(item.owner.tenantName ? { TenantName: item.owner.tenantName } : {}), Content: item.content,
   };
@@ -618,7 +618,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       INSERT INTO jobs(id, workspace_id, type, payload)
       SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
     ), simulated_callbacks AS (
-      SELECT 'urn:opensend:simulated-ses:' || m.region AS topic_arn, m.id || ':' || kind AS message_id, i.workspace_id, m.region, x.provider_id,
+      SELECT 'urn:bane:simulated-ses:' || m.region AS topic_arn, m.id || ':' || kind AS message_id, i.workspace_id, m.region, x.provider_id,
         i.created_at + CASE WHEN kind = 'Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs}::int ELSE 0 END * interval '1 millisecond' AS created_at, kind
       FROM inserted i JOIN input x ON x.event_id = i.id JOIN mail m ON m.id = i.email_id, unnest(ARRAY['Send','Delivery']) kind
       WHERE ${simulated && !runtime.feedback}::boolean AND x.type = 'accepted' AND x.provider_id LIKE 'sim\\_%'

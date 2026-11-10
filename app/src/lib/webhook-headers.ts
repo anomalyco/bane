@@ -2,11 +2,11 @@
 export const MAX_WEBHOOK_HEADERS = 10
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 const FIELD_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/
-const RESERVED = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|opensend-test)$|^proxy-/i
+const RESERVED = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|bane-test|opensend-test)$|^proxy-/i
 
 function reservedMessage(name: string) {
   if (/^cookie$/i.test(name)) return 'Cookie is not allowed. Use an endpoint token instead.'
-  if (/^(?:webhook-|opensend-test$)/i.test(name)) return `${name} is set by Bane.`
+  if (/^(?:webhook-|(?:bane|opensend)-test$)/i.test(name)) return `${name} is set by Bane.`
   return `${name} is reserved for the HTTP connection.`
 }
 

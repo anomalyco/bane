@@ -17,7 +17,7 @@ function options(args:string[]) {
   if (region!=='us-east-2') throw Error('Only us-east-2 is supported.');
   const workspaces=(v.workspaces??'').split(',').sort();
   if (workspaces.some(w=>w!=='default' && !/^ws_[0-9a-f]{32}$/.test(w)) || !workspaces.some(w=>w!=='default') || new Set(workspaces).size!==workspaces.length) throw Error('Expected exact, distinct workspace IDs.');
-  const buckets=[old,dest].map(a=>mailboxResources(POOL_INSTALLATION,region,a).bucket);
+  const buckets=[`opensend-mx-${old}-mail-${region}`,mailboxResources(POOL_INSTALLATION,region,dest).bucket];
   if (v['old-bucket']!==buckets[0] || v['new-bucket']!==buckets[1]) throw Error('Expected the account-specific Ohio Hosted mail bucket names.');
   if (!run || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(run) || [v.restore,v.finalize].some(id=>id!==undefined && id!==run)) throw Error('Expected a single run ID.');
   if ([v.apply,v.plan,v.restore,v.finalize].filter(Boolean).length>1 || (v.apply ? !expect || !/^[0-9a-f]{64}$/.test(expect) : expect!==undefined)) throw Error('Choose --plan, --apply --expect-plan-sha256 HASH, --restore RUN, or --finalize RUN.');
@@ -72,7 +72,7 @@ const hashSql=(expr:string)=>`encode(sha256(convert_to(${expr},'UTF8')),'hex')`;
 
 async function schemaCheck(db:Client) {
   const dir=new URL('../migrations/',import.meta.url), files=(await readdir(dir)).filter(n=>/^\d+_[a-z_]+\.sql$/.test(n)).sort();
-  const applied=await db.query('SELECT name,checksum FROM opensend_migrations ORDER BY name COLLATE "C"');
+  const applied=await db.query('SELECT name,checksum FROM bane_migrations ORDER BY name COLLATE "C"');
   const sums=new Map(applied.rows.map(r=>[r.name,r.checksum]));
   if (files.length!==sums.size || !(await Promise.all(files.map(async n=>sums.get(n)===sha(await readFile(new URL(n,dir),'utf8'))))).every(Boolean)) throw Error('Wrong migration set or checksum.');
   const {rows:[database]}=await db.query(`SELECT system_identifier::text AS system_id,current_database() AS database,current_schema() AS schema FROM pg_catalog.pg_control_system()`);
@@ -170,7 +170,7 @@ export async function rehomeHostedAccount(db:Client,args:string[]) {
       // finishing an admission or a provider update must commit first (or cause a short timeout).
       await db.query(`LOCK TABLE ${tables.map(t=>t.name).join(',')},jobs IN SHARE ROW EXCLUSIVE MODE`);
       await db.query(`LOCK TABLE workspaces,ses_installation_settings,provider_feedback_history,domain_sending_bindings,operation_domains,sending_emails,sending_campaigns,mailboxes,mailbox_addresses,mailbox_messages IN SHARE MODE`);
-      await db.query("SELECT pg_advisory_xact_lock(hashtextextended('opensend:hosted-account-cutover',0))");
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended('bane:hosted-account-cutover',0))");
     }
     const database=await schemaCheck(db);
     const run=(await db.query('SELECT plan_sha256,post_sha256,restored_at,finalized_at,inputs=$2::jsonb AS matches FROM hosted_rehome_runs WHERE run_id=$1',[i.run,i])).rows[0];

@@ -2,15 +2,15 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
+      "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
       "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2", "s3:prefix": "staging/"}}
     },
     {
-      "Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/quarantine/?*",
+      "Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/quarantine/?*",
       "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}}
     },
     {
-      "Effect": "Allow", "Action": ["s3:PutObject", "s3:AbortMultipartUpload"], "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/workspaces/ws_????????????????????????????????/raw/?*.eml",
+      "Effect": "Allow", "Action": ["s3:PutObject", "s3:AbortMultipartUpload"], "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/workspaces/ws_????????????????????????????????/raw/?*.eml",
       "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}, "Null": {"s3:RequestObjectTagKeys": "true"}}
     },
     {
@@ -29,41 +29,30 @@
       "Effect": "Deny", "NotAction": "ses:SendEmail", "Resource": "arn:aws:ses:*:*:identity/*@*"
     },
     {
-      "Effect": "Deny", "Action": "*", "Resource": [
-        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-042df6f752eaa1f62cb8-*",
-        "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:opensend-042df6f752eaa1f62cb8-*",
-        "arn:aws:s3:::opensend-042df6f752eaa1f62cb8-*"
-      ]
-    },
-    {
-      "Sid": "ProtectAdoptedIdentities", "Effect": "Deny", "NotAction": ["ses:GetEmailIdentity", "ses:SendEmail"],
-      "Resource": "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/*"
-    },
-    {
       "Effect": "Allow", "Action": "ses:GetEmailIdentity", "Resource": "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/?*.??*"
     },
     {
       "Effect": "Allow", "Action": "ses:CreateEmailIdentity", "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/?*.??*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*"],
       "Condition": {
-        "StringLike": {"aws:RequestTag/opensend:domain-claim": "????????-????-4???-????-????????????"},
-        "StringEquals": {"aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "domain-identity"},
-        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:domain-claim", "opensend:owner", "opensend:installation-id", "opensend:purpose"]}
+        "StringLike": {"aws:RequestTag/bane:domain-claim": "????????-????-4???-????-????????????"},
+        "StringEquals": {"aws:RequestTag/bane:owner": "bane", "aws:RequestTag/bane:installation-id": "bane:pool", "aws:RequestTag/bane:purpose": "domain-identity"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["bane:domain-claim", "bane:owner", "bane:installation-id", "bane:purpose"]}
       }
     },
     {
       "Effect": "Allow", "Action": "ses:TagResource", "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/?*.??*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*"],
       "Condition": {
-        "StringLike": {"aws:ResourceTag/opensend:domain-claim": "????????-????-4???-????-????????????"},
-        "StringEquals": {"aws:RequestTag/opensend:domain-claim": "${aws:ResourceTag/opensend:domain-claim}", "aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "domain-identity", "aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "domain-identity"},
-        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:domain-claim", "opensend:owner", "opensend:installation-id", "opensend:purpose"]}
+        "StringLike": {"aws:ResourceTag/bane:domain-claim": "????????-????-4???-????-????????????"},
+        "StringEquals": {"aws:RequestTag/bane:domain-claim": "${aws:ResourceTag/bane:domain-claim}", "aws:ResourceTag/bane:owner": "bane", "aws:ResourceTag/bane:installation-id": "bane:pool", "aws:ResourceTag/bane:purpose": "domain-identity", "aws:RequestTag/bane:owner": "bane", "aws:RequestTag/bane:installation-id": "bane:pool", "aws:RequestTag/bane:purpose": "domain-identity"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["bane:domain-claim", "bane:owner", "bane:installation-id", "bane:purpose"]}
       }
     },
     {
       "Effect": "Allow", "Action": ["ses:PutEmailIdentityMailFromAttributes", "ses:DeleteEmailIdentity", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:ListResourceTenants"],
       "Resource": "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/?*.??*",
       "Condition": {
-        "StringLike": {"aws:ResourceTag/opensend:domain-claim": "????????-????-4???-????-????????????"},
-        "StringEquals": {"aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "domain-identity"}
+        "StringLike": {"aws:ResourceTag/bane:domain-claim": "????????-????-4???-????-????????????"},
+        "StringEquals": {"aws:ResourceTag/bane:owner": "bane", "aws:ResourceTag/bane:installation-id": "bane:pool", "aws:ResourceTag/bane:purpose": "domain-identity"}
       }
     }
   ]

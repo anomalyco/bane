@@ -3,13 +3,13 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: opensend
-      POSTGRES_DB: opensend
+      POSTGRES_USER: bane
+      POSTGRES_DB: bane
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     ports: ["127.0.0.1:55432:5432"]
     volumes: ["postgres:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U opensend -d opensend"]
+      test: ["CMD-SHELL", "pg_isready -U bane -d bane"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -25,10 +25,10 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
-    image: opensend-api:local
+    image: bane-api:local
     env_file: .env
     environment:
-      DATABASE_URL: postgres://opensend:${POSTGRES_PASSWORD}@postgres:5432/opensend
+      DATABASE_URL: postgres://bane:${POSTGRES_PASSWORD}@postgres:5432/bane
       S3_ENDPOINT: http://storage:9000
       PORT: 8787
       HOST: 0.0.0.0
@@ -37,11 +37,11 @@ services:
       postgres: { condition: service_healthy }
       storage: { condition: service_started }
   worker:
-    image: opensend-api:local
+    image: bane-api:local
     command: ["node", "dist/runner.js"]
     env_file: .env
     environment:
-      DATABASE_URL: postgres://opensend:${POSTGRES_PASSWORD}@postgres:5432/opensend
+      DATABASE_URL: postgres://bane:${POSTGRES_PASSWORD}@postgres:5432/bane
       S3_ENDPOINT: http://storage:9000
       PORT: 8787
       HOST: 0.0.0.0

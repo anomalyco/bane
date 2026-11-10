@@ -26,7 +26,7 @@ import { byoStackTopic } from './provider-connections.js';
 import { byoEnabled } from './byo-pilot.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
 import { awsError, feedbackUrl, mxOwnerTag, mxResourceName, POOL_INSTALLATION } from './ses-setup.js';
-import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
+import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, simulatedTopic, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
@@ -40,7 +40,7 @@ export type { PublishedEvent } from './db/operations.js';
 const now = () => new Date().toISOString();
 const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
 const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: SuppressionEventData }).openapi('Event');
-const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|opensend-test)$|^proxy-/i;
+const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|bane-test|opensend-test)$|^proxy-/i;
 export const WebhookHeaders = z.array(z.object({
   name: z.string().min(1).max(64).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).refine(name => !reservedHeader.test(name), 'Reserved webhook header.'),
   value: z.string().max(2048).regex(/^[\t\x20-\x7e\x80-\xff]*$/, 'Use single-line HTTP field bytes.'),
@@ -120,7 +120,7 @@ export async function encrypt(runtime: Pick<Runtime, 'config'>, secret: string, 
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(binding) }, current.key, new TextEncoder().encode(secret));
   return `v1.${current.id}.${hex(iv)}.${hex(new Uint8Array(encrypted))}`;
 }
-export async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: string, binding: string) {
+export async function decrypt(runtime: {config: Pick<Config, 'encryptionKey' | 'previousEncryptionKey'>}, ciphertext: string, binding: string) {
   const parts = ciphertext.split('.'), versioned = parts.length === 4 && parts[0] === 'v1';
   const [iv, value] = versioned ? parts.slice(2) : parts;
   const rotationRequired = () => new ApiError(503, 'KEY_ROTATION_REQUIRED', 'The webhook secret cannot be decrypted with configured keys. Restore its encryption key or rotate the webhook secret.');
@@ -208,7 +208,7 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
   await db.insert(unsubscribeTokens).values(link.record);
   return link.url;
 }
-const claimTag = 'opensend:domain-claim';
+const claimTag = 'bane:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
@@ -243,6 +243,16 @@ async function txtProof(name: string, token: string) {
     return answer.Status === 0 && !!answer.Answer?.some(rr => rr.type === 16 && rr.name.toLowerCase().replace(/\.$/, '') === name && (rr.data === `"${token}"` || rr.data === token));
   } catch { throw dnsUnavailable(); }
 }
+// Either published label proves the same stored token. A resolver error is not proof of loss.
+async function ownershipTxt(domain: string, token: string) {
+  let failed = false;
+  for (const label of ['_bane', '_opensend']) {
+    try { if (await txtProof(`${label}.${domain}`, token)) return true; }
+    catch { failed = true; }
+  }
+  if (failed) throw dnsUnavailable();
+  return false;
+}
 const state = (verified:boolean) => verified ? 'verified' as const : 'pending' as const;
 function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; regional?:boolean; proven:boolean; imported?:boolean; txtOwned?:boolean }, mx?:MxReport|null, note?:string|null, observation?:DmarcObservation|null): Readiness {
   const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
@@ -262,8 +272,8 @@ function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>
   }
   let verified = value.VerifiedForSendingStatus === true, verificationStatus = value.VerificationStatus ?? 'NOT_STARTED';
   if (hosted) {
-    if (hosted.shared) dns.push({ name:`_opensend.${row.name}`,type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.proven) });
-    if (hosted.imported) dns.push({name:`_opensend.${row.name}`,type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.txtOwned===true),note:'Optional for sending. Publish this record and verify the domain to claim exclusive ownership.'});
+    if (hosted.shared) dns.push({ name:`_bane.${row.name}`,type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.proven) });
+    if (hosted.imported) dns.push({name:`_bane.${row.name}`,type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.txtOwned===true),note:'Optional for sending. Publish this record and verify the domain to claim exclusive ownership.'});
     verified = verified && hosted.proven && signed && (hosted.imported || (new Set(dkim?.Tokens).size===3 && (!dkim?.SigningAttributesOrigin || dkim.SigningAttributesOrigin==='AWS_SES')));
     if (!verified && verificationStatus === 'SUCCESS') verificationStatus = 'PENDING';
   }
@@ -295,7 +305,7 @@ function derivedReadiness(row: ClaimRow): Readiness {
   if (facts?.adopted) report.dns=[]; // No DNS setup is authorized by send-only operator attestation.
   return report;
 }
-const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.pool_tenant_name??(row.connection.managed_tenant?mxResourceName(wid):`opensend-${wid}`), ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
+const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.pool_tenant_name??(row.connection.managed_tenant?mxResourceName(wid):`bane-${wid}`), ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
 type ReceivingObservation={mx:MxReport;note?:string};
 // The caller holds the claim lock. Only a full identity check can change eligibility; an MX-only
 // observation may change routing but can never grant ownership or qualify an unverified SES identity.
@@ -339,11 +349,11 @@ const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFac
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
 async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string,installation?:string,regionalByo=false) {
   try {
-    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'opensend:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'opensend:purpose',Value:'domain-identity'}]:[])]})));
+    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})));
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
-    if (!ownsIdentity(existing,token) || regionalByo && ![mxOwnerTag,{Key:'opensend:installation-id',Value:installation},{Key:'opensend:purpose',Value:'domain-identity'}].every(tag=>existing.Tags?.some(t=>t.Key===tag.Key && t.Value===tag.Value))) throw unavailableDomain();
+    if (!ownsIdentity(existing,token) || regionalByo && ![mxOwnerTag,{Key:'bane:installation-id',Value:installation},{Key:'bane:purpose',Value:'domain-identity'}].every(tag=>existing.Tags?.some(t=>t.Key===tag.Key && t.Value===tag.Value))) throw unavailableDomain();
     return existing;
   }
 }
@@ -501,8 +511,8 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // is established, keep checking it even if DKIM regresses: receive-only routing has its own grace.
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
     const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
-    const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(()=>null),
-      scopedImport || row.connection.legacy===false ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
+    const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? ownershipTxt(row.name,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(()=>null),
+      scopedImport || row.connection.legacy===false ? undefined : receivingMx(row),scopedImport ? ownershipTxt(row.name,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
     if (shared && report.ready && row.connection.tenant_state!=='ready') {
@@ -974,7 +984,7 @@ function registerPublicEvents(app: App) {
       return c.json({ accepted: true }, 202);
     }
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
-    // Mailbox receipt notifications arrive on a separate OpenSend-owned topic and carry no sending account.
+    // Mailbox receipt notifications arrive on a separate Bane-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
       const runnable = await acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
       if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
@@ -1112,7 +1122,7 @@ function registerMetrics(app: App) {
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
     const body = await cachedDashboardRead(new URL(c.req.url).origin, ['metrics', a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
-    c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
+    c.header('x-bane-metrics-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value, 200);
   });
 }
@@ -1129,7 +1139,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const url = webhookUrl(runtime, delivery.url), binding = secretBinding(job, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);
     const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
-    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'Bane-Webhooks/1.0', ...(delivery.synthetic ? { 'Bane-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < WEBHOOK_ATTEMPTS;
@@ -1162,7 +1172,7 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const data = item.message as Record<string, any>;
   const { kind, providerId } = sesFeedbackIdentity(data);
   const type = kind === 'Send' ? 'send' : kind === 'Delivery' ? 'delivery' : 'receipt';
-  const simulated = item.topicArn === `urn:opensend:simulated-ses:${item.region}`;
+  const simulated = simulatedTopic(item.topicArn, item.region);
   if (type === 'receipt' && simulated) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
   // HTTP without a queue still defers these to its durable job. The queue can apply the
   // same facts to a whole batch; subscription changes keep their distinct consent workflow.
@@ -1196,7 +1206,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
   for (const [index, item] of items.entries()) {
     try {
-      if (item.topicArn.startsWith('urn:opensend:simulated-ses:')) assertSimulatedFeedback(runtime, item);
+      if (simulatedTopic(item.topicArn)) assertSimulatedFeedback(runtime, item);
       else verifySesAccount(runtime, item.message, item.topicArn);
       group.push({ index, input: routineInput(item) });
     } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
@@ -1262,7 +1272,7 @@ async function quarantineFeedback(runtime: Runtime, item: FeedbackItem, workspac
     // Keep the verified input as escaped JSON text, not JSONB: a diagnostic may contain NUL.
     const key = await digest(JSON.stringify([item.topicArn,item.messageId]));
     const provider=(item.message.mail as {messageId?:unknown})?.messageId, tag=taggedEmailId(item.message);
-    const simulated=item.topicArn===`urn:opensend:simulated-ses:${item.region}`;
+    const simulated=simulatedTopic(item.topicArn, item.region);
     // Never take a workspace ID from a payload. Prefer the receipt; a rolled-back first
     // receipt can still be attributed if its pinned topic/region/provider match is unique.
     await runtime.db.execute(sql`INSERT INTO operation_feedback_failures(id,payload,topic_arn,workspace_id) VALUES (${key},${JSON.stringify(item)},${item.topicArn},
@@ -1282,14 +1292,14 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const [input] = await runtime.db.select({ receipt: snsReceipts, hostedFeedback: runtime.config.multiTenant && (kind==='Bounce' || kind==='Complaint')
     ? sql<boolean>`EXISTS (SELECT 1 FROM provider_feedback_history WHERE topic_arn=${String(payload.topicArn)} AND kind='shared')` : sql<boolean>`false`, email: {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
-  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)),runtime.config.multiTenant && !String(payload.topicArn).startsWith('urn:opensend:simulated-ses:') ? sql`"sending_emails".feedback_topic_arn=${String(payload.topicArn)}` : undefined, tagged
+  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)),runtime.config.multiTenant && !simulatedTopic(payload.topicArn) ? sql`"sending_emails".feedback_topic_arn=${String(payload.topicArn)}` : undefined, tagged
     // Fallback for a lost provider response: see ingestRoutineSesEvents.
     ? and(eq(emails.id, tagged), or(eq(emails.providerId, providerId), and(isNull(emails.providerId), eq(emails.status, 'acceptance_unknown'))))
     : eq(emails.providerId, providerId))).where(receiptWhere);
   if (!input || input.receipt.processedAt) return;
   const { receipt, email } = input;
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
-  if (email.simulated !== (payload.topicArn === `urn:opensend:simulated-ses:${payload.region}`)) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
+  if (email.simulated !== simulatedTopic(payload.topicArn, String(payload.region))) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
   if (kind === 'Subscription') {
     const preferences = data.subscription?.newTopicPreferences;
     // SES topic defaults are not evidence of app-wide opt-in; never reverse local opt-outs from them.
@@ -1346,14 +1356,14 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere);
 };
 const sesJob: JobHandler = async (runtime, payload, job) => {
-  if (String(payload.topicArn).startsWith('urn:opensend:simulated-ses:')) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'Synthetic callbacks are not SNS events.');
+  if (simulatedTopic(payload.topicArn)) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'Synthetic callbacks are not SNS events.');
   verifySesAccount(runtime, payload.message, String(payload.topicArn));
   await processSesReceipt(runtime, payload, job);
 };
 function assertSimulatedFeedback(runtime: Runtime, payload: Record<string, unknown>) {
   const message = payload.message as { mail?: { messageId?: unknown } } | undefined;
   if (!isSimulatedSes(runtime) ||
-    payload.topicArn !== `urn:opensend:simulated-ses:${payload.region}` ||
+    !simulatedTopic(payload.topicArn, String(payload.region)) ||
     typeof message?.mail?.messageId !== 'string' || !message.mail.messageId.startsWith('sim_')) {
     throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires a simulated deployment and a synthetic provider identity.');
   }

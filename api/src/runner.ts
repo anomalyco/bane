@@ -35,7 +35,7 @@ try {
           client.on('notification', msg => { if (msg.payload) priorityWake.dispatchEvent(new Event(msg.payload)); });
           client.on('error', () => log('warn', { code: 'DISPATCH_LISTENER_FAILED', message: 'Priority wakes disconnected; ordinary leases continue.' }));
           client.on('end', () => { if (listener === client) listener = undefined; });
-          try { await client.connect(); await client.query('LISTEN opensend_priority'); listener = client; }
+          try { await client.connect(); await client.query('LISTEN bane_priority'); listener = client; }
           catch { await client.end(); }
         }
         // Don't stall mail dispatch while waiting for a platform pool to come online.

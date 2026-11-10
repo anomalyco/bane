@@ -57,7 +57,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
   const create = inbound ? createInboundKey : createApiKey
   const pending = createApiKey.isPending || createInboundKey.isPending
   const domainOptions = useInfiniteQuery({
-    queryKey: ['opensend', api.mode, 'domains', 'key-options'],
+    queryKey: ['bane', api.mode, 'domains', 'key-options'],
     enabled: open && !inbound,
     initialPageParam: { page: 1 } as Pick<PageRequest, 'page' | 'cursor'>,
     queryFn: ({ pageParam, signal }) => api.domains.list({ ...pageParam, pageSize: 10 }, signal),

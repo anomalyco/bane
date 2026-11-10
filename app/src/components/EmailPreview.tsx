@@ -73,7 +73,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
       FORBID_ATTR: ['href', 'srcset', 'ping', 'action', 'formaction', 'target', 'download', 'autofocus', 'xlink:href', 'background'],
     });
     const email = new DOMParser().parseFromString(clean, 'text/html');
-    email.querySelectorAll('style[data-opensend-fonts]').forEach(style => style.remove());
+    email.querySelectorAll('style[data-bane-fonts], style[data-opensend-fonts]').forEach(style => style.remove());
     email.querySelectorAll('[src]').forEach(element => {
       const source = element.getAttribute('src') ?? '';
       const owned = element.tagName === 'IMG' ? sources?.get(source) : undefined;

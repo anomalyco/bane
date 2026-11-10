@@ -19,12 +19,12 @@
   "vars": {
     "PUBLIC_URL": "https://dev.bane.mx",
     "MULTI_TENANT": "true",
-    "MX_PLATFORM_AWS_ACCOUNT": "905840579680",
+    "BANE_PLATFORM_AWS_ACCOUNT": "905840579680",
     // The dedicated account only has the v8 policies: tenants and identities must be created with their pool tags.
-    "MX_REGIONAL_SENDING": "true",
-    "MX_TRUSTED_POOL": "true",
+    "BANE_REGIONAL_SENDING": "true",
+    "BANE_TRUSTED_POOL": "true",
     // Dev only: the pools become ready in the SES sandbox, so dev can send to the mailbox simulator and verified addresses.
-    "MX_ALLOW_SES_SANDBOX": "true",
+    "BANE_ALLOW_SES_SANDBOX": "true",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",

@@ -23,12 +23,12 @@ export const listMcpConnections = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -41,12 +41,12 @@ export const revokeMcpConnection = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -59,12 +59,12 @@ export const getCurrentIdentity = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -77,12 +77,12 @@ export const listAgentTokens = <ThrowOnError extends boolean = false>(options?: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -98,12 +98,12 @@ export const createAgentToken = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -120,12 +120,12 @@ export const revokeAgentToken = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -138,12 +138,12 @@ export const listApiKeys = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -156,12 +156,12 @@ export const createApiKey = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -178,12 +178,12 @@ export const revokeApiKey = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -199,12 +199,12 @@ export const listContacts = <ThrowOnError extends boolean = false>(options?: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -217,12 +217,12 @@ export const createContact = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -242,12 +242,12 @@ export const deleteContact = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -260,12 +260,12 @@ export const getContact = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -278,12 +278,12 @@ export const updateContact = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -300,12 +300,12 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -321,12 +321,12 @@ export const updateContactConsent = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -343,12 +343,12 @@ export const listContactLists = <ThrowOnError extends boolean = false>(options?:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -361,12 +361,12 @@ export const createContactList = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -383,12 +383,12 @@ export const deleteContactList = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -401,12 +401,12 @@ export const getContactList = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -419,12 +419,12 @@ export const updateContactList = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -441,12 +441,12 @@ export const listListMembers = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -459,12 +459,12 @@ export const addListMembers = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -481,12 +481,12 @@ export const removeListMember = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -499,12 +499,12 @@ export const listSegments = <ThrowOnError extends boolean = false>(options?: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -517,12 +517,12 @@ export const createSegment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -539,12 +539,12 @@ export const deleteSegment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -557,12 +557,12 @@ export const getSegment = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -575,12 +575,12 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -600,12 +600,12 @@ export const previewSegment = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -622,12 +622,12 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -643,12 +643,12 @@ export const previewContactImport = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -665,12 +665,12 @@ export const getContactImport = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -683,12 +683,12 @@ export const commitContactImport = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -704,12 +704,12 @@ export const queryAudience = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -729,12 +729,12 @@ export const planAudienceMutation = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -754,12 +754,12 @@ export const applyAudiencePlan = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -776,12 +776,12 @@ export const listCampaignTemplates = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -794,12 +794,12 @@ export const createCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -816,12 +816,12 @@ export const deleteCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -834,12 +834,12 @@ export const getCampaignTemplate = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -852,12 +852,12 @@ export const updateCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -874,12 +874,12 @@ export const publishCampaignTemplate = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -896,12 +896,12 @@ export const previewCampaignTemplate = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -917,12 +917,12 @@ export const renderCampaignTemplatePreviewImage = <ThrowOnError extends boolean 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -935,12 +935,12 @@ export const setCampaignTemplateArchived = <ThrowOnError extends boolean = false
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -957,12 +957,12 @@ export const uploadTemplateAsset = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -982,12 +982,12 @@ export const importTemplateImage = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1004,12 +1004,12 @@ export const deleteTemplateAsset = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1022,12 +1022,12 @@ export const getTemplateAsset = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1040,12 +1040,12 @@ export const getTemplateAssetContent = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1058,12 +1058,12 @@ export const sendEmail = <ThrowOnError extends boolean = false>(options: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1080,12 +1080,12 @@ export const sendEmailBatch = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1102,12 +1102,12 @@ export const listEmails = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1120,12 +1120,12 @@ export const getEmail = <ThrowOnError extends boolean = false>(options: Options<
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1141,12 +1141,12 @@ export const getEmailDetail = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1162,12 +1162,12 @@ export const getEmailContent = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1180,12 +1180,12 @@ export const listEmailEvents = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1198,12 +1198,12 @@ export const uploadAttachment = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1220,12 +1220,12 @@ export const deleteAttachment = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1238,12 +1238,12 @@ export const getAttachment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1259,12 +1259,12 @@ export const getAttachmentContent = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1280,12 +1280,12 @@ export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1301,12 +1301,12 @@ export const createCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1323,12 +1323,12 @@ export const deleteCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1341,12 +1341,12 @@ export const getCampaign = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1362,12 +1362,12 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1387,12 +1387,12 @@ export const getCampaignStats = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1408,12 +1408,12 @@ export const getCampaignContentGuide = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1429,12 +1429,12 @@ export const previewCampaign = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1450,12 +1450,12 @@ export const previewCampaignAudience = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1471,12 +1471,12 @@ export const renderCampaignPreviewImage = <ThrowOnError extends boolean = false>
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1492,12 +1492,12 @@ export const getCampaignState = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1513,12 +1513,12 @@ export const setCampaignArchived = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1535,12 +1535,12 @@ export const testCampaign = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1560,12 +1560,12 @@ export const sendCampaign = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1585,12 +1585,12 @@ export const scheduleCampaign = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1610,12 +1610,12 @@ export const cancelCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1631,12 +1631,12 @@ export const pauseCampaign = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1656,12 +1656,12 @@ export const resumeCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1681,12 +1681,12 @@ export const setCampaignPacing = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1703,12 +1703,12 @@ export const getWorkspaceSettings = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1721,12 +1721,12 @@ export const updateWorkspaceSettings = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1743,12 +1743,12 @@ export const getSesSettings = <ThrowOnError extends boolean = false>(options?: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1764,12 +1764,12 @@ export const listDomains = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1782,12 +1782,12 @@ export const createDomain = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1807,12 +1807,12 @@ export const configureDomainMailFrom = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1830,11 +1830,11 @@ export const configureDomainMailFrom = <ThrowOnError extends boolean = false>(op
 export const getDomainDnsSetup = <ThrowOnError extends boolean = false>(options: Options<GetDomainDnsSetupData, ThrowOnError>): RequestResult<GetDomainDnsSetupResponses, GetDomainDnsSetupErrors, ThrowOnError> => (options.client ?? client).get<GetDomainDnsSetupResponses, GetDomainDnsSetupErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/dns-setup',
@@ -1847,11 +1847,11 @@ export const getDomainDnsSetup = <ThrowOnError extends boolean = false>(options:
 export const completeDomainDnsSetup = <ThrowOnError extends boolean = false>(options: Options<CompleteDomainDnsSetupData, ThrowOnError>): RequestResult<unknown, CompleteDomainDnsSetupErrors, ThrowOnError> => (options.client ?? client).get<unknown, CompleteDomainDnsSetupErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/dns-setup/return/{token}',
@@ -1866,12 +1866,12 @@ export const deleteDomain = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1887,12 +1887,12 @@ export const getDomain = <ThrowOnError extends boolean = false>(options: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1908,12 +1908,12 @@ export const verifyDomain = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1926,12 +1926,12 @@ export const listWebhooks = <ThrowOnError extends boolean = false>(options?: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1944,12 +1944,12 @@ export const createWebhook = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1966,12 +1966,12 @@ export const deleteWebhook = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -1984,12 +1984,12 @@ export const getWebhook = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2002,12 +2002,12 @@ export const updateWebhook = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2024,12 +2024,12 @@ export const revealWebhookSecret = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2042,12 +2042,12 @@ export const rotateWebhookSecret = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2060,12 +2060,12 @@ export const testWebhook = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2078,12 +2078,12 @@ export const listWebhookDeliveries = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2096,12 +2096,12 @@ export const getWebhookDelivery = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2114,12 +2114,12 @@ export const retryWebhookDelivery = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2148,12 +2148,12 @@ export const getMetrics = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2169,12 +2169,12 @@ export const listRegions = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2190,12 +2190,12 @@ export const configureRegion = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2215,12 +2215,12 @@ export const discoverRegion = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2236,12 +2236,12 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2261,12 +2261,12 @@ export const configureRegionAutoValidation = <ThrowOnError extends boolean = fal
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2286,12 +2286,12 @@ export const listInboundDomains = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2304,12 +2304,12 @@ export const getInboundDomain = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2322,12 +2322,12 @@ export const updateInboundDomain = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2349,12 +2349,12 @@ export const checkInboundDomain = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2372,12 +2372,12 @@ export const enableInboundDomain = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2399,12 +2399,12 @@ export const disableInboundDomain = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2420,12 +2420,12 @@ export const listInboundSubdomains = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2443,12 +2443,12 @@ export const createInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2470,12 +2470,12 @@ export const removeInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2488,12 +2488,12 @@ export const getInboundSubdomain = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2506,12 +2506,12 @@ export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2533,12 +2533,12 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2556,12 +2556,12 @@ export const createInboundAddress = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2581,12 +2581,12 @@ export const deleteInboundAddress = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2602,12 +2602,12 @@ export const getInboundAddress = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2623,12 +2623,12 @@ export const updateInboundAddress = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2650,12 +2650,12 @@ export const listInboundThreads = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2671,12 +2671,12 @@ export const createInboundThread = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2698,12 +2698,12 @@ export const getInboundThread = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2719,12 +2719,12 @@ export const updateInboundThread = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2746,12 +2746,12 @@ export const listInboundMessages = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2767,12 +2767,12 @@ export const getInboundMessage = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2788,12 +2788,12 @@ export const getInboundAttachment = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2811,12 +2811,12 @@ export const replyToInboundThread = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2838,12 +2838,12 @@ export const listInboundEvents = <ThrowOnError extends boolean = false>(options?
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2856,12 +2856,12 @@ export const listInboundKeys = <ThrowOnError extends boolean = false>(options?: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2879,12 +2879,12 @@ export const createInboundKey = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2901,12 +2901,12 @@ export const revokeInboundKey = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2919,12 +2919,12 @@ export const listInboundWebhooks = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2942,12 +2942,12 @@ export const createInboundWebhook = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2964,12 +2964,12 @@ export const deleteInboundWebhook = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -2982,12 +2982,12 @@ export const getInboundWebhook = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3000,12 +3000,12 @@ export const updateInboundWebhook = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3022,12 +3022,12 @@ export const rotateInboundWebhookSecret = <ThrowOnError extends boolean = false>
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3040,12 +3040,12 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }
     ],
@@ -3054,16 +3054,16 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Lists your memberships. Dashboard requests can select a membership with X-OpenSend-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.
+ * Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.
  */
 export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspacesData, ThrowOnError>): RequestResult<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces',
@@ -3071,16 +3071,16 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-OpenSend-Workspace.
+ * Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-Bane-Workspace.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces',
@@ -3094,11 +3094,11 @@ export const createWorkspace = <ThrowOnError extends boolean = false>(options: O
 export const renameCurrentWorkspace = <ThrowOnError extends boolean = false>(options: Options<RenameCurrentWorkspaceData, ThrowOnError>): RequestResult<RenameCurrentWorkspaceResponses, RenameCurrentWorkspaceErrors, ThrowOnError> => (options.client ?? client).patch<RenameCurrentWorkspaceResponses, RenameCurrentWorkspaceErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current',
@@ -3112,11 +3112,11 @@ export const renameCurrentWorkspace = <ThrowOnError extends boolean = false>(opt
 export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspaceMembersData, ThrowOnError>): RequestResult<ListWorkspaceMembersResponses, ListWorkspaceMembersErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspaceMembersResponses, ListWorkspaceMembersErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members',
@@ -3129,11 +3129,11 @@ export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(optio
 export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<InviteWorkspaceMemberData, ThrowOnError>): RequestResult<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).post<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members',
@@ -3147,11 +3147,11 @@ export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<RevokeWorkspaceInvitationData, ThrowOnError>): RequestResult<RevokeWorkspaceInvitationResponses, RevokeWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).delete<RevokeWorkspaceInvitationResponses, RevokeWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -3164,11 +3164,11 @@ export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspaceInvitationsData, ThrowOnError>): RequestResult<ListWorkspaceInvitationsResponses, ListWorkspaceInvitationsErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspaceInvitationsResponses, ListWorkspaceInvitationsErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -3181,11 +3181,11 @@ export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(o
 export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceInvitationData, ThrowOnError>): RequestResult<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -3199,11 +3199,11 @@ export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 export const removeWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<RemoveWorkspaceMemberData, ThrowOnError>): RequestResult<RemoveWorkspaceMemberResponses, RemoveWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveWorkspaceMemberResponses, RemoveWorkspaceMemberErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members/{id}',
@@ -3213,11 +3213,11 @@ export const removeWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<UpdateWorkspaceMemberData, ThrowOnError>): RequestResult<UpdateWorkspaceMemberResponses, UpdateWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).patch<UpdateWorkspaceMemberResponses, UpdateWorkspaceMemberErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members/{id}',
@@ -3231,11 +3231,11 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<AcceptWorkspaceInvitationData, ThrowOnError>): RequestResult<AcceptWorkspaceInvitationResponses, AcceptWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<AcceptWorkspaceInvitationResponses, AcceptWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/invitations/{id}/accept',
@@ -3248,11 +3248,11 @@ export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 export const deleteConnection = <ThrowOnError extends boolean = false>(options?: Options<DeleteConnectionData, ThrowOnError>): RequestResult<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError> => (options?.client ?? client).delete<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -3265,11 +3265,11 @@ export const deleteConnection = <ThrowOnError extends boolean = false>(options?:
 export const getConnection = <ThrowOnError extends boolean = false>(options?: Options<GetConnectionData, ThrowOnError>): RequestResult<GetConnectionResponses, GetConnectionErrors, ThrowOnError> => (options?.client ?? client).get<GetConnectionResponses, GetConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -3282,11 +3282,11 @@ export const getConnection = <ThrowOnError extends boolean = false>(options?: Op
 export const createConnection = <ThrowOnError extends boolean = false>(options: Options<CreateConnectionData, ThrowOnError>): RequestResult<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -3303,11 +3303,11 @@ export const createConnection = <ThrowOnError extends boolean = false>(options: 
 export const listConnectionRegions = <ThrowOnError extends boolean = false>(options?: Options<ListConnectionRegionsData, ThrowOnError>): RequestResult<ListConnectionRegionsResponses, ListConnectionRegionsErrors, ThrowOnError> => (options?.client ?? client).get<ListConnectionRegionsResponses, ListConnectionRegionsErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/regions',
@@ -3320,11 +3320,11 @@ export const listConnectionRegions = <ThrowOnError extends boolean = false>(opti
 export const refreshConnectionScan = <ThrowOnError extends boolean = false>(options?: Options<RefreshConnectionScanData, ThrowOnError>): RequestResult<RefreshConnectionScanResponses, RefreshConnectionScanErrors, ThrowOnError> => (options?.client ?? client).post<RefreshConnectionScanResponses, RefreshConnectionScanErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/scan',
@@ -3337,11 +3337,11 @@ export const refreshConnectionScan = <ThrowOnError extends boolean = false>(opti
 export const importConnectionDomains = <ThrowOnError extends boolean = false>(options: Options<ImportConnectionDomainsData, ThrowOnError>): RequestResult<ImportConnectionDomainsResponses, ImportConnectionDomainsErrors, ThrowOnError> => (options.client ?? client).post<ImportConnectionDomainsResponses, ImportConnectionDomainsErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/imports',
@@ -3358,11 +3358,11 @@ export const importConnectionDomains = <ThrowOnError extends boolean = false>(op
 export const getConnectionRegionStatus = <ThrowOnError extends boolean = false>(options?: Options<GetConnectionRegionStatusData, ThrowOnError>): RequestResult<GetConnectionRegionStatusResponses, GetConnectionRegionStatusErrors, ThrowOnError> => (options?.client ?? client).get<GetConnectionRegionStatusResponses, GetConnectionRegionStatusErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/regions/status',
@@ -3375,11 +3375,11 @@ export const getConnectionRegionStatus = <ThrowOnError extends boolean = false>(
 export const verifyConnection = <ThrowOnError extends boolean = false>(options: Options<VerifyConnectionData, ThrowOnError>): RequestResult<VerifyConnectionResponses, VerifyConnectionErrors, ThrowOnError> => (options.client ?? client).post<VerifyConnectionResponses, VerifyConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'opensend.session_token',
+            name: 'bane.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Secure-opensend.session_token',
+            name: '__Secure-bane.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/verify',

@@ -1,10 +1,10 @@
 import { connectionApi } from './connections'
-import type { InboundThreadView, OpenSendApi, PageRequest, Stream, TimeRange } from './types'
+import type { InboundThreadView, BaneApi, PageRequest, Stream, TimeRange } from './types'
 import { workspaceApi } from './workspaces'
 
 // The first-screen queries of the sidebar pages, defined once: a page reads them through useApiDef and
 // data/prefetch.ts warms the very same keys and readers before the page is opened.
-export type QueryDef<T> = { key: readonly unknown[]; read: (api: OpenSendApi, signal: AbortSignal) => Promise<T> }
+export type QueryDef<T> = { key: readonly unknown[]; read: (api: BaneApi, signal: AbortSignal) => Promise<T> }
 const def = <T>(key: readonly unknown[], read: QueryDef<T>['read']): QueryDef<T> => ({ key, read })
 
 export const queries = {

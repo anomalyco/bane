@@ -186,7 +186,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0))
         if (allIds.size >= 20 || totalSize + bytes.length > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
         const hash = await inlineImageHash(source)
-        const contentId = `opensend-${crypto.randomUUID()}`
+        const contentId = `bane-${crypto.randomUUID()}`
         const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
         const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
         cid = `cid:${contentId}`

@@ -249,7 +249,7 @@ export function assertReplyable(original: MessageRow, to: string[], allowAutomat
 }
 export const replySubject = (subject: string) => `Re: ${normalizeSubject(subject) || '(no subject)'}`.slice(0, 998);
 
-/** Mailbox sync can lag provider acceptance. Never put an OpenSend ID on the wire or silently send an unthreaded follow-up. */
+/** Mailbox sync can lag provider acceptance. Never put a Bane ID on the wire or silently send an unthreaded follow-up. */
 export async function replyParentId(db: DbExecutor, original: MessageRow) {
   if (original.messageId && wireId(original.messageId, 'In-Reply-To')) return original.messageId;
   // Inbound mail is allowed to omit Message-ID; never invent one that the recipient cannot match.

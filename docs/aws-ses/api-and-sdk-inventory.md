@@ -1,4 +1,4 @@
-# SES API and SDK inventory for OpenSend
+# SES API and SDK inventory for Bane
 
 [Hub](README.md)
 
@@ -37,7 +37,7 @@ The model's operation names, member names, required fields, enums, protocol meta
 
 SMTP is a third interface, not “SES API v1 over SMTP.” It submits MIME over TLS with regional SMTP credentials and supports 40 MB messages. SES Global endpoints do not support SMTP or VPC endpoint access. [I1][I2][I4][I10]
 
-**Recommendation:** use v2 for new OpenSend sending. Retain classic only for explicitly needed classic-only operations or an intentional compatibility adapter. No reviewed source established retirement of the classic **SES API**; do not confuse retired SDK major versions with API retirement.
+**Recommendation:** use v2 for new Bane sending. Retain classic only for explicitly needed classic-only operations or an intentional compatibility adapter. No reviewed source established retirement of the classic **SES API**; do not confuse retired SDK major versions with API retirement.
 
 ## Current SDK support and naming
 
@@ -201,7 +201,7 @@ The classic model remains relevant when investigating older integrations and rec
 
 “Newer” below means likely absent from older integrations, not a claim that every feature launched on the research date. Exact launch dates are intentionally not invented.
 
-| Capability | Current verified model exposure | OpenSend implication |
+| Capability | Current verified model exposure | Bane implication |
 | --- | --- | --- |
 | Structured attachments | `Message.Attachments`, `Template.Attachments`; required `RawContent`/`FileName` | Raw MIME no longer required for all ordinary attachments. Bulk shares attachments across entries. |
 | Inline template content | `Template.TemplateContent.{Subject,Text,Html}` | No stored-template lifecycle required, but simple substitutions only. |

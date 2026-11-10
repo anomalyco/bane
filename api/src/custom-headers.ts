@@ -1,6 +1,6 @@
 import { z } from '@hono/zod-openapi';
 
-// Headers that decide identity, recipients, where replies or receipts go, MIME structure, authentication, transport or SES behavior. OpenSend sets
+// Headers that decide identity, recipients, where replies or receipts go, MIME structure, authentication, transport or SES behavior. Bane sets
 // these itself (or from dedicated fields), so a caller can never override them.
 const RESERVED = /^(?:from|sender|reply-to|return-path|to|cc|bcc|subject|date|message-id|mime-version|content-[a-z0-9-]*|dkim-[a-z0-9-]*|arc-[a-z0-9-]*|authentication-results|received[a-z0-9-]*|resent-[a-z0-9-]*|x-ses-[a-z0-9-]*|list-unsubscribe[a-z0-9-]*|auto-submitted|mail-reply-to|mail-followup-to|followup-to|disposition-notification-[a-z0-9-]*|return-receipt-to|errors-to|bounces-to|delivered-to|x-original-to|domainkey-[a-z0-9-]*|feedback-id|tls-required|bimi-[a-z0-9-]*|autocrypt[a-z0-9-]*|openpgp)$/i;
 const MESSAGE_ID = '<[\\x21-\\x3b\\x3d\\x3f-\\x7e]+@[\\x21-\\x3b\\x3d\\x3f-\\x7e]+>';

@@ -42,8 +42,8 @@ function configuration() {
     fail('CONFIGURATION_ERROR', 'BANE_API_URL must be an HTTPS origin without credentials, query, fragment, or path. HTTP is allowed only on loopback.');
   }
   const key = env('API_KEY') ?? '';
-  const addressKey = /^os_mbx_[0-9a-f]{64}$/.test(key);
-  if (!addressKey && !/^os_(?:live_)?[0-9a-f]{64}$/.test(key)) {
+  const addressKey = /^(?:bane|os)_mbx_[0-9a-f]{64}$/.test(key);
+  if (!addressKey && !/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/.test(key)) {
     fail('CONFIGURATION_ERROR', 'Set BANE_API_KEY to a scoped Bane API key or address key.');
   }
   const writes = env('MCP_ALLOW_WRITES') ?? 'false';
@@ -226,7 +226,7 @@ async function main() {
     }
   }
   const health = await request('/health', {}, false, 4096);
-  if (!health.response.ok || !object(health.data) || health.data.service !== 'opensend' || health.data.status !== 'ok') fail('INVALID_SERVICE', 'API health check did not identify a healthy Bane service.');
+  if (!health.response.ok || !object(health.data) || !['bane', 'opensend'].includes(health.data.service) || health.data.status !== 'ok') fail('INVALID_SERVICE', 'API health check did not identify a healthy Bane service.');
   const fetched = await request('/openapi.json', {}, false, SPEC_LIMIT);
   const spec = fetched.data;
   if (!fetched.response.ok || !object(spec) || spec.openapi !== '3.1.0' || !['Bane API', 'OpenSend API'].includes(spec.info?.title) || spec.info?.version !== '0.1.0' || !object(spec.paths)) fail('INVALID_SPEC', 'Expected Bane API 0.1.0 with OpenAPI 3.1.0.');

@@ -3,7 +3,7 @@ import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { rememberedPageSize } from '../lib/pagination'
 import { useApi, useRegion, useWorkspaceAccess } from './context'
 import { queries, type QueryDef } from './queries'
-import type { OpenSendApi } from './types'
+import type { BaneApi } from './types'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
@@ -32,8 +32,8 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
   }
 }
 
-export function prefetchQueries(cache: QueryClient, api: OpenSendApi, defs: QueryDef<unknown>[]) {
-  return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['opensend', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
+export function prefetchQueries(cache: QueryClient, api: BaneApi, defs: QueryDef<unknown>[]) {
+  return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['bane', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
 }
 
 // Loads a sidebar page's code and warms its first-screen queries. GET only; queries already fresh or in flight are skipped.

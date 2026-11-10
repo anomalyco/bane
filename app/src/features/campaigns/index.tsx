@@ -241,8 +241,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         }
       }
       const saved = await saveMutation.mutateAsync(submitted)
-      cache.setQueryData(['opensend', api.mode, 'campaign', saved.id], saved)
-      void cache.invalidateQueries({queryKey: ['opensend', api.mode, 'campaigns'], refetchType: 'none'})
+      cache.setQueryData(['bane', api.mode, 'campaign', saved.id], saved)
+      void cache.invalidateQueries({queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none'})
       if (!mounted.current) return
       creation.current = null
       const changedWhileSaving = editVersion.current !== version

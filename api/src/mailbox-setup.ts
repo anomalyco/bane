@@ -16,8 +16,8 @@ import { awsError, feedbackUrl, POOL_INSTALLATION, setupResources } from './ses-
 import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
 import { activateReceiving, claimReceivable, connectionReady, noteReconcileFailure } from './states.js';
 
-const OWNER_TAG = 'opensend:installation-id';
-const PURPOSE_TAG = 'opensend:purpose';
+const OWNER_TAG = 'bane:installation-id';
+const PURPOSE_TAG = 'bane:purpose';
 const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
 export const STAGING_PREFIX = 'staging/';
@@ -110,20 +110,20 @@ const httpStatus = (error: unknown) => (error as { $metadata?: { httpStatusCode?
 function ruleSourceArn(region: string, account: string, rulePrefix: string) { return `arn:aws:ses:${region}:${account}:receipt-rule-set/*:receipt-rule/${rulePrefix}*`; }
 function bucketPolicy(bucket: string, region: string, account: string, rulePrefix: string) {
   return { Version: '2012-10-17', Statement: [
-    { Sid: 'OpenSendSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 's3:PutObject', Resource: `arn:aws:s3:::${bucket}/${STAGING_PREFIX}*`, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
-    { Sid: 'OpenSendTlsOnly', Effect: 'Deny', Principal: '*', Action: 's3:*', Resource: [`arn:aws:s3:::${bucket}`, `arn:aws:s3:::${bucket}/*`], Condition: { Bool: { 'aws:SecureTransport': 'false' } } },
+    { Sid: 'BaneSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 's3:PutObject', Resource: `arn:aws:s3:::${bucket}/${STAGING_PREFIX}*`, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
+    { Sid: 'BaneTlsOnly', Effect: 'Deny', Principal: '*', Action: 's3:*', Resource: [`arn:aws:s3:::${bucket}`, `arn:aws:s3:::${bucket}/*`], Condition: { Bool: { 'aws:SecureTransport': 'false' } } },
   ] };
 }
 function topicPolicy(topicArn: string, region: string, account: string, rulePrefix: string) {
   return { Version: '2012-10-17', Statement: [
-    { Sid: 'OpenSendOwner', Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${account}:root` }, Action: ['sns:GetTopicAttributes', 'sns:SetTopicAttributes', 'sns:AddPermission', 'sns:RemovePermission', 'sns:DeleteTopic', 'sns:Subscribe', 'sns:ListSubscriptionsByTopic', 'sns:Publish'], Resource: topicArn },
-    { Sid: 'OpenSendSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 'sns:Publish', Resource: topicArn, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
+    { Sid: 'BaneOwner', Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${account}:root` }, Action: ['sns:GetTopicAttributes', 'sns:SetTopicAttributes', 'sns:AddPermission', 'sns:RemovePermission', 'sns:DeleteTopic', 'sns:Subscribe', 'sns:ListSubscriptionsByTopic', 'sns:Publish'], Resource: topicArn },
+    { Sid: 'BaneSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 'sns:Publish', Resource: topicArn, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
   ] };
 }
 
 export type RegionResources = { account: string; bucket: string; topicArn: string; ruleSetName: string };
 
-/** Idempotently creates the OpenSend-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
+/** Idempotently creates the Bane-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
 type Clients = { sts: STSClient; s3: S3Client; sns: SNSClient; ses: ReturnType<typeof pacedSes> };
 async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>, knownAccount?:string): Promise<RegionResources & { rules: ReceiptRule[] }> {
   const endpoint = feedbackUrl(runtime.config);
@@ -153,12 +153,12 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     await aws('s3:PutPublicAccessBlock', () => s3.send(new PutPublicAccessBlockCommand({ Bucket: names.bucket, PublicAccessBlockConfiguration: { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true } }), { abortSignal: signal }));
     await aws('s3:PutBucketPolicy', () => s3.send(new PutBucketPolicyCommand({ Bucket: names.bucket, Policy: JSON.stringify(bucketPolicy(names.bucket, region, account, names.rulePrefix)) }), { abortSignal: signal }));
     await aws('s3:PutLifecycleConfiguration', () => s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: names.bucket, LifecycleConfiguration: { Rules: [
-      { ID:'opensend-staging',Status:'Enabled',Filter:{Prefix:STAGING_PREFIX},Expiration:{Days:3} },
-      { ID:'opensend-unattributed',Status:'Enabled',Filter:{Prefix:'quarantine/'},Expiration:{Days:30} },
-      { ID: 'opensend-raw-retention', Status: 'Enabled', Filter: { Tag:{Key:'opensend-kind',Value:'raw'} }, Expiration: { Days: RAW_RETENTION_DAYS } },
-      { ID:'opensend-legacy-raw',Status:'Enabled',Filter:{Prefix:'raw/'},Expiration:{Days:RAW_RETENTION_DAYS} },
-      ...(installationId!==POOL_INSTALLATION ? [{ID:'opensend-legacy-downloads',Status:'Enabled' as const,Filter:{Tag:{Key:'opensend-kind',Value:'legacy-raw'}},Expiration:{Days:1}}] : []),
-      { ID: 'opensend-abort-uploads', Status: 'Enabled', Filter: { Prefix: '' }, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } },
+      { ID:'bane-staging',Status:'Enabled',Filter:{Prefix:STAGING_PREFIX},Expiration:{Days:3} },
+      { ID:'bane-unattributed',Status:'Enabled',Filter:{Prefix:'quarantine/'},Expiration:{Days:30} },
+      { ID: 'bane-raw-retention', Status: 'Enabled', Filter: { Tag:{Key:'bane-kind',Value:'raw'} }, Expiration: { Days: RAW_RETENTION_DAYS } },
+      { ID:'bane-legacy-raw',Status:'Enabled',Filter:{Prefix:'raw/'},Expiration:{Days:RAW_RETENTION_DAYS} },
+      ...(installationId!==POOL_INSTALLATION ? [{ID:'bane-legacy-downloads',Status:'Enabled' as const,Filter:{Tag:{Key:'bane-kind',Value:'legacy-raw'}},Expiration:{Days:1}}] : []),
+      { ID: 'bane-abort-uploads', Status: 'Enabled', Filter: { Prefix: '' }, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } },
     ] } }), { abortSignal: signal }));
 
     // Topic: CreateTopic is idempotent, so ownership is proven by tags, never by name alone.
@@ -222,7 +222,7 @@ export async function preparePoolReceiving(runtime:Runtime,region:string,account
 }
 
 /**
- * Makes the OpenSend receipt rules accept exactly the domains whose mailbox state wants mail.
+ * Makes the Bane receipt rules accept exactly the domains whose mailbox state wants mail.
  * Rules are packed up to the SES recipient quota. A rule is deleted instead of emptied:
  * a receipt rule with no recipients matches every address on every domain.
  */

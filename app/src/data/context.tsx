@@ -2,7 +2,7 @@ import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffe
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
-import { ApiError, type Identity, type OpenSendApi } from './types'
+import { ApiError, type Identity, type BaneApi } from './types'
 import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
@@ -16,7 +16,7 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
 const HomePage = homeChunk.page(m => m.HomePage)
-const ApiContext = createContext<OpenSendApi | null>(null)
+const ApiContext = createContext<BaneApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
 // Self-hosted installations have no workspace roles; every signed-in operator administers.
@@ -35,7 +35,7 @@ function invitationError(error: unknown) {
   if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for a different email address. Ask for a new invitation.'
   return `Couldn’t accept the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
 }
-export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
+export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
   // The docs are public: they render signed out, and /v1/me only adds the workspace's context.
   const publicRoute = useLocation().pathname === '/docs'
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
@@ -113,10 +113,10 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     if (!match) return
     let id: string
     try { id = decodeURIComponent(match[1]) } catch { return }
-    void cache.prefetchQuery({ queryKey: ['opensend', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
+    void cache.prefetchQuery({ queryKey: ['bane', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
-  useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
+  useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
@@ -187,15 +187,15 @@ export function useApi() {
 // Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
 type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
 type Poll<T> = { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
-export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
+export function useApiQuery<T>(key: readonly unknown[], read: (api: BaneApi, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
   const api = useApi()
   const interval = poll?.interval
   const keep = poll?.keepPrevious
-  return useQuery({ queryKey: ['opensend', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
+  return useQuery({ queryKey: ['bane', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
-export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
+export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
@@ -206,7 +206,7 @@ export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input:
       if (successMessage) toast(successMessage, 'success')
       if (!invalidate) return
       void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
-      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
+      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'bane' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
     },
   })
 }
@@ -216,11 +216,11 @@ export function RegionProvider({ children }: { children: ReactNode }) {
   const [regionId, setRegion] = useState(() => {
     const linked = new URLSearchParams(window.location.search).get('region')
     if (linked && /^[a-z0-9-]{1,40}$/.test(linked)) return linked
-    try { return localStorage.getItem('opensend.region') || '' } catch { return '' }
+    try { return localStorage.getItem('bane.region') || '' } catch { return '' }
   })
   function setRegionId(id: string) {
     setRegion(id)
-    try { localStorage.setItem('opensend.region', id) } catch { /* Selection can remain session-only. */ }
+    try { localStorage.setItem('bane.region', id) } catch { /* Selection can remain session-only. */ }
   }
   return <RegionContext.Provider value={{ regionId, setRegionId }}>{children}</RegionContext.Provider>
 }

@@ -19,7 +19,7 @@ export function useConnectionCache() {
   const api = useApi()
   const client = useQueryClient()
   return (connection: ProviderConnection | null) => {
-    client.setQueryData(['opensend', api.mode, 'connection'], connection)
+    client.setQueryData(['bane', api.mode, 'connection'], connection)
     client.setQueryData<Identity>(['identity'], old => old && { ...old, connection: connection && { kind: connection.kind, region: connection.region, state: connection.state, tenant: connection.tenant } })
   }
 }

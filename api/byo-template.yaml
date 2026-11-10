@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: OpenSend MX BYO v5. Install once in a commercial region. Creates only a global IAM role; no identities, feedback resources, mailboxes or callbacks at install time.
+Description: Bane BYO v5. Install once in a commercial region. Creates only a global IAM role; no identities, feedback resources, mailboxes or callbacks at install time.
 Parameters:
   PlatformAccount:
     Type: String
-    Default: '438095551154'
-    AllowedValues: ['438095551154']
+    Default: '009882681002'
+    AllowedValues: ['009882681002']
   ExternalId:
     Type: String
     NoEcho: true
@@ -16,9 +16,9 @@ Parameters:
     Type: String
     AllowedPattern: 'ws_[0-9a-f]{32}'
   ResourcePrefix:
-    Description: opensendmx- followed by the first 20 hex characters of SHA256(ConnectionId).
+    Description: bane- followed by the first 20 hex characters of SHA256(ConnectionId).
     Type: String
-    AllowedPattern: 'opensendmx-[0-9a-f]{20}'
+    AllowedPattern: 'bane-[0-9a-f]{20}'
   ReceiveMail:
     Description: Allow mailbox provisioning. Classic SES cannot restrict receipt-rule writes to a rule name; leave off unless you approve this risk.
     Type: String
@@ -47,21 +47,21 @@ Conditions:
   Receiving: !Equals [!Ref ReceiveMail, 'true']
   AccountRequests: !Equals [!Ref EnableAccountRequests, 'true']
 Resources:
-  OpenSendRole:
+  BaneRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Ref AWS::StackName
       Tags:
-        - {Key: 'opensend:owner', Value: mx}
-        - {Key: 'opensend:installation-id', Value: !Ref ConnectionId}
-        - {Key: 'opensend:purpose', Value: byo-role}
+        - {Key: 'bane:owner', Value: bane}
+        - {Key: 'bane:installation-id', Value: !Ref ConnectionId}
+        - {Key: 'bane:purpose', Value: byo-role}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: {AWS: !Sub 'arn:aws:iam::${PlatformAccount}:user/opensend-mx'}
+            Principal: {AWS: !Sub 'arn:aws:iam::${PlatformAccount}:user/bane-runtime'}
             Action: sts:AssumeRole
-            Condition: {StringEquals: {'sts:ExternalId': !Ref ExternalId, 'sts:RoleSessionName': OpenSendMX}}
+            Condition: {StringEquals: {'sts:ExternalId': !Ref ExternalId, 'sts:RoleSessionName': Bane}}
       Policies:
         - PolicyName: Sending
           PolicyDocument:
@@ -85,7 +85,7 @@ Resources:
               - Effect: Allow
                 Action: ses:GetConfigurationSet
                 Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/opensend-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/bane-*'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
               - Effect: Allow
@@ -101,27 +101,27 @@ Resources:
                 Condition: {StringEquals: {'ses:OpenTrackingEnabled': '${ses:ClickTrackingEnabled}'}}
               - Effect: Allow
                 Action: ['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate']
-                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:template/opensend-*'
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:template/bane-*'
               - Effect: Allow
                 Action: ses:CreateEmailIdentity
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
-                  StringEquals: {'aws:RequestTag/opensend:owner': mx, 'aws:RequestTag/opensend:installation-id': !Ref ConnectionId, 'aws:RequestTag/opensend:purpose': domain-identity}
-                  StringLike: {'aws:RequestTag/opensend:domain-claim': '????????-????-4???-????-????????????'}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['opensend:owner', 'opensend:installation-id', 'opensend:purpose', 'opensend:domain-claim']}
+                  StringEquals: {'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': domain-identity}
+                  StringLike: {'aws:RequestTag/bane:domain-claim': '????????-????-4???-????-????????????'}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose', 'bane:domain-claim']}
               - Effect: Allow
                 Action: ses:TagResource
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': domain-identity, 'aws:RequestTag/opensend:owner': mx, 'aws:RequestTag/opensend:installation-id': !Ref ConnectionId, 'aws:RequestTag/opensend:purpose': domain-identity, 'aws:RequestTag/opensend:domain-claim': '${aws:ResourceTag/opensend:domain-claim}'}
-                  StringLike: {'aws:ResourceTag/opensend:domain-claim': '????????-????-4???-????-????????????'}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['opensend:owner', 'opensend:installation-id', 'opensend:purpose', 'opensend:domain-claim']}
+                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': domain-identity, 'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': domain-identity, 'aws:RequestTag/bane:domain-claim': '${aws:ResourceTag/bane:domain-claim}'}
+                  StringLike: {'aws:ResourceTag/bane:domain-claim': '????????-????-4???-????-????????????'}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose', 'bane:domain-claim']}
               - Effect: Allow
                 Action: ['ses:PutEmailIdentityMailFromAttributes', 'ses:DeleteEmailIdentity']
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': domain-identity}
-                  StringLike: {'aws:ResourceTag/opensend:domain-claim': '????????-????-4???-????-????????????'}
+                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': domain-identity}
+                  StringLike: {'aws:ResourceTag/bane:domain-claim': '????????-????-4???-????-????????????'}
               - Effect: Allow
                 Action: ['ses:CreateConfigurationSet', 'sns:CreateTopic']
                 Resource:
@@ -129,8 +129,8 @@ Resources:
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
                   - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
                 Condition:
-                  StringEquals: {'aws:RequestTag/opensend:owner': mx, 'aws:RequestTag/opensend:installation-id': !Ref ConnectionId, 'aws:RequestTag/opensend:purpose': ses-feedback}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['opensend:owner', 'opensend:installation-id', 'opensend:purpose']}
+                  StringEquals: {'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': ses-feedback}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
               - Effect: Allow
                 Action: ['ses:TagResource', 'sns:TagResource']
                 Resource:
@@ -138,8 +138,8 @@ Resources:
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
                   - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': ses-feedback, 'aws:RequestTag/opensend:owner': mx, 'aws:RequestTag/opensend:installation-id': !Ref ConnectionId, 'aws:RequestTag/opensend:purpose': ses-feedback}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['opensend:owner', 'opensend:installation-id', 'opensend:purpose']}
+                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': ses-feedback, 'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': ses-feedback}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
               - Effect: Allow
                 Action: ['sns:GetTopicAttributes', 'sns:ListTagsForResource', 'sns:GetSubscriptionAttributes', 'sns:ListSubscriptionsByTopic']
                 Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
@@ -150,12 +150,12 @@ Resources:
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
                   - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': ses-feedback}
+                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': ses-feedback}
               - Effect: Allow
                 Action: sns:Subscribe
                 Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': ses-feedback, 'sns:Protocol': https, 'sns:Endpoint': 'https://opensend.mx/v1/events/ses'}
+                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': ses-feedback, 'sns:Protocol': https, 'sns:Endpoint': 'https://bane.mx/v1/events/ses'}
         - !If
           - AccountRequests
           - PolicyName: AccountRequests
@@ -178,7 +178,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Condition: Receiving
     Properties:
-      Roles: [!Ref OpenSendRole]
+      Roles: [!Ref BaneRole]
       PolicyDocument:
               Version: '2012-10-17'
               Statement:
@@ -197,25 +197,25 @@ Resources:
                   Action: sns:CreateTopic
                   Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
                   Condition:
-                    StringEquals: {'aws:RequestTag/opensend:owner': mx, 'aws:RequestTag/opensend:installation-id': !Ref ConnectionId, 'aws:RequestTag/opensend:purpose': mailbox-inbound}
-                    'ForAllValues:StringEquals': {'aws:TagKeys': ['opensend:owner', 'opensend:installation-id', 'opensend:purpose']}
+                    StringEquals: {'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': mailbox-inbound}
+                    'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
                 - Effect: Allow
                   Action: sns:TagResource
                   Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
                   Condition:
-                    StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': mailbox-inbound, 'aws:RequestTag/opensend:owner': mx, 'aws:RequestTag/opensend:installation-id': !Ref ConnectionId, 'aws:RequestTag/opensend:purpose': mailbox-inbound}
-                    'ForAllValues:StringEquals': {'aws:TagKeys': ['opensend:owner', 'opensend:installation-id', 'opensend:purpose']}
+                    StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': mailbox-inbound, 'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': mailbox-inbound}
+                    'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
                 - Effect: Allow
                   Action: ['sns:ListTagsForResource', 'sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes', 'sns:GetSubscriptionAttributes']
                   Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
                 - Effect: Allow
                   Action: ['sns:SetTopicAttributes', 'sns:DeleteTopic']
                   Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition: {StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': mailbox-inbound}}
+                  Condition: {StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': mailbox-inbound}}
                 - Effect: Allow
                   Action: sns:Subscribe
                   Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition: {StringEquals: {'aws:ResourceTag/opensend:owner': mx, 'aws:ResourceTag/opensend:installation-id': !Ref ConnectionId, 'aws:ResourceTag/opensend:purpose': mailbox-inbound, 'sns:Protocol': https, 'sns:Endpoint': 'https://opensend.mx/v1/events/ses'}}
+                  Condition: {StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': mailbox-inbound, 'sns:Protocol': https, 'sns:Endpoint': 'https://bane.mx/v1/events/ses'}}
                 - Effect: Allow
                   Action: s3:CreateBucket
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
@@ -256,8 +256,8 @@ Resources:
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/?*.eml'
                   Condition:
                     StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}
-                    StringEqualsIfExists: {'s3:RequestObjectTag/opensend-kind': raw}
-                    'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': opensend-kind}
+                    StringEqualsIfExists: {'s3:RequestObjectTag/bane-kind': raw}
+                    'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
 Outputs:
   AccountId: {Value: !Ref 'AWS::AccountId'}
-  RoleArn: {Value: !GetAtt OpenSendRole.Arn}
+  RoleArn: {Value: !GetAtt BaneRole.Arn}

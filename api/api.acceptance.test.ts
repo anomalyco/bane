@@ -16,13 +16,13 @@ const AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
 if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BETTER_AUTH_SECRET to sign synthetic local session fixtures; no scenarios were run.');
 const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
-const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Secure-opensend.session_token' : 'opensend.session_token';
+const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Secure-bane.session_token' : 'bane.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
 const AUTH_DOMAIN = process.env.AUTH_TEST_GOOGLE_DOMAIN ?? 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
 const probe = await fetch(`${BASE}/health`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
 const identity = await probe.json().catch(() => null) as { service?: string } | null;
-if (!probe.ok || identity?.service !== 'opensend' || !probe.headers.get('x-request-id')) throw new Error('API_TARGET_MISMATCH: API_BASE_URL is not an OpenSend API. No authenticated scenarios were run.');
+if (!probe.ok || identity?.service !== 'bane' || !probe.headers.get('x-request-id')) throw new Error('API_TARGET_MISMATCH: API_BASE_URL is not a Bane API. No authenticated scenarios were run.');
 const secrets = new Set<string>([AUTH_SECRET]);
 const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')}`;
 const address = () => `${unique('acceptance')}@example.com`;
@@ -45,7 +45,7 @@ function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:strin
       case 'GetAccountCommand':return {ProductionAccessEnabled:true,SendingEnabled:true,EnforcementStatus:'HEALTHY'};
       case 'GetConfigurationSetCommand':return set??missing();
       case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:set!.destinations};
-      case 'CreateConfigurationSetCommand':assert.equal(i.ConfigurationSetName.startsWith('opensend-mx-'),account===platform);sets.set(key,{...i,destinations:[]});return {};
+      case 'CreateConfigurationSetCommand':assert.equal(/^bane-(transactional|marketing)$/.test(i.ConfigurationSetName),account===platform);sets.set(key,{...i,destinations:[]});return {};
       case 'PutConfigurationSetSuppressionOptionsCommand':assert.equal(i.SuppressionScope,account===platform?'TENANT':'ACCOUNT');set!.SuppressionOptions=i;return {};
       case 'CreateConfigurationSetEventDestinationCommand':set!.destinations.push({...i.EventDestination,Name:i.EventDestinationName});return {};
       case 'UpdateConfigurationSetEventDestinationCommand':set!.destinations=[{...i.EventDestination,Name:i.EventDestinationName}];return {};
@@ -179,7 +179,7 @@ async function allPages(path: string, key: string): Promise<Json[]> {
 function redact(value: unknown): string {
   let text = JSON.stringify(value, (key, item) => /^(secret|token|authorization|signingSecret|signingKey|unsubscribeUrl|unsubscribeToken)$/i.test(key) ? '[REDACTED]' : item) ?? String(value);
   for (const secret of secrets) text = text.replaceAll(secret, '[REDACTED]');
-  return text.replace(/os_(?:(?:test|live)_)?[0-9a-f]{64}/g, '[REDACTED_API_KEY]')
+  return text.replace(/(?:os|bane)_(?:(?:test|live)_)?[0-9a-f]{64}/g, '[REDACTED_API_KEY]')
     .replace(/(\/unsubscribe\/)[^\s"<>?]+/g, '$1[REDACTED]');
 }
 function diagnostic(reply: Reply): string {
@@ -235,7 +235,7 @@ async function keyFixture(t: TestContext, options: { permissions?: string[]; dom
   }), 201);
   assert.equal(typeof body.id, 'string');
   assert.equal(typeof body.secret, 'string', 'API-key creation must return the secret exactly once.');
-  assert.match(body.secret, /^os_[0-9a-f]{64}$/);
+  assert.match(body.secret, /^bane_[0-9a-f]{64}$/);
   secrets.add(body.secret);
   cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${body.id}/revoke`, MANAGER), [200, 204]); });
   return body;
@@ -259,7 +259,7 @@ describe('Public contract and authentication', () => {
     const healthReply = await http('GET', '/health');
     const health = ok(healthReply);
     assert.equal(health.status, 'ok');
-    assert.equal(health.service, 'opensend');
+    assert.equal(health.service, 'bane');
     assert.match(healthReply.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
     assert.equal(healthReply.headers.get('x-frame-options'), 'DENY');
     assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
@@ -314,12 +314,12 @@ describe('Public contract and authentication', () => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
     // Even with a matching stored hash, the retired test key format cannot authenticate.
-    for (const mode of ['live', 'test']) {
-      const old = `os_${mode}_${key.secret.slice(3)}`, id = unique('legacy-key');
+    for (const prefix of ['os_', 'os_live_', 'os_test_', 'bane_test_']) {
+      const old = prefix + key.secret.slice('bane_'.length), id = unique('legacy-key');
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default','fixture',$2,$3,'["read"]','[]')`, [id, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
       cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [id]); });
       const me = await http('GET','/v1/me',old);
-      if (mode === 'live') assert.equal(ok(me).id,id); else {
+      if (!prefix.endsWith('test_')) assert.equal(ok(me).id,id); else {
         error(me,401,'AUTH_INVALID');
       }
     }
@@ -370,7 +370,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(me.name, 'Synthetic acceptance operator');
     assert.equal(me.environment, undefined);
     assert.ok(me.permissions.includes('manage'));
-    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-opensend-environment': 'live' })).environment, undefined);
+    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-bane-environment': 'live' })).environment, undefined);
     error(await http('POST', '/v1/emails/send', MANAGER, mail(), { 'x-opensend-environment': 'test' }), 400, 'ENVIRONMENT_REMOVED');
     const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
     assert.equal(inspected.user.id, manager!.userId);
@@ -378,7 +378,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(inspected.user.googleHostedDomain, undefined, 'Google hd is protected server-side identity data.');
     assert.equal(ok(await http('GET', '/api/auth/get-session')), null);
     const machine = await keyFixture(t, { permissions: ['read'] });
-    const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-opensend-environment': 'live' }));
+    const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-bane-environment': 'live' }));
     assert.equal(machineMe.id, machine.id);
     assert.equal(machineMe.email, null);
     assert.equal(machineMe.name, null);
@@ -459,7 +459,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       await authDb!.query('UPDATE auth_user SET email = $2, email_verified = $3, google_hosted_domain = $4 WHERE id = $1', [fixture.userId, state.email, state.verified, state.hd]);
       await authDb!.query('UPDATE auth_account SET provider_id = $2 WHERE user_id = $1', [fixture.userId, state.account ? 'google' : 'not-google']);
       error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-      if (!state.account) error(await http('GET', '/v1/inbound/threads', undefined, undefined, { ...headers, 'x-opensend-environment': 'live' }), 401, 'AUTH_REQUIRED');
+      if (!state.account) error(await http('GET', '/v1/inbound/threads', undefined, undefined, { ...headers, 'x-bane-environment': 'live' }), 401, 'AUTH_REQUIRED');
       assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null, state.reason);
       const email = address();
       error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
@@ -502,7 +502,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       if (state === 'sign-out') {
         const signedOut = await http('POST', '/api/auth/sign-out', undefined, {}, headers);
         assert.equal(ok(signedOut).success, true);
-        assert.match(signedOut.headers.get('set-cookie') ?? '', /opensend\.session_token=/);
+        assert.match(signedOut.headers.get('set-cookie') ?? '', /bane\.session_token=/);
         assert.equal((await authDb!.query('SELECT id FROM auth_session WHERE id = $1', [fixture.sessionId])).rowCount, 0);
       }
       error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
@@ -526,7 +526,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
   test('MOCK GOOGLE TRANSPORT: real OAuth state/callback lifecycle persists trusted claims, rejects denied profiles, and fails closed on configuration', async t => {
     const [{ createApp }, { drizzle }] = await Promise.all([import('./src/app.js'), import('drizzle-orm/node-postgres')]);
     const app = createApp();
-    const origin = 'https://mock-oauth.opensend.dev';
+    const origin = 'https://mock-oauth.bane.dev';
     const emailAllowed = `${unique('mock-email-approved')}@unapproved.invalid`;
     const runtime: import('./src/core.js').Runtime = {
       db: drizzle(authDb!),
@@ -637,7 +637,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(account.provider_id, 'google');
         assert.equal(account.account_id, profile.sub);
         for (const field of ['access_token', 'refresh_token', 'id_token', 'password', 'scope']) assert.equal(account[field], null, 'Google token material must not remain in the account row.');
-        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Secure-opensend.session_token='));
+        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Secure-bane.session_token='));
         assert.ok(sessionCookie, 'A successful callback must issue the secure prefixed session cookie.');
         assert.match(sessionCookie, /;\s*HttpOnly/i);
         assert.match(sessionCookie, /;\s*Secure/i);
@@ -654,7 +654,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.deepEqual((await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows, userBefore);
         assert.deepEqual((await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows, subjectBefore, 'A denied returning profile must not replace the established identity or overwrite its last trusted hd.');
         assert.deepEqual((await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows, sessionsBefore, 'Denied profile/JWT must not create any session.');
-        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Secure-opensend.session_token=')));
+        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Secure-bane.session_token=')));
       }
       const replay = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
       assert.equal(replay.headers.get('location'), `${origin}/?auth=error`);
@@ -704,7 +704,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('POST', acceptedPath, undefined, b.cookie)).workspaceId, a.org.id);
       const invitedMember = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.email === otherEmail);
       ok(await local('DELETE', `${base}/members/${invitedMember.id}`, undefined, a.cookie));
-      const select = (id: string) => ({ 'x-opensend-workspace': id });
+      const select = (id: string) => ({ 'X-OpenSend-Workspace': id });
       error(await local('GET', '/v1/me', undefined, a.cookie, select(b.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
       const invitedEmail = `${unique('mx-invited-owner')}@example.com`;
       const linked = ok(await local('POST', `${base}/invitations`, {email:invitedEmail,role:'member'}, b.cookie),201);
@@ -751,10 +751,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         let failImportRead=false, wrongArn=false;
         providerTest.mock.method(STSClient.prototype, 'send', async function(this: InstanceType<typeof STSClient>, command: any) {
           const key = (await this.config.credentials()).accessKeyId;
-          if (command.constructor.name === 'GetCallerIdentityCommand') { identityChecks++; return key === platformKey.accessKeyId ? { Account: platform, Arn: callerArn } : { Account: customer, Arn: `arn:aws:sts::${customer}:assumed-role/OpenSendMX/synthetic` }; }
+          if (command.constructor.name === 'GetCallerIdentityCommand') { identityChecks++; return key === platformKey.accessKeyId ? { Account: platform, Arn: callerArn } : { Account: customer, Arn: `arn:aws:sts::${customer}:assumed-role/Bane/synthetic` }; }
           assert.equal(command.constructor.name, 'AssumeRoleCommand'); assert.equal(key, platformKey.accessKeyId);
           if (!command.input.ExternalId || (!laxTrust && !externalIds.includes(command.input.ExternalId)) || !command.input.RoleArn.startsWith(`arn:aws:iam::${customer}:`)) throw Object.assign(new Error('Synthetic trust policy denial'), { name: 'AccessDenied' });
-          assert.match(command.input.RoleArn, /^arn:aws:iam::222222222222:role\/OpenSendMX-[a-f0-9]{20}$/);
+          assert.match(command.input.RoleArn, /^arn:aws:iam::222222222222:role\/Bane-[a-f0-9]{20}$/);
           const wait=holdAssume;holdAssume=undefined;if(wait) await wait();
           assumptions++; return { AssumedRoleUser:{Arn:`arn:aws:sts::${wrongArn?platform:customer}:assumed-role/${command.input.RoleArn.split('/')[1]}/${command.input.RoleSessionName}`}, Credentials: { AccessKeyId: 'synthetic-customer', SecretAccessKey: 'synthetic-secret', SessionToken: 'synthetic-temporary', Expiration: new Date(Date.now() + 3600_000) } };
         });
@@ -796,7 +796,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'CreateEmailIdentityCommand': {
               if (dropCreate) { dropCreate=false; throw new Error('Synthetic connection reset before SES received Create'); }
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
-              assert.equal(i.Tags[0].Key,'opensend:domain-claim');
+              assert.equal(i.Tags[0].Key,'bane:domain-claim');
               identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
               if (loseCreateResponse) { loseCreateResponse=false; throw new Error('Synthetic connection reset after SES accepted Create'); }
               return {DkimAttributes:{...verifiedIdentity.DkimAttributes,Status:'PENDING'},VerifiedForSendingStatus:false};
@@ -819,19 +819,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'GetSubscriptionAttributesCommand': return { Attributes: { ...topic!.subs[0], PendingConfirmation: String(ohioConfirmationPending && region === 'us-east-2' && account === platform), Owner: account, RawMessageDelivery: 'false' } };
             case 'CreateTenantCommand': {
               assert.deepEqual(i.SuppressionAttributes, { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE','COMPLAINT'] });
-              const unready = await pool.query("SELECT 1 FROM provider_connections WHERE 'opensend-' || workspace_id=$1 AND tenant_state<>'ready' AND lease_until IS NULL", [i.TenantName]);
+              const unready = await pool.query("SELECT 1 FROM provider_connections WHERE 'bane-' || workspace_id=$1 AND tenant_state<>'ready' AND lease_until IS NULL", [i.TenantName]);
               assert.equal(unready.rowCount, 1, 'CreateTenant is idempotent: no lease, and never for a tenant already marked ready.');
               if (failTenantOnce) { failTenantOnce=false; throw Object.assign(new Error('Synthetic SES outage'),{name:'TooManyRequestsException',$metadata:{httpStatusCode:429}}); }
               return { TenantName: i.TenantName, TenantArn: `arn:aws:ses:${region}:${account}:tenant/${i.TenantName}/fixture` };
             }
             case 'UpdateReputationEntityPolicyCommand': assert.equal(i.ReputationEntityPolicy, `arn:aws:ses:${region}:aws:reputation-policy/strict`); return {};
             case 'CreateTenantResourceAssociationCommand':
-              assert.ok([a.org.id, b.org.id].some(wid => i.TenantName === `opensend-${wid}`));
+              assert.ok([a.org.id, b.org.id].some(wid => i.TenantName === `bane-${wid}`));
               if (i.ResourceArn.includes(':identity/')) {
                 assert.equal(account, platform); const binding = `${i.TenantName}:${i.ResourceArn}`;
                 if (associations.has(binding)) throw Object.assign(new Error('Already associated'), { name:'AlreadyExistsException' });
                 associations.add(binding);
-              } else assert.match(i.ResourceArn, /:configuration-set\/opensend-mx-(transactional|marketing)$/);
+              } else assert.match(i.ResourceArn, /:configuration-set\/bane-(transactional|marketing)$/);
               return {};
             default: return setup(name,i,region,account);
           }
@@ -901,7 +901,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const discovery = `/v1/regions/${region}/discovery`;
         await providerTest.test('MX refuses public suffixes and reserved domain trees before reserving or contacting SES',async()=>{
           const own=new URL(runtime.config.publicUrl).hostname, start=calls.length;
-          const blocked=['com','xn--p1ai',' CO.UK ','com.au','k12.ak.us','sch.uk','district.sch.uk','wixsite.com','github.io','customer.github.io','mail.vercel.app','netlify.app','onmicrosoft.com','amazonses.com','in.amazonses.com','amazonaws.com','ses.amazonaws.com',own,'in.'+own,own.split('.').slice(1).join('.')];
+          const blocked=['com','xn--p1ai',' CO.UK ','com.au','k12.ak.us','sch.uk','district.sch.uk','wixsite.com','github.io','customer.github.io','mail.vercel.app','netlify.app','onmicrosoft.com','amazonses.com','in.amazonses.com','amazonaws.com','ses.amazonaws.com','opensend.mx','mail.sub.opensend.mx',own,'in.'+own,own.split('.').slice(1).join('.')];
           for (const name of blocked) error(await add(b.cookie,name),422,'DOMAIN_NOT_ALLOWED');
           assert.equal(calls.length,start);
           assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=ANY($1)',[blocked.map(s=>s.trim().toLowerCase())])).rowCount,0);
@@ -930,7 +930,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         await providerTest.test('Domain Connect: inline cached discovery, sorted signature and workspace-bound dashboard return',async dc=>{
           const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
-          const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
+          const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/bane.mx/services/mail';
           const cf='https://api.cloudflare.com/client/v4/dns/domainconnect';
           let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false, existingMx=false;
           let deployedVersion:number|undefined;
@@ -940,7 +940,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             if(url.origin==='https://cloudflare-dns.com') {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
               if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
-              if(q===`_opensend.${name}`) return Response.json({Status:3});
+              if(q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${zone}`) return Response.json({Status:0,Answer:[{name:q,type:16,data:'v=DMARC1; p=reject'}]});
               assert.equal(type,'TXT'); assert.equal(init?.redirect,'manual');
@@ -998,7 +998,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const wire=url.search.slice(1).split('&key=')[0]!, sig=Buffer.from(params.get('sig')!,'base64');
           const sorted=new URLSearchParams(params); sorted.delete('key'); sorted.delete('sig'); sorted.sort(); assert.equal(wire,sorted.toString());
           assert.ok(verifySignature('RSA-SHA256',Buffer.from(sorted.toString()),publicKey,sig)); assert.ok(!verifySignature('RSA-SHA256',Buffer.from(wire.replace('host=mail','host=other')),publicKey,sig));
-          const template=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../domain-connect/opensend.mx.mail.json',import.meta.url),'utf8'));
+          const template=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../domain-connect/bane.mx.mail.json',import.meta.url),'utf8'));
           const expand=(s:string)=>s.replace(/%(\w+)%/g,(_,key:string)=>{assert.ok(params.has(key));return params.get(key)!;});
           for(const record of template.records.filter((r:Json)=>offered.groups.includes(r.groupId))) {
             const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
@@ -1080,7 +1080,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               dmarcQueries++; const records=policies.get(q.slice(7));
               return Response.json(dmarcFailure ? {Status:2} : records ? {Status:0,Answer:records.map(data=>({name:q,type:16,data}))} : {Status:3});
             }
-            lookups++; return Response.json(answer ? { Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] } : {Status:3});
+            lookups++; return Response.json(answer && q.startsWith('_opensend.') ? { Status:0, Answer:[{ name:`${q}.`, type:16, data:JSON.stringify(answer) }] } : {Status:3});
           });
           const before = calls.length;
           error(await local('GET',discovery,undefined,b.cookie),409,'CONNECTION_MANAGED_REGION');
@@ -1120,7 +1120,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose==='sending' && r.type==='TXT');
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
           assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
-          assert.equal(proof.name,`_opensend.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
+          assert.equal(proof.name,`_bane.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
           assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:domain,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
           assert.equal(associations.size,0);
@@ -1157,8 +1157,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
 
           identity.DkimAttributes=dkim; answer=''; await pace();
           await assert.rejects(check(40),e=>e instanceof JobDeferred && Date.parse(e.availableAt)<=Date.now()+16_000 && e.payload?.poll===1);
-          assert.equal(lookups,1,'The first DKIM success checks TXT; NXDOMAIN restarts at the short delay even after 40 polls.');
-          await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
+          assert.equal(lookups,2,'The first DKIM success checks TXT; NXDOMAIN restarts at the short delay even after 40 polls.');
+          await assert.rejects(check(),JobDeferred); assert.equal(lookups,2,'Account pacing must prevent a second SES read.');
           await pace();
           // A verified domain binds to the tenant only once the tenant job has created it; the verifier waits, never provisions.
           await pool.query("UPDATE provider_connections SET tenant_state='pending' WHERE workspace_id=$1",[b.org.id]);
@@ -1172,8 +1172,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`GET verified domain: 1 domain statement; ${verifiedQueries} pg round trips including dashboard auth; no wake.`);
           const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
-          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,3,"Two completed checks plus the one that waited for the tenant.");
-          assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
+          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,6,"Three checks of both ownership labels; the legacy TXT proves the claim.");
+          assert.ok(associations.has(`bane-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
           // A verified sender on a connection whose tenant is not ready is refused at admission, never queued silently.
           await pool.query("UPDATE provider_connections SET tenant_state='failed' WHERE workspace_id=$1",[b.org.id]);
           try { error(await send(`hi@${domain}`),409,'TENANT_NOT_READY'); assert.equal((await pool.query('SELECT 1 FROM sending_emails WHERE workspace_id=$1',[b.org.id])).rowCount,0); }
@@ -1243,8 +1243,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const probe=async(addr:string,id=unique('probe'))=>acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});
             assert.equal(await probe(custom),0,'Sending verification cannot authorize receipt before MX.');
             // Proven ownership is enough to create addresses; nothing routes until the MX record is observed.
-            const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-opensend-environment':'live'}),201);
-            assert.equal(await probe(early.address),0); ok(await local('DELETE',`/v1/inbound/addresses/${early.id}`,undefined,b.cookie,{'x-opensend-environment':'live'}));
+            const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-bane-environment':'live'}),201);
+            assert.equal(await probe(early.address),0); ok(await local('DELETE',`/v1/inbound/addresses/${early.id}`,undefined,b.cookie,{'x-bane-environment':'live'}));
               const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
             activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
@@ -1303,8 +1303,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const {rows:[stored]}=await pool.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);assert.deepEqual(stored.envelope_to,[recipient]);assert.deepEqual(stored.bcc,[]);assert.equal(stored.to[0].address,custom);assert.deepEqual(objects.get(`${bucket}/${stored.raw_key}`),expected);
               assert.equal(stored.raw_key,`workspaces/${wid}/raw/${sesMessageId}.eml`);assert.equal((await pool.query('SELECT 1 FROM mailboxes WHERE workspace_id=$1 AND address=$2 AND origin=\'auto\'',[wid,recipient])).rowCount,1);
               const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
-              if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
-              const detailed=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
+              if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-bane-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
+              const detailed=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,user.cookie,{'x-bane-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
             }
             message.receipt.recipients=[dropped];message.mail.messageId=unique('unmatched');message.receipt.action.objectKey='staging/'+message.mail.messageId;
             assert.equal(await accept(),0);assert.equal((await pool.query('SELECT 1 FROM mail_receipts WHERE ses_message_id=$1',[message.mail.messageId])).rowCount,0);
@@ -1314,7 +1314,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             });
             message.receipt.recipients=[custom];message.receipt.timestamp='2020-01-01T00:00:00Z';assert.equal(await accept(),0,'A delayed notification predating this domain claim does not transfer old mail.');
             const deliveries=await pool.query('SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1',[hook]);assert.equal(deliveries.rowCount,1);assert.ok(!JSON.stringify(deliveries.rows).includes(blind));
-            const live={'x-opensend-environment':'live'},awsCount=calls.length;
+            const live={'x-bane-environment':'live'},awsCount=calls.length;
             const inboundPath=`/v1/inbound/domains/${created.id}`;
             const inboundView=ok(await local('GET',inboundPath,undefined,b.cookie,live));assert.equal(inboundView.name,mx.name);assert.equal(inboundView.dns[0].name,mx.name);assert.equal(inboundView.status,'active');assert.equal(inboundView.addressCount,1);
             assert.equal(ok(await local('PATCH',inboundPath,{catchAll:'store'},b.cookie,live)).catchAll,'store');
@@ -1357,9 +1357,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const {cleanup}=await import('./src/maintenance.js');
               const create=async()=>ok(await add(b.cookie,unique('expiry')+'.invalid'),201);
               const expired=await create(),foreignTag=await create(),recent=await create();
-              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_opensend.'+x.name).value;
+              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_bane.'+x.name).value;
               const token=getToken(expired);
-              identities.get(`${platform}:${foreignTag.name}`)!.Tags=[{Key:'opensend:domain-claim',Value:randomUUID()}];
+              identities.get(`${platform}:${foreignTag.name}`)!.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];
               await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=ANY($1)",[[expired.name,foreignTag.name,domain]]);
               await pool.query("UPDATE domain_claims SET created_at=now()-interval '71 hours' WHERE name=$1",[recent.name]);
               await pool.query("UPDATE jobs SET status='running',lease_until=now()+interval '1 hour' WHERE id=$1",['domain.verify:'+token]);
@@ -1468,8 +1468,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         await providerTest.test('signed stack confirmation proves the account, resumes paged identity import, and replays without mutations',async bt=>{
           const row=ok(ac,201),prefix=new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]).get('param_ResourcePrefix')!;
           const arn=`arn:aws:sns:${region}:${customer}:${prefix}-feedback`, host=`https://sns.${region}.amazonaws.com/`;
-          const tags=[{Key:'opensend:installation-id',Value:row.id},{Key:'opensend:purpose',Value:'ses-feedback'}];
-          const sharedPrefix='opensend-mx',sharedArn=`arn:aws:sns:${region}:${platform}:${sharedPrefix}-feedback`;
+          const tags=[{Key:'bane:installation-id',Value:row.id},{Key:'bane:purpose',Value:'ses-feedback'}];
+          const sharedPrefix='bane',sharedArn=`arn:aws:sns:${region}:${platform}:${sharedPrefix}-feedback`;
           // Completed stack, not resources created by the app's role. Discovery checks tags, exact
           // policy, both destinations and the confirmed non-raw HTTPS subscription.
           const policy=topics.get(sharedArn)!.Attributes.Policy.replaceAll(platform,customer).replaceAll(sharedPrefix,prefix);
@@ -1494,7 +1494,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           }
           const receive=(body:Json)=>local('POST','/v1/events/ses',body,undefined,{'content-type':'text/plain; charset=UTF-8'}), signed=envelope(arn);
           error(await receive({...signed,Type:'Notification'}),403,'SNS_TOPIC_NOT_ALLOWED');
-          for(const bad of [arn.replace(region,'eu-west-1'),arn.replace(prefix,'opensend-'+ '0'.repeat(20)),arn.replace(customer,platform)])error(await receive(envelope(bad)),403,'SNS_TOPIC_NOT_ALLOWED');
+          for(const bad of [arn.replace(region,'eu-west-1'),arn.replace(prefix,'bane-'+ '0'.repeat(20)),arn.replace(customer,platform)])error(await receive(envelope(bad)),403,'SNS_TOPIC_NOT_ALLOWED');
           error(await receive({...signed,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');assert.equal(assumptions,0);
           error(await receive(envelope(arn.replace(customer,'333333333333'))),503,'AWS_ACCESS_DENIED');
           wrongArn=true;error(await receive(signed),409,'AWS_ACCOUNT_MISMATCH');wrongArn=false;
@@ -1567,7 +1567,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           }
           await canReserve(true);
           async function check(item:Json,correct:boolean){
-            const proof=item.dns.find((r:Json)=>r.name==='_opensend.'+item.name);assert.equal(proof.status,'pending');
+            const proof=item.dns.find((r:Json)=>r.name==='_bane.'+item.name);assert.equal(proof.status,'pending');
             dns.set(proof.name,correct?proof.value:'wrong');await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
             return operationJobs['domain.verify']!(runtime,{domainId:item.id,token:proof.value},{id:'domain.verify:'+proof.value,attempts:1,workspaceId:a.org.id});
           }
@@ -1597,7 +1597,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['sending','sending','sending','receiving']);
         const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[byoDomain.id]);
         await providerTest.test('BYO inbound uses its assumed role and per-domain rule, never the platform catch-all',async bt=>{
-          const headers={'x-opensend-environment':'live'},wid=a.org.id;
+          const headers={'x-bane-environment':'live'},wid=a.org.id;
           bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{assert.equal(new URL(String(input)).searchParams.get('type'),'MX');return Response.json({Status:0,Answer:[{name:domain,type:15,data:`10 inbound-smtp.${region}.amazonaws.com.`}]});});
           bt.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){
             assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'customer-set'},Rules:[]};
@@ -1675,7 +1675,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type IN ('domain.verify','domain.mx') AND status='pending'",[a.org.id])).rowCount,0);
         assert.equal((await pool.query('SELECT 1 FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rowCount,0);
         assert.deepEqual(ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data,[]); error(await local('GET',`/v1/domains/${byoDomain.id}`,undefined,a.cookie),404);
-        assert.deepEqual(ok(await local('GET','/v1/inbound/domains',undefined,a.cookie,{'x-opensend-environment':'live'})).data,[]);
+        assert.deepEqual(ok(await local('GET','/v1/inbound/domains',undefined,a.cookie,{'x-bane-environment':'live'})).data,[]);
         error(await add(a.cookie,domain),409,'CONNECTION_REQUIRED');
         ok(await choose('shared', a.cookie),201);
         const reproved=ok(await local('POST','/v1/domains',{name:domain},a.cookie),201); // Region defaults to the connection.
@@ -1683,7 +1683,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const reconnected=ok(await local('GET', path, undefined, a.cookie)).connection;
         assert.equal((await released())[0].connection_id,reconnected.id);
         // Disconnecting a shared connection removes its tagged pool identities so a later reconnect never meets its own ghost.
-        associations.add(`opensend-${a.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`); const sharedCalls=calls.length;
+        associations.add(`bane-${a.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`); const sharedCalls=calls.length;
         ok(await local('DELETE', path, undefined, a.cookie));
         assert.deepEqual(calls.slice(sharedCalls),['GetEmailIdentityCommand','ListResourceTenantsCommand','DeleteTenantResourceAssociationCommand','DeleteEmailIdentityCommand']);
         assert.ok(!identities.has(`${platform}:${domain}`)); assert.equal(associations.size,[...associations].filter(k=>!k.endsWith(`:identity/${domain}`)).length);
@@ -1754,7 +1754,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
 
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
-  const writableScope = 'opensend:read opensend:manage offline_access';
+  const writableScope = 'bane:read bane:manage offline_access';
   const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
   function protectOAuth(reply: Reply): Reply {
     if (reply.body && typeof reply.body === 'object') for (const [field, value] of Object.entries(reply.body)) {
@@ -1829,6 +1829,45 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual(JSON.parse(result.content[0].text), output);
     return output.response;
   }
+
+  test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
+    await simulatedSesFixture(t, async ({ db, request }) => {
+      const {token, consentId}=await oauthGrant(t,db,'opensend:read offline_access',request);
+      const claims=JSON.parse(Buffer.from(token.split('.')[1]!,'base64url').toString());
+      assert.equal(claims.bane_grant,'mcp_'+consentId);assert.ok(claims.scope.split(' ').includes('bane:read'));
+      await db.query("UPDATE oauth_consent SET reference_id=replace(reference_id,'bane:read','opensend:read'), scopes=array_replace(scopes,'bane:read','opensend:read') WHERE id=$1",[consentId]);
+      const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'}),kid=randomUUID();
+      await db.query("INSERT INTO auth_jwks(id,public_key,private_key,created_at,alg,crv) VALUES($1,$2,'fixture-only',now()-interval '1 day','ES256','P-256')",[kid,JSON.stringify(publicKey.export({format:'jwk'}))]);
+      const encode=(v:unknown)=>Buffer.from(JSON.stringify(v)).toString('base64url');
+      const legacy=(grant:string)=>{
+        const data=encode({alg:'ES256',typ:'at+jwt',kid})+'.'+encode({...claims,bane_grant:undefined,opensend_grant:grant,scope:'opensend:read'});
+        return data+'.'+Buffer.from(sign('sha256',Buffer.from(data),{key:privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
+      };
+      const rpc=(bearer:string)=>request('POST','/mcp',bearer,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
+      assert.ok(ok(await rpc(legacy(claims.bane_grant))).result.tools.length);
+      assert.equal((await rpc(legacy('mcp_unknown'))).status,401);
+    });
+  });
+
+  test('092 migrates a stored refresh grant without widening the next access token',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {refreshToken,clientId,consentId}=await oauthGrant(t,db,'bane:read offline_access',request);
+      // Keep the real opaque token and grant linkage, but restore their pre-092 spellings.
+      for (const table of ['oauth_consent','oauth_refresh_token','oauth_access_token']) {
+        await db.query(`UPDATE ${table} SET scopes=array_replace(scopes,'bane:read','opensend:read'),reference_id=replace(reference_id,'bane:read','opensend:read') WHERE client_id=$1`,[clientId]);
+      }
+      const stored=async()=>(await db.query('SELECT scopes,reference_id FROM oauth_refresh_token WHERE client_id=$1',[clientId])).rows[0];
+      const before=await stored();assert.ok(before.scopes.includes('opensend:read'));
+      const {readFile}=await import('node:fs/promises');
+      await db.query(await readFile(new URL('./migrations/092_bane_scopes.sql',import.meta.url),'utf8'));
+      const expected=['bane:read','offline_access'];const after=await stored();
+      assert.deepEqual(after.scopes.toSorted(),expected);assert.equal(after.reference_id,before.reference_id.replace('opensend:read','bane:read'));
+      const tokens=ok(protectOAuth(await request('POST','/api/auth/oauth2/token',undefined,new URLSearchParams({grant_type:'refresh_token',client_id:clientId,refresh_token:refreshToken,resource:resourceUrl}).toString(),{'content-type':'application/x-www-form-urlencoded'})));
+      assert.deepEqual(tokens.scope.split(' ').sort(),expected);
+      const claims=JSON.parse(Buffer.from(tokens.access_token.split('.')[1],'base64url').toString());
+      assert.equal(claims.bane_grant,'mcp_'+consentId);assert.deepEqual(claims.scope.split(' ').sort(),expected);
+    });
+  });
 
   test('hosted MCP bounds registration per peer and hour without weakening desktop redirect validation', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, request }) => {
@@ -2035,7 +2074,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
     assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, undefined);
-    const [encoded, signature] = temporary.token.slice('os_agent_'.length).split('.');
+    const [encoded, signature] = temporary.token.slice('bane_agent_'.length).split('.');
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString());
     const derived = Buffer.from(hkdfSync('sha256', AUTH_SECRET!, 'opensend:keys:v1', 'agent-token:v1', 32));
     const mac = (body: string, key: string | Buffer) => createHmac('sha256', key).update(`opensend-agent-token-v1:${body}`).digest('base64url');
@@ -2052,10 +2091,10 @@ describe('Hosted MCP OAuth and tools', () => {
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
-    const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-opensend-environment': 'live' }));
+    const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
-    ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-opensend-environment': 'live' }));
+    ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
     error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
     const connections = page(await http('GET', '/v1/mcp-connections', MANAGER));
     assert.ok(connections.some(row => row.id === `mcp_${consentId}`));
@@ -2119,8 +2158,8 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
-      const manager = await oauthGrant(t, db, `${writableScope} opensend:live`, request);
-      const reader = await oauthGrant(t, db, 'opensend:read opensend:live offline_access', request);
+      const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
       await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4), ($5,$2,'example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
@@ -2175,7 +2214,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const { token } = await oauthGrant(t, db, `${writableScope} opensend:live`, request);
+      const { token } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -2191,7 +2230,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const sent = new Map<string, any>();
       t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled:true, SendQuota:{ MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0 } };
-        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x=>x.Name==='opensend_email_id')!.Value!;sent.set(id,cmd.input);return { MessageId:`ses-${id}` };
+        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x=>x.Name==='bane_email_id')!.Value!;sent.set(id,cmd.input);return { MessageId:`ses-${id}` };
       });
       const base = '/v1/inbound', get = (p:string, h?:Record<string,string>) => local('GET',base+p,undefined,'live',h), post = (p:string, body:Json, h?:Record<string,string>) => local('POST',base+p,body,'live',h);
       const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
@@ -2299,7 +2338,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
-    const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
+    const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
     const catalog = await rpc(token, 'tools/list');
     assert.equal(catalog.tools.length, 16);
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
@@ -2462,7 +2501,7 @@ describe('DB region catalog and explicit SES setup', () => {
         await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, runtime.config);
         async function local(method: string, path: string, body?: Json, key?: string, environment: 'test' | 'live' = 'live'): Promise<Reply> {
           const response = await app.fetch(new Request(`${runtime.config.publicUrl}${path}`, {
-            method, headers: { origin: runtime.config.publicUrl, 'x-opensend-environment': environment,
+            method, headers: { origin: runtime.config.publicUrl, 'x-bane-environment': environment,
               ...(key ? { authorization: `Bearer ${key}` } : { cookie: manager!.cookie }), ...(body ? { 'content-type': 'application/json' } : {}) },
             ...(body ? { body: JSON.stringify(body) } : {}),
           }), runtime);
@@ -2507,7 +2546,7 @@ describe('DB region catalog and explicit SES setup', () => {
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, scoped), 403);
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: false }, admin), 422);
         const originalUrl = runtime.config.publicUrl;
-        runtime.config.publicUrl = 'https://ses-acceptance.opensend.dev';
+        runtime.config.publicUrl = 'https://ses-acceptance.bane.dev';
         error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, reader), 503, 'SES_NOT_CONFIGURED');
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, admin), 503);
         assert.equal(observed.length, 0, 'Missing explicit AWS credentials must fail without SDK calls.');
@@ -2515,7 +2554,7 @@ describe('DB region catalog and explicit SES setup', () => {
         runtime.config.publicUrl = 'http://127.0.0.1:8798';
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, admin), 422);
         assert.equal(observed.length, 0, 'Invalid callback URL must reject provisioning before AWS calls.');
-        runtime.config.sesFeedbackUrl = 'https://ses-acceptance.opensend.dev/v1/events/ses';
+        runtime.config.sesFeedbackUrl = 'https://ses-acceptance.bane.dev/v1/events/ses';
         const startup = await import('./src/ses-regions.js');
         assert.equal(await startup.queueStartupDiscovery(runtime), 1);
         assert.equal(await startup.queueStartupDiscovery(runtime), 0, 'Concurrent/repeated startup discovery must reuse its pending job.');
@@ -2527,7 +2566,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(writes().length, 0, 'Automatic startup discovery must not provision resources.');
         assert.equal(await startup.queueStartupDiscovery(runtime), 0, 'A fresh discovery does not need another startup job.');
         runtime.config.sesFeedbackUrl = undefined;
-        runtime.config.publicUrl = 'https://ses-acceptance.opensend.dev';
+        runtime.config.publicUrl = 'https://ses-acceptance.bane.dev';
         const discoveryPath = `/v1/regions/${REGION}/discovery`;
         const missing = ok(await local('GET', discoveryPath, undefined, reader));
         assert.equal(missing.status, 'needs_provisioning', 'Changed credentials must invalidate the previous blocked discovery cache.');
@@ -2583,7 +2622,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.deepEqual(publish.Condition.StringEquals['AWS:SourceArn'].sort(), expectedSets.map(name => `arn:aws:ses:${REGION}:${accountId}:configuration-set/${name}`).sort());
         assert.ok(policy.Statement.every((statement: Json) => statement.Principal !== '*' && statement.Resource === expectedTopic));
         for (const set of sets.values()) {
-          assert.ok(set.Tags.some((tag: Json) => tag.Key === 'opensend:installation-id' && tag.Value));
+          assert.ok(set.Tags.some((tag: Json) => tag.Key === 'bane:installation-id' && tag.Value));
           // Provider acceptance comes from SendEmail's response, not a duplicate SEND notification.
           assert.deepEqual([...set.destinations[0].MatchingEventTypes].sort(), ['DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'].sort());
         }
@@ -2951,15 +2990,19 @@ describe('Private attachment assets and campaign revisions', () => {
     for (const content of ['QUJDR', 'QUJD\x01RA==', 'QUJD====', 'data:text/plain;base64,QUJDRA==']) error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content }), 422, 'INVALID_BASE64');
     const calendar = Buffer.from('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n');
     const upload = async (filename: string, contentType: string, content: Buffer, extra: Record<string, string> = {}) => {
-      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-opensend-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
+      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-bane-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
       return { status: response.status, body: await response.json(), headers: response.headers } satisfies Reply;
     };
     const raw = ok(await upload('invite.ics', 'text/calendar; method=REQUEST; charset=utf-8', calendar), 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${raw.id}`, key.secret), [200, 404]); });
     assert.equal(raw.contentType, 'text/calendar; method=REQUEST; charset=utf-8');
     assert.equal(ok(await http('GET', `/v1/attachments/${raw.id}/content`, key.secret)).content, calendar.toString('base64'));
+    const legacyUpload=await fetch(`${BASE}/v1/attachments/upload`,{method:'POST',headers:{authorization:`Bearer ${key.secret}`,'content-type':'image/gif','x-opensend-filename':'old%20logo.gif','x-opensend-disposition':'inline','x-opensend-content-id':'opensend-logo'},body:Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64')});
+    assert.equal(legacyUpload.status,201);const oldAsset=await legacyUpload.json() as Json;
+    cleanup(t,async()=>{ok(await http('DELETE',`/v1/attachments/${oldAsset.id}`,key.secret),[200,404]);});
+    assert.deepEqual([oldAsset.filename,oldAsset.disposition,oldAsset.contentId],['old logo.gif','inline','opensend-logo']);
     error(await upload('unsafe.vbs', 'text/plain', bytes), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
-    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-opensend-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
+    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-bane-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
     assert.equal(ok(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret)).deleted, true);
@@ -3418,10 +3461,10 @@ describe('Dashboard API capabilities', () => {
     assert.equal(messages[0].kind, 'marketing');
     const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
     assert.equal(content.simulated, true);
-    assert.ok(content.html.includes('data-opensend-preview="true"'));
+    assert.ok(content.html.includes('data-bane-preview="true"'));
     assert.ok(content.html.includes('&lt;img src=x onerror=alert(1)&gt; &amp; &quot;Preview&quot;!'));
     assert.ok(!content.html.includes('<img src=x'));
-    assert.ok(content.html.indexOf('data-opensend-preview') < content.html.indexOf('Visible body'));
+    assert.ok(content.html.indexOf('data-bane-preview') < content.html.indexOf('Visible body'));
     // The sent row stores only a stub and its unsubscribe URL; the body above was rebuilt from the frozen review.
     const db = await fixtureDatabase(t);
     const [stored] = (await db.query("SELECT snapshot FROM sending_emails WHERE id = $1", [messages[0].id])).rows;
@@ -3580,8 +3623,8 @@ describe('Dashboard API capabilities', () => {
     const historical=`/v1/metrics?from=2024-01-01T00:00:00Z&to=2024-01-02T00:00:00Z&region=${REGION}`;
     await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
     const cached=await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
-    assert.equal(cached.headers.get('x-opensend-metrics-cache'),'hit');
-    assert.equal((await http('GET',historical,key.secret)).headers.get('x-opensend-metrics-cache'),null);
+    assert.equal(cached.headers.get('x-bane-metrics-cache'),'hit');
+    assert.equal((await http('GET',historical,key.secret)).headers.get('x-bane-metrics-cache'),null);
     const before = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
     assert.equal(before.basis, 'created-cohort');
     assert.equal(before.region, REGION);
@@ -4172,7 +4215,7 @@ describe('Operational configuration and public event boundaries', () => {
         }
         error(await local('POST', base, { url, headers: [hdr('HOST')] }), 422, 'VALIDATION_FAILED');
         for (const invalid of [
-          ...['content-TYPE','Content-Length','Content-Encoding','Transfer-Encoding','Connection','Keep-Alive','TE','Trailer','Upgrade','HTTP2-Settings','Expect','pRoXy-Authorization','Cookie','User-Agent','wEbHoOk-iD','Webhook-Timestamp','Webhook-Signature','OpenSend-Test','not a token','x'.repeat(65)].map(name => [hdr(name)]),
+          ...['content-TYPE','Content-Length','Content-Encoding','Transfer-Encoding','Connection','Keep-Alive','TE','Trailer','Upgrade','HTTP2-Settings','Expect','pRoXy-Authorization','Cookie','User-Agent','wEbHoOk-iD','Webhook-Timestamp','Webhook-Signature','Bane-Test','OpenSend-Test','not a token','x'.repeat(65)].map(name => [hdr(name)]),
           ...['\r','\n','\x00'].map(bad => [hdr('X-Test', value + bad)]), [hdr('Authorization', 'a'.repeat(2049))],
           [hdr('X-Dup'), hdr('x-DUP')], Array.from({ length: 11 }, (_, i) => hdr(`X-${i}`)),
           Array.from({ length: 4 }, (_, i) => hdr(`X-${i}`, 'é'.repeat(1024))),
@@ -4242,7 +4285,7 @@ describe('Operational configuration and public event boundaries', () => {
         if (callbacks.length > 1) { response.writeHead(204); response.end(); return; }
       }
       if (request.url === '/certificate' || request.url === '/webhook') {
-        response.writeHead(302, { Location: '/redirect-target' }); response.end('Redirect refused by OpenSend.');
+        response.writeHead(302, { Location: '/redirect-target' }); response.end('Redirect refused by Bane.');
       } else { response.writeHead(200); response.end('The redirect target must never be requested.'); }
     });
     server.listen(0, '127.0.0.1');
@@ -4302,7 +4345,7 @@ describe('Operational configuration and public event boundaries', () => {
         function checkCallback(index: number, value: string | undefined, synthetic: boolean) {
           const { headers, body } = callbacks[index];
           assert.equal(headers.authorization, value); assert.equal(headers['content-type'], 'application/json');
-          assert.equal(headers['opensend-test'], synthetic ? 'true' : undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
+          assert.equal(headers['bane-test'], synthetic ? 'true' : undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
           assert.match(String(headers['webhook-timestamp']), /^\d+$/);
           assert.equal(headers['webhook-signature'], 'v1,' + createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.${body}`).digest('base64'));
         }
@@ -4359,7 +4402,7 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
   const key = await keyFixture(t, { permissions: ['read', 'send'], domains: [from.split('@')[1]] });
   const queued = ok(await http('POST', '/v1/emails/send', key.secret, {
     from, to, region: process.env.SES_TEST_REGION ?? REGION,
-    subject: unique('OpenSend authorized live acceptance'), text: 'One explicitly authorized OpenSend acceptance email. Provider acceptance is not a delivery claim.', kind: 'transactional',
+    subject: unique('Bane authorized live acceptance'), text: 'One explicitly authorized Bane acceptance email. Provider acceptance is not a delivery claim.', kind: 'transactional',
   }, { 'Idempotency-Key': unique('authorized-live') }), 202);
   assert.equal(queued.environment, undefined);
   assert.equal(queued.simulated, false);
@@ -4407,7 +4450,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       await ensureRegionSettings(runtime.db, runtime.config);
       async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'live', headers: Record<string, string> = {}): Promise<Reply> {
         const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
-          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
+          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
           ...(body ? { body: JSON.stringify(body) } : {}),
         }), runtime);
         return { status: response.status, body: await response.json(), headers: response.headers };
@@ -4442,6 +4485,37 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
 
+test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
+  const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
+  const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_SHADOW:'false',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};
+  for (const key of Object.keys(flags)) assert.ok(CONFIG_KEYS.includes(key),'Workers must pass the legacy binding to loadConfig');
+  const config=loadConfig({MULTI_TENANT:'true',PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:AUTH_SECRET,...flags});
+  assert.deepEqual([config.platformAccount,config.regionalSending,config.trustedPool,config.byoV2,config.allowSesSandbox,config.requireDmarcForBulk,config.placementShadow,config.placementDblZone],['000000000001',true,true,true,true,true,false,'fixture.invalid']);
+  assert.equal(loadConfig({MULTI_TENANT:'true',PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:AUTH_SECRET,...flags,BANE_REGIONAL_SENDING:'false'}).regionalSending,false);
+  for (const key of ['BANE_PLATFORM_AWS_ACCOUNT','MX_PLATFORM_AWS_ACCOUNT']) assert.throws(()=>loadConfig({MULTI_TENANT:'true',PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:AUTH_SECRET,[key]:'438095551154'}),{status:503,code:'PLATFORM_ACCOUNT_RETIRED'});
+});
+
+test('cached dashboard responses accept the old expiry header and write only the new one',async()=>{
+  const {cachedDashboardRead}=await import('./src/dashboard-cache.js');
+  let hit:Response|undefined=Response.json(1,{headers:{'x-opensend-expires':String(Date.now()+60_000)}}),written:Response|undefined;
+  const previous=Object.getOwnPropertyDescriptor(globalThis,'caches');
+  Object.defineProperty(globalThis,'caches',{configurable:true,value:{default:{match:async()=>hit,put:async(_:Request,r:Response)=>{written=r;}}}});
+  try {
+    assert.deepEqual(await cachedDashboardRead(PUBLIC_ORIGIN,unique('old-cache'),async()=>2),{value:1,hit:true});
+    hit=undefined;assert.deepEqual(await cachedDashboardRead(PUBLIC_ORIGIN,unique('new-cache'),async()=>3),{value:3,hit:false});
+    assert.ok(written);assert.ok(written.headers.has('x-bane-expires'));assert.equal(written.headers.has('x-opensend-expires'),false);
+  } finally {if(previous)Object.defineProperty(globalThis,'caches',previous);else Reflect.deleteProperty(globalThis,'caches');}
+});
+
+test('stdio MCP connects with legacy env, key, health and API title',async()=>{
+  const {spawnSync}=await import('node:child_process');
+  const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:'opensend'});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:'OpenSend API',version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
+  const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
+  const env={PATH:process.env.PATH,OPENSEND_API_URL:'http://127.0.0.1',OPENSEND_API_KEY:'os_mbx_'+'1'.repeat(64)};
+  const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
+  assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
+});
+
 test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   // The operator script owns its transactions and inventories the entire installation. A separately
   // migrated schema exercises the real triggers/views without exposing any jobs to the harness runner.
@@ -4455,9 +4529,46 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
     await db.query(await readFile(new URL(file,dir),'utf8'));await db.query('COMMIT');
   }
-  await db.query('CREATE TABLE opensend_migrations AS TABLE public.opensend_migrations');
+  await db.query('CREATE TABLE opensend_migrations (LIKE public.bane_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.bane_migrations WHERE name NOT LIKE \'092_%\'');
+  await t.test('secretless migration preserves ciphertext and the legacy ledger; explicit rotation rewraps it',async mt=>{
+    const {loadConfig}=await import('./src/config.js'), {encrypt,decrypt}=await import('./src/operations.js'), {spawnSync}=await import('node:child_process');
+    const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
+    const migrate=(env:Record<string,string>={},failure?:RegExp)=>{
+      const child=spawnSync(process.execPath,['--import','tsx','src/migrate.ts'],{encoding:'utf8',timeout:15000,env:{PATH:process.env.PATH,DATABASE_URL:url.href,DEFAULT_SES_REGION:'us-east-2',...env} as unknown as NodeJS.ProcessEnv});
+      if (failure) { assert.equal(child.status,1);assert.match(child.stderr,failure);return child.stdout; }
+      assert.equal(child.status,0,child.stderr);return child.stdout;
+    };
+    const config={PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:randomUUID()},plain='fixture signing secret',aad='default:live:fixture';
+    const encrypted=await encrypt({config:loadConfig(config)},plain,aad);
+    await db.query("INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('fixture','default','https://fixture.invalid','[]',$1)",[encrypted]);
+    const read=async()=>(await db.query("SELECT encrypted_secret FROM operation_webhooks WHERE id='fixture'")).rows[0].encrypted_secret;
+    const reference=`mcp_v2_${randomUUID()}|opensend:read opensend:live offline_access|ws_fixture|member`;
+    await db.query("INSERT INTO oauth_client(id,client_id,redirect_uris,scopes) VALUES('legacy','legacy','{}','{opensend:read,offline_access}')");
+    await db.query("INSERT INTO oauth_consent(id,client_id,reference_id,scopes,created_at,updated_at) VALUES('legacy','legacy',$1,'{opensend:read,opensend:live,offline_access}',now(),now())",[reference]);
+    await mt.test('ambiguous ledgers refuse migration without changing either table',async()=>{
+      await db.query('CREATE TABLE bane_migrations (LIKE opensend_migrations INCLUDING ALL)');
+      migrate({},/MIGRATION_LEDGER_AMBIGUOUS: both opensend_migrations and bane_migrations exist/);
+      assert.equal((await db.query('SELECT FROM bane_migrations')).rowCount,0);
+      assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='091_byo_requested_account_format.sql'")).rowCount,1);
+      await db.query('DROP TABLE bane_migrations');
+    });
+    await mt.test('wrong webhook root fails before ledger rename or migration writes',async()=>{
+      migrate({BETTER_AUTH_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: BETTER_AUTH_SECRET differs/);
+      assert.equal(await read(),encrypted);assert.equal((await db.query("SELECT to_regclass('bane_migrations') AS t")).rows[0].t,null);
+      assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='092_bane_scopes.sql'")).rowCount,0);
+      assert.equal((await db.query("SELECT reference_id FROM oauth_consent WHERE id='legacy'")).rows[0].reference_id,reference);
+    });
+    assert.match(migrate(),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
+    assert.equal((await db.query("SELECT name FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
+    assert.deepEqual((await db.query("SELECT scopes,reference_id FROM oauth_consent WHERE id='legacy'")).rows,[{scopes:['bane:read','bane:live','offline_access'],reference_id:reference.replaceAll('opensend:','bane:')}]);
+    assert.match(migrate({BETTER_AUTH_SECRET:config.BETTER_AUTH_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
+    const next={...config,BETTER_AUTH_SECRET:randomUUID()};
+    assert.match(migrate({...next,PREVIOUS_BETTER_AUTH_SECRET:config.BETTER_AUTH_SECRET}),/WEBHOOK_SECRETS_REKEYED/);
+    const rotated=await read();assert.notEqual(rotated,encrypted);assert.equal(await decrypt({config:loadConfig(next)},rotated,aad),plain);
+    await db.query("DELETE FROM oauth_client WHERE id='legacy'; DELETE FROM operation_webhooks WHERE id='fixture'; DELETE FROM ses_installation_settings WHERE workspace_id='default'");
+  });
   const w=['ws_10'+'a'.repeat(30),'ws_2'+'b'.repeat(31)],r='us-east-2',old='000011110001',dest='000011110002',run='fixture-cutover';
-  const bucket=(acct:string)=>`opensend-mx-${acct}-mail-${r}`,topic=(acct:string,kind='feedback')=>`arn:aws:sns:${r}:${acct}:opensend-mx-${kind}`;
+  const bucket=(acct:string)=>`${acct===old?'opensend-mx':'bane'}-${acct}-mail-${r}`,topic=(acct:string,kind='feedback')=>`arn:aws:sns:${r}:${acct}:${acct===old?'opensend-mx':'bane'}-${kind}`;
   const personal='ws_'+'c'.repeat(32), inventory=['default',...w,personal];
   await db.query(`INSERT INTO workspaces(id,name,slug) SELECT w,w,w FROM unnest($1::text[]) w`,[[...w,personal]]);
   await db.query(`INSERT INTO ses_installation_settings SELECT id,id,$1,jsonb_build_array($1::text) FROM workspaces`,[r]);
@@ -4483,7 +4594,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const mailboxAddress='fixture@reply.'+names[0];
   await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES('box',$1,'mdom',$2)`,[w[0],mailboxAddress]);
   await db.query(`INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,'box','primary')`,[w[0],mailboxAddress]);
-  const resPrefix='opensend-'+'f'.repeat(20),va='us-east-1';
+  const resPrefix='bane-'+'f'.repeat(20),va='us-east-1';
   await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,trusted_account_id,trusted_topic_arn,credentials_fingerprint) VALUES('default',$1,$2,$3,'fixture')`,[va,old,`arn:aws:sns:${va}:${old}:${resPrefix}-feedback`]);
   await db.query(`INSERT INTO mailbox_regions(workspace_id,region,account_id,bucket,topic_arn) VALUES('default',$1,$2,$3,$4)`,[va,old,resPrefix+'-mail-'+va,`arn:aws:sns:${va}:${old}:${resPrefix}-inbound`]);
   const prefix=`workspaces/${w[0]}/`, raw=prefix+'raw/fixture.eml';
@@ -4506,7 +4617,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.opensend.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);
   await t.test('deterministic read-only plan and strict inputs',async()=>{
     assert.deepEqual(await command('--plan'),first);assert.deepEqual(await database(),original);assert.match(hash,/^[a-f0-9]{64}$/);
@@ -4529,7 +4640,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     await refused('account-bound data without connection',`INSERT INTO mail_threads(id,workspace_id) VALUES('personal',$1)`,`DELETE FROM mail_threads WHERE id='personal'`,personal);
     await refused('foreign mailbox region residue',`INSERT INTO mailbox_regions(workspace_id,region) VALUES($1,'us-east-2')`,`DELETE FROM mailbox_regions WHERE workspace_id=$1`,personal);
     await db.query(`UPDATE provider_connections SET requested_account='438095551154'`);await assert.rejects(db.query(`UPDATE provider_connections SET requested_account='malformed'`),/check constraint/);await db.query('UPDATE provider_connections SET requested_account=NULL');
-    await refused('migration set or checksum',`UPDATE opensend_migrations SET checksum='changed' WHERE name='090_hosted_rehome_runs.sql'`,`UPDATE opensend_migrations m SET checksum=p.checksum FROM public.opensend_migrations p WHERE p.name=m.name`);
+    await refused('migration set or checksum',`UPDATE bane_migrations SET checksum='changed' WHERE name='090_hosted_rehome_runs.sql'`,`UPDATE bane_migrations m SET checksum=p.checksum FROM public.bane_migrations p WHERE p.name=m.name`);
     await refused('unexpected workspaces',"INSERT INTO workspaces(id,name,slug) VALUES('outsider','extra','extra')","DELETE FROM workspaces WHERE id='outsider'");
     await refused('unexpected connections',"INSERT INTO workspaces(id,name,slug) VALUES('extra','extra','extra'); INSERT INTO provider_connections(id,workspace_id,region,kind,state) VALUES('extra','extra','us-east-2','shared','ready')","DELETE FROM workspaces WHERE id='extra'");
     await refused('BYO connections',`INSERT INTO workspaces(id,name,slug) VALUES('byo','byo','byo'); INSERT INTO provider_connections(id,workspace_id,kind,region,template_version,external_id,platform_principal_arn) VALUES('byo','byo','byo','us-east-2','v4',gen_random_uuid(),'fixture')`,`DELETE FROM workspaces WHERE id='byo'`);
@@ -4560,7 +4671,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const doc=await readFile(new URL('./README.md',import.meta.url),'utf8'),code=doc.match(/node --import tsx --input-type=module <<'RECONCILE'\n([\s\S]*?)\n *RECONCILE\n/)?.[1];assert.ok(code);
     const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
     // The old pool and tenants are ready: the exact README command reads the isolated DB and must not call AWS.
-    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',MX_PLATFORM_AWS_ACCOUNT:old,MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
+    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:old,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
     // The generated Worker ProcessEnv includes deployment-only bindings; this Node child gets only the fixture allowlist.
     const result=(await import('node:child_process')).spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(guard),'--import','tsx','--input-type=module'],{input:code,env:env as unknown as NodeJS.ProcessEnv,encoding:'utf8',timeout:10000});
     assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'');
@@ -4583,7 +4694,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     for(const [tab,digest] of Object.entries(baseline))if(!allowed.has(tab))assert.equal(changed[tab],digest,tab);
     assert.equal((await db.query('SELECT FROM regional_sending_connections')).rowCount,0);
     const targets=(await db.query('SELECT workspace_id,aws_account_id,managed_tenant,tenant_state,pool_tenant_name,legacy_names FROM regional_connections ORDER BY workspace_id')).rows;
-    assert.deepEqual(targets,w.map(workspace_id=>({workspace_id,aws_account_id:dest,managed_tenant:true,tenant_state:'pending',pool_tenant_name:'opensendmx-probation-'+workspace_id,legacy_names:true})));
+    assert.deepEqual(targets,w.map(workspace_id=>({workspace_id,aws_account_id:dest,managed_tenant:true,tenant_state:'pending',pool_tenant_name:'bane-probation-'+workspace_id,legacy_names:true})));
     assert.deepEqual((await db.query('SELECT token,ever_proven,identity,sending_state,receiving_state FROM domain_claims ORDER BY name')).rows,names.map((name,n)=>({name,token:tokens[n],ever_proven:n!==1,identity:null,sending_state:'pending',receiving_state:'off'})).sort((a,b)=>a.name.localeCompare(b.name)).map(({name,...row})=>row));
     assert.deepEqual((await db.query('SELECT raw_bucket b FROM mail_messages UNION ALL SELECT bucket FROM mail_attachments UNION ALL SELECT bucket FROM mail_receipts')).rows,[1,2,3].map(()=>({b:bucket(dest)})));
     assert.equal((await db.query("SELECT FROM jobs WHERE type='domain.verify' AND status='pending' AND attempts=0")).rowCount,dom.length);
@@ -4621,8 +4732,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{authorization:'Bearer '+apiKey,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const sets=new Map<string,Json>(),topics=new Map<string,Json>(),setup=setupStore(sets,topics,dest),identities=new Map<string,Json>(),tenants=new Set<string>(),associations=new Set<string>();
     const tags=(ts:Json[])=>Object.fromEntries(ts.map(t=>[t.Key,t.Value]));
-    const owned={'opensend:owner':'mx','opensend:installation-id':'opensend-mx:pool'};
-    let awsCalls=0; t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){awsCalls++;assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');return {Account:dest,Arn:`arn:aws:iam::${dest}:user/opensend-mx`};});
+    const owned={'bane:owner':'bane','bane:installation-id':'bane:pool'};
+    let awsCalls=0; t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){awsCalls++;assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');return {Account:dest,Arn:`arn:aws:iam::${dest}:user/bane-runtime`};});
     let catchAll=0,buckets=0,sends=0;const objects=new Map<string,Buffer>([[prefix+'att/mail/attachment',Buffer.from('old bytes')]]);
     t.mock.method(S3Client.prototype,'send',(cmd:any)=>{const i=cmd.input,n=cmd.constructor.name;assert.equal(i.Bucket,bucket(dest));switch(n){
       case 'HeadObjectCommand':return {ContentLength:objects.get(i.Key)!.length,ETag:'"fixture"'};
@@ -4631,21 +4742,21 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       case 'PutObjectCommand':objects.set(i.Key,Buffer.from(i.Body));return {};
       default:assert.match(n,/^(CreateBucket|PutBucketTagging|PutPublicAccessBlock|PutBucketPolicy|PutBucketLifecycleConfiguration)Command$/);if(n==='CreateBucketCommand')buckets++;return {};
     }});
-    t.mock.method(SESClient.prototype,'send',(cmd:any)=>{if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'opensend-mx-inbound'},Rules:[]};assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.Rule.Name,'opensend-mx-inbound-all');assert.deepEqual(cmd.input.Rule.Actions,[{S3Action:{BucketName:bucket(dest),TopicArn:topic(dest,'inbound'),ObjectKeyPrefix:'staging/'}}]);catchAll++;return {};});
+    t.mock.method(SESClient.prototype,'send',(cmd:any)=>{if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'bane-inbound'},Rules:[]};assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.Rule.Name,'bane-inbound-all');assert.deepEqual(cmd.input.Rule.Actions,[{S3Action:{BucketName:bucket(dest),TopicArn:topic(dest,'inbound'),ObjectKeyPrefix:'staging/'}}]);catchAll++;return {};});
     async function aws(this:InstanceType<typeof SESv2Client>|InstanceType<typeof SNSClient>,cmd:any){
       awsCalls++;
       assert.equal(await this.config.region(),r);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
       const i=cmd.input,name=cmd.constructor.name;
       switch(name){
         case 'GetAccountCommand':return {SendingEnabled:true,ProductionAccessEnabled:true,EnforcementStatus:'HEALTHY',SendQuota:{MaxSendRate:100,Max24HourSend:10000,SentLast24Hours:0}};
-        case 'SendEmailCommand':assert.equal(i.TenantName,'opensendmx-probation-'+w[0]);assert.equal(i.ConfigurationSetName,'opensend-mx-transactional');sends++;return {MessageId:'fixture-new-send'};
+        case 'SendEmailCommand':assert.equal(i.TenantName,'bane-probation-'+w[0]);assert.equal(i.ConfigurationSetName,'bane-transactional');sends++;return {MessageId:'fixture-new-send'};
         case 'SubscribeCommand':{assert.equal(i.Endpoint,origin+'/v1/events/ses');const sub={...i,SubscriptionArn:i.TopicArn+':fixture',Owner:dest};topics.get(i.TopicArn)!.subs.push(sub);return sub;}
         case 'GetSubscriptionAttributesCommand':return {Attributes:{...topics.get(i.SubscriptionArn.split(':').slice(0,6).join(':'))!.subs[0],PendingConfirmation:'false',RawMessageDelivery:'false'}};
-        case 'CreateTenantCommand':assert.ok(w.some(wid=>i.TenantName==='opensendmx-probation-'+wid));assert.ok(!tenants.has(i.TenantName));assert.deepEqual(tags(i.Tags),{...owned,'opensend:purpose':'workspace-tenant'});tenants.add(i.TenantName);return {TenantName:i.TenantName,TenantArn:`arn:aws:ses:${r}:${dest}:tenant/${i.TenantName}/fixture`};
+        case 'CreateTenantCommand':assert.ok(w.some(wid=>i.TenantName==='bane-probation-'+wid));assert.ok(!tenants.has(i.TenantName));assert.deepEqual(tags(i.Tags),{...owned,'bane:purpose':'workspace-tenant'});tenants.add(i.TenantName);return {TenantName:i.TenantName,TenantArn:`arn:aws:ses:${r}:${dest}:tenant/${i.TenantName}/fixture`};
         case 'UpdateReputationEntityPolicyCommand':assert.equal(i.ReputationEntityPolicy,`arn:aws:ses:${r}:aws:reputation-policy/strict`);return {};
         case 'CreateTenantResourceAssociationCommand':assert.ok(tenants.has(i.TenantName));assert.ok(i.ResourceArn.startsWith(`arn:aws:ses:${r}:${dest}:`));assert.ok(!associations.has(i.TenantName+':'+i.ResourceArn));associations.add(i.TenantName+':'+i.ResourceArn);return {};
         case 'GetEmailIdentityCommand':if(!identities.has(i.EmailIdentity))throw Object.assign(Error('fresh account'),{name:'NotFoundException'});return identities.get(i.EmailIdentity);
-        case 'CreateEmailIdentityCommand':{const n=names.indexOf(i.EmailIdentity);assert.ok(n>=0);assert.ok(!identities.has(i.EmailIdentity));assert.deepEqual(tags(i.Tags),{...owned,'opensend:purpose':'domain-identity','opensend:domain-claim':tokens[n]});
+        case 'CreateEmailIdentityCommand':{const n=names.indexOf(i.EmailIdentity);assert.ok(n>=0);assert.ok(!identities.has(i.EmailIdentity));assert.deepEqual(tags(i.Tags),{...owned,'bane:purpose':'domain-identity','bane:domain-claim':tokens[n]});
           const dkim={Tokens:['new-a','new-b','new-c'],SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',SigningAttributesOrigin:'AWS_SES'};identities.set(i.EmailIdentity,{Tags:i.Tags,VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{...dkim,Status:'SUCCESS'}});return {DkimAttributes:{...dkim,Status:'PENDING'}};}
         default:return setup(name,i,r,dest);
       }
@@ -4655,9 +4766,9 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:privateKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.href===certUrl)return new Response(pem);
       if(u.hostname===bucket(dest)+`.s3.${r}.amazonaws.com`){assert.match(u.searchParams.get('X-Amz-Credential')!,/^fixture-rehome\//);return new Response(new Uint8Array(objects.get(decodeURIComponent(u.pathname.slice(1)))!));}
-      assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name')!,type=u.searchParams.get('type'),n=names.indexOf(name.replace(/^_opensend\./,''));
+      assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name')!,type=u.searchParams.get('type'),n=names.indexOf(name.replace(/^_bane\./,''));
       const mx=name===names[0]?'mx.other.invalid.':name==='reply.'+names[0] || name==='reply.'+names[2]?`inbound-smtp.${r}.amazonaws.com.`:null;
-      return Response.json({Status:0,Answer:type==='MX' && mx?[{name,type:15,data:'10 '+mx}]:type==='TXT' && name.startsWith('_opensend.') && n!==1?[{name,type:16,data:JSON.stringify(tokens[n])}]:[]});});
+      return Response.json({Status:0,Answer:type==='MX' && mx?[{name,type:15,data:'10 '+mx}]:type==='TXT' && name.startsWith('_bane.') && n!==1?[{name,type:16,data:JSON.stringify(tokens[n])}]:[]});});
     const jobs=(await db.query(`SELECT * FROM jobs WHERE type='domain.verify'`)).rows;assert.equal(jobs.length,names.length);
     const newKey=runtime.config.aws;runtime.config.platformAccount=old;runtime.config.aws={accessKeyId:'fixture-retired',secretAccessKey:'fixture'};
     const j=jobs[0],jobArgs={id:j.id,workspaceId:j.workspace_id,attempts:1};
@@ -4667,7 +4778,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const tracked=()=>db.query(`SELECT to_jsonb(j) AS job FROM jobs j WHERE type='domain.verify' ORDER BY id`);
     const before=(await tracked()).rows;error(await api('POST',`/v1/domains/${dom[0]}/verify`),503,'AWS_ACCOUNT_MISMATCH');assert.deepEqual((await tracked()).rows,before);
     const dashboard=await seedSession(db);await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('owner',$1,$2,'owner')`,[w[0],dashboard.userId]);
-    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Secure-)?opensend/,'__Secure-opensend'),'x-opensend-workspace':w[0]!}}),runtime);
+    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Secure-)?bane/,'__Secure-bane'),'x-bane-workspace':w[0]!}}),runtime);
     assert.equal(detail.status,200);assert.equal((await detail.json() as Json).id,dom[0]);assert.deepEqual((await tracked()).rows,before);
     const {workspaceCredentials}=await import('./src/provider-credentials.js');await assert.rejects(workspaceCredentials(runtime,r,{kind:'shared',id:'fixture',aws_account_id:dest,role_arn:'',external_id:''}),mismatch);
     const {tenantJob}=await import('./src/provider-connections.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),cid='conn_'+w[0];
@@ -4678,7 +4789,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     runtime.config.platformAccount=dest;runtime.config.aws=newKey;
     await db.query(`UPDATE domain_claims SET identity='{"ses":{"VerificationStatus":"SUCCESS","VerifiedForSendingStatus":true,"DkimAttributes":{"Status":"SUCCESS","SigningEnabled":true,"Tokens":["old-selector"]},"MailFromAttributes":{"MailFromDomain":"bounce.inbound.example","MailFromDomainStatus":"SUCCESS"}},"proven":true}' WHERE token=$1`,[tokens[0]]);
     await reconcileSharedConnections(runtime);await reconcileSharedConnections(runtime);
-    assert.deepEqual([buckets,catchAll,sets.size,topics.size],[1,1,2,2]);assert.deepEqual([...tenants].sort(),w.map(wid=>'opensendmx-probation-'+wid));
+    assert.deepEqual([buckets,catchAll,sets.size,topics.size],[1,1,2,2]);assert.deepEqual([...tenants].sort(),w.map(wid=>'bane-probation-'+wid));
     assert.equal((await db.query(`SELECT FROM provider_pool_regions WHERE aws_account_id=$1 AND sending_state='ready' AND receiving_state='ready' AND inbound_bucket=$2 AND feedback_topic_arn=$3 AND inbound_topic_arn=$4 AND legacy_names AND pool_tier='probation'`,[dest,bucket(dest),topic(dest),topic(dest,'inbound')])).rowCount,1);
     assert.equal((await db.query('SELECT FROM regional_sending_connections WHERE tenant_state=\'ready\' AND aws_account_id=$1 AND managed_tenant AND legacy_names',[dest])).rowCount,w.length);
     for(const job of jobs){
@@ -4722,12 +4833,12 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     // POST /connection takes its account only from a ready sending pool.
     await db.query(`UPDATE provider_pool_regions SET sending_state='pending'`);
     const owner=await seedSession(db),host='cold-rehome.example.org';await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('personal-owner',$1,$2,'owner')`,[personal,owner.userId]);
-    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Secure-)?opensend/,'__Secure-opensend'),origin,'x-opensend-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Secure-)?bane/,'__Secure-bane'),origin,'x-bane-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
     let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
     cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
       if(cmd.constructor.name==='CreateEmailIdentityCommand'){tags=cmd.input.Tags;return {DkimAttributes:dkim};}assert.equal(cmd.constructor.name,'GetEmailIdentityCommand');return {VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:dkim,Tags:tags};});
-    cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_opensend.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='opensend:domain-claim')!.Value)}]:[]});});
+    cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_bane.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='bane:domain-claim')!.Value)}]:[]});});
     ok(await api('POST','/v1/connection',{kind:'shared'}),201);assert.equal((await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[personal])).rows[0].aws_account_id,null);
     const d=ok(await api('POST','/v1/domains',{name:host}),201);assert.deepEqual(ok(await api('GET','/v1/domains')).data.map((v:Json)=>v.id),[d.id]);
     assert.ok(ok(await api('GET',`/v1/domains/${d.id}`)).dns.some((v:Json)=>v.name.startsWith('cold-a.')),'Create saved DKIM facts on the unbound connection.');
@@ -4812,9 +4923,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {loadConfig}=await import('./src/config.js'), {operationJobs}=await import('./src/operations.js');
       const {SESv2Client}=await import('@aws-sdk/client-sesv2'), tls=(await import('node:tls')).default,{EventEmitter}=await import('node:events');
       const cfg={BETTER_AUTH_SECRET:'fixture-'.repeat(6),PUBLIC_URL:'https://fixture.example.com'};
-      assert.equal(loadConfig({...cfg,MX_PLACEMENT_SHADOW:'true'}).placementShadow,false);
+      assert.equal(loadConfig({...cfg,BANE_PLACEMENT_SHADOW:'true'}).placementShadow,false);
       assert.equal(loadConfig({...cfg,MULTI_TENANT:'true'}).placementShadow,true);
-      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',MX_PLACEMENT_SHADOW:'false'}).placementShadow,false);
+      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',BANE_PLACEMENT_SHADOW:'false'}).placementShadow,false);
       const wid=runtime.config.workspaceId,oh='us-east-2',type='domain.placement',zone='licensed-dbl.invalid';
       const create=(name:string)=>local('POST','/v1/domains',{name});
       const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
@@ -4924,8 +5035,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('Hosted trusted pool: concurrent setup, signed publish, fenced send-only adoption and retention',async t=>{
     const [{nodeRuntime},{createApp},{trustedProvision},{setDomainPool},{adoptIdentities},{ensureRegionSettings},{JobDeferred},{SESv2Client},{SNSClient},{STSClient},{SESClient},{S3Client}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
-    const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='opensendmx-trusted-'+wid,
-      topic=`arn:aws:sns:${va}:${acct}:opensendmx-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',MX_PLATFORM_AWS_ACCOUNT:acct,MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.opensend.dev/v1/events/ses'};
+    const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='bane-trusted-'+wid,
+      topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
     const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
@@ -4939,20 +5050,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),wid,user.userId]);
     await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid,regions:[oh]});
     await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
-    const api=async(method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-opensend-workspace':wid,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const api=async(method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     let confirmed=false,policy='',sub:Json|undefined,drift=false,failAssociation=true;const calls:string[]=[],sets=new Map<string,Json>(),members=new Set<string>();
     const missing=()=>Object.assign(new Error('not found'),{name:'NotFoundException'});
-    const tags=(purpose:string)=>({'opensend:owner':'mx','opensend:installation-id':'opensend-mx:pool','opensend:purpose':purpose});
+    const tags=(purpose:string)=>({'bane:owner':'bane','bane:installation-id':'bane:pool','bane:purpose':purpose});
     const checkTags=(ts:Json[],purpose:string)=>assert.deepEqual(Object.fromEntries(ts.map(t=>[t.Key,t.Value])),tags(purpose));
     let managedTags:{Key:string;Value:string}[]=[];
-    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.hostname==='cloudflare-dns.com') {const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name===`_opensend.${managed}`?[{name,type:16,data:JSON.stringify(managedTags[0]?.Value)}]:[]});}assert.equal(u.hostname,`sns.${va}.amazonaws.com`);if(u.pathname.endsWith('.pem'))return new Response(pem);assert.equal(u.searchParams.get('TopicArn'),topic);confirmed=true;return new Response(null);});
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.hostname==='cloudflare-dns.com') {const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name===`_bane.${managed}`?[{name,type:16,data:JSON.stringify(managedTags[0]?.Value)}]:[]});}assert.equal(u.hostname,`sns.${va}.amazonaws.com`);if(u.pathname.endsWith('.pem'))return new Response(pem);assert.equal(u.searchParams.get('TopicArn'),topic);confirmed=true;return new Response(null);});
     t.mock.method(SESClient.prototype,'send',()=>assert.fail('Virginia receipt call'));t.mock.method(S3Client.prototype,'send',()=>assert.fail('Virginia S3 call'));
-    t.mock.method(STSClient.prototype,'send',(cmd:any)=>{assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');return {Account:acct,Arn:`arn:aws:iam::${acct}:user/opensend-mx`};});
+    t.mock.method(STSClient.prototype,'send',(cmd:any)=>{assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');return {Account:acct,Arn:`arn:aws:iam::${acct}:user/bane-runtime`};});
     const identity=(name:string)=>({IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningEnabled:true,Status:'SUCCESS',SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:['c','a','b']},MailFromAttributes:{MailFromDomain:`bounce.${name}`,MailFromDomainStatus:'SUCCESS',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}});
     const managed='canary.trusted-fixture.test';
     t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const i=cmd.input,n=cmd.constructor.name;calls.push(n);assert.equal(await this.config.region(),va);
-      if(i.ConfigurationSetName)assert.match(i.ConfigurationSetName,/^opensendmx-trusted-(transactional|marketing)$/);
+      if(i.ConfigurationSetName)assert.match(i.ConfigurationSetName,/^bane-trusted-(transactional|marketing)$/);
       switch(n){
         case 'GetAccountCommand':return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:true,SendQuota:{Max24HourSend:100000,MaxSendRate:100}};
         case 'GetConfigurationSetCommand':if(!sets.has(i.ConfigurationSetName))throw missing();return sets.get(i.ConfigurationSetName);
@@ -4965,7 +5076,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'CreateTenantResourceAssociationCommand':assert.equal(i.TenantName,tenant);if(i.ResourceArn.includes(':configuration-set/'))assert.ok(sets.has(i.ResourceArn.split('/')[1]));else if (failAssociation && members.size===3){failAssociation=false;throw new Error('interrupted');}assert.ok(!members.has(i.ResourceArn));members.add(i.ResourceArn);return {};
         case 'ListResourceTenantsCommand':return {ResourceTenants:members.has(i.ResourceArn)?[{TenantName:tenant,TenantId:'tenant-fixture',ResourceArn:i.ResourceArn}]:[]};
         case 'GetEmailIdentityCommand':if(i.EmailIdentity===managed && !managedTags.length)throw missing();return {...identity(i.EmailIdentity),Tags:i.EmailIdentity===managed?managedTags:[],ConfigurationSetName:drift?'changed':undefined};
-        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);checkTags(i.Tags.filter((t:Json)=>t.Key!=='opensend:domain-claim'),'domain-identity');managedTags=i.Tags;return {Tags:i.Tags};
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);checkTags(i.Tags.filter((t:Json)=>t.Key!=='bane:domain-claim'),'domain-identity');managedTags=i.Tags;return {Tags:i.Tags};
         case 'DeleteTenantResourceAssociationCommand':assert.equal(i.ResourceArn,`arn:aws:ses:${va}:${acct}:identity/${managed}`);assert.ok(members.delete(i.ResourceArn));return {};
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);managedTags=[];return {};
         default:assert.fail(n);
@@ -4975,7 +5086,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       if(i.TopicArn || i.ResourceArn)assert.equal(i.TopicArn??i.ResourceArn,topic);
       switch(n){
         case 'GetTopicAttributesCommand':if(!policy)throw missing();return {Attributes:{TopicArn:topic,Owner:acct,Policy:policy}};
-        case 'CreateTopicCommand':assert.equal(i.Name,'opensendmx-trusted-feedback');assert.ok(!policy);checkTags(i.Tags,'ses-feedback');policy=i.Attributes.Policy;assert.equal(JSON.parse(policy).Statement.length,1);return {TopicArn:topic};
+        case 'CreateTopicCommand':assert.equal(i.Name,'bane-trusted-feedback');assert.ok(!policy);checkTags(i.Tags,'ses-feedback');policy=i.Attributes.Policy;assert.equal(JSON.parse(policy).Statement.length,1);return {TopicArn:topic};
         case 'ListTagsForResourceCommand':return {Tags:Object.entries(tags('ses-feedback')).map(([Key,Value])=>({Key,Value}))};
         case 'SetTopicAttributesCommand':assert.ok(confirmed);policy=i.AttributeValue;assert.deepEqual(JSON.parse(policy).Statement[1].Condition.StringEquals,{'AWS:SourceAccount':acct,'AWS:SourceArn':[...sets.keys()].map(n=>`arn:aws:ses:${va}:${acct}:configuration-set/${n}`)});return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:sub?[sub]:[]};
@@ -4985,10 +5096,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
     });
     const prepare=()=>trustedProvision(runtime,{connectionId:wid},{workspaceId:wid,id:'hosted.trusted:'+wid,attempts:1});
-    await assert.rejects(setDomainPool(db,[wid,managed,'trusted'],{...flags,MX_TRUSTED_POOL:'false'}),/enabled/);
+    await assert.rejects(setDomainPool(db,[wid,managed,'trusted'],{...flags,BANE_TRUSTED_POOL:'false'}),/enabled/);
     runtime.config.trustedPool=false;await assert.rejects(prepare(),JobDeferred);assert.deepEqual(calls,[]);runtime.config.trustedPool=true;
     await setDomainPool(db,[wid,managed,'trusted'],flags);
-    await assert.rejects(setDomainPool(db,[wid,'e2e-trusted.opensend.mx','trusted'],flags),/release-canary workspace/);
+    await assert.rejects(setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted'],flags),/release-canary workspace/);
+    await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('e2e.bane.mx',$1,$1,'verified')",[wid]);
+    try {
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'e2e.bane.mx',$3)",['dom_'+randomUUID().replaceAll('-',''),wid,oh]);
+      await setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted'],flags);
+    } finally {
+      // This Ohio proof is only for operator authorization, not an SES identity in the Virginia mock.
+      await db.query("DELETE FROM hosted_domain_tiers WHERE connection_id=$1 AND name='e2e-trusted.bane.mx'",[wid]);
+      await db.query("DELETE FROM operation_domains WHERE workspace_id=$1 AND name='e2e.bane.mx'",[wid]);
+      await db.query("DELETE FROM domain_claims WHERE workspace_id=$1 AND name='e2e.bane.mx'",[wid]);
+    }
     assert.ok((await Promise.allSettled([prepare(),prepare()])).every(s=>s.status==='rejected' && s.reason instanceof JobDeferred));
     // AWS reporting a confirmed subscription is not signed-ingress evidence.
     confirmed=true;await assert.rejects(prepare(),JobDeferred);confirmed=false;assert.equal(JSON.parse(policy).Statement.length,1);
@@ -5012,7 +5133,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await db.query('SELECT FROM mailbox_domains WHERE workspace_id=$1',[wid])).rowCount,0);
     ok(await api('DELETE','/v1/domains/'+added.id));const mark=calls.length;
     error(await api('POST',`/v1/domains/${adopted[0].domain_id}/mail-from`,{mailFromDomain:'bounce.'+ok(await api('GET',`/v1/domains/${adopted[0].domain_id}`)).name}),409,'IMPORTED_IDENTITY_READ_ONLY');
-    ok(await api('DELETE',`/v1/domains/${adopted[0].domain_id}`));ok(await api('DELETE','/v1/connection'));assert.equal(calls.length,mark);assert.equal(members.size,14);
+    ok(await api('DELETE',`/v1/domains/${adopted[0].domain_id}`));
+    assert.deepEqual((await db.query("SELECT name FROM domain_claims WHERE connection_id=$1 AND NOT coalesce(identity ? 'adopted',false)",[wid])).rows,[],'Only adopted identities should remain at disconnect.');
+    ok(await api('DELETE','/v1/connection'));assert.equal(calls.length,mark);assert.equal(members.size,14);
   });
 
   test('MX regional delivery: legacy backfill, closest claim, mixed batch and frozen dispatch',async t=>{
@@ -5020,7 +5143,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {readFile}=await import('node:fs/promises'),{runDispatcher}=await import('./src/dispatcher.js');
       const {GetAccountCommand,SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
       const wid=runtime.config.workspaceId,acct='111122223333',oh='us-east-2',va='us-east-1',byo=unique('byo');
-      const old=`arn:aws:sns:${oh}:${acct}:opensend-mx-feedback`,trusted=`arn:aws:sns:${va}:${acct}:opensendmx-trusted-feedback`;
+      const old=`arn:aws:sns:${oh}:${acct}:bane-feedback`,trusted=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`;
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture-only'}});
       assert.equal(runtime.config.regionalSending,false);
       const attempts:string[][]=[];
@@ -5046,11 +5169,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const drain=(region:string)=>runDispatcher(runtime,{region,accountId:acct,lanes:1});
       const legacy=ok(await send(parent),202);
       assert.deepEqual((await db.query(`SELECT region,snapshot ? 'binding' AS pinned FROM sending_emails WHERE id=$1`,[legacy.id])).rows,[{region:oh,pinned:false}]);
-      await drain(oh);assert.deepEqual(attempts,[[oh,'opensend-mx-transactional',`opensend-${wid}`]]);
+      await drain(oh);assert.deepEqual(attempts,[[oh,'bane-transactional',`bane-${wid}`]]);
       runtime.config.regionalSending=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier,legacy_names) VALUES($1,$2,$3,'ready','trusted',false)`,[va,acct,trusted]);
       runtime.config.trustedPool=true;
-      await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name) VALUES($1,$2,$3)`,[wid,va,`opensendmx-trusted-${wid}`]);
+      await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name) VALUES($1,$2,$3)`,[wid,va,`bane-trusted-${wid}`]);
       const {acquireRegionProvisioning,finishHostedRegion}=await import('./src/states.js'),ref={connectionId:wid,region:va};
       const generation=Number((await runtime.db.execute(acquireRegionProvisioning(ref))).rows[0]!.generation);
       assert.equal((await runtime.db.execute(finishHostedRegion(ref,generation))).rowCount,1);
@@ -5068,7 +5191,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const mixed=ok(await batch(parent,child),202).data;
       const frozen=async(id:string)=>(await db.query(`SELECT region,snapshot->'binding' AS binding,status,error_code FROM sending_emails WHERE id=$1`,[id])).rows[0];
       assert.deepEqual((await frozen(mixed[1].id)).binding,{account:acct,topic:trusted,connection:wid,domain:'va-domain',generation});
-      await drain(oh);await drain(va);assert.deepEqual(attempts.slice(1),[[oh,'opensend-mx-transactional',`opensend-${wid}`],[va,'opensendmx-trusted-transactional',`opensendmx-trusted-${wid}`]]);
+      await drain(oh);await drain(va);assert.deepEqual(attempts.slice(1),[[oh,'bane-transactional',`bane-${wid}`],[va,'bane-trusted-transactional',`bane-trusted-${wid}`]]);
       runtime.config.trustedPool=false;error(await send(child),409,'TRUSTED_POOL_DISABLED');runtime.config.trustedPool=true;
       await db.query(`UPDATE workspaces SET send_cap_override=2 WHERE id=$1`,[wid]);
       const pair=[parent,child].map(m=>({...m,to:'real-counted@fixture.test'}));
@@ -5087,7 +5210,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(reviewed.queued,reviewed.review);assert.equal(reviewed.review.domain,'va-domain');
       const {createMailbox}=await import('./src/mailbox-store.js'),md=unique('mdom');
       await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,receiving_host,region,status,enabled_at) VALUES($1,$2,'va-domain','trusted.regional.example','trusted.regional.example',$3,'active',now())`,[md,wid,oh]);
-      const inbound=`arn:aws:sns:${oh}:${acct}:opensend-mx-inbound`;
+      const inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`;
       await db.query(`UPDATE provider_pool_regions SET inbound_topic_arn=$1,receiving_state='ready' WHERE region=$2`,[inbound,oh]);
       const {acceptInboundNotification}=await import('./src/mailbox-ingest.js');
       const receive=()=>acceptInboundNotification(runtime,{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:'cross-region-fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['reply@trusted.regional.example'],action:{type:'S3',bucketName:'ohio-fixture',topicArn:inbound,objectKey:'staging/cross-region-fixture'}}}});
@@ -5110,7 +5233,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // account, region and provider/email ID. Rotating a shared topic cannot move an event.
       const {ingestFeedbackBatch}=await import('./src/operations.js');
       const providerId=(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[mixed[1].id])).rows[0].provider_id;
-      const replacement=`arn:aws:sns:${va}:${acct}:opensendmx-replacement-feedback`;
+      const replacement=`arn:aws:sns:${va}:${acct}:bane-replacement-feedback`;
       await db.query('UPDATE provider_pool_regions SET feedback_topic_arn=$1 WHERE region=$2',[replacement,va]);
       const feedback=(topicArn:string,region:string,account:string)=>({topicArn,region,messageId:unique('late'),message:{eventType:'Delivery',delivery:{timestamp:new Date().toISOString()},mail:{messageId:providerId,sendingAccountId:account,tags:{opensend_email_id:[mixed[1].id]}}}});
       const results=await ingestFeedbackBatch(runtime,[feedback(replacement,va,acct),feedback(trusted,oh,acct),feedback(trusted,va,'000000000000'),feedback(trusted,va,acct)]);
@@ -5206,7 +5329,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {setupResources}=await import('./src/ses-setup.js'),{SESv2Client,GetEmailTemplateCommand,TestRenderEmailTemplateCommand}=await import('@aws-sdk/client-sesv2');
       const wid=runtime.config.workspaceId,oh='us-east-2',va='us-east-1',account='444455556666';
       Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'unused',secretAccessKey:'fixture'}});
-      const names=setupResources(wid,'byo');assert.match(names.topicName,/^opensendmx-[0-9a-f]{20}-feedback$/);
+      const names=setupResources(wid,'byo');assert.match(names.topicName,/^bane-[0-9a-f]{20}-feedback$/);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn) VALUES($1,$1,$2,'provisioning','byo',$3,gen_random_uuid(),'v5','fixture-role','fixture-platform')`,[wid,oh,account]);
       const publish=async(region:string)=>{
         const ref={connectionId:wid,region},topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
@@ -5244,14 +5367,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('BYO v5 enrollment: read-only inventory and independent confirmed regional imports',async t=>{
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
-    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.opensend.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',MX_PLATFORM_AWS_ACCOUNT:platform,MX_REGIONAL_SENDING:'true',MX_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
     cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM provider_feedback_history WHERE aws_account_id=$1',[account]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);});
     await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),wid,user.userId]);
     await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid});
-    const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-opensend-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey;
     const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
@@ -5259,16 +5382,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
-      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/OpenSendMX-${v5.id.slice(-20)}/OpenSendMX`};
-      assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'OpenSendMX');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
+      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/Bane-${v5.id.slice(-20)}/Bane`};
+      assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'Bane');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
       if (!external || cmd.input.ExternalId!==external) throw denied();
-      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/OpenSendMX`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
+      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/Bane`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
     });
     t.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');trace.push({region:await this.config.region(),op:cmd.constructor.name});return {Metadata:{Name:'customer'},Rules:[{Name:'existing',Enabled:true,Actions:[{StopAction:{Scope:'RuleSet'}}]}]};});
     t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');
       switch(op){
         case 'GetEmailTemplateCommand':case 'TestRenderEmailTemplateCommand':{
-          const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/opensend-pilot`);
+          const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/bane-pilot`);
           return op==='GetEmailTemplateCommand'?{TemplateContent:{Subject:'{{subject}}'}}:{RenderedTemplate:`Subject: ${JSON.parse(i.TemplateData).subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain;\r\n charset=UTF-8\r\n\r\nBody line.\r\nSender: body text`};
         }
         case 'SendEmailCommand':{
@@ -5278,14 +5401,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal(Buffer.from(i.Content.Raw.Data).toString(),'From: pilot@sub.both.example\r\nTo: success@simulator.amazonses.com\r\nSubject: Fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nBody line.\r\nSender: body text');return {MessageId:randomUUID()};
         }
         case 'GetAccountCommand':if(![oh,ie,va,west].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
-        case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
-        case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
+        case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['bane-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
+        case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='bane-legacy')return {Tags:[{Key:'bane:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
         case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
         case 'ListEmailIdentitiesCommand':if(region===west)return {EmailIdentities:[]};if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
-        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);if(failDelete){failDelete=false;throw Object.assign(Error('synthetic delete denied'),{name:'AccessDenied'});}createdIdentity=undefined;return {};
-        case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='opensend:owner'&&t.Value==='mx'));sets.set(key,{...i,dest:[]});return {};
+        case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='bane:owner'&&t.Value==='bane'));sets.set(key,{...i,dest:[]});return {};
         case 'PutConfigurationSetSuppressionOptionsCommand':sets.get(key)!.SuppressionOptions=i;return {};
         case 'GetConfigurationSetEventDestinationsCommand':{const d=sets.get(key)!.dest;return d.length?{EventDestinations:d}:{};} // Real SES omits an empty list.
         case 'CreateConfigurationSetEventDestinationCommand':sets.get(key)!.dest.push({Name:i.EventDestinationName,...i.EventDestination});return {};
@@ -5324,7 +5447,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const {setByoV2}=await import('./scripts/set-byo-v2.js');await setByoV2(db,[wid,'enable']);
     error(await post('',{kind:'byo',awsAccountId:platform}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
     const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
-    assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'opensendmx-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
+    assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'bane-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
     await run('byo.prove');assert.equal(policies.length,3);
     await assert.rejects(setByoV2(db,[wid,'disable']),/Disconnect/);
     const rs=(await db.query('SELECT region FROM provider_connection_regions WHERE connection_id=$1',[v5.id])).rows;assert.equal(rs.length,32);
@@ -5376,7 +5499,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // customer's regional dispatcher has recorded the provider response.
       const previous=runtime.db;try {await (await import('drizzle-orm/node-postgres')).drizzle(db).transaction(async tx=>{runtime.db=tx;
       const {dispatchDue}=await import('./src/dispatcher.js');const scoped={...runtime,config:{...runtime.config,workspaceId:wid,regions:[oh,va]}};
-      const sendSubject=(subject:string)=>api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'opensend-pilot',data:{subject}}});
+      const sendSubject=(subject:string)=>api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'bane-pilot',data:{subject}}});
       error(await sendSubject('Fixture\rSender: x@evil'),422,'INVALID_RENDERED_MIME');
       error(await sendSubject('Fixture\r\nContent-Type: text/html'),422,'INVALID_RENDERED_MIME');
       const mail=ok(await sendSubject('Fixture\r\nSender: x@evil\r\nFrom : x@evil\r\nReturn-Path : x@evil\r\nResent-From: x@evil\r\nX-SES-SOURCE-ARN: foreign\r\n\tcontinued\r\nX-Unrequested: value'),202);
@@ -5384,7 +5507,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===oh;}));
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),pc=await workspaceConnection(scoped,oh),other=(await db.query('SELECT domain_id FROM domain_sending_bindings WHERE workspace_id=$1 AND region=$2',[wid,va])).rows[0].domain_id;
       await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'send',domainId:other}}),{code:'BYO_SESSION_SCOPE_REQUIRED'});
-      await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'template',name:'opensend-*'}}),{code:'TEMPLATE_SCOPE_REQUIRED'});
+      await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'template',name:'bane-*'}}),{code:'TEMPLATE_SCOPE_REQUIRED'});
       // The enrollment link's Ohio region isn't necessarily the first enabled sender.
       await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,va]);
       try {assert.equal(ok(await api('GET','/v1/settings/ses')).region,va);assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===va;}));}
@@ -5393,7 +5516,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
     await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');
-      const scoped={...runtime,config:{...runtime.config,workspaceId:wid}}, bucket='retained-v4-mail',topicArn=`arn:aws:sns:${oh}:${account}:opensend-legacy-inbound`;
+      const scoped={...runtime,config:{...runtime.config,workspaceId:wid}}, bucket='retained-v4-mail',topicArn=`arn:aws:sns:${oh}:${account}:bane-legacy-inbound`;
       await db.query('INSERT INTO mailbox_regions(workspace_id,region,account_id,bucket,topic_arn) VALUES($1,$2,$3,$4,$5)',[wid,oh,account,bucket,topicArn]);
       try {
         const keyReads=policies.length,binding=await workspaceConnection(scoped,oh);assert.equal(binding.template_version,'v5');
@@ -5461,7 +5584,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(await run('byo.disconnect'),false); // Explicit NotFound reconciles the lost response without repeating Delete.
       denyCleanup=true;await assert.rejects(run('byo.disconnect'),{code:'AWS_ACCESS_DENIED'});const manifest=(await poll()).cleanup;
       assert.deepEqual(manifest.lastError,{region:va,code:'AWS_ACCESS_DENIED'});assert.equal(manifest.remaining.length,3);assert.ok(!manifest.remaining.find((r:Json)=>r.region===va).resources.some((e:Json)=>e.resource.endsWith('-transactional')));
-      const foreign='opensend-self-hosted-fixture';sets.set(va+':'+foreign,{ConfigurationSetName:foreign});topics.set(varn.replace(resource+'-feedback',foreign),{});
+      const foreign='bane-self-hosted-fixture';sets.set(va+':'+foreign,{ConfigurationSetName:foreign});topics.set(varn.replace(resource+'-feedback',foreign),{});
       const pendingArn=varn.replace(va,west),pendingSub=topics.get(pendingArn)!.subs[0];
       denyCleanup=false;await retry();for(let steps=0;!await run('byo.disconnect');steps++){
         assert.ok(steps<8);
@@ -5532,7 +5655,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // tail fixture; neither run needs to render the previous days' 1,999,599 messages.
       await limits('100000','10001');
       const list = ok(await local('POST','/v1/lists',{name:unique('newsletter')}),201);
-      const total=process.env.OPENSEND_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 401;
+      const total=process.env.BANE_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 401;
       if (total>401) await db.query("SET LOCAL statement_timeout='180s'");
       for (let start=1;start<=total;start+=50000) await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
         SELECT 'con_'||md5($1||n),$1,'subscriber-'||n||'@example.net','subscribed' FROM generate_series($3::int,$4::int)n RETURNING workspace_id,id)
@@ -5564,7 +5687,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { createMailbox } = await import('./src/mailbox-store.js');
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'guard.example', from = `sender@${domain}`;
       Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
-      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:opensend-mx-feedback`]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
       const md = unique('mdom');
@@ -5693,7 +5816,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[workspace,REGION,account]);
         await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[host,workspace]);
       }
-      const post=(path:string,body:Json,workspace=wid)=>local('POST',path,body,'live',{'X-OpenSend-Workspace':workspace});
+      const post=(path:string,body:Json,workspace=wid)=>local('POST',path,body,'live',{'X-Bane-Workspace':workspace});
       const send=()=>post('/v1/emails/send',mail({from}));
       const md=unique('mdom');
       await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,$4,$5,'active')`,[md,wid,unique('domain'),domain,REGION]);
@@ -5718,7 +5841,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('UPDATE sending_campaigns SET auto_pause=false WHERE id=$1',[c.id]);
       await db.query(`INSERT INTO sending_emails(id,workspace_id,campaign_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
         SELECT 'history-'||n,$1,$2,$3,'fixture',$4,'["older@example.net"]','[]','[]','Historical fixture','{}',false,CASE WHEN n<=21 THEN 'bounced' ELSE 'delivered' END,now()-interval '2 days' FROM generate_series(1,1000)n`,[wid,c.id,REGION,from]);
-      const view=async()=>ok(await local('GET',path,undefined,'live',{'X-OpenSend-Workspace':wid}));
+      const view=async()=>ok(await local('GET',path,undefined,'live',{'X-Bane-Workspace':wid}));
       await run('campaign.run'); assert.equal((await view()).delivery.pauseReason.code,'BOUNCE_RATE_HIGH');
       ok(await post(`${path}/resume`,{})); await run('campaign.run');
       assert.equal((await view()).delivery.expanded,1); assert.equal((await view()).delivery.waiting,null);
@@ -5862,7 +5985,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('MX: admission reads only hourly totals even with a full day of Hosted mail', async t => {
     await simulatedSesFixture(t, async ({runtime,db}) => {
       const {sql}=await import('drizzle-orm'), {hostedAllowance}=await import('./src/hosted-sending.js');
-      const wid=runtime.config.workspaceId, total=process.env.OPENSEND_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 2400;
+      const wid=runtime.config.workspaceId, total=process.env.BANE_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 2400;
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state) VALUES ($1,$1,'shared',$2,'ready','ready')`,[wid,REGION]);
       for(let start=1;start<=total;start+=20000) await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
@@ -5915,8 +6038,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { runDispatcher } = await import('./src/dispatcher.js'), { dispatchPartitions } = await import('./src/dispatch.js');
       const { ingestFeedbackBatch } = await import('./src/operations.js'), { setupResources } = await import('./src/ses-setup.js');
       const shared = runtime.config.workspaceId, byo = unique('customer'), pool = '111122223333', account = '444455556666', externalId = randomUUID();
-      const poolTopic = `arn:aws:sns:${REGION}:${pool}:opensend-mx-feedback`, byoTopic = `arn:aws:sns:${REGION}:${account}:${setupResources(byo).topicName}`;
-      const role = `arn:aws:iam::${account}:role/OpenSendMX-fixture`;
+      const poolTopic = `arn:aws:sns:${REGION}:${pool}:bane-feedback`, byoTopic = `arn:aws:sns:${REGION}:${account}:${setupResources(byo).topicName}`;
+      const role = `arn:aws:iam::${account}:role/Bane-fixture`;
       Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
       await db.query('INSERT INTO workspaces(id,slug,name) VALUES ($1,$1,$1)',[byo]);
       await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')",[unique('member'),byo,manager!.userId]);
@@ -5944,16 +6067,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd instanceof GetEmailTemplateCommand || cmd instanceof TestRenderEmailTemplateCommand) {
           assert.ok(customer); return { TemplateContent:{Subject:'fixture'},RenderedTemplate:'Subject: fixture\r\n\r\nFixture.' };
         }
-        assert.ok(cmd instanceof SendEmailCommand); const input=cmd.input, wid=input.EmailTags!.find(t=>t.Name==='opensend_workspace_id')!.Value!;
-        assert.equal(wid,customer?byo:shared); assert.equal(input.TenantName,customer?undefined:`opensend-${shared}`);
-        assert.equal(input.ConfigurationSetName,customer?setupResources(byo).transactional:'opensend-mx-transactional');
+        assert.ok(cmd instanceof SendEmailCommand); const input=cmd.input, wid=input.EmailTags!.find(t=>t.Name==='bane_workspace_id')!.Value!;
+        assert.equal(input.EmailTags!.find(t=>t.Name==='bane_priority')?.Value,'transactional');assert.equal(wid,customer?byo:shared); assert.equal(input.TenantName,customer?undefined:`bane-${shared}`);
+        assert.equal(input.ConfigurationSetName,customer?setupResources(byo).transactional:'bane-transactional');
         if(!customer){assert.ok(input.Content?.Simple);assert.equal(input.Content?.Raw,undefined);if(input.Content.Simple.Subject?.Data==='ordinary'){const [file]=input.Content.Simple.Attachments!;assert.equal(file!.ContentDisposition,'INLINE');assert.equal(file!.ContentId,'logo');assert.deepEqual(Buffer.from(file!.RawContent!),gif);}}
         if (customer) assert.match(Buffer.from(input.Content!.Raw!.Data!).toString(), /\r\nX-Ticket: 42\r\n\r\nFixture\.$/);
         else if (input.Content?.Simple?.Subject?.Data === 'ordinary') assert.deepEqual(input.Content.Simple.Headers, [{Name:'X-Ticket',Value:'42'}]);
         sends.push(wid);
         if (input.Content?.Simple?.Subject?.Data==='paused') throw Object.assign(new Error('Sending for this tenant is paused'),{ name:'MessageRejected',$metadata:{httpStatusCode:400} });
         if (!customer) {
-          const tag = input.EmailTags!.find(t=>t.Name==='opensend_email_id')!.Value!;
+          const tag = input.EmailTags!.find(t=>t.Name==='bane_email_id')!.Value!;
           const early = { topicArn:poolTopic, region:REGION, messageId:unique('early-bounce'), message:{ eventType:'Bounce', mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId:pool,tags:{opensend_email_id:[tag]}}, bounce:{bounceType:'Permanent',bouncedRecipients:[{emailAddress:bouncedAddress}]} } };
           const { settleFeedbackMessage } = await import('./src/adapters/feedback-queue.js');
           for (const attempts of [1,2]) {
@@ -5966,10 +6089,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return {MessageId:'same-provider-id-in-both-accounts'};
       });
       const wakes: string[]=[]; runtime.dispatch=async (region, accountId)=>{ wakes.push(`${region}:${accountId}`); };
-      const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-opensend-workspace':wid});
+      const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-bane-workspace':wid});
       const headers=[{name:'X-Ticket',value:'42'}];
       const template={template:{name:'fixture',data:{}},headers}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
-      const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-opensend-workspace':shared}),201);
+      const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-bane-workspace':shared}),201);
       const a=ok(await send(shared,{to:bouncedAddress,subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id],headers}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
       assert.deepEqual(wakes,[pool,account,pool].map(id=>`${REGION}:${id}`));
       assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
@@ -5988,7 +6111,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const envelope={Type:'Notification',MessageId:unique('sns'),Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'!!!',SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`};
       for(const topic of [poolTopic,byoTopic]) error(await local('POST','/v1/events/ses',{...envelope,TopicArn:topic}),403,'SNS_INVALID_SIGNATURE');
       error(await local('POST','/v1/events/ses',{...envelope,TopicArn:byoTopic+'-unregistered'}),403,'SNS_TOPIC_NOT_ALLOWED');
-      const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{opensend_email_id:[tag]}}:{})}}});
+      const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{bane_email_id:[tag]}}:{})}}});
       const results=await ingestFeedbackBatch(runtime,[delivery(byoTopic,account),delivery(byoTopic,pool),delivery(byoTopic,account,a.id)]);
       assert.deepEqual(results.map(r=>r.ok),[true,false,false]);
       assert.deepEqual((await db.query('SELECT workspace_id FROM operation_sns_receipts WHERE topic_arn=$1',[byoTopic])).rows,[{workspace_id:byo}]);
@@ -5998,14 +6121,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const uncapped = ok(await send(byo,{to:['one@example.org','two@example.org'],subject:'uncapped',text:'fixture'}),202);
       await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) SELECT gen_random_uuid()::text,$1,x,'complaint',false FROM unnest($2::text[]) x`,[byo,[b.id,uncapped.id]]);
       await (await import('./src/maintenance.js')).checkHostedHealth(runtime);
-      assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-opensend-workspace':byo})).connection.sendingPause,null);
+      assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-bane-workspace':byo})).connection.sendingPause,null);
     });
   });
   test('MX: 100 emails across 100 workspaces share account-scoped quota and bounded dispatcher statements', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { runDispatcher } = await import('./src/dispatcher.js');
       const accounts=['111122223333','444455556666']; runtime.config.multiTenant=true; runtime.config.simulatedSes.latencyMs=15;
-      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES ($1,$2,'ready',$3)`,[REGION,accounts[0],`arn:aws:sns:${REGION}:${accounts[0]}:opensend-mx-feedback`]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES ($1,$2,'ready',$3)`,[REGION,accounts[0],`arn:aws:sns:${REGION}:${accounts[0]}:bane-feedback`]);
       await db.query("INSERT INTO workspaces(id,name,slug) SELECT 'bench-'||n,'fixture','bench-'||n FROM generate_series(1,100)n");
       await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT id,id,$1,jsonb_build_array($1::text) FROM workspaces WHERE id LIKE 'bench-%'`,[REGION]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) SELECT id,id,'shared','ready',$1,$2,'ready' FROM workspaces WHERE id LIKE 'bench-%' AND id<>'bench-100'`,[REGION,accounts[0]]);
@@ -6078,7 +6201,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const sends = new Map<string, any>();
       t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 10000, SentLast24Hours: 0 } };
-        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'opensend_email_id')!.Value!; sends.set(id, cmd.input); return { MessageId: `fixture-${id}` };
+        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'bane_email_id')!.Value!; sends.set(id, cmd.input); return { MessageId: `fixture-${id}` };
       });
       const create = async (body: Json) => ok(await local('POST', '/v1/inbound/addresses', body, 'live'), 201);
       const support = await create({ address: 'support@example.com' }), temporary = await create({ address: 'case-42@example.com', ttlSeconds: 3600 });
@@ -6087,6 +6210,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await local('POST', root, { address: 'short@example.com', ttlSeconds: 1 }, 'live'), 422);
       error(await local('PATCH', `${root}/${temporary.id}`, { rules: ['case-*@example.com'] }, 'live'), 422);
       const scoped = ok(await local('POST', '/v1/inbound/keys', { name: 'support fixture', addressIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
+      assert.match(scoped.secret,/^bane_mbx_[0-9a-f]{64}$/);
+      const old=scoped.secret.replace('bane_mbx_','os_mbx_');
+      await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) SELECT 'legacy-fixture',workspace_id,name,$1,$2,mailbox_ids,permissions FROM mailbox_keys WHERE id=$3`,[createHash('sha256').update(old).digest('hex'),old.slice(0,14),scoped.id]);
+      assert.equal(ok(await local('GET',`${root}/${support.id}`,undefined,'live',{authorization:`Bearer ${old}`})).id,support.id);
       const agent = { authorization: `Bearer ${scoped.secret}` };
       const webhook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/support-hook', addressIds: [support.id], eventTypes: ['message.received'] }, 'live'), 201);
       const payload = { from: support.address, to: 'customer@example.net', subject: 'Case 42', text: 'An update', replyMailboxId: support.id }, idem = { 'Idempotency-Key': 'fixture-case-42' };
@@ -6445,8 +6572,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           case 'ListObjectsV2Command': assert.equal(i.Prefix,'staging/');assert.ok(i.MaxKeys<=1000);page++;return i.StartAfter?{Contents:[listed('spoof')]}:{Contents:[listed('orphan')],IsTruncated:true};
           case 'HeadObjectCommand': if(mid==='denied')throw Object.assign(Error(),{name:'AccessDenied'});if(mid==='unavailable')throw Error('synthetic temporary outage');return {ContentLength:raw.get(mid)!.length,ETag:'"fixture"'};
           case 'GetObjectCommand': if(i.Range)assert.equal(i.Range,'bytes=0-16383');assert.equal(i.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>raw.get(mid)!}};
-          case 'CopyObjectCommand': if(i.Key.startsWith('quarantine/')){if(quarantineDenied)throw Object.assign(Error(),{name:'AccessDenied'});assert.equal(i.CopySourceIfMatch,'"fixture"');quarantined.push(i.Key);}if(i.CopySource.endsWith('/large')){assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.TaggingDirective,'REPLACE');assert.equal(i.Tagging,'opensend-kind=raw');largeReads.push('copy');}return {};
-          case 'CreateMultipartUploadCommand':assert.equal(i.Tagging,'opensend-kind=raw');return {UploadId:'upload'};
+          case 'CopyObjectCommand': if(i.Key.startsWith('quarantine/')){if(quarantineDenied)throw Object.assign(Error(),{name:'AccessDenied'});assert.equal(i.CopySourceIfMatch,'"fixture"');quarantined.push(i.Key);}if(i.CopySource.endsWith('/large')){assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.TaggingDirective,'REPLACE');assert.equal(i.Tagging,'bane-kind=raw');largeReads.push('copy');}return {};
+          case 'CreateMultipartUploadCommand':assert.equal(i.Tagging,'bane-kind=raw');return {UploadId:'upload'};
           case 'UploadPartCommand':assert.ok(i.Body.length>=5*1024*1024);assert.equal(i.Body.subarray(0,14).toString(),'Auto-Submitted');parts.push({size:i.Body.length});return {ETag:'first'};
           case 'UploadPartCopyCommand':assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.CopySourceRange,`bytes=${5.25*1024*1024}-${39*1024*1024-1}`);if(interruptCopy)throw Error('interrupted copy');return {CopyPartResult:{ETag:'second'}};
           case 'AbortMultipartUploadCommand':assert.equal(i.UploadId,'upload');parts.push({aborted:true});return {};
@@ -6543,7 +6670,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{load}=await import('js-yaml'),{readFile}=await import('node:fs/promises');
     const account='905840579680',docs=render('--fresh',{account,origin:'https://dev.bane.mx'}),all=(Object.values(docs) as Json[]).flatMap(d=>d.Statement);
     const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),byo=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources.ReceivingPolicy.Properties.PolicyDocument.Statement;
-    for(const [rows,bucket] of [[all,`arn:aws:s3:::opensend-mx-${account}-mail-us-east-2`],[byo,'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}']] as [Json[],string][]){
+    for(const [rows,bucket] of [[all,`arn:aws:s3:::bane-${account}-mail-us-east-2`],[byo,'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}']] as [Json[],string][]){
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:ListBucket' && s.Resource===bucket && s.Condition.StringEquals['s3:prefix']==='staging/'));
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:PutObject' && s.Resource===bucket+'/quarantine/?*'));
       assert.ok(rows.some(s=>s.Action.includes('s3:AbortMultipartUpload') && s.Effect==='Allow' && s.Resource.startsWith(bucket+'/workspaces/') && s.Resource.endsWith('/raw/?*.eml')));
@@ -6615,7 +6742,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
         if (cmd instanceof GetEmailIdentityCommand) { assert.equal(cmd.input.EmailIdentity, 'example.com'); return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: verified, VerificationStatus: verified ? 'SUCCESS' : 'PENDING', DkimAttributes: { Status: dkim ? 'SUCCESS' : 'PENDING', SigningEnabled: dkim } }; }
         if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
-        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'opensend_email_id')!.Value!; outgoing.set(id, cmd.input); return { MessageId: `synthetic-${id}` };
+        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'bane_email_id')!.Value!; outgoing.set(id, cmd.input); return { MessageId: `synthetic-${id}` };
       });
       const base = '/v1/inbound', addresses = `${base}/addresses`;
       const post = (path: string, body: Json, headers?: Record<string, string>) => local('POST', path, body, 'live', headers);
@@ -6693,7 +6820,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       } finally { runtime.webhookFetch = transport; }
       const replyPath = `${base}/threads/${detail.threadId}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
-      // Headers are denylisted, not X- only: structural headers OpenSend/SES own are refused, everything else passes through.
+      // Headers are denylisted, not X- only: structural headers Bane/SES own are refused, everything else passes through.
       for (const name of ['X-SeS-CONFIGURATION-SET','From','content-type','In-Reply-To','List-Unsubscribe','Auto-Submitted','Resent-From','ARC-Seal','Authentication-Results','DomainKey-Signature','Feedback-ID']) error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no provider overrides',headers:[{name,value:'override'}] },agent),422);
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no injection',headers:[{name:'Precedence',value:'bulk\r\nBcc: victim@example.net'}] },agent),422);
       const reply = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202);
@@ -6730,7 +6857,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const received = (await announced()).filter(payload => payload.messageId === passed[0].id);
       assert.equal(received.length,1); assert.equal(received[0].data.dmarc,'PASS'); assert.equal((await announced()).length,before + 1);
       // Custom headers: reserved names and malformed Message-IDs are refused, replies keep their own threading,
-      // and a new conversation can cite a thread OpenSend never received.
+      // and a new conversation can cite a thread Bane never received.
       const plain = { from:publicAddress,to:'customer@example.net',subject:'Headers',text:'Header check' };
       error(await post('/v1/emails/send',{ ...plain,headers:[{name:'from',value:'ceo@example.com'}] }),422);
       error(await post('/v1/emails/send',{ ...plain,headers:[{name:'X-SES-Configuration-Set',value:'other'}] }),422);
@@ -7077,7 +7204,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const first = new Promise<void>(resolve => { started = resolve; });
       const send = SESv2Client.prototype.send;
       t.mock.method(SESv2Client.prototype, 'send', function(this: InstanceType<typeof SESv2Client>, cmd: any) {
-        if (cmd instanceof SendEmailCommand) { calls.push({ id: cmd.input.EmailTags!.find(t => t.Name === 'opensend_email_id')!.Value!, at: Date.now() }); started(); }
+        if (cmd instanceof SendEmailCommand) { calls.push({ id: cmd.input.EmailTags!.find(t => t.Name === 'bane_email_id')!.Value!, at: Date.now() }); started(); }
         return Reflect.apply(send, this, [cmd]);
       });
       // The budget stops new normal leases; it must not disable hints while the last batch drains.
@@ -7256,7 +7383,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const calls: string[] = [];
       t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) { calls.push('quota'); return { SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:1000,SentLast24Hours:0} }; }
-        const id = cmd.input.EmailTags.find((t:any)=>t.Name==='opensend_email_id').Value; calls.push(id);
+        const id = cmd.input.EmailTags.find((t:any)=>t.Name==='bane_email_id').Value; calls.push(id);
         if (id===tx) throw Object.assign(new Error('Daily message quota exceeded.'),{$metadata:{httpStatusCode:429}});
         return {MessageId:'unexpected-marketing'};
       });
@@ -7542,6 +7669,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a frozen v1 campaign reproduces the legacy preheader at dispatch and on readback',async t=>{
+    await simulatedSesFixture(t,async({db,local,run})=>{
+      const list=ok(await local('POST','/v1/lists',{name:unique('legacy-render')}),201);
+      const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Synthetic fixture.',occurredAt:new Date().toISOString()}));
+      ok(await local('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]}));
+      const c=ok(await local('POST','/v1/campaigns',{name:'Frozen fixture',from:'sender@example.com',subject:'Fixture',previewText:'Preview',html:'<p>Body</p>',audience:{listId:list.id}}),201);
+      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);
+      await db.query("UPDATE sending_campaign_reviews SET renderer_version=1, rendered=replace(rendered::text,'data-bane-fonts','data-opensend-fonts')::jsonb WHERE campaign_id=$1",[c.id]);
+      await run('campaign.run');await run('email.dispatch');
+      const [mail]=page(await local('GET',`/v1/emails?campaignId=${c.id}`));
+      const content=ok(await local('GET',`/v1/emails/${mail!.id}/content`));
+      assert.match(content.html,/data-opensend-preview="true"/);assert.match(content.html,/data-opensend-fonts/);
+    });
+  });
+
   test('static campaign preparation validates the second frozen recipient instead of trusting the first', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('static-validation') }), 201);
@@ -7763,7 +7906,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await run('email.dispatch');
       assert.equal((await jobs('operation.simulatedFeedback')).length, 0, 'With a sink, acceptance must not create feedback jobs.');
       assert.equal(sink.length, 4, 'Two accepted emails produce Send and Delivery callbacks each.');
-      assert.ok(sink.every(item => item.topicArn === `urn:opensend:simulated-ses:${REGION}` && String(item.message.mail && (item.message.mail as Json).messageId).startsWith('sim_')));
+      assert.ok(sink.every(item => item.topicArn === `urn:bane:simulated-ses:${REGION}` && String(item.message.mail && (item.message.mail as Json).messageId).startsWith('sim_')));
       const receipts = async () => (await db.query('SELECT message_id, processed_at FROM operation_sns_receipts WHERE workspace_id = $1 ORDER BY message_id', [runtime.config.workspaceId])).rows;
       assert.deepEqual(await receipts(), []);
       // Out of order, duplicated, plus one non-routine item the simulator can never legitimately emit.
@@ -8404,7 +8547,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(SESv2Client.prototype, 'send', (command: any) => {
         assert.ok(command instanceof SendEmailCommand || command instanceof GetAccountCommand);
         if (command instanceof SendEmailCommand) {
-          providerCalls.push({ emailId: command.input.EmailTags!.find(tag => tag.Name === 'opensend_email_id')!.Value!, to: command.input.Destination!.ToAddresses! });
+          providerCalls.push({ emailId: command.input.EmailTags!.find(tag => tag.Name === 'bane_email_id')!.Value!, to: command.input.Destination!.ToAddresses! });
           assert.deepEqual(command.input.Destination!.CcAddresses, []);
           assert.deepEqual(command.input.Destination!.BccAddresses, []);
         }
@@ -8488,12 +8631,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ]);
       const base = { BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
       assert.equal(loadConfig(base).screen, undefined, 'Without TYPESAFE_API_KEY the screen is off.');
-      for (const flag of ['MX_REGIONAL_SENDING', 'MX_TRUSTED_POOL', 'MX_BYO_V2']) {
+      for (const flag of ['BANE_REGIONAL_SENDING', 'BANE_TRUSTED_POOL', 'BANE_BYO_V2']) {
         assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true' }), { code: 'CONFIG_INVALID' }, `${flag} needs the platform account.`);
-        assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', MX_PLATFORM_AWS_ACCOUNT: '12345' }), { code: 'CONFIG_INVALID' });
-        assert.equal(loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', MX_PLATFORM_AWS_ACCOUNT: '000011112222' }).platformAccount, '000011112222');
+        assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '12345' }), { code: 'CONFIG_INVALID' });
+        assert.equal(loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '000011112222' }).platformAccount, '000011112222');
       }
-      assert.equal(loadConfig({ ...base, MX_REGIONAL_SENDING: 'true' }).platformAccount, undefined, 'Single-tenant installs need no platform account.');
+      assert.equal(loadConfig({ ...base, BANE_REGIONAL_SENDING: 'true' }).platformAccount, undefined, 'Single-tenant installs need no platform account.');
       assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
       assert.equal(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-console-key', JEV_ENDPOINT: 'https://opencode.ai/inference/systemone/v1/systemone', JEV_MODEL: 'jev-1.13-free' }).screen?.endpoint, 'https://opencode.ai/inference/systemone/v1/systemone');
       // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.
@@ -8509,7 +8652,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(SESv2Client.prototype, 'send', async (command: any) => {
         if (command instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
         assert.ok(command instanceof SendEmailCommand, 'Only GetAccount and SendEmail are expected.');
-        const emailId = command.input.EmailTags!.find((tag: Json) => tag.Name === 'opensend_email_id')!.Value!;
+        const emailId = command.input.EmailTags!.find((tag: Json) => tag.Name === 'bane_email_id')!.Value!;
         sent.push(emailId);
         return { MessageId: `live-${emailId}` };
       });
