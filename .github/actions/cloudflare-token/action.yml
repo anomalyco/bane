@@ -1,0 +1,81 @@
+name: Cloudflare token
+description: Mint a short-lived, stage-scoped Cloudflare API token from the AWS_IAM token issuer
+
+# The caller must already have assumed its arn:aws:iam::604439173067:role/github/bane-<stage>
+# role in the stage's GitHub environment. Lambda identifies the caller from that
+# role, so the request carries no scope: the stage in anomalyco/secrets config.ts
+# is the only thing that decides the permissions, zones, buckets, Workers and TTL.
+inputs:
+  url:
+    description: Token issuer function URL
+    required: false
+    default: https://kjivkui2evldapbok5fhrrl6oy0fctkp.lambda-url.us-east-1.on.aws/
+  account-id:
+    description: Cloudflare account id the token is minted in
+    required: false
+    default: "15d29c8639fd3733b1b5486a2acfd968"
+
+outputs:
+  token:
+    description: Cloudflare API token; short-lived, never logged
+    value: ${{ steps.mint.outputs.token }}
+  id:
+    description: Cloudflare token id (account-owned tokens verify under the account)
+    value: ${{ steps.mint.outputs.id }}
+  secret:
+    description: The token's sha256, used as the R2 secret access key
+    value: ${{ steps.mint.outputs.secret }}
+  expires_on:
+    description: Token expiry in Cloudflare's ISO form
+    value: ${{ steps.mint.outputs.expires_on }}
+
+runs:
+  using: composite
+  steps:
+    - id: mint
+      shell: bash
+      env:
+        TOKEN_URL: ${{ inputs.url }}
+        CF_ACCOUNT_ID: ${{ inputs.account-id }}
+      run: |
+        set -euo pipefail
+        set +x
+
+        url="$TOKEN_URL"
+        account="$CF_ACCOUNT_ID"
+        url_pattern='^https://[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws/$'
+        if ! [[ "$url" =~ $url_pattern ]]; then echo "::error::bad token issuer URL"; exit 1; fi
+        if ! [[ "$account" =~ ^[a-f0-9]{32}$ ]]; then echo "::error::bad account id"; exit 1; fi
+        for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+          [ -n "${!name:-}" ] || { echo "::error::$name is not set"; exit 1; }
+        done
+
+        # The response is captured, never streamed: it contains the token.
+        response=$(
+          printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' \
+            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" |
+            curl --config - \
+              --proto '=https' --proto-redir '=https' \
+              --aws-sigv4 "aws:amz:us-east-1:lambda" \
+              --request POST --url "$url" \
+              --fail-with-body --silent --show-error --max-time 20
+        )
+        token=$(printf '%s' "$response" | jq -er '.token | strings')
+        expires=$(printf '%s' "$response" | jq -er '.expires_on | strings')
+        case "$token" in ""|*[[:space:]]*) echo "::error::invalid token"; exit 1 ;; esac
+        printf '::add-mask::%s\n' "$token"
+
+        # Account-owned tokens verify under the account, not /user.
+        id=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/tokens/verify"\n' \
+          "$token" "$account" | curl --config - --silent --show-error --fail-with-body --max-time 20 |
+          jq -er 'select(.success == true and .result.status == "active") | .result.id | strings')
+        secret=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
+        printf '::add-mask::%s\n' "$secret"
+
+        {
+          printf 'token=%s\n' "$token"
+          printf 'id=%s\n' "$id"
+          printf 'secret=%s\n' "$secret"
+          printf 'expires_on=%s\n' "$expires"
+        } >> "$GITHUB_OUTPUT"
+        echo "::notice::Cloudflare token ready; expires $expires"
