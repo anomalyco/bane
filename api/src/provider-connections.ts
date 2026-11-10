@@ -40,6 +40,7 @@ const platformRegion = 'us-east-2';
 const sharedRegions = (runtime: Runtime) => runtime.config.regionalSending ? [platformRegion] : runtime.config.sharedRegions ?? [platformRegion];
 const principals = new Map<string, { account: string; arn: string }>();
 async function platformIdentity(runtime: Runtime, expectedAccount?: string) {
+  if (expectedAccount && runtime.config.platformAccount && expectedAccount!==runtime.config.platformAccount) throw new ApiError(503,'AWS_ACCOUNT_MISMATCH','This pool belongs to a different platform account.',undefined,true);
   const key = platformCredentials(runtime), cached = principals.get(key.accessKeyId);
   // A key from another environment must never provision or bind this installation's pool.
   const mismatch = (account: string) => (expectedAccount && account !== expectedAccount) || (runtime.config.platformAccount && account !== runtime.config.platformAccount);
@@ -253,7 +254,7 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   try { await ensureTenant(runtime,job.workspaceId,payload.connectionId); }
   catch (e) {
     // The last retry marks the tenant failed so sends say so; the hourly reconcile keeps trying.
-    if (job.attempts >= MAX_ATTEMPTS) await runtime.db.execute(setTenantState(payload.connectionId, 'failed'));
+    if (job.attempts >= MAX_ATTEMPTS) await runtime.db.execute(setTenantState(payload.connectionId, 'failed',runtime.config.platformAccount));
     throw e;
   }
 });

@@ -5,7 +5,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
-import { workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
+import { assertSharedAccount, workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
 
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
@@ -140,6 +140,7 @@ export function assertSesConfigured(runtime: Runtime) {
 export function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client {
   region(runtime, selectedRegion);
   assertSesConfigured(runtime);
+  if (runtime.config.multiTenant && connection) assertSharedAccount(runtime,connection); // Even a cached SDK client must not cross a rebind.
   let clients = runClients ?? sesClients.get(runtime);
   if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
   // The dispatcher leases the connection alongside the mail. One shared-account client can

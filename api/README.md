@@ -325,6 +325,45 @@ After migration 082 and the matching API and runner rollout, use a short-lived o
 
 Drain mail writers before applying 062: it backfills recent mail and feedback while holding write locks. Hosted windows use UTC hour buckets (the current hour and the preceding 23 or 47); an admission expires at its hour start plus 24 hours, up to 59 minutes earlier than an exact rolling cutoff. Suppression and definitive pre-acceptance failure refund the original hour. Reputation resumes still exclude everything through the exact review timestamp.
 
+**Re-home a legacy Hosted Ohio installation (operator only, migrations 090–091).** The script never calls AWS or DNS. **Before applying, deploy this release's account guard everywhere with the OLD key and `MX_PLATFORM_AWS_ACCOUNT` set to the OLD account.** Do not skip this stage: old binaries can repopulate reset identities with old DKIM facts. Take a restore-tested encrypted backup and an object manifest. Verify destination IAM, SES production access, quota, active receipt-rule set and the HTTPS subscription endpoint. Save receiving hosts, custom MAIL FROM settings and account/tenant suppression lists.
+
+1. Block new admissions on both origins; hold incoming SMTP upstream, disable the old catch-all and drain old sends, campaigns, receipts and archives. Keep signed outbound feedback and unsubscribe working. After draining, pause every connection, retaining previous holds. Fence old HTTP writers, cron, queues, runners and deployments; wait for outstanding work to exit. The advisory lock is **not** a Worker maintenance gate. Do not switch to simulated sending.
+2. From `api/`, use a short-lived operator `DATABASE_URL` and the matching migrations checkout. Supply **every** workspace ID, including unconnected sign-ins and `default` if present. Review connected IDs, unconnected workspaces, receiving hosts, counts, database identity and digest. All running jobs and pending reputation alerts must drain. Pending outbound feedback/webhook/publication jobs may accumulate while consumers are stopped. Apply only the reviewed digest, with writers still fenced:
+
+   ```bash
+   cutover=(node --import tsx scripts/rehome-hosted-account.ts --run-id "$RUN" --region us-east-2
+     --old-account "$OLD" --new-account "$NEW" --workspaces "$WIDS"
+     --old-bucket "opensend-mx-$OLD-mail-us-east-2" --new-bucket "opensend-mx-$NEW-mail-us-east-2")
+   "${cutover[@]}" --plan
+   "${cutover[@]}" --apply --expect-plan-sha256 "$REVIEWED_HASH"
+   # Alternative: rollback BEFORE starting new-account work, with writers still fenced.
+   "${cutover[@]}" --restore "$RUN"
+   ```
+
+3. Stage the new key pair, `MX_PLATFORM_AWS_ACCOUNT`, `PUBLIC_URL`, `ENABLE_LIVE_SES=true`, `MX_REGIONAL_SENDING=true` and `MX_TRUSTED_POOL=true` together. Preserve DB/queue/storage bindings and encryption secrets. Verifier jobs target the new account. Tenant jobs are deliberately **not** queued under the old deployment: their retry budget can expire before the new pool exists. With the new runtime environment, trigger the same pool-then-tenants reconciliation as minute cron from `api/`, then start new job consumers:
+
+   ```bash
+   node --import tsx --input-type=module <<'RECONCILE'
+   import { Client } from 'pg';
+   import { drizzle } from 'drizzle-orm/node-postgres';
+   import { postgresConnection } from './src/adapters/node.js';
+   import { loadConfig } from './src/config.js';
+   import { reconcileSharedConnections } from './src/provider-connections.js';
+
+   const config = loadConfig(process.env);
+   const client = new Client(postgresConnection(process.env.DATABASE_URL));
+   const unused = async () => { throw Error('Reconciliation must not use application storage'); };
+   await client.connect();
+   try {
+     await reconcileSharedConnections({config, db: drizzle(client), storage: {get: unused, put: unused, delete: unused}});
+   } finally { await client.end(); }
+   RECONCILE
+   ```
+
+   No application `S3_*` variables or R2 binding are needed. Run a second pass after the live Worker confirms the SNS subscriptions at `/v1/events/ses`; a successful command exit alone does not mean the pool is ready. Immediate restore requires the expected post-apply state and original inputs; revert Worker config while fenced. After reconciliation or new mail, use a separately drained reverse migration instead.
+4. Verify both pool topics, the catch-all, new bucket and tagged probation tenants. Copy and verify the manifest's workspace raw/attachment objects at the same keys (preserve metadata, tags and original expiration deadlines) **before downloads**. Keep the old bucket. Publish returned DKIM CNAMEs, retain claim TXT and old selectors, restore MAIL FROM and suppression lists, and verify domains again after pool receiving is ready.
+5. Check prior receiving hosts and mailbox IDs, pre-cutover downloads, and controlled inbound/outbound/feedback canaries. Release only this run's uniquely named hold: `UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE kind='shared' AND pause_reason=:hold`. **Do not use `resume-hosted-sending.ts`**: it changes `resumed_at`, resetting the reputation review window. Keep the old outbound SNS route directly served. After the rollback window, run `"${cutover[@]}" --finalize "$RUN"` to delete that run's before-images; the hash and timestamps remain and automatic restore becomes impossible.
+
 Non-manage readers receive app unsubscribe capabilities redacted from content and nested event/webhook payloads; raw MIME is withheld. This does not sanitize arbitrary third-party password-reset links—content-read grants belong only with trusted integrations. Campaign substitutions reject executable, unquoted, comment, and foreign-markup contexts and validate completed URLs. SES templates retain their caller-escaping contract.
 
 Postgres request/resource budgets bound major amplification paths. Authenticated credentials default to 1,200 requests/minute. Outstanding (queued or attempting) direct email is capped per workspace at the account's SES 24-hour quota, between 10,000 and 200,000 (shared-pool workspaces default to 10,000); there is no per-key cap. Stored attachments are limited to 1 GiB per workspace and expanded batch content to 128 MiB. These are implementation limits, not plan entitlements or full isolation from shared infrastructure costs.
