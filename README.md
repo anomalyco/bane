@@ -63,8 +63,11 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 The Cloudflare token is not stored anywhere. Each deploy mints a 30-minute token from the
 token issuer in `anomalyco/secrets` with the environment's own role, scoped to the stage's
 Worker, its custom-domain zones and the Pulumi resources (see the `cloudflare` entry for
-`bane/dev` and `bane/production` in that repo's `config.ts`). Live API keys need
-read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
+`bane/dev` and `bane/production` in that repo's `config.ts`). The issuer only answers calls
+from Blacksmith's dedicated egress addresses and restricts every token it mints to that
+list, so the `pulumi` and `deploy` jobs must stay on the `blacksmith-4vcpu-ubuntu-2404`
+runner. Live API keys need read/send/manage on the dedicated **E2E** workspace, not on a
+customer workspace.
 
 **Production is frozen until the AWS account switch.** The renamed Worker expects `bane-*` pool resources that do not exist in the old production account. Leave `PROD_DEPLOY_ENABLED` unset or `false` until cutover. Only the coordinator should set it to the exact lowercase string `true`, **only** on the `production` GitHub Environment (not the repository or organization). The gate and deploy jobs both check the freeze. No required reviewers are configured; adding a reviewer rule would prompt twice because both jobs use `production`.
 

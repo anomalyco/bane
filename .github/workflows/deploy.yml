@@ -196,7 +196,9 @@ jobs:
     name: Pulumi ${{ needs.authorize.outputs.stage }}
     needs: authorize
     if: needs.authorize.outputs.pulumi == 'true'
-    runs-on: ubuntu-latest
+    # The token issuer only mints for Blacksmith's dedicated egress addresses,
+    # so this label is part of the credential's scope, not a speed choice.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     environment: ${{ github.ref_name }}
     permissions:
@@ -338,7 +340,9 @@ jobs:
       always() && needs.authorize.result == 'success' &&
       (needs.pulumi.result == 'success' || needs.pulumi.result == 'skipped') &&
       inputs.preview != true
-    runs-on: ubuntu-24.04
+    # Same reason as the pulumi job: the Cloudflare token is only valid from
+    # Blacksmith's egress addresses.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read
