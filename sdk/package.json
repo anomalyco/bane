@@ -51,7 +51,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepack": "npm run build"
+    "prepack": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",

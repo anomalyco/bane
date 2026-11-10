@@ -434,7 +434,7 @@ jobs:
             DATABASE_URL,bane/production/PROD_DATABASE_URL
           parse-json-secrets: false
 
-      - run: npm run migrate
+      - run: bun run migrate
         if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         working-directory: api
         env:
@@ -468,7 +468,7 @@ jobs:
           BANE_E2E_DOMAIN_ID: ${{ vars.DEV_E2E_DOMAIN_ID }}
           BANE_E2E_REGION: us-east-2
           BANE_E2E_ALLOW_DESTRUCTIVE: '1'
-        run: npm run e2e
+        run: bun run e2e
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() && needs.authorize.outputs.stage == 'dev' && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}

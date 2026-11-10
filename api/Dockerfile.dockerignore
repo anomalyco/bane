@@ -2,7 +2,7 @@
 !api/
 api/*
 !api/package.json
-!api/package-lock.json
+!api/bun.lock
 !api/tsconfig*.json
 !api/worker-configuration.d.ts
 !api/src/
@@ -12,7 +12,7 @@ api/*
 !app/
 app/*
 !app/package.json
-!app/package-lock.json
+!app/bun.lock
 !app/tsconfig*.json
 !app/vite.config.ts
 !app/index.html

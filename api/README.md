@@ -42,7 +42,7 @@ Disabling a *region* retires its binding generation. The minute recovery sweep c
 Use Node.js **24** and Docker Compose for the local quickstart. All commands below run from `api/` unless stated otherwise.
 
 ```sh
-npm ci
+bun install
 cp .env.example .env
 ```
 
@@ -146,12 +146,12 @@ For managed infrastructure, run the same image with your actual database/private
 Use the same local Postgres/MinIO and bucket as above, but stop Docker's `api`/`worker` before running host processes. Keep Node.js 24 active in each terminal.
 
 1. Set `PUBLIC_URL=http://127.0.0.1:5173` in `api/.env`. Configure the Google client origin `http://127.0.0.1:5173` and redirect `http://127.0.0.1:5173/api/auth/callback/google`. Keep `PORT=8793`, `API_BASE_URL=http://127.0.0.1:8793`, and host-local Postgres/S3 URLs.
-2. From `api/`, run `npm run migrate`, then `npm run dev`. The API listens on **8793**.
-3. From `api/` in a second terminal, run `npm run worker`.
-4. From `app/` in a third terminal, run `npm ci`, then `npm run dev`. Open **http://127.0.0.1:5173**; Vite proxies the API/auth requests to 8793, keeping browser authentication on one origin.
+2. From `api/`, run `bun run migrate`, then `bun run dev`. The API listens on **8793**.
+3. From `api/` in a second terminal, run `bun run worker`.
+4. From `app/` in a third terminal, run `bun install`, then `bun run dev`. Open **http://127.0.0.1:5173**; Vite proxies the API/auth requests to 8793, keeping browser authentication on one origin.
 5. Sign in with your real approved Google account. No browser API URL/secret configuration is required. Fake Google credentials do not unlock the dashboard.
 
-Use `npm start` instead of `npm run dev` for a non-watching host API. Both API and worker load `api/.env` when run from `api/`.
+Use `bun start` instead of `bun run dev` for a non-watching host API. Both API and worker load `api/.env` when run from `api/`.
 
 ## Database and storage
 
@@ -173,7 +173,7 @@ Use a read/write database role for Hyperdrive and a separate schema-owner creden
 
 Supply `BETTER_AUTH_SECRET` and `GOOGLE_CLIENT_SECRET` using Worker secrets; configure your real `GOOGLE_CLIENT_ID`, allowlists, and HTTPS `PUBLIC_URL` for this deployment. This deployment also stores `GOOGLE_CLIENT_ID` and the allowlists as Worker secrets rather than committing those installation values. For AWS discovery, explicit provisioning, or live SES sending, also supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` securely. Use interactive `wrangler secret put --config wrangler.prod.jsonc` (or the dev config), not secrets in config or command arguments. Pasted temporary credentials are not automatically renewed.
 
-Build `app/` with `npm ci` and `npm run build` before `npm run cf:check` in `api/`. `cf:check` is a deployment **dry run**, not a deployment or remote-resource check. For local Workers, keep an ignored `api/.dev.vars` containing only the required Worker settings and secrets, including both Google credentials, allowlists, `BETTER_AUTH_SECRET`, and the local `PUBLIC_URL`. This avoids loading unrelated Docker/storage credentials from `.env`. Securely set `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`, then use `npm run cf:dev -- --port 8794 --local-upstream 127.0.0.1:8794 --upstream-protocol http` and a matching `PUBLIC_URL`/Google callback. The explicit local upstream prevents Wrangler from rewriting same-origin authorization headers to the production custom domain. Local Hyperdrive cannot certify production pooling/caching; see [local development](https://developers.cloudflare.com/hyperdrive/configuration/local-development/).
+Build `app/` with `bun install` and `bun run build` before `bun run cf:check` in `api/`. `cf:check` is a deployment **dry run**, not a deployment or remote-resource check. For local Workers, keep an ignored `api/.dev.vars` containing only the required Worker settings and secrets, including both Google credentials, allowlists, `BETTER_AUTH_SECRET`, and the local `PUBLIC_URL`. This avoids loading unrelated Docker/storage credentials from `.env`. Securely set `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`, then use `bun run cf:dev -- --port 8794 --local-upstream 127.0.0.1:8794 --upstream-protocol http` and a matching `PUBLIC_URL`/Google callback. The explicit local upstream prevents Wrangler from rewriting same-origin authorization headers to the production custom domain. Local Hyperdrive cannot certify production pooling/caching; see [local development](https://developers.cloudflare.com/hyperdrive/configuration/local-development/).
 
 HTTP, Queue, and scheduled handlers share the outbox. Queue messages are wakeups; committed jobs survive a lost wakeup. Workers consume one wake signal per queue invocation and stop claiming new jobs after a two-second turn, while allowing every in-flight job to finish. Database claims lease only as many jobs as there are free local lanes; lanes refill individually as jobs finish, without waiting for the slowest job in a group. At most one feedback-first reservation is active per invocation, with feedback-only fallback when no send work exists. Invocation-local rotation provides job-class fairness without writing a shared scheduler row on every claim. The `job_schedule` row remains for admission locking and wake coalescing. A campaign launch asks for an uncoalesced wake so its run starts at once. Cron recovers due work and performs hourly retention. PostgreSQL transactions/leases, not wake messages or process-local state, control dispatch.
 
@@ -191,7 +191,7 @@ The XML-builder alias in Wrangler selects the AWS SDK's non-browser parser: Work
 
 ### Live E2E
 
-From `api/` on Node 24, run `npm ci` then `npm run e2e` with `BANE_E2E_API_KEY` in the environment. With a local env file, run `node --env-file="$HOME/.config/bane/e2e.env" --import tsx scripts/e2e.ts`. `BANE_E2E_URL` defaults to `https://bane.mx`. The full suite uses the dedicated unrestricted read/send/manage workspace key; it checks the Hosted connection, region and exact test domain ID before writing. Use separate E2E credentials for each hosted environment.
+From `api/` on Node 24, run `bun install` then `bun run e2e` with `BANE_E2E_API_KEY` in the environment. With a local env file, run `node --env-file="$HOME/.config/bane/e2e.env" --import tsx scripts/e2e.ts`. `BANE_E2E_URL` defaults to `https://bane.mx`. The full suite uses the dedicated unrestricted read/send/manage workspace key; it checks the Hosted connection, region and exact test domain ID before writing. Use separate E2E credentials for each hosted environment.
 
 Each run sends to [run-tagged SES simulator addresses](https://docs.aws.amazon.com/ses/latest/dg/send-an-email-from-console.html#send-email-simulator-considerations) and its own two temporary MX addresses. A second one-recipient campaign is scheduled 24 hours ahead, paused, paced, resumed and canceled before dispatch. The paused outbound webhook sends only a synthetic probe to `https://httpbin.org/status/204`; the inbound webhook sends only thread-state metadata from a run-owned address there. Neither subscribes to customer mail. The API records HTTP attempts, not request headers: this does not independently verify receiver-side HMAC. Cleanup targets only returned IDs. MX retains immutable mail, idempotency, consent/suppression and one-row import records; terminal campaigns are archived, not deleted.
 
@@ -199,7 +199,7 @@ Each run sends to [run-tagged SES simulator addresses](https://docs.aws.amazon.c
 
 ## SDK and MCP
 
-- `/openapi.json` comes from the actual Zod route schemas; stable operation IDs define generated SDK methods. `npm run sdk` exports the contract, generates `../sdk/src`, and compiles it. Do not edit generated code. See [SDK usage](../sdk/README.md).
+- `/openapi.json` comes from the actual Zod route schemas; stable operation IDs define generated SDK methods. `bun run sdk` exports the contract, generates `../sdk/src`, and compiles it. Do not edit generated code. See [SDK usage](../sdk/README.md).
 - The dashboard uses the same public API as integrations; Google establishes an administrator session, not a separate dashboard business API. API keys are hashed at rest and scoped to a workspace. New keys use `bane_<64 hex digits>`; existing `os_` and `os_live_` keys remain valid. Retired test keys (`os_test_` or `bane_test_`) are rejected. Requests explicitly selecting the obsolete test environment fail with `400 ENVIRONMENT_REMOVED` rather than sending real mail. A sending-domain restriction authorizes that domain and its subdomains, matching SES identity inheritance; a subdomain restriction does not authorize its parent or siblings. Give integrations only necessary grants; sending-domain restrictions are not a general data-isolation boundary.
 - [Hosted MCP](../mcp/README.md) is served at `/mcp` on this API's origin. OAuth authorization reuses the dashboard's approved Google session, then grants the MCP client its own scoped access. Ordinary named tools include both input and output schemas; no local process, pasted API key, or server-side code-mode wrapper is required. Read access is the default; writes require the corresponding OAuth scope and `confirm: true`. Apply `009_mcp_oauth.sql` before deployment and grant the API database role access to its new tables, following the existing migration-role separation.
 - Collections return `{ data, nextCursor }`. HTTP `202` means queued, not delivered. Read stored message/event state to find the outcome.
@@ -259,7 +259,7 @@ The managed destinations enable `SEND`, `DELIVERY`, `BOUNCE`, `COMPLAINT`, `REJE
 
 Use [`iam-policy.json`](iam-policy.json) for the dedicated Bane IAM user. Replace every `YOUR_AWS_ACCOUNT_ID` with your 12-digit AWS account ID, create a customer-managed policy in IAM, and attach it to that user. It covers discovery, provisioning, identity verification, custom MAIL FROM configuration, stored-template reads/rendering, and sending; it grants no IAM administration or resource deletion. The only storage access is to Bane's own `bane-*-mail-*` mailbox buckets.
 
-Generate a personalized, gitignored copy with `npm run iam-policy:personal -- YOUR_12_DIGIT_ACCOUNT_ID`. This writes `iam-policy-personal.json` beside the canonical template for pasting into IAM.
+Generate a personalized, gitignored copy with `bun run iam-policy:personal -- YOUR_12_DIGIT_ACCOUNT_ID`. This writes `iam-policy-personal.json` beside the canonical template for pasting into IAM.
 
 Per-message open/click tracking overrides require `ses:ApplyTrackingConfigurationOverrides` in addition to `ses:SendEmail`. A live SES denial confirmed this permission on September 10, 2026, although AWS’s published service authorization reference did not list it. Keep the separate tracking statement in the generated policy. The subscription statement permits HTTPS callbacks at `/v1/events/ses`; you can replace its host wildcard with your exact public callback URL. Validate sending with an authorized recipient after applying the policy—read-only discovery cannot prove send authorization.
 
@@ -335,7 +335,7 @@ Drain mail writers before applying 062: it backfills recent mail and feedback wh
 MCP clients authorised against `https://opensend.mx/mcp` must reconnect to `https://bane.mx/mcp`.
 
 1. Block new admissions on both origins; hold incoming SMTP upstream, disable the old catch-all and drain old sends, campaigns, receipts and archives. Keep signed outbound feedback and unsubscribe working. After draining, pause every connection, retaining previous holds. Fence old HTTP writers, cron, queues, runners and deployments; wait for outstanding work to exit. The advisory lock is **not** a Worker maintenance gate. Do not switch to simulated sending.
-2. With the pre-rename release fenced, run `npm run migrate` from the new `api/` checkout using a short-lived operator `DATABASE_URL`, then plan the re-home. Running migration 092 before the switch is safe here only because production has no stored MCP grants: the pre-rename Worker cannot read `bane:*` scopes. With live grants, run 092 together with the renamed release. Supply **every** workspace ID, including unconnected sign-ins and `default` if present. Review connected IDs, unconnected workspaces, receiving hosts, counts, database identity and digest. All running jobs and pending reputation alerts must drain. Pending outbound feedback/webhook/publication jobs may accumulate while consumers are stopped. Apply only the reviewed digest, with writers still fenced:
+2. With the pre-rename release fenced, run `bun run migrate` from the new `api/` checkout using a short-lived operator `DATABASE_URL`, then plan the re-home. Running migration 092 before the switch is safe here only because production has no stored MCP grants: the pre-rename Worker cannot read `bane:*` scopes. With live grants, run 092 together with the renamed release. Supply **every** workspace ID, including unconnected sign-ins and `default` if present. Review connected IDs, unconnected workspaces, receiving hosts, counts, database identity and digest. All running jobs and pending reputation alerts must drain. Pending outbound feedback/webhook/publication jobs may accumulate while consumers are stopped. Apply only the reviewed digest, with writers still fenced:
 
    ```bash
    cutover=(node --import tsx scripts/rehome-hosted-account.ts --run-id "$RUN" --region us-east-2
@@ -379,14 +379,14 @@ Coarse admission runs before DB access: 6,000 requests/minute per connection pee
 
 ## Secret rotation and upgrades
 
-A normal `npm run migrate` needs only `DATABASE_URL` and the intended `DEFAULT_SES_REGION` on first setup. Without rotation inputs it does not re-encrypt webhooks. If `BETTER_AUTH_SECRET` is supplied, it first decrypts one stored webhook signing secret read-only; `KEY_ROTATION_REQUIRED` means the sample could not be decrypted and nothing was written. No stored webhook is required, and secretless CI skips this probe. Only explicit rotation requires the new root and previous key as described below.
+A normal `bun run migrate` needs only `DATABASE_URL` and the intended `DEFAULT_SES_REGION` on first setup. Without rotation inputs it does not re-encrypt webhooks. If `BETTER_AUTH_SECRET` is supplied, it first decrypts one stored webhook signing secret read-only; `KEY_ROTATION_REQUIRED` means the sample could not be decrypted and nothing was written. No stored webhook is required, and secretless CI skips this probe. Only explicit rotation requires the new root and previous key as described below.
 
 `MIGRATION_LEDGER_AMBIGUOUS` means both `opensend_migrations` and `bane_migrations` exist. Stop and compare their migration names and checksums with the checkout. Only after confirming that `bane_migrations` is authoritative and that `opensend_migrations` is empty or contains only duplicate entries, drop the stray `opensend_migrations` and rerun. If they disagree, reconcile the histories first; do not replay migrations.
 
 `BETTER_AUTH_SECRET` is the root for authentication and HKDF-derived, domain-separated webhook encryption keys. Webhook ciphertext carries a version/key identifier. **Back up the old secret securely before rotation**; losing a needed decryption key can make stored signing secrets unrecoverable.
 
 1. Generate a new root secret. Set the old root as `PREVIOUS_BETTER_AUTH_SECRET` and the new root as `BETTER_AUTH_SECRET` in every API/worker environment. Restart the services with the same configuration.
-2. Run `npm run migrate` against the intended database (Docker: `docker compose -p bane-api-local run --rm api node dist/migrate.js`). Migration re-encrypts stored webhook secrets with the new root. Resolve any failure before retiring old key material.
+2. Run `bun run migrate` against the intended database (Docker: `docker compose -p bane-api-local run --rm api node dist/migrate.js`). Migration re-encrypts stored webhook secrets with the new root. Resolve any failure before retiring old key material.
 3. Keep the previous root until migration is complete and all services use the new configuration. Then remove `PREVIOUS_BETTER_AUTH_SECRET` and restart all services. Root rotation logs out existing sessions: the previous-root setting is **not** an authentication fallback.
 
 For an **older `ENCRYPTION_KEY` installation**, retain that old key only as upgrade-time decryption input while configuring a new `BETTER_AUTH_SECRET`. Do **not** set both legacy `ENCRYPTION_KEY` and `PREVIOUS_BETTER_AUTH_SECRET`. Run migration to re-encrypt secrets, verify completion, then remove `ENCRYPTION_KEY` and restart. Do not copy obsolete admin-key/bootstrap settings into a new deployment. Old credentials do not create a Google administrator.
@@ -395,7 +395,7 @@ For an **older `ENCRYPTION_KEY` installation**, retain that old key only as upgr
 
 ## Verification
 
-The only acceptance-test file is `api/api.acceptance.test.ts`. `npm test` uses the local API/job worker and a paired local database; its Google identities are synthetic and its OAuth transport is mocked. It does **not** prove normal Google login with a real client. Do not run it against production or unrelated data: synthetic contacts/campaigns and audit records are created.
+The only acceptance-test file is `api/api.acceptance.test.ts`. `bun run test` uses the local API/job worker and a paired local database; its Google identities are synthetic and its OAuth transport is mocked. It does **not** prove normal Google login with a real client. Do not run it against production or unrelated data: synthetic contacts/campaigns and audit records are created.
 
 Use an isolated database with synthetic identities, never real user data, for local acceptance. For that dedicated local test installation, the suite needs the server's matching `BETTER_AUTH_SECRET`, `API_BASE_URL`, and paired `DATABASE_URL`. Allow its default fixture email `operator@example.com` in `AUTH_ALLOWED_EMAILS` and fixture domain `example.com` in `AUTH_ALLOWED_DOMAINS` (or use matching `AUTH_TEST_EMAIL` / `AUTH_TEST_GOOGLE_DOMAIN` values). Reserve `operator@example.com` for the fixture; it must not collide with an existing user. Restart the API/worker after changing configuration. These are **test-only** identities/permissions, not production onboarding, and fake OAuth credentials alone are not an alternate login path.
 
@@ -403,8 +403,8 @@ The dashboard is desktop-first. At a 390-pixel viewport its controls remain reac
 
 Useful checks, from their respective packages:
 
-- `api/`: `npm run check`, `npm test`, `npm run sdk`, and `npm run cf:check` (after the dashboard build).
-- `app/`: `npm run build`.
-- `mcp/`: `npm run check` and `npm run build`; exercise the stdio client against the local API with a scoped key on a simulated deployment.
+- `api/`: `bun run check`, `bun run test`, `bun run sdk`, and `bun run cf:check` (after the dashboard build).
+- `app/`: `bun run build`.
+- `mcp/`: `bun run check` and `bun run build`; exercise the stdio client against the local API with a scoped key on a simulated deployment.
 
 Live acceptance is opt-in with `LIVE_SES_TEST=1`, `SES_TEST_RECIPIENT`, and `SES_TEST_FROM` for explicitly authorized real sending. The commands above describe checks, not a claim that they have passed on your installation. Docker/Workers builds, local simulation, Google mocks, and source review do not replace the [external release gates](#ses-and-production-release-gates).
