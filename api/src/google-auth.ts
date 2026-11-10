@@ -160,10 +160,10 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
       storeAccountCookie: false, storeStateStrategy: 'database', skipStateCookieCheck: false,
     },
     advanced: {
-      cookiePrefix: 'opensend', useSecureCookies: secure,
+      cookiePrefix: 'bane', useSecureCookies: secure,
       defaultCookieAttributes: { httpOnly: true, secure, sameSite: 'lax', path: '/' },
       trustedProxyHeaders: false, disableCSRFCheck: false, disableOriginCheck: false,
-      ipAddress: { ipAddressHeaders: ['x-opensend-client-ip'] },
+      ipAddress: { ipAddressHeaders: ['x-bane-client-ip', 'x-opensend-client-ip'] },
     },
     databaseHooks: {
       user: {
@@ -246,7 +246,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, meas
     if (!session) return null;
     let principal: { workspaceId: string; role: string; email: string; name: string };
     if (runtime.config.multiTenant) {
-      const wid = headers.get('x-opensend-workspace');
+      const wid = headers.get('x-bane-workspace') ?? headers.get('x-opensend-workspace');
       const result = await measure('membership-db', () => runtime.db.execute<typeof principal>(sql`WITH member AS (
         SELECT m.workspace_id AS "workspaceId", m.role, u.email, u.name, u.id FROM auth_user u
         JOIN auth_session s ON s.user_id = u.id AND s.id = ${session.session.id} AND s.token = ${session.session.token} AND s.expires_at > now()

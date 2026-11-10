@@ -1,9 +1,7 @@
-// Bane production (bane.mx): a multi-tenant installation with its own data, queues, secrets and
-// AWS principal. opensend.mx stays routed for API clients, old unsubscribe links and the SNS
-// feedback endpoint the existing AWS account still delivers to. Queues, the attachment bucket and
-// Hyperdrive come from infra/ (tofu, production.tfvars).
+// Bane production. Keep the legacy route for existing API clients and unsubscribe links.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
+  // Keep the script name: production secrets (including BETTER_AUTH_SECRET for webhook secrets and sessions) live on this script; renaming requires a planned secret transfer.
   "name": "opensend-mx",
   "account_id": "15d29c8639fd3733b1b5486a2acfd968",
   "workers_dev": false,
@@ -20,12 +18,13 @@
   "vars": {
     "PUBLIC_URL": "https://bane.mx",
     "MULTI_TENANT": "true",
-    "MX_PLATFORM_AWS_ACCOUNT": "438095551154",
+    "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",
+    "BANE_REGIONAL_SENDING": "true",
+    "BANE_TRUSTED_POOL": "true",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",
-    // Bring-your-own AWS CloudFormation template, v4 published from api/byo-template-v4.yaml (public, versioned); v5 (api/byo-template.yaml) is unpublished.
-    "BYO_TEMPLATE_URL": "https://opensend-mx-templates.s3.us-east-2.amazonaws.com/byo/v4.yaml",
+    // BYO_TEMPLATE_URL stays unset until a template is published in the dedicated account.
     "DEFAULT_SES_REGION": "us-east-2",
     // Live SES uses the shared-account key (infra/aws-shared). Sends stay denied by its IAM policy
     // until every send carries an SES TenantName.
@@ -33,35 +32,36 @@
     "JOB_CONCURRENCY": "6",
     "SIMULATED_SES_LATENCY_MS": "170",
     "SIMULATED_SES_RATE": "5000",
-    "DISPATCH_SHARDS": "4",
+    "DISPATCH_SHARDS": "8",
     "DISPATCH_RATE_FACTOR": "1.1",
     "API_RATE_LIMIT_PER_MINUTE": "10000",
-    "WORK_QUEUE_NAME": "opensend-mx-production-work",
-    "FEEDBACK_QUEUE_NAME": "opensend-mx-production-feedback"
+    "WORK_QUEUE_NAME": "bane-prod-work",
+    "FEEDBACK_QUEUE_NAME": "bane-prod-feedback"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
-  // Run HTTP requests next to the opensend-public database (PlanetScale aws-us-east-2), as production does.
+  // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.
   "placement": { "region": "aws:us-east-2" },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
   // From `tofu output hyperdrive_id` (infra/, production state).
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "3742f44f5c9344fd8e7c99b7b08b84cf" }],
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "556aba191add406eaa58a0e26eebb6b1" }],
   "browser": { "binding": "BROWSER" },
-  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-mx-production-attachments" }],
+  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "bane-prod-attachments" }],
   "queues": {
+    // Wrangler binds by name. Work: 753a4b880016464c833b836a63663684; feedback: 34426f99502941fbbed927a059517b7c.
     "producers": [
-      { "binding": "WAKE_QUEUE", "queue": "opensend-mx-production-work" },
-      { "binding": "FEEDBACK_QUEUE", "queue": "opensend-mx-production-feedback" }
+      { "binding": "WAKE_QUEUE", "queue": "bane-prod-work" },
+      { "binding": "FEEDBACK_QUEUE", "queue": "bane-prod-feedback" }
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
-      { "queue": "opensend-mx-production-work", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
+      { "queue": "bane-prod-work", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
-      { "queue": "opensend-mx-production-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1 }
+      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1 }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
-  // Rate limiter namespaces are per account; production uses 8793001.
-  "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793101", "simple": { "limit": 6000, "period": 60 } }],
+  // Rate limiter namespaces are per account.
+  "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793301", "simple": { "limit": 6000, "period": 60 } }],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

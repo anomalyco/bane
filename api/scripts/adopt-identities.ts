@@ -17,7 +17,7 @@ const attestation=z.object({workspaceId:z.string(),installation:z.literal('opens
   arn:z.string(),defaultSet:z.string().nullable(),dkimOrigin:z.enum(DkimSigningAttributesOrigin),dkimZone:z.string().nullable(),dkimTokens:z.array(z.string().min(1)),mailFrom:z.string().nullable(),mailFromBehavior:z.enum(['USE_DEFAULT_VALUE','REJECT_MESSAGE']).nullable(),
 }).strict()).length(12)}).strict();
 
-// No API endpoint. `arns` is the very same private JSON array supplied to the IAM renderer.
+// No API endpoint. This legacy operator tool takes a private, independently attested ARN list.
 // Its independently reviewed facts are pinned BEFORE reading AWS; live discovery is not authorization.
 export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:unknown,inventory:unknown,operator:string,apply:boolean,env:Record<string,string|undefined>=process.env) {
   const platformAccount=requirePoolFlags(env),prefix=`arn:aws:ses:${region}:${platformAccount}:identity/`;
@@ -29,7 +29,7 @@ export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:
     if (list[i]!==arn || !arn.startsWith(prefix) || domainName.safeParse(name).data!==name || facts.mailFrom && !facts.mailFrom.endsWith('.'+name)) throw new Error('Expected exactly the attested Virginia domain ARNs and their MAIL FROM hosts.');
     facts.dkimTokens.sort();return {name,arn,fingerprint:adoptionFingerprint(facts)};
   });
-  for (const d of domains) if (!await claimNameAllowed(d.name,'https://opensend.mx')) throw new Error('Reserved identity name.');
+  for (const d of domains) if (!await claimNameAllowed(d.name,'https://bane.mx')) throw new Error('Reserved identity name.');
   const digest=createHash('sha256').update(JSON.stringify([wid,input.installation,input.scope,domains])).digest('hex');
   async function members(arn:string) {
     const p=await ses.send(new ListResourceTenantsCommand({ResourceArn:arn,PageSize:2}));
@@ -49,7 +49,7 @@ export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:
       JOIN hosted_tenant_ownership o ON o.workspace_id=c.workspace_id AND o.region=r.region
       WHERE c.workspace_id=$1 AND c.kind='shared' AND c.state='ready' AND c.paused_at IS NULL AND c.aws_account_id=$2 AND r.region=$3 AND NOT r.legacy AND r.pool_tenant_name=$4
       AND r.sending_state='ready' AND r.tenant_state='ready' AND r.receiving_state='off' AND p.sending_state='ready' AND p.confirmed_generation=p.generation
-      AND p.feedback_topic_arn=$5 FOR ${reserving?'NO KEY UPDATE':'SHARE'} OF s FOR SHARE OF c,r,p,o`,[wid,platformAccount,region,tenant,`arn:aws:sns:${region}:${platformAccount}:opensendmx-trusted-feedback`])).rows[0];
+      AND p.feedback_topic_arn=$5 FOR ${reserving?'NO KEY UPDATE':'SHARE'} OF s FOR SHARE OF c,r,p,o`,[wid,platformAccount,region,tenant,`arn:aws:sns:${region}:${platformAccount}:bane-trusted-feedback`])).rows[0];
     if (!c || !c.arn.startsWith(`arn:aws:ses:${region}:${platformAccount}:tenant/${tenant}/`)) throw new Error('Prepare and canary the signed Virginia pool and workspace tenant first.');
     const names=domains.map(d=>d.name);
     for (const root of [...new Set(names.map(n=>n.split('.').slice(-2).join('.')))].sort()) await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,84912))',[root]);

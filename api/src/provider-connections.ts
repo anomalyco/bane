@@ -58,7 +58,7 @@ async function platformIdentity(runtime: Runtime, expectedAccount?: string) {
 const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-south-1', 'ap-south-2', 'ap-southeast-3', 'ap-southeast-5', 'ap-south-1', 'ap-northeast-3', 'ap-northeast-2',
   'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ca-central-1', 'ca-west-1', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-south-1', 'eu-west-3', 'eu-north-1', 'eu-central-2',
   'il-central-1', 'me-south-1', 'me-central-1', 'sa-east-1'];
-const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
+const stackName = (row: Row) => `Bane-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
   if (row.template_version==='v5' && row.state!=='disconnecting' && runtime.config.byoV2 && runtime.config.byoV5TemplateUrl && !row.aws_account_id) quickCreateUrl=v5Link(runtime,row);
@@ -131,11 +131,11 @@ async function wakeByoJob(runtime: Runtime, connectionId: string) {
 }
 // This lookup authorizes only signature verification for a SubscriptionConfirmation, never a notification.
 export async function byoStackTopic(runtime: Runtime, arn: string) {
-  const match = /^arn:aws:sns:([a-z0-9-]+):(\d{12}):(opensend-[0-9a-f]{20})-feedback$/.exec(arn);
+  const match = /^arn:aws:sns:([a-z0-9-]+):(\d{12}):(bane-[0-9a-f]{20})-feedback$/.exec(arn);
   if (!match) return;
   const [, region, account, prefix] = match;
   const row = (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE resource_prefix=${prefix} AND region=${region} AND kind='byo'
-    AND (template_version='v4' OR feedback_topic_arn IS NULL) AND (aws_account_id IS NULL OR aws_account_id=${account}) AND split_part(platform_principal_arn,':',5)<>${account}`)).rows[0];
+    AND template_version IS DISTINCT FROM 'v5' AND (template_version='v4' OR feedback_topic_arn IS NULL) AND (aws_account_id IS NULL OR aws_account_id=${account}) AND split_part(platform_principal_arn,':',5)<>${account}`)).rows[0];
   if (!row || setupResources(row.id).topicName !== `${prefix}-feedback`) return;
   return (confirmation: Confirmation) => provision(runtime, row, account!, confirmation);
 }

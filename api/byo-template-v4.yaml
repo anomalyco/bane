@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: OpenSend MX customer connection v4. Connects regional SES sending and signed feedback; receiving is optional.
+Description: Bane customer connection v4. Connects regional SES sending and signed feedback; receiving is optional.
 Parameters:
   PlatformPrincipalArn:
     Type: String
@@ -12,9 +12,9 @@ Parameters:
     Type: String
     AllowedPattern: 'conn_[0-9a-f]{32}'
   ResourcePrefix:
-    Description: OpenSend resources dedicated to this connection.
+    Description: Bane resources dedicated to this connection.
     Type: String
-    AllowedPattern: 'opensend-[0-9a-f]{20}'
+    AllowedPattern: 'bane-[0-9a-f]{20}'
   FeedbackUrl:
     Type: String
     AllowedPattern: 'https://[^/?#]+/v1/events/ses'
@@ -30,8 +30,8 @@ Resources:
     Properties:
       TopicName: !Sub '${ResourcePrefix}-feedback'
       Tags:
-        - { Key: 'opensend:installation-id', Value: !Ref ConnectionId }
-        - { Key: 'opensend:purpose', Value: ses-feedback }
+        - { Key: 'bane:installation-id', Value: !Ref ConnectionId }
+        - { Key: 'bane:purpose', Value: ses-feedback }
   FeedbackPolicy:
     Type: AWS::SNS::TopicPolicy
     Properties:
@@ -39,12 +39,12 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: OpenSendOwner
+          - Sid: BaneOwner
             Effect: Allow
             Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
             Action: ['sns:GetTopicAttributes', 'sns:SetTopicAttributes', 'sns:AddPermission', 'sns:RemovePermission', 'sns:DeleteTopic', 'sns:Subscribe', 'sns:ListSubscriptionsByTopic', 'sns:Publish']
             Resource: !Ref FeedbackTopic
-          - Sid: OpenSendSesPublish
+          - Sid: BaneSesPublish
             Effect: Allow
             Principal: { Service: ses.amazonaws.com }
             Action: sns:Publish
@@ -64,8 +64,8 @@ Resources:
         SuppressedReasons: [BOUNCE, COMPLAINT]
         ValidationOptions: { ConditionThreshold: { ConditionThresholdEnabled: DISABLED } }
       Tags:
-        - { Key: 'opensend:installation-id', Value: !Ref ConnectionId }
-        - { Key: 'opensend:purpose', Value: ses-feedback }
+        - { Key: 'bane:installation-id', Value: !Ref ConnectionId }
+        - { Key: 'bane:purpose', Value: ses-feedback }
   MarketingSet:
     Type: AWS::SES::ConfigurationSet
     Properties:
@@ -75,8 +75,8 @@ Resources:
         SuppressedReasons: [BOUNCE, COMPLAINT]
         ValidationOptions: { ConditionThreshold: { ConditionThresholdEnabled: ENABLED, OverallConfidenceThreshold: { ConfidenceVerdictThreshold: MANAGED } } }
       Tags:
-        - { Key: 'opensend:installation-id', Value: !Ref ConnectionId }
-        - { Key: 'opensend:purpose', Value: ses-feedback }
+        - { Key: 'bane:installation-id', Value: !Ref ConnectionId }
+        - { Key: 'bane:purpose', Value: ses-feedback }
   TransactionalEvents:
     Type: AWS::SES::ConfigurationSetEventDestination
     DependsOn: FeedbackPolicy
@@ -99,13 +99,13 @@ Resources:
         SnsDestination: { TopicARN: !Ref FeedbackTopic }
   FeedbackSubscription:
     Type: AWS::SNS::Subscription
-    DependsOn: [OpenSendRole, TransactionalEvents, MarketingEvents]
+    DependsOn: [BaneRole, TransactionalEvents, MarketingEvents]
     Properties:
       TopicArn: !Ref FeedbackTopic
       Protocol: https
       Endpoint: !Ref FeedbackUrl
       RawMessageDelivery: false
-  OpenSendRole:
+  BaneRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Ref AWS::StackName
@@ -133,21 +133,21 @@ Resources:
                 Action: ses:CreateEmailIdentity
                 Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
                 Condition:
-                  'ForAllValues:StringEquals': { 'aws:TagKeys': ['opensend:domain-claim'] }
-                  'Null': { 'aws:RequestTag/opensend:domain-claim': 'false' }
+                  'ForAllValues:StringEquals': { 'aws:TagKeys': ['bane:domain-claim'] }
+                  'Null': { 'aws:RequestTag/bane:domain-claim': 'false' }
               - Effect: Allow
                 Action: ses:TagResource
                 Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
                 # Restrict the value as well: a key allowlist alone would let us tag a customer's
                 # existing identity and then satisfy the DeleteEmailIdentity / MAIL FROM guard.
                 Condition:
-                  'ForAllValues:StringEquals': { 'aws:TagKeys': ['opensend:domain-claim'] }
-                  StringEquals: { 'aws:RequestTag/opensend:domain-claim': '${aws:ResourceTag/opensend:domain-claim}' }
-                  'Null': { 'aws:ResourceTag/opensend:domain-claim': 'false' }
+                  'ForAllValues:StringEquals': { 'aws:TagKeys': ['bane:domain-claim'] }
+                  StringEquals: { 'aws:RequestTag/bane:domain-claim': '${aws:ResourceTag/bane:domain-claim}' }
+                  'Null': { 'aws:ResourceTag/bane:domain-claim': 'false' }
               - Effect: Allow
                 Action: ['ses:DeleteEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes']
                 Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
-                Condition: { 'Null': { 'aws:ResourceTag/opensend:domain-claim': 'false' } }
+                Condition: { 'Null': { 'aws:ResourceTag/bane:domain-claim': 'false' } }
               - Effect: Allow
                 Action: ['ses:GetConfigurationSet', 'ses:GetConfigurationSetEventDestinations']
                 Resource:
@@ -161,7 +161,7 @@ Resources:
                   - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
               - Effect: Allow
                 Action: ['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate']
-                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:template/opensend-*'
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:template/bane-*'
               - Effect: Allow
                 Action: ['sns:ListTagsForResource', 'sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes', 'sns:GetSubscriptionAttributes']
                 Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-feedback'
@@ -202,7 +202,7 @@ Resources:
           - !Ref AWS::NoValue
 Outputs:
   AccountId:
-    Description: OpenSend detects this account automatically. Use this ID only for manual verification.
+    Description: Bane detects this account automatically. Use this ID only for manual verification.
     Value: !Ref AWS::AccountId
   RoleArn:
-    Value: !GetAtt OpenSendRole.Arn
+    Value: !GetAtt BaneRole.Arn

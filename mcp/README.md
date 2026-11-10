@@ -1,6 +1,8 @@
 # Bane MCP
 
-Connect an MCP client to **`https://YOUR_BANE_DOMAIN/mcp`**. The hosted endpoint is part of the Bane API; it does not require a local process or an API key. This installation uses **https://opensend.anoma.ly/mcp**.
+Connect an MCP client to **`https://YOUR_BANE_DOMAIN/mcp`**. The hosted endpoint is part of the Bane API; it does not require a local process or an API key. This installation uses **https://bane.mx/mcp**.
+
+If you authorised your client against `https://opensend.mx/mcp`, reconnect it to `https://bane.mx/mcp` and approve access again.
 
 ## Connect
 
@@ -18,12 +20,12 @@ OAuth scopes map to the existing API permissions:
 
 | Scope | Access |
 | --- | --- |
-| `opensend:read` | Read contacts, email, delivery, and account data where API rules permit. |
-| `opensend:send` | Send email and use operations requiring send permission. |
-| `opensend:manage` | Management permission, including read and send. MCP safety exclusions still apply. |
+| `bane:read` | Read contacts, email, delivery, and account data where API rules permit. |
+| `bane:send` | Send email and use operations requiring send permission. |
+| `bane:manage` | Management permission, including read and send. MCP safety exclusions still apply. |
 | `offline_access` | Obtain a rotating refresh token, valid for up to 30 days. |
 
-Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `opensend:send` or `opensend:manage`; every non-GET operation still requires literal `confirm: true`, including POST previews. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
+Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; every non-GET operation still requires literal `confirm: true`, including POST previews. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
 Authenticated dashboard clients can inspect their approvals with `GET /api/auth/oauth2/get-consents` and revoke one with `POST /api/auth/oauth2/delete-consent` and JSON `{ "id": "consent-id" }`. Revocation requires the dashboard session and canonical Origin. These are not MCP tools.
 
@@ -71,7 +73,7 @@ On an API without the expected-recipient guard, MCP omits reply rather than send
 
 ### Temporary script tokens
 
-`createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses a lifetime of 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. Do not commit it or place it in logs. For local files, use the token with `npx banemx upload <file> --api <origin> --token <token>` so raw bytes stream directly to Bane instead of passing through MCP or model context.
+`createAgentToken` returns a signed, nonrefreshable `bane_agent_…` bearer token for temporary uncommitted scripts. The caller chooses a lifetime of 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. Do not commit it or place it in logs. For local files, use the token with `npx banemx upload <file> --api <origin> --token <token>` so raw bytes stream directly to Bane instead of passing through MCP or model context.
 
 `audienceQuery` runs the restricted AudienceQL language over contacts, lists and existing segments. `query` executes bounded `SELECT` reads. Mutations use `plan` followed by confirmed `apply`, freezing at most 10,000 contact IDs for 15 minutes and rejecting stale contact updates. Supported mutations update contact names, consent and `properties.key` values, or add/remove matching contacts from a list. AudienceQL never exposes physical tables, joins, DDL, comments or multiple statements. Prior opt-outs require `confirmResubscribe`; suppression is never lifted.
 
@@ -99,4 +101,4 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
-The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `BANE_API_URL` and `BANE_API_KEY`; writes additionally require `BANE_MCP_ALLOW_WRITES=true`. An address-scoped `os_mbx_…` key exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.
+The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `BANE_API_URL` and `BANE_API_KEY`; writes additionally require `BANE_MCP_ALLOW_WRITES=true`. An address-scoped `bane_mbx_…` key exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.

@@ -157,7 +157,7 @@ export class ApiError extends Error {
 // The UI depends on this boundary, never on fixture data or a transport implementation.
 // Dates cross the boundary as ISO-8601 strings; rates are ratios, not formatted percentages.
 export type CursorItems<T> = T[] & { nextCursor?: string | null }
-export interface OpenSendApi {
+export interface BaneApi {
   consentHistory?: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
   emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   attachments: AttachmentApi

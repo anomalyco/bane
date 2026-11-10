@@ -6,26 +6,25 @@ import { requirePlatformAccount } from '../src/config.js';
 import { id } from '../src/core.js';
 
 export function requirePoolFlags(env:Record<string,string|undefined>) {
-  if ([env.MULTI_TENANT,env.MX_REGIONAL_SENDING,env.MX_TRUSTED_POOL].some(v=>v!=='true')) throw new Error('Hosted regional sending and trusted-pool enrollment must both be enabled.');
-  return requirePlatformAccount(env.MX_PLATFORM_AWS_ACCOUNT);
+  if ([env.MULTI_TENANT,env.BANE_REGIONAL_SENDING ?? env.MX_REGIONAL_SENDING,env.BANE_TRUSTED_POOL ?? env.MX_TRUSTED_POOL].some(v=>v!=='true')) throw new Error('Hosted regional sending and trusted-pool enrollment must both be enabled.');
+  return requirePlatformAccount(env.BANE_PLATFORM_AWS_ACCOUNT ?? env.MX_PLATFORM_AWS_ACCOUNT);
 }
 // This only sets initial placement. Never silently move live mail, reset proof, or join the
 // two sending regions' DNS. A graduation requires a staged identity, drain and reviewed cutover.
 export async function setDomainPool(db:Client,args:string[],env:Record<string,string|undefined>=process.env) {
   const platformAccount=requirePoolFlags(env);
   const [wid,host,tier]=args,prepare=args.length===2 && host==='--prepare-trusted';
-  const canary=host==='e2e-trusted.opensend.mx' && tier==='trusted';
-  if (!wid || !prepare && (args.length!==3 || !['probation','trusted'].includes(tier!) || domainName.safeParse(host).data!==host || (!canary && !await claimNameAllowed(host!,env.PUBLIC_URL ?? 'https://opensend.mx')))) throw new Error('Usage: set-domain-pool.ts WORKSPACE_ID DOMAIN trusted|probation, or WORKSPACE_ID --prepare-trusted');
+  const canary=host==='e2e-trusted.bane.mx' && tier==='trusted';
+  if (!wid || !prepare && (args.length!==3 || !['probation','trusted'].includes(tier!) || domainName.safeParse(host).data!==host || (!canary && !await claimNameAllowed(host!,env.PUBLIC_URL ?? 'https://bane.mx')))) throw new Error('Usage: set-domain-pool.ts WORKSPACE_ID DOMAIN trusted|probation, or WORKSPACE_ID --prepare-trusted');
   const name=poolTenantName(wid,'trusted');
   await db.query('BEGIN');
   try {
     const c=(await db.query(`SELECT c.id FROM ses_installation_settings s JOIN provider_connections c USING(workspace_id) WHERE s.workspace_id=$1 AND c.kind='shared' AND c.state='ready'
       AND c.region='us-east-2' AND c.aws_account_id=$2 AND c.paused_at IS NULL FOR UPDATE OF s FOR SHARE OF c`,[wid,platformAccount])).rows[0];
     if (!c) throw new Error('Expected an unpaused Hosted Ohio connection in the platform account.');
-    // The release checker uses a platform-owned fixture. Never relax the public reserved-name
-    // filter. Only its pinned Ohio workspace may reserve this exact sibling (normal TXT still required).
+    // Only the workspace with the verified Ohio fixture may reserve its exact sibling (normal TXT still required).
     if (canary && !(await db.query(`SELECT FROM domain_sending_bindings b JOIN domain_claims dc USING(workspace_id,name,connection_id)
-      WHERE b.workspace_id=$1 AND b.connection_id=$2 AND b.name='e2e.opensend.mx' AND b.region='us-east-2' AND b.domain_id='dom_1aa89a5a687348e89699f5cd97f5496b' AND dc.sending_state='verified'`,[wid,c.id])).rowCount) throw new Error('Not the verified Ohio release-canary workspace.');
+      WHERE b.workspace_id=$1 AND b.connection_id=$2 AND b.name='e2e.bane.mx' AND b.region='us-east-2' AND dc.sending_state='verified'`,[wid,c.id])).rowCount) throw new Error('Not the verified Ohio release-canary workspace.');
     if (!prepare) {
       const bound=(await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0];
       if (bound && bound.region!==(tier==='trusted'?'us-east-1':'us-east-2')) throw new Error('Already bound in another region. A staged and drained migration is required.');

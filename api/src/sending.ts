@@ -465,7 +465,7 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uin
   };
   const textPart = (type: 'plain' | 'html', body: string) => `Content-Type: text/${type}; charset=UTF-8${crlf}Content-Transfer-Encoding: quoted-printable${crlf}${crlf}${quotedPrintable(body)}`;
   const multipart = (type: 'related' | 'alternative' | 'mixed', children: string[]) => {
-    const boundary = `opensend_${crypto.randomUUID()}`;
+    const boundary = `bane_${crypto.randomUUID()}`;
     return `Content-Type: multipart/${type}; boundary="${boundary}"${type === 'related' ? '; type="text/html"' : ''}${crlf}${crlf}` +
       children.map(child => `--${boundary}${crlf}${child}${crlf}`).join('') + `--${boundary}--${crlf}`;
   };
@@ -504,7 +504,7 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uin
   if (bytes.length > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Encoded MIME exceeds the 16 MiB message limit.');
   return bytes;
 }
-function withPreheader(html: string | undefined, previewText?: string): string | undefined {
+function withPreheader(html: string | undefined, previewText?: string, version = CAMPAIGN_RENDERER_VERSION): string | undefined {
   if (!html || !previewText) return html;
   const stack: DefaultTreeAdapterMap['node'][] = [parse(html, { sourceCodeLocationInfo: true })];
   let bodyOffset = 0;
@@ -515,7 +515,7 @@ function withPreheader(html: string | undefined, previewText?: string): string |
     }
     if ('childNodes' in node) stack.push(...node.childNodes);
   }
-  const preheader = `<div data-opensend-preview="true" data-skip-in-text="true" style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all">${escaped(previewText)}</div>`;
+  const preheader = `<div ${version===1?'data-opensend-preview':'data-bane-preview'}="true" data-skip-in-text="true" style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all">${escaped(previewText)}</div>`;
   return html.slice(0, bodyOffset) + preheader + html.slice(bodyOffset);
 }
 const URL_ATTRIBUTES = new Set(['href', 'src', 'action', 'formaction', 'poster', 'background', 'cite', 'longdesc', 'data', 'codebase', 'profile', 'manifest', 'xlink:href']);
@@ -624,7 +624,7 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
     snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
   }
   snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
-  // Keep caller headers; the unsubscribe pair is always OpenSend's own.
+  // Keep caller headers; the unsubscribe pair is always Bane's own.
   snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection): Promise<EmailSnapshot> {
@@ -909,11 +909,11 @@ function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft, 'htm
   assertBlockContent(draft.html, complete);
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
-async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false) {
+async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
     const rendered = prepared ?? renderCampaignContent(runtime, draft);
-    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: test ? campaignSendRegion(runtime,draft) : draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false, templateValidated), html: withPreheader(interpolate(rendered.html, values, true, templateValidated), draft.previewText), text: interpolate(rendered.text, values, false, templateValidated), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: test ? campaignSendRegion(runtime,draft) : draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false, templateValidated), html: withPreheader(interpolate(rendered.html, values, true, templateValidated), draft.previewText, version), text: interpolate(rendered.text, values, false, templateValidated), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
@@ -1000,12 +1000,12 @@ export function registerSending(app: App) {
   });
   app.post('/v1/attachments/upload', async c => {
     const a = actor(c, 'send');
-    const encodedFilename = c.req.header('x-opensend-filename');
+    const encodedFilename = c.req.header('x-bane-filename') ?? c.req.header('x-opensend-filename');
     let filename = '';
-    try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', 'X-OpenSend-Filename must be URI-encoded UTF-8.'); }
+    try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', 'X-Bane-Filename must be URI-encoded UTF-8.'); }
     const contentLength = Number(c.req.header('content-length'));
     if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB.');
-    const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: c.req.header('x-opensend-disposition') ?? 'attachment', contentId: c.req.header('x-opensend-content-id') });
+    const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: c.req.header('x-bane-disposition') ?? c.req.header('x-opensend-disposition') ?? 'attachment', contentId: c.req.header('x-bane-content-id') ?? c.req.header('x-opensend-content-id') });
     if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', 'Attachment headers are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     const result = await saveAttachment(c, a, parsed.data, bytes);
@@ -1398,9 +1398,15 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngr
 }
 export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt;
   effects?: { reported: (string | null)[] | null; suppress: string | null; observe: string | null; receiptTime: boolean } };
-/** The opensend_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
+// Old queued simulator jobs and SNS receipts retain their original topic as a deduplication key.
+export function simulatedTopic(topic: unknown, region?: unknown) {
+  if (typeof topic !== 'string') return false;
+  return ['urn:bane:simulated-ses:', 'urn:opensend:simulated-ses:'].some(prefix => region === undefined ? topic.startsWith(prefix) : topic === prefix + region);
+}
+/** The bane_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
 export function taggedEmailId(message: unknown): string | undefined {
-  const tag = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags?.opensend_email_id;
+  const tags = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags;
+  const tag = tags?.bane_email_id ?? tags?.opensend_email_id;
   const value = Array.isArray(tag) ? tag[0] : undefined;
   return typeof value === 'string' && /^email_[a-z0-9]{8,64}$/.test(value) ? value : undefined;
 }
@@ -1413,7 +1419,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
   const effects = inputs.some(input => input.effects);
   const topicMatch = mx ? sql`AND (x.simulated OR (e.feedback_topic_arn=x.topic_arn AND EXISTS(SELECT FROM provider_feedback_history h WHERE h.topic_arn=x.topic_arn AND h.region=x.region AND h.aws_account_id=split_part(x.topic_arn,':',5))))` : sql``;
   const rows = inputs.map((input, index) => ({
-    ordinal: index, job_workspace: input.workspaceId, simulated: input.ingress.topicArn === `urn:opensend:simulated-ses:${input.ingress.region}`, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
+    ordinal: index, job_workspace: input.workspaceId, simulated: simulatedTopic(input.ingress.topicArn, input.ingress.region), topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
     external_id: input.externalId ?? null, data: input.data ?? {}, effects: input.effects, created_at: input.createdAt ?? now(),
     event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
@@ -1442,7 +1448,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       SELECT s.workspace_id, CASE WHEN count(DISTINCT r.trusted_account_id) = 1 THEN min(r.trusted_account_id) END AS account
       FROM (SELECT DISTINCT workspace_id FROM locked WHERE NOT simulated) l JOIN ses_installation_settings s USING (workspace_id)
       LEFT JOIN ses_region_discovery r ON r.workspace_id = s.workspace_id AND r.trusted_account_id ~ '^[0-9]{12}$'
-        AND r.trusted_topic_arn = 'arn:aws:sns:' || r.region || ':' || r.trusted_account_id || ':opensend-' || left(encode(sha256(convert_to(s.installation_id, 'UTF8')), 'hex'), 20) || '-feedback'
+        AND r.trusted_topic_arn = 'arn:aws:sns:' || r.region || ':' || r.trusted_account_id || ':bane-' || left(encode(sha256(convert_to(s.installation_id, 'UTF8')), 'hex'), 20) || '-feedback'
       GROUP BY s.workspace_id
     )`}, input AS (
       SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status, ${effects ? sql`l.to_addresses,l.cc_addresses,l.bcc_addresses,` : sql``}
@@ -1571,7 +1577,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
     INSERT INTO jobs(id, workspace_id, type, payload)
     SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
   ), simulated_callbacks AS (
-    SELECT 'urn:opensend:simulated-ses:' || mail.region AS topic_arn, mail.id || ':' || kind AS message_id, inserted.workspace_id,
+    SELECT 'urn:bane:simulated-ses:' || mail.region AS topic_arn, mail.id || ':' || kind AS message_id, inserted.workspace_id,
       inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs}::int ELSE 0 END * interval '1 millisecond' AS created_at
     FROM inserted, mail, unnest(ARRAY['Send','Delivery']) kind
     WHERE ${simulatedJobs}::boolean
@@ -1600,7 +1606,7 @@ export async function queueSimulatedFeedback(runtime: Runtime, accepted: { email
   const delay = runtime.config.simulatedSes.deliveryDelayMs;
   const items = accepted.flatMap(item => (['Send', 'Delivery'] as const).map(kind => {
     const at = new Date(Date.parse(item.createdAt) + (kind === 'Delivery' ? delay : 0)).toISOString();
-    return { region: item.region, topicArn: `urn:opensend:simulated-ses:${item.region}`, messageId: `${item.emailId}:${kind}`,
+    return { region: item.region, topicArn: `urn:bane:simulated-ses:${item.region}`, messageId: `${item.emailId}:${kind}`,
       message: { eventType: kind, mail: { messageId: item.providerId }, [kind.toLowerCase()]: { timestamp: at } } };
   }));
   await runtime.feedback.enqueue(items);
@@ -1644,14 +1650,14 @@ export function checkedDispatchAttachments(ids: string[], rows: (typeof attachme
   validateAttachmentRows(distinctAttachmentIds(ids), rows);
   return rows;
 }
-export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
+export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { version: number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
   // The winning claim persists its snapshot and token atomically; losing workers
   // discard their render without writing a different snapshot over the winner.
   const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
-  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
+  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
   if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl;
@@ -1666,7 +1672,7 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record, stored };
 }
 // Bump when interpolation, preheader or footer output changes, and keep the previous renderer for older reviews.
-export const CAMPAIGN_RENDERER_VERSION = 1;
+export const CAMPAIGN_RENDERER_VERSION = 2;
 // Rebuilds a sent campaign email from its frozen review, recipient values and stored unsubscribe URL, and refuses to
 // show anything that does not match the hash of what was reviewed and sent.
 type SentReview = { draft: CampaignDraft; rendered: { html?: string; text?: string } | null; renderer_version: number; recipient: ReviewedRecipient; content_hash: string | null };
@@ -1681,9 +1687,9 @@ export async function sentCampaignContent(runtime: Runtime, a: Actor, mail: type
 // Pure: no writes, no provider calls. Also used to verify stored bodies before they are dropped.
 export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: EmailSnapshot, review: SentReview | undefined, rows: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
   if (!review?.rendered || !review.content_hash) throw new ApiError(410, 'EMAIL_CONTENT_EXPIRED', 'The campaign review this email was rendered from has been retired.');
-  if (review.renderer_version !== CAMPAIGN_RENDERER_VERSION) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release only reproduces v${CAMPAIGN_RENDERER_VERSION}.`);
+  if (![1, CAMPAIGN_RENDERER_VERSION].includes(review.renderer_version)) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release supports v1 and v${CAMPAIGN_RENDERER_VERSION}.`);
   if (!stub.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
-  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
+  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
   if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
   marketingFooter(snapshot, stub.unsubscribeUrl);
   return snapshot;
@@ -1704,10 +1710,10 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string): Pro
 }
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
 type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null; generation:number };
-type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
+type RunRow = typeof campaigns.$inferSelect & { reviewVersion: number | null; reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
-  const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered,
+  const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewVersion: campaignReviews.rendererVersion, reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered,
     autoPause: runtime.config.multiTenant ? sql<boolean>`${campaigns.autoPause} OR ${sharedConnection(a.workspaceId)}` : campaigns.autoPause,
     account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason,'generation',generation) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
     rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
@@ -1752,10 +1758,10 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
       if (recipient.ordinal !== cursor + 1 || recipient.content_hash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience cursor is inconsistent.');
       // The immutable rendered base is shared by all recipients; the full message audit is saved at dispatch.
       if (messageStatic && !Address.safeParse(recipient.recipient.email).success) throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Contact ${recipient.recipient.id}: Recipient or rendered message is invalid (to).`, 'contactId');
-      if (messageStatic && !staticSnapshot) staticSnapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, true);
+      if (messageStatic && !staticSnapshot) staticSnapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, true, row.reviewVersion!);
       const snapshot = staticSnapshot
         ? { ...staticSnapshot, to: [recipient.recipient.email], headers: [...staticSnapshot.headers] }
-        : await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, htmlStatic);
+        : await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, htmlStatic, row.reviewVersion!);
       const contentHash = await digest(canonical(snapshot));
       marketingFooter(snapshot, `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/u_${'0'.repeat(64)}`);
       sizeCheck(snapshot, lockedAttachments);

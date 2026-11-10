@@ -20,7 +20,7 @@ export async function cachedDashboardRead<T>(origin: string, scope: string, comp
   };
   if (cache) {
     const hit = await cache.match(request).catch(() => undefined);
-    const expires = Number(hit?.headers.get('x-opensend-expires'));
+    const expires = Number(hit?.headers.get('x-bane-expires') ?? hit?.headers.get('x-opensend-expires'));
     if (hit && expires > Date.now()) { const value = await hit.json() as T; remember(value,expires); return { value, hit: true }; }
   }
   const work = compute();
@@ -29,7 +29,7 @@ export async function cachedDashboardRead<T>(origin: string, scope: string, comp
     const value = await work;
     const expires = Date.now() + TTL_SECONDS * 1000;
     remember(value,expires);
-    if (cache) await cache.put(request, new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${TTL_SECONDS}`, 'x-opensend-expires': String(expires) } })).catch(() => undefined);
+    if (cache) await cache.put(request, new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${TTL_SECONDS}`, 'x-bane-expires': String(expires) } })).catch(() => undefined);
     return { value, hit: false };
   } finally { if (!cache) inflight.delete(key); }
 }

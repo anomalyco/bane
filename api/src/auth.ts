@@ -59,7 +59,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
-    if (token.startsWith('os_agent_')) {
+    if (/^(?:bane|os)_agent_/.test(token)) {
       const temporary = await verifyAgentToken(c.env.config, token);
       const grant = temporary && await getMcpGrantActor(c.env, temporary.grant);
       const invalid = () => new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
@@ -73,7 +73,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       if (!tracked) throw invalid();
       c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
     } else {
-      if (!/^os_(?:live_)?[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+      if (!/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
       const limit = c.env.config.apiRateLimitPerMinute;
       const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys, sql`
@@ -133,7 +133,7 @@ export function registerAuth(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security, request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json');
-    const secret = randomSecret('os_');
+    const secret = randomSecret('bane_');
     const [key] = await c.env.db.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
     return c.json({ ...keyView(key!), secret }, 201);
   });

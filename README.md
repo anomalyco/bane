@@ -29,6 +29,8 @@ Self-hosted transactional email, newsletters, campaigns, and inbound conversatio
    sending. Ask before provisioning, deploying, or sending real email.
    ```
 
+The hosted service is at [bane.mx](https://bane.mx); its [production Worker configuration](api/wrangler.prod.jsonc) is separate from dev.
+
 Prefer a manual setup? Start with [Docker](api/README.md#docker-quickstart) or [Cloudflare](api/README.md#cloudflare). For development, see the [local setup](api/README.md#local-development).
 
 ## TypeScript SDK

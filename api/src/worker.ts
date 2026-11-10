@@ -125,10 +125,10 @@ export default {
       if (request.method === 'GET' || request.method === 'HEAD') { url.protocol = 'https:'; return fastSecure(Response.redirect(url.toString(), 301)); }
       return fastSecure(Response.json({ error: { code: 'HTTPS_REQUIRED', message: 'Use HTTPS.', retryable: false } }, { status: 403, headers: { 'cache-control': 'no-store' } }));
     }
-    if (url.pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-OpenSend-Environment')) {
+    if (url.pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-Bane-Environment') && !request.headers.has('X-OpenSend-Environment')) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      const body = request.method === 'HEAD' ? null : JSON.stringify({ status: 'ok', service: 'opensend', multiTenant });
+      const body = request.method === 'HEAD' ? null : JSON.stringify({ status: 'ok', service: 'bane', multiTenant });
       return fastSecure(new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId, 'server-timing': 'runtime;dur=0.0' } }));
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(url.pathname) || url.pathname.startsWith('/docs/operations/'));
@@ -146,11 +146,12 @@ export default {
       // SNS publishes from a small IP pool at the full send rate; its requests are authenticated by
       // signature verification in the handler, so the per-address admission gate does not apply.
       const feedbackIngress = url.pathname === '/v1/events/ses' && request.method === 'POST';
-      const gate = feedbackIngress ? { success: true } : await env.ADMISSION.limit({ key: `opensend:default:${peer}` });
+      const gate = feedbackIngress ? { success: true } : await env.ADMISSION.limit({ key: `bane:default:${peer}` });
       if (!gate.success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
-      headers.set('x-opensend-client-ip', address);
+      headers.delete('x-opensend-client-ip');
+      headers.set('x-bane-client-ip', address);
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
@@ -179,7 +180,7 @@ export default {
     const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadHttpDeps();
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
-    if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'opensend-feedback')) {
+    if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback')) {
       const { ingestFeedbackBatch } = await import('./operations.js');
       // Each message is one verified callback; acknowledge and retry individually so one bad
       // payload never blocks a batch of routine deliveries.
@@ -191,7 +192,7 @@ export default {
       });
       return;
     }
-    if (batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'opensend-work')) {
+    if (batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'bane-work')) {
       core.log('error', { code: 'UNKNOWN_QUEUE', queue: batch.queue });
       batch.retryAll();
       return;

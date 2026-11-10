@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenSend · Campaign flow</title>
+<title>Bane · Campaign flow</title>
 <link rel="icon" href="data:,">
 <style>
 :root{color-scheme:light;--bg:#faf9f6;--ink:#292d28;--muted:#757a70;--line:#e1e4dc;--db:#526fa8;--cpu:#96743b;--job:#80679a;--net:#397d69;--mono:"Berkeley Mono",monospace}
@@ -14,7 +14,7 @@
 <main>
 <header><h1>50,000 emails, end to end</h1><p>Cloudflare deployment · saved campaign · static HTML · one recipient per email</p><div class="legend"><span><i class="dot db"></i>SQL: PostgreSQL</span><span><i class="dot cpu"></i>CPU: computation</span><span><i class="dot job"></i>Job: durable work</span><span><i class="dot net"></i>I/O: network or storage</span></div></header>
 <ol id="flow" aria-label="Campaign processing steps"></ol>
-<footer>Source: <a href="https://github.com/R44VC0RP/opensend/tree/b6e047c" target="_blank" rel="noreferrer">b6e047c</a>.</footer>
+<footer>Source: <a href="https://github.com/R44VC0RP/bane/tree/b6e047c" target="_blank" rel="noreferrer">b6e047c</a>.</footer>
 </main>
 <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
 <script>
@@ -58,7 +58,7 @@ const steps=[
 ];
 const types={db:'SQL',cpu:'CPU',job:'Job',net:'I/O'};
 const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-document.querySelector('#flow').innerHTML=steps.map((s,i)=>`<li class="step" id="step-${i+1}"><span class="number" aria-hidden="true">${i+1}</span><i class="packet" aria-hidden="true"></i><i class="packet" aria-hidden="true"></i><div class="step-head"><h2><span class="sr-number" hidden>Step ${i+1}: </span>${esc(s.t)}</h2><a class="source" href="https://github.com/R44VC0RP/opensend/blob/b6e047c/api/src/${s.at[0]}#L${s.at[1]}" target="_blank" rel="noreferrer">${esc(s.at[0])}:${s.at[1]} ↗</a></div><div class="operations">${s.ops.map(([kind,text,count,why])=>`<div class="operation" tabindex="0" data-tip="${esc(why)}" aria-label="${esc(types[kind]+': '+text+'. '+count+'. '+why)}"><span class="kind ${kind}">${types[kind]}</span><span>${esc(text)}</span><span class="quantity">${esc(count)}</span></div>`).join('')}</div>${s.note?`<p class="note">${esc(s.note)}</p>`:''}${s.loop?`<p class="loop">${esc(s.loop)}</p>`:''}</li>`).join('');
+document.querySelector('#flow').innerHTML=steps.map((s,i)=>`<li class="step" id="step-${i+1}"><span class="number" aria-hidden="true">${i+1}</span><i class="packet" aria-hidden="true"></i><i class="packet" aria-hidden="true"></i><div class="step-head"><h2><span class="sr-number" hidden>Step ${i+1}: </span>${esc(s.t)}</h2><a class="source" href="https://github.com/R44VC0RP/bane/blob/b6e047c/api/src/${s.at[0]}#L${s.at[1]}" target="_blank" rel="noreferrer">${esc(s.at[0])}:${s.at[1]} ↗</a></div><div class="operations">${s.ops.map(([kind,text,count,why])=>`<div class="operation" tabindex="0" data-tip="${esc(why)}" aria-label="${esc(types[kind]+': '+text+'. '+count+'. '+why)}"><span class="kind ${kind}">${types[kind]}</span><span>${esc(text)}</span><span class="quantity">${esc(count)}</span></div>`).join('')}</div>${s.note?`<p class="note">${esc(s.note)}</p>`:''}${s.loop?`<p class="loop">${esc(s.loop)}</p>`:''}</li>`).join('');
 const observer=new IntersectionObserver(entries=>entries.forEach(e=>e.target.classList.toggle('visible',e.isIntersecting)),{rootMargin:'40px'});
 document.querySelectorAll('.step').forEach(el=>observer.observe(el));
 const tip=document.querySelector('#tooltip');let target=null;

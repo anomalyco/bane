@@ -43,7 +43,7 @@ export type ClaimEvidence = {
   definitive?: boolean;
   /** SES VerificationStatus SUCCESS (receiving needs the identity, not DKIM). */
   identityVerified: boolean;
-  /** The `_opensend` TXT proof (or, for BYO, the identity verification) was observed. */
+  /** The `_bane` TXT proof (or, for BYO, the identity verification) was observed. */
   proven: boolean;
   /** The region can receive at all: the pool's catch-all is ready, or the connection is BYO. */
   regionReceives: boolean;

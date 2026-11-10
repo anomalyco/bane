@@ -175,7 +175,7 @@ export function secureResponse(response: Response): Response {
 }
 export function hasSessionCookie(headers: Headers): boolean {
   const cookie = headers.get('cookie');
-  return Boolean(cookie && /(?:^|;\s*)(?:__Secure-)?opensend\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
+  return Boolean(cookie && /(?:^|;\s*)(?:__Secure-)?bane\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.

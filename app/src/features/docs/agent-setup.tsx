@@ -68,8 +68,8 @@ export function AgentPrompt({ prompt }: { prompt: string | null }) {
 }
 
 const accessOptions = [
-  { value: 'read', label: 'Read only', scope: 'opensend:read offline_access', hint: 'Read data without sending email.' },
-  { value: 'manage', label: 'Full access', scope: 'opensend:read opensend:send opensend:manage offline_access', hint: 'Includes sending email and changing configuration.' },
+  { value: 'read', label: 'Read only', scope: 'bane:read offline_access', hint: 'Read data without sending email.' },
+  { value: 'manage', label: 'Full access', scope: 'bane:read bane:send bane:manage offline_access', hint: 'Includes sending email and changing configuration.' },
 ]
 const clients = [{ value: 'opencode', label: 'OpenCode' }, { value: 'claude', label: 'Claude Code' }, { value: 'cursor', label: 'Cursor' }]
 

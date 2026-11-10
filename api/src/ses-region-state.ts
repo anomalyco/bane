@@ -19,7 +19,7 @@ export async function credentialFingerprint(config: Config) {
   return digest(JSON.stringify(config.aws ? [config.aws.accessKeyId, config.aws.secretAccessKey, config.aws.sessionToken ?? null] : null));
 }
 // Called by the explicit migration command, never an AWS discovery request.
-export async function ensureRegionSettings(db: Database, config: Config) {
+export async function ensureRegionSettings(db: Database, config: Pick<Config, 'workspaceId' | 'regions'>) {
   if ((await db.select().from(sesSettings).where(settingWhere(config.workspaceId)).limit(1)).length) return;
   const used = await db.execute<{ region: string }>(sql`SELECT region FROM sending_emails WHERE workspace_id=${config.workspaceId}
     UNION SELECT draft->>'region' FROM sending_campaigns WHERE workspace_id=${config.workspaceId}

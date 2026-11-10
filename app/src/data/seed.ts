@@ -56,8 +56,8 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
 export function demoMailboxAccess(now = Date.now()) {
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
   const keys: MailboxKey[] = [
-    { id: 'mbk_support_agent', name: 'Support agent', prefix: 'os_mbx_4f2a91', addressIds: ['mbx_support'], permissions: ['read', 'send', 'modify'], createdAt: ago(20 * 24), lastUsedAt: ago(0.1), revokedAt: null },
-    { id: 'mbk_triage', name: 'Triage reader', prefix: 'os_mbx_8c1d07', addressIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
+    { id: 'mbk_support_agent', name: 'Support agent', prefix: 'bane_mbx_4f2a91', addressIds: ['mbx_support'], permissions: ['read', 'send', 'modify'], createdAt: ago(20 * 24), lastUsedAt: ago(0.1), revokedAt: null },
+    { id: 'mbk_triage', name: 'Triage reader', prefix: 'bane_mbx_8c1d07', addressIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
   ]
   const delivery = (id: string, hours: number, status: MailboxWebhookDelivery['status'], code: number | null, attempts = 1): MailboxWebhookDelivery => ({ id, webhookId: 'mwh_agent', eventId: `mev_${id}`, status, attemptCount: attempts, lastStatusCode: code, lastError: status === 'failed' ? 'WEBHOOK_HTTP_ERROR' : null, createdAt: ago(hours), updatedAt: ago(hours) })
   const webhooks = [
@@ -179,7 +179,7 @@ export function createSeed(now = Date.now()): DemoState {
     { id: 'key_analytics', name: 'Analytics dashboard', prefix: 'demo_read_', permission: 'read', domains: [], createdAt: ago(14 * 24), lastUsedAt: ago(3) },
   ]
   const agentTokens: AgentTokenSummary[] = [{ id: 'agt_demo_import', grantId: 'mcp_demo_opencode', permissions: ['read', 'manage'], domains: [], purpose: 'Import customer contacts', expiresAt: new Date(now + 3_600_000).toISOString(), createdAt: ago(0.25), lastUsedAt: ago(0.1), revokedAt: null }]
-  const mcpConnections: McpConnection[] = [{ id: 'mcp_demo_opencode', clientId: 'demo-opencode', name: 'OpenCode', userEmail: 'ryan@example.com', scopes: ['opensend:read', 'opensend:send', 'opensend:manage', 'offline_access'], createdAt: ago(14 * 24), updatedAt: ago(2) }]
+  const mcpConnections: McpConnection[] = [{ id: 'mcp_demo_opencode', clientId: 'demo-opencode', name: 'OpenCode', userEmail: 'ryan@example.com', scopes: ['bane:read', 'bane:send', 'bane:manage', 'offline_access'], createdAt: ago(14 * 24), updatedAt: ago(2) }]
   const webhooks: Webhook[] = [
     { id: 'wh_pipeline', name: 'Event pipeline', url: 'https://api.example.com/webhooks/email', regionIds: 'all', events: ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.delivery_delayed'], status: 'active', secretHint: 'demo_wh_…pipeline', headers: [{ name: 'Authorization', hint: '••••c0de', updatedAt: ago(72) }], deliveries: [{ id: 'del_pipeline_success', at: ago(0.5), regionId: 'us-east-1', event: 'email.delivered', response: 200, attempts: 1, status: 'delivered', payload: { demo: true, event: 'email.delivered', emailId: 'em_activity_01' } }, { id: 'del_pipeline_pending', at: ago(2), regionId: 'eu-west-1', event: 'email.bounced', response: 503, attempts: 1, status: 'retry_pending', payload: { demo: true, event: 'email.bounced', emailId: 'em_activity_23' } }] },
     { id: 'wh_bounces', name: 'Bounce monitoring', url: 'https://monitor.example.com/events', regionIds: ['us-east-1'], events: ['email.bounced', 'email.complained'], status: 'active', secretHint: 'demo_wh_…bounces', headers: [], deliveries: [] },

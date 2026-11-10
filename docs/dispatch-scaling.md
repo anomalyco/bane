@@ -90,7 +90,7 @@ Commits `be8076e` → `7f82248` on `main`.
 - `sending_region_limits` is the shared one-minute quota cache; only a shard that finds it stale calls
   `GetAccount`, with a conditional upsert so concurrent shards don't repeat the call.
 
-### 3.4 Feedback (`opensend-feedback` queue)
+### 3.4 Feedback (`bane-feedback` queue)
 - `/v1/events/ses` verifies the SNS signature and account binding, enqueues, returns 202 with no
   database call. Exempt from the per-IP admission limiter (SNS publishes from a small IP pool).
 - Consumer: batches of ≤100 within 2 s. Routine Delivery (and any Send) callbacks are persisted by one
@@ -205,7 +205,7 @@ node --env-file=.env.benchmark scripts/expand-test-benchmark-list.local.mjs --ta
 # test-mode campaign (no real mail); --no-tail avoids resetting the Durable Objects mid-run
 node --env-file=.env.benchmark scripts/test-campaign-benchmark.local.mjs --confirm-test-send --recipients=10000 --no-tail
 
-# live campaign (real mail; requires OPENSEND_LIVE_TOKEN and a ready domain)
+# live campaign (real mail; requires BANE_LIVE_TOKEN and a ready domain)
 node --env-file=.env.benchmark scripts/test-campaign-benchmark.local.mjs --live --confirm-live-send --recipients=1000 --from=benchmark@example.com --no-tail
 
 # per-second dispatch curve straight from the database (attempt_started_at = claim time, groups of six)

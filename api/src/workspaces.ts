@@ -113,14 +113,14 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 
 export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security,
-    description: 'Lists your memberships. Dashboard requests can select a membership with X-OpenSend-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.',
+    description: 'Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.',
     responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => {
     const a = dashboard(c);
     const rows = await c.env.db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, a.userId)).orderBy(workspaces.name, workspaces.id);
     return c.json({ data: rows.map(row => Workspace.parse(row)) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
-    description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-OpenSend-Workspace.`,
+    description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-Bane-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
     const a = dashboard(c), { name } = c.req.valid('json');
     const created = await c.env.db.transaction(async db => {
