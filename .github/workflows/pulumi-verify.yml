@@ -124,10 +124,13 @@ jobs:
           aws sts get-caller-identity
           aws iam get-user --user-name bane-runtime --query 'User.[UserName,PermissionsBoundary.PermissionsBoundaryArn]' --output text
           aws iam list-access-keys --user-name bane-runtime --query 'AccessKeyMetadata[].Status' --output text
-          aws iam get-policy --policy-arn arn:aws:iam::905840579680:policy/bane-runtime-boundary --query 'Policy.[PolicyName,Arn]' --output text
           aws ses describe-active-receipt-rule-set --region us-east-2
+          if aws iam get-policy --policy-arn arn:aws:iam::905840579680:policy/bane-runtime-boundary 2>/dev/null; then
+            echo "::error::boundary policy must not be readable or editable"
+            exit 1
+          fi
           if aws iam get-role --role-name bane-deploy 2>/dev/null; then
             echo "::error::deploy role must not be able to read roles"
             exit 1
           fi
-          echo "recipient + iam user reads ok; role reads denied"
+          echo "recipient + iam user reads ok; boundary and role reads denied"
