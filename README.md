@@ -1,8 +1,8 @@
-# opensend
+# bane
 
 Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Inbound** to manage receiving addresses, read threads, and reply. One installation, Google-only sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 
-![opensend dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
+![Bane dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
 
 <p>
   <a href="docs/images/campaign-composer.png"><img src="docs/images/campaign-composer.png" alt="Campaign composer with visual email editing and audience selection" width="49%" /></a>
@@ -14,14 +14,14 @@ Self-hosted transactional email, newsletters, campaigns, and inbound conversatio
 1. Clone the repo:
 
    ```sh
-   git clone https://github.com/R44VC0RP/opensend.git
-   cd opensend
+   git clone https://github.com/anomalyco/bane.git
+   cd bane
    ```
 
 2. Open the repo in your coding agent and paste:
 
    ```text
-   Help me set up OpenSend for my use case. Explore this repo and read
+   Help me set up Bane for my use case. Explore this repo and read
    api/README.md first. Ask what I want to send, whether I prefer Docker
    or Cloudflare, and what infrastructure I already have. Recommend the
    simplest setup and explain the plan before making changes. Use my own
@@ -33,10 +33,10 @@ Prefer a manual setup? Start with [Docker](api/README.md#docker-quickstart) or [
 
 ## TypeScript SDK
 
-Install [`opensend-js`](https://www.npmjs.com/package/opensend-js) from npm:
+Install [`banemx`](https://www.npmjs.com/package/banemx) from npm:
 
 ```sh
-npm install opensend-js
+npm install banemx
 ```
 
 See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client](mcp/README.md).

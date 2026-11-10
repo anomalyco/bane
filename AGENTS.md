@@ -1,4 +1,4 @@
-# OpenSend
+# Bane
 
 Self-hosted transactional and marketing email on Amazon SES. Read `README.md` for the starting points and `api/README.md` for setup, deployment, and operational details.
 
@@ -6,7 +6,7 @@ Self-hosted transactional and marketing email on Amazon SES. Read `README.md` fo
 
 - `app/` — React/Vite dashboard. `app/index.html` loads `src/main.tsx`; `src/App.tsx` defines routes. Screens live in `src/features/`, shared UI in `src/components/`, API adapters in `src/data/`, and design tokens/styles in `src/styles/`.
 - `api/` — Hono API with Zod/OpenAPI schemas. `src/app.ts` assembles routes; `src/server.ts` runs on Node and `src/worker.ts` runs on Cloudflare. `src/runner.ts` runs the Node job worker. PostgreSQL schemas are in `src/db/`, migrations in `migrations/`, and platform/database/storage adapters in `src/adapters/`.
-- `sdk/` — Generated TypeScript client, published on npm as `opensend-js`. Usage is in `sdk/README.md`.
+- `sdk/` — Generated TypeScript client, published on npm as `banemx`. Usage is in `sdk/README.md`.
 - `mcp/` — MCP integration and client connection documentation. See `mcp/README.md`.
 - `docs/` — Public demo screenshots, SES research, and `dispatch-scaling.md` (measured throughput ceilings, dispatcher design rationale, and the scaling playbook by SES quota). Prefer `api/README.md` over older research notes for current setup instructions.
 
