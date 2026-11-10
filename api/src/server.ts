@@ -6,7 +6,7 @@ import { createApp } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
-import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied } from './core.js';
+import { admissionDenied, admissionPeer, ApiError, digest, log, guardPublicRequest } from './core.js';
 
 try {
   const { runtime, close } = nodeRuntime(process.env);
@@ -29,18 +29,16 @@ try {
   const server = serve({ fetch: async (request, connection) => {
     const current = Math.floor(Date.now() / 60000);
     if (current !== minute) { peers.clear(); minute = current; }
-    const address = connection.incoming.socket.remoteAddress ?? 'unknown';
+    const address = admissionPeer(connection.incoming.socket.remoteAddress ?? 'unknown');
     const key = peers.has(address) || peers.size < 1024 ? address : 'overflow';
     const count = (peers.get(key) ?? 0) + 1; peers.set(key, count);
     if (count > 6000) return admissionDenied();
     const headers = new Headers(request.headers);
     headers.delete('x-opensend-client-ip');
     headers.set('x-bane-client-ip', address);
-    const response = await app.fetch(new Request(request, { headers }), runtime);
+    const response = await guardPublicRequest(getPath(request), headers, await digest(key), async () => app.fetch(new Request(request, { headers }), runtime));
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
-    const bucket = publicFailureBucket(getPath(request), response.status, request.headers);
-    if (bucket && !await publicFailureAllowed(runtime, bucket, await digest(key))) return publicFailureDenied();
     return response;
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });

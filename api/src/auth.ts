@@ -87,9 +87,9 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
         SELECT id, workspace_id, id AS key_id, permissions, domains,
           ${limit}::int AS max_requests
         FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`;
-      if(c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
+      if((verifiedFingerprints.get(hash)??0)>Date.now() && c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,credential),(verifiedFingerprints.get(hash)??0)>Date.now());
+        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,credential));
         if(response){rememberFingerprint(hash);return response;}
       }
       const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys,credential));

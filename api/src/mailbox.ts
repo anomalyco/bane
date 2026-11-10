@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { authenticate, chargeCredential } from './auth.js';
+import { authenticate, chargeCredential, checkBudget } from './auth.js';
+import { boundRequestBody } from './request-body.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
 import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
@@ -459,6 +460,7 @@ function registerAddresses(app: App) {
 
 export function registerMailbox(app: App) {
   app.use('/v1/inbound/*', mailboxAuth);
+  app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');
   app.openapi(createRoute({method:'get',path:'/v1/inbound/policy',operationId:'getInboundScanPolicy',tags:['Inbound domains'],security,responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c);const {rows}=await c.env.db.execute<{spam:'store'|'quarantine'}>(sql`SELECT spam_policy AS spam FROM mail_receive_limits WHERE workspace_id=${workspaceId}`);return c.json({spam:rows[0]?.spam??'store'},200);});
   app.openapi(createRoute({method:'patch',path:'/v1/inbound/policy',operationId:'updateInboundScanPolicy',tags:['Inbound domains'],security,description:'Non-PASS virus scans are always quarantined. Store non-PASS spam scans without normal receipt notifications, or quarantine them privately.',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c),{spam}=c.req.valid('json');await c.env.db.execute(sql`INSERT INTO mail_receive_limits(workspace_id,spam_policy) VALUES(${workspaceId},${spam}) ON CONFLICT(workspace_id) DO UPDATE SET spam_policy=excluded.spam_policy`);return c.json({spam},200);});
@@ -578,12 +580,21 @@ export function registerMailbox(app: App) {
     const types = q.types?.split(',').map(type => type.trim()).filter(Boolean);
     if (types?.some(type => !inboundEventTypes.some(allowed => allowed === type))) throw new ApiError(422, 'INVALID_EVENT_TYPE', `Event types: ${inboundEventTypes.join(', ')}.`, 'types');
     const scope = { mailboxIds, includeStored: value.admin && types?.includes('message.stored') === true };
+    // Reserve the extra polls before the first query. Parallel long polls use
+    // the same minute counter as ordinary requests, not a separate allowance.
+    if (q.wait) {
+      const max = c.env.config.apiRateLimitPerMinute;
+      const {rows:[debit]} = await c.env.db.execute<{used:number}>(sql`INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used)
+        VALUES(${value.workspaceId},${value.keyId},date_trunc('minute',now()),${q.wait}) ON CONFLICT(workspace_id,key_id) DO UPDATE SET
+        used=least(${max+1},excluded.used+CASE WHEN b.window_start=excluded.window_start THEN b.used ELSE 0 END),window_start=excluded.window_start RETURNING used`);
+      checkBudget(c, debit!.used, max);
+    }
     let after = q.after !== undefined ? Number(q.after) : await latestCursor(c.env.db, value.workspaceId, scope);
     const deadline = Date.now() + q.wait * 1000;
-    for (;;) {
+    for (let remaining = q.wait; ; remaining--) {
       const rows = await readEvents(c.env.db, value.workspaceId, { ...scope, after, types, limit: q.limit });
       if (rows.length) return { data: rows.map(eventView), cursor: String(rows.at(-1)!.seq) };
-      if (Date.now() >= deadline) return { data: [], cursor: String(after) };
+      if (!remaining || Date.now() >= deadline || c.req.raw.signal.aborted) return { data: [], cursor: String(after) };
       await new Promise(resolve => setTimeout(resolve, Math.min(1000, Math.max(0, deadline - Date.now()))));
       after = Math.max(after, 0);
     }
@@ -682,7 +693,8 @@ function registerInboundWebhooks(app: App) {
         await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${row.workspaceId},jsonb_build_object('hook',${row.id}::text))`);
         c.get('actor').wakeJobs=1;
       }
-      const [result] = await tx.update(mailboxWebhooks).set({ mailboxIds, description: input.description, paused: input.paused, url: input.url ? webhookUrl(c.env, input.url) : undefined, eventTypes, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
+      const url = input.url ? webhookUrl(c.env, input.url) : undefined;
+      const [result] = await tx.update(mailboxWebhooks).set({ mailboxIds, description: input.description, paused: input.paused, url, eventTypes, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });
     return c.json(await webhookView(c, updated), 200);

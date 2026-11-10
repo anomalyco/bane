@@ -280,7 +280,10 @@ describe('Public contract and authentication', () => {
     assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(healthReply.headers.get('referrer-policy'), 'no-referrer');
     assert.match(healthReply.headers.get('permissions-policy') ?? '', /camera=\(\)/);
-    const { publicFailureBucket } = await import('./src/core.js');
+    const { publicFailureBucket, admissionPeer } = await import('./src/core.js');
+    assert.equal(admissionPeer('2001:0db8:0:0::3'),admissionPeer('2001:db8::ffff:abcd'));
+    assert.notEqual(admissionPeer('2001:db8:0:1::3'),admissionPeer('2001:db8::3'));
+    assert.equal(admissionPeer('::ffff:192.0.2.1'),'192.0.2.1');
     assert.equal(publicFailureBucket('/v1/me', 401), 'auth');
     assert.equal(publicFailureBucket('/v1/me', 200), null);
     assert.equal(publicFailureBucket('/unsubscribe/invalid', 404), 'unsubscribe');
@@ -943,7 +946,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
         const {sendingLimit,domains:claimed,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
         assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null}); assert.deepEqual(claimed,{total:0,verified:0});
-        assert.deepEqual({...sendingLimit,resetAt:undefined,nextCapAt:undefined},{cap:100,used:0,resetAt:undefined,nextCap:1000,nextCapAt:undefined}); assert.ok(Date.parse(sendingLimit.nextCapAt)>Date.now()+6*86400_000,'A new hosted workspace moves to 1,000 after a week.');
+        assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:100,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
@@ -1608,8 +1611,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             return {...values,SigningCertURL:certUrl,SignatureVersion:'2',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(values).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64')};
           }
           const receive=(body:Json)=>local('POST','/v1/events/ses',body,undefined,{'content-type':'text/plain; charset=UTF-8'}), signed=envelope(arn);
-          error(await receive({...signed,Type:'Notification'}),403,'SNS_TOPIC_NOT_ALLOWED');
-          for(const bad of [arn.replace(region,'eu-west-1'),arn.replace(prefix,'bane-'+ '0'.repeat(20)),arn.replace(customer,platform)])error(await receive(envelope(bad)),403,'SNS_TOPIC_NOT_ALLOWED');
+          error(await receive({...signed,Type:'Notification'}),403,'SNS_INVALID_SIGNATURE');
+          error(await receive(envelope(arn.replace(region,'eu-west-1'))),403,'SNS_UNTRUSTED_URL');
+          for(const bad of [arn.replace(prefix,'bane-'+ '0'.repeat(20)),arn.replace(customer,platform)])error(await receive(envelope(bad)),403,'SNS_TOPIC_NOT_ALLOWED');
           error(await receive({...signed,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');assert.equal(assumptions,0);
           error(await receive(envelope(arn.replace(customer,'333333333333'))),503,'AWS_ACCESS_DENIED');
           wrongArn=true;error(await receive(signed),409,'AWS_ACCOUNT_MISMATCH');wrongArn=false;
@@ -2024,7 +2028,13 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query("INSERT INTO oauth_consent(id,client_id,scopes,created_at,updated_at) VALUES ($1,$1,'{}',now(),now())", [consented]);
       await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,now()+interval '1 hour',now(),'{}')", [access]);
       await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,$2,now()+interval '1 hour',now(),'{}')", [refresh,manager!.userId]);
+      const expired=unique('expired');
+      await db.query("INSERT INTO auth_verification(id,identifier,value,expires_at) VALUES($1,$1,'fixture',now())",[expired]);
+      await db.query('INSERT INTO auth_session(id,token,user_id,expires_at) VALUES($1,$1,$2,now())',[expired,manager!.userId]);
+      await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES($1,$1,$2,$3,now(),now(),'{}')",[expired,refresh,manager!.userId]);
+      await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES($1,$1,$2,now(),now(),'{}')",[expired,access]);
       await cleanup(runtime);
+      for(const table of ['auth_verification','auth_session','oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE id=$1`,[expired])).rowCount,0);
       const remaining = (await db.query('SELECT client_id FROM oauth_client WHERE client_id=ANY($1)', [ids])).rows.map(row=>row.client_id);
       assert.deepEqual(remaining.sort(), ids.filter(id=>id!==unused).sort());
     });
@@ -3708,6 +3718,7 @@ describe('Dashboard API capabilities', () => {
       await poll(`/v1/emails/${queued.id}`, key.secret, row => row.status === 'delivered');
     }
     error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'Name\nBcc: victim@example.com' })), 422);
+    error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'billing@example.com' })),422);
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     const marketing = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email, kind: 'marketing', subject: `${marker} marketing` })), 202);
@@ -4341,6 +4352,7 @@ describe('Operational configuration and public event boundaries', () => {
           Array.from({ length: 4 }, (_, i) => hdr(`X-${i}`, 'é'.repeat(1024))),
         ]) noValues(error(await local('PATCH', path, { headers: invalid }), 422, 'VALIDATION_FAILED'));
         assert.deepEqual(ok(await local('PATCH', path, { description: 'keep headers' })).headers, endpoint.headers);
+        assert.deepEqual(ok(await local('PATCH', path, { url: url + '/new-path' })).headers, []);
         const changed = ok(await local('PATCH', path, { headers: [hdr('X-Routing_Key', replacement)] }));
         assert.deepEqual(changed.headers, [{ name: 'X-Routing_Key', hint: '••••' + replacement.slice(-4), updatedAt: changed.headers[0].updatedAt }]);
         assert.ok(Date.parse(changed.headers[0].updatedAt) > Date.parse(timestamp)); noValues(changed);
@@ -4375,17 +4387,16 @@ describe('Operational configuration and public event boundaries', () => {
       Timestamp: new Date().toISOString(), SignatureVersion: '2', Signature: Buffer.from('forged').toString('base64'),
       SigningCertURL: 'https://127.0.0.1/never-fetch-this.pem',
     };
-    // One shared SNS peer can exceed the public failure threshold without losing the real rejection.
-    for (let i = 0; i < 41; i++) error(await http('POST', '/v1/events/ses', undefined, envelope), 403, 'SNS_TOPIC_NOT_ALLOWED');
+    error(await http('POST', '/v1/events/ses', undefined, envelope), 403, 'SNS_UNTRUSTED_URL');
     // SNS defaults to text/plain, including signed subscription confirmations.
     // These must reach the same security checks, not fail as an absent JSON body.
     for (const contentType of ['text/plain', 'text/plain; charset=UTF-8']) {
-      error(await http('POST', '/v1/events/ses', undefined, envelope, { 'content-type': contentType }), 403, 'SNS_TOPIC_NOT_ALLOWED');
-      error(await http('POST', '/v1/events/ses', undefined, { ...envelope, Type: 'SubscriptionConfirmation', SubscribeURL: `https://sns.${REGION}.amazonaws.com/?Action=ConfirmSubscription`, Token: 'untrusted' }, { 'content-type': contentType }), 403, 'SNS_TOPIC_NOT_ALLOWED');
+      error(await http('POST', '/v1/events/ses', undefined, envelope, { 'content-type': contentType }), 403, 'SNS_UNTRUSTED_URL');
+      error(await http('POST', '/v1/events/ses', undefined, { ...envelope, Type: 'SubscriptionConfirmation', SubscribeURL: `https://sns.${REGION}.amazonaws.com/?Action=ConfirmSubscription`, Token: 'untrusted' }, { 'content-type': contentType }), 403, 'SNS_UNTRUSTED_URL');
       error(await http('POST', '/v1/events/ses', undefined, {}, { 'content-type': contentType }), 422, 'VALIDATION_FAILED');
     }
-    // Topic authorization is checked before certificate/signature work, even for malformed signatures.
-    error(await http('POST', '/v1/events/ses', undefined, { ...envelope, Signature: '!!!' }), 403, 'SNS_TOPIC_NOT_ALLOWED');
+    // Signature shape is checked before any topic lookup or certificate fetch.
+    error(await http('POST', '/v1/events/ses', undefined, { ...envelope, SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`, Signature: '!!!' }), 403, 'SNS_INVALID_SIGNATURE');
   });
 
   test('MOCK REDIRECT TRANSPORT: SNS certificates and webhook delivery refuse redirects and retain retryable failures', async t => {
@@ -5665,7 +5676,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const bare={id:v5.id,kind:'byo' as const,aws_account_id:account,role_arn:binding.role_arn,external_id:external};
         for(const b of [bare,{...bare,legacy_names:true},{...bare,legacy:true,template_version:'v5'}]) await assert.rejects(workspaceCredentials(scoped,oh,b),{code:'BYO_SESSION_SCOPE_REQUIRED'});
         await assert.rejects(mailboxS3(scoped,wid,oh,bucket),{code:'MAILBOX_OBJECT_NOT_FOUND'});assert.equal(policies.length,keyReads);
-        error(await api('POST','/v1/events/ses',{Type:'SubscriptionConfirmation',MessageId:randomUUID(),Message:'fixture',TopicArn:topicArn,Timestamp:new Date().toISOString(),Token:'fixture',SignatureVersion:'2',Signature:'invalid',SigningCertURL:`https://sns.${oh}.amazonaws.com/SimpleNotificationService-fixture.pem`}),403,'SNS_TOPIC_NOT_ALLOWED');
+        error(await api('POST','/v1/events/ses',{Type:'SubscriptionConfirmation',MessageId:randomUUID(),Message:'fixture',TopicArn:topicArn,Timestamp:new Date().toISOString(),Token:'fixture',SignatureVersion:'2',Signature:'invalid',SigningCertURL:`https://sns.${oh}.amazonaws.com/SimpleNotificationService-fixture.pem`}),403,'SNS_INVALID_SIGNATURE');
         await assert.rejects(acceptInboundNotification(scoped,{topicArn,region:oh,message:{notificationType:'Received',mail:{messageId:'fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['a@both.example'],action:{type:'S3',topicArn,bucketName:bucket,objectKey:'staging/fixture'}}}}),{code:'MAILBOX_NOTIFICATION_UNTRUSTED'});
       } finally {await db.query('DELETE FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,oh]);}
     });
@@ -5915,11 +5926,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const send = (to = 'real@example.net') => request('POST','/v1/emails/send',key,mail({from,to}));
       const simulator = 'success@simulator.amazonses.com';
       const refused = error(await send(),429,'SEND_LIMIT_REACHED').message;
-      assert.match(refused, /100 recipients per rolling 24 hours; [\d,]+ are used\./); assert.match(refused, /The limit rises to 1,000 at \d{4}-/);
+      assert.match(refused, /100 recipients per rolling 24 hours; [\d,]+ are used\./); assert.doesNotMatch(refused, /The limit rises/);
       // The same limit is visible before a send hits it.
       const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
-      assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,1000);
-      assert.ok(Date.parse(limit.nextCapAt)>Date.now() && Date.parse(limit.nextCapAt)<=Date.now()+3600_000, 'Week two starts an hour after this six-day, 23-hour-old connection.');
+      assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
       assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
       await limits('11001','10001');
       error(await request('POST','/v1/connection',key,{kind:'shared',sendCapOverride:99999,pendingCapOverride:99999}),422,'VALIDATION_FAILED');
@@ -6049,6 +6059,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(resumed.delivery.expanded,3); assert.equal(resumed.delivery.waiting,null,'Hour expiry releases the tail without a resume request.');
       await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']);
       await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
+      error(await batch(100),429,'SEND_LIMIT_REACHED');
+      await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',100,0,0)",[wid]);
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
@@ -6292,7 +6304,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         SELECT $1||n,$1,$2,'key','a@example.org','["b@example.org"]','[]','[]','fixture','{}',false,'delivered',now()-(n%24)*interval '1 hour' FROM generate_series($3::int,$4::int)n`,[wid,REGION,start,Math.min(start+19999,total)]);
       const allowance=hostedAllowance(runtime.config,wid,1);
       assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total);
-      const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT ${allowance}`)).rows[0]['QUERY PLAN'] as Json[];
+      const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM hosted_allowance_snapshot(${wid},1,0,100,1000,10000,10,NULL)`)).rows[0]['QUERY PLAN'] as Json[];
       const nodes=(p:Json):Json[]=>[p,...(p.Plans??[]).flatMap(nodes)]; const all=nodes(plan[0].Plan);
       assert.ok(!all.some(n=>['sending_emails','sending_email_events'].includes(n['Relation Name'])));
       assert.equal(all.find(n=>n['Relation Name']==='hosted_usage_hourly')?.['Actual Rows'],24);
@@ -6410,7 +6422,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await drain(account)).sent,1); assert.equal(assumptions.mock.callCount(),1);
       const envelope={Type:'Notification',MessageId:unique('sns'),Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'!!!',SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`};
       for(const topic of [poolTopic,byoTopic]) error(await local('POST','/v1/events/ses',{...envelope,TopicArn:topic}),403,'SNS_INVALID_SIGNATURE');
-      error(await local('POST','/v1/events/ses',{...envelope,TopicArn:byoTopic+'-unregistered'}),403,'SNS_TOPIC_NOT_ALLOWED');
+      error(await local('POST','/v1/events/ses',{...envelope,TopicArn:byoTopic+'-unregistered'}),403,'SNS_INVALID_SIGNATURE');
       const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{bane_email_id:[tag]}}:{})}}});
       const results=await ingestFeedbackBatch(runtime,[delivery(byoTopic,account),delivery(byoTopic,pool),delivery(byoTopic,account,a.id)]);
       assert.deepEqual(results.map(r=>r.ok),[true,false,false]);
@@ -6506,6 +6518,53 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('hosted limits count sibling usage and require seasoned, healthy accepted mail',async t=>{
+    await simulatedSesFixture(t,async({db,runtime})=>{
+      const wid=runtime.config.workspaceId, sibling=wid+'-sibling',sponsor=unique('sponsor');
+      await db.query('UPDATE workspaces SET quota_sponsor=$1 WHERE id=$2',[sponsor,wid]);
+      await db.query('INSERT INTO workspaces(id,slug,name,quota_sponsor) VALUES($1,$1,$1,$2)',[sibling,sponsor]);
+      for(const id of [wid,sibling]) await db.query("INSERT INTO provider_connections(id,workspace_id,kind,state,region,tenant_state,created_at) VALUES($1,$1,'shared','ready',$2,'ready',now()-interval '30 days')",[id,REGION]);
+      const limit=async()=>(await db.query('SELECT allowance FROM hosted_allowance($1,1,0,100,1000,10000,10)',[wid])).rows[0].allowance;
+      await db.query("INSERT INTO hosted_usage_hourly VALUES($1,date_trunc('hour',now()),89)",[sibling]);
+      assert.equal((await limit()).used,89); assert.equal((await limit()).cap,100);
+      await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '2 days',100,0,0)",[wid]);
+      assert.equal((await limit()).cap,1000);
+      await db.query('UPDATE hosted_health_hourly SET accepted=1000 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,10000);
+      await db.query('UPDATE hosted_health_hourly SET complaints=1 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,100);
+      await db.query('UPDATE hosted_health_hourly SET complaints=0,bounces=20 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,100);
+      assert.equal((await db.query("SELECT hosted_burst_ok($1,'a.example',50) AS ok",[wid])).rows[0].ok,true);
+      assert.equal((await db.query("SELECT hosted_burst_ok($1,'b.example',1) AS ok",[sibling])).rows[0].ok,false);
+    });
+  });
+
+  test('security admission: signature and key checks precede DB lookup and body reads respectively',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const {createApp}=await import('./src/app.js'),app=createApp();
+      const queries=t.mock.method(db,'query');
+      for(const multiTenant of [false,true]) {
+        runtime.config.multiTenant=multiTenant;
+        const body={Type:'Notification',MessageId:'fixture',TopicArn:'arn:aws:sns:us-east-1:111122223333:fixture',Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'invalid',SigningCertURL:'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-fixture.pem'};
+        const res=await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/ses`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),runtime);
+        assert.equal(res.status,403);assert.equal((await res.json() as Json).error.code,'SNS_INVALID_SIGNATURE');
+      }
+      assert.equal(queries.mock.callCount(),0);
+      for (const path of ['/v1/emails/send','/v1/emails/batch','/v1/inbound/webhooks']) {
+        let reads=0;
+        const body=new ReadableStream({pull(c){reads++;c.close();}},{highWaterMark:0});
+        const res=await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`,{method:'POST',headers:{authorization:'Bearer bane_'+'1'.repeat(64),'content-type':'application/json'},body,duplex:'half'} as RequestInit),runtime);
+        assert.equal(res.status,401);assert.equal(reads,0,'An unknown key cannot read any body bytes.');
+      }
+      assert.equal(queries.mock.callCount(),3);
+      queries.mock.restore();
+      const key=ok(await local('POST','/v1/api-keys',{name:'poll budget',permissions:['manage']}),201);
+      runtime.config.apiRateLimitPerMinute=30;
+      const query=t.mock.method(db,'query');
+      error(await local('GET','/v1/inbound/events?wait=30&after=0',undefined,'live',{authorization:`Bearer ${key.secret}`}),429,'REQUEST_RATE_LIMITED');
+      assert.equal(query.mock.callCount(),2,'Only credential and reservation statements, no event query or wait.');
+      query.mock.restore();
+    });
+  });
+
   test('query budget: API key admission, dispatch, acceptance and delivery at one and 100 envelopes',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {runDispatcher}=await import('./src/dispatcher.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
@@ -6518,6 +6577,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES($1,$2,10000,100000,0,clock_timestamp(),now()+interval '1 minute')`,[acct,REGION]);
       const sink:import('./src/core.js').FeedbackItem[]=[];runtime.feedback={enqueue:async items=>{sink.push(...items);}};
       const meter=await queryBudget(t,db);
+      ok(await local('GET','/v1/emails',undefined,'live',{authorization:`Bearer ${key.secret}`})); // prime this real key
       for(const n of [1,100]){
         const emails=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`to${i}@example.invalid`,subject:'Fixture',text:'Fixture'}));
         await meter(`admit-${n}`,async()=>ok(await local('POST',`/v1/emails/${n===1?'send':'batch'}`,n===1?emails[0]:{emails},'live',{authorization:`Bearer ${key.secret}`,'Idempotency-Key':`bench-${n}`}),202),1);
@@ -6715,7 +6775,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { acceptInboundNotification, isPostalMimeEscapeGuardInstalled, mailboxIngestJobs, parseInboundMime } = await import('./src/mailbox-ingest.js');
       const apiPkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
-      assert.equal(apiPkg.dependencies['postal-mime'], '4.0.0', 'postal-mime must be pinned to an exact version.');
+      assert.equal(apiPkg.dependencies['postal-mime'], '4.2.1', 'postal-mime must be pinned to the reviewed version.');
       assert.equal(typeof (PostalMime.prototype as { renderTextContent?: unknown }).renderTextContent, 'function');
       const probe = new PostalMime() as unknown as { textTypes?: unknown; textMap?: unknown };
       assert.ok(probe.textTypes instanceof Set && probe.textMap instanceof Map, 'PostalMime internal textTypes/textMap must match the escape guard hook.');
@@ -6738,6 +6798,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return { Body: { transformToByteArray: async () => bytes } };
       });
       const parseSpy = t.mock.method(PostalMime, 'parse');
+      assert.equal(await parseInboundMime(Buffer.from('Subject: '+'a'.repeat(65536)+'\r\n\r\nbody')),null);
+      assert.equal(await parseInboundMime(Buffer.from('X-Fixture: ok\r\n'.repeat(257)+'\r\nbody')),null);
+      let nested='Content-Type: text/plain\r\n\r\nhello';
+      for(let i=0;i<13;i++) nested=`Content-Type: multipart/mixed; boundary="b${i}"\r\n\r\n--b${i}\r\n${nested}\r\n--b${i}--\r\n`;
+      assert.equal(await parseInboundMime(Buffer.from(nested)),null);
+      assert.equal(parseSpy.mock.callCount(),0,'Reject excess header bytes and count before invoking the decoder.');
       async function ingest(bytes: Uint8Array, subject: string, messageId: string, commonFrom = ['Sender <sender@example.net>']) {
         const receiptId = unique('cap'), objectKey = `raw/${receiptId}`;
         raw.set(objectKey, bytes);
@@ -6849,7 +6915,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const mixed70kA = mixedMime('8bit', '<'.repeat(70_000));
       const mixed70kB = mixedMime('8bit', '&'.repeat(70_000));
       const nested140k = Buffer.from(
-        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="outer"\r\n\r\n--outer\r\nContent-Type: message/rfc822\r\n\r\n${mixed70kA.toString('utf8')}\r\n--outer\r\nContent-Type: text/html\r\n\r\n<p>outer</p>\r\n--outer--\r\n`
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="outer"\r\n\r\n--outer\r\nContent-Type: message/rfc822\r\n\r\n${mixed70kA.toString('utf8')}\r\n--outer\r\nContent-Type: text/plain\r\n\r\n${'&'.repeat(70_000)}\r\n--outer\r\nContent-Type: text/html\r\n\r\n<p>outer</p>\r\n--outer--\r\n`
       );
       const [concA, concNested, concB] = await Promise.all([parseInboundMime(mixed70kA), parseInboundMime(nested140k), parseInboundMime(mixed70kB)]);
       assert.ok(concA?.html && concB?.html, 'Two concurrent 70,000-escape root parses must both succeed without summing across roots.');
@@ -6954,8 +7020,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const cappedField = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nAuto-Submitted: ${'('.concat('a'.repeat(17_000), ') auto-replied')}\r\n\r\n${unparsedTail}`), 'Capped header field', 'cap-hdr-2@example.net');
       assert.equal(cappedField.automated, false);
       const parsedHugeAuto = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: ${'a'.repeat(1024 * 1024)}\r\n\r\nhi\r\n`), 'Parsed 1 MiB Auto-Submitted', 'cap-hdr-parsed@example.net');
-      assert.equal(parsedHugeAuto.status, 'received');
-      assert.equal(parsedHugeAuto.automated, false, 'Parsed messages must also enforce the 16 KiB field cap before tokenizing automated headers.');
+      assert.equal(parsedHugeAuto.status, 'unparsed');
+      assert.equal(parsedHugeAuto.automated, false, 'Oversized header blocks take the bounded raw path.');
       const capLogs = capWarnSpy.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(entry => entry.code === 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE');
       assert.deepEqual(capLogs.map(entry => entry.count), [1, 2, 3]);
       capWarnSpy.mock.restore();
@@ -7052,6 +7118,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await db.query("SELECT FROM mail_messages WHERE workspace_id=$1 AND ses_message_id LIKE ANY(ARRAY['unsafe-%','spam-%'])",[wid])).rowCount,0);ok(await local('PATCH','/v1/inbound/policy',{spam:'store'},'live'));
       });
       await t.test('noisy workspace budgets do not suppress a neighbor and never fetch over-budget MIME',async()=>{
+        assert.deepEqual((await db.query('SELECT * FROM mail_receive_policy($1)',[wid+'-no-row'])).rows,[{messages:5000,bytes:'2147483648',backlog:5000}]);
         await db.query('UPDATE mail_receive_limits SET backlog_limit=0 WHERE workspace_id=$1',[wid]);assert.equal(await submit('blocked',['a@receive.example']),0);assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].error,'MAILBOX_RECEIVE_BUDGET');
         const other=wid+'-neighbor';await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,'healthy',$2,$3,'key','[]','{}')",[other,REGION,bucket]);assert.equal((await db.query('SELECT status FROM mail_receipts WHERE workspace_id=$1',[other])).rows[0].status,'pending');
         await db.query('UPDATE mail_receive_limits SET backlog_limit=50000,byte_limit=1 WHERE workspace_id=$1',[wid]);raw.set('big',Buffer.from('test'));await submit('big',['a@receive.example']);await run('mailbox.ingest',{sesMessageId:'big'});assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='big'",[wid])).rows[0].error,'MAILBOX_BYTE_BUDGET');await db.query('UPDATE mail_receive_limits SET byte_limit=68719476736 WHERE workspace_id=$1',[wid]);
@@ -10070,11 +10137,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal((await openApiRes.json()).openapi, '3.1.0');
 
           // 3) Exhaust public auth & unsubscribe failure budgets for peer 203.0.113.9; encoded variants must return 429 PUBLIC_RATE_LIMITED (and never hit ASSETS).
-          const { digest } = await import(mod('src/core.js'));
+          const { digest, guardPublicRequest } = await import(mod('src/core.js'));
           const peer = await digest('203.0.113.9');
-          await setup.query(\`INSERT INTO \${schema}.api_request_budgets(workspace_id, key_id, window_start, used)
-            VALUES ('default', $1, date_trunc('minute', now()), 40), ('default', $2, date_trunc('minute', now()), 40)\`,
-            ['public:auth:' + peer, 'public:unsubscribe:' + peer]);
+          for(const path of ['/v1/domains','/unsubscribe/test']) for(let n=0;n<40;n++) await guardPublicRequest(path,new Headers({authorization:'fixture'}),peer,async()=>new Response(null,{status:401}));
 
           const encodedAuthRes = await worker.fetch(new Request('https://dev.bane.mx/%761/domains', {
             headers: { 'CF-Connecting-IP': '203.0.113.9', authorization: 'Bearer bane_' + 'f'.repeat(64) },
@@ -10089,7 +10154,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal(encodedUnsubRes.status, 429, 'Exhausted unsubscribe failure budget must reject encoded /%75nsubscribe/... with 429.');
           assert.equal((await encodedUnsubRes.json()).error?.code, 'PUBLIC_RATE_LIMITED');
 
-          // 4) Encoded /v1/events/ses POST must keep the ADMISSION exemption even when ADMISSION denies other routes.
+          // 4) Encoded SNS ingress must also be gated before opening Hyperdrive.
           admissionAllowed = false;
           const deniedApi = await worker.fetch(new Request('https://dev.bane.mx/%761/domains'), env);
           assert.equal(deniedApi.status, 429);
@@ -10099,8 +10164,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             headers: { 'content-type': 'application/json' },
             body: '{}',
           }), env);
-          assert.equal(exemptSns.status, 422);
-          assert.equal((await exemptSns.json()).error?.code, 'VALIDATION_FAILED');
+          assert.equal(exemptSns.status, 429);
+          assert.equal((await exemptSns.json()).error?.code, 'ADMISSION_RATE_LIMITED');
         } finally {
           await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
           await setup.end();

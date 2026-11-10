@@ -1,4 +1,5 @@
 import { cachedDashboardRead } from './dashboard-cache.js';
+import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
@@ -97,7 +98,7 @@ async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: nu
 }
 const Address = mailAddress();
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
-const FromName = z.string().max(200).refine(v => !/[\x00-\x1f\x7f]/.test(v), 'Sender name cannot contain control characters.');
+const FromName = z.string().max(200).refine(v => !/[\x00-\x1f\x7f@<>]/.test(v), 'Sender name cannot contain an address, angle brackets, or control characters.');
 const PreviewText = z.string().max(200).describe('Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.');
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
 const Data = z.record(z.string().max(120), Scalar).default({});
@@ -728,12 +729,9 @@ function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: Se
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate.
 // Malformed inputs, mailbox tracking and provider-rendered templates keep their normal
 // authenticated handler (including error ordering). No external I/O before admission.
-export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL,recentlyVerified:boolean) {
+export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL) {
   if(!/^application\/json(?:\s*;|$)/i.test(c.req.header('content-type')??''))return;
-  // Do not spend parser, HTML or hashing CPU on a large speculative request.
-  // Hono caches the body for the authenticated handler, including chunked POSTs.
-  const maxSpeculative=64*1024;
-  if(!recentlyVerified && (Number(c.req.header('content-length'))>maxSpeculative || Buffer.byteLength(await c.req.text())>maxSpeculative))return;
+  await boundRequestBody(c);
   const body=await c.req.json().catch(()=>undefined), batch=c.req.path==='/v1/emails/batch';
   const parsed=batch?BatchInput.safeParse(body):SingleSendInput.safeParse(body);
   if(!parsed.success)return;
