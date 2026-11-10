@@ -798,7 +798,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'CreateTopicCommand': { const arn = `arn:aws:sns:${region}:${account}:${i.Name}`; topics.set(arn, { Tags: i.Tags, Attributes: { TopicArn: arn, Owner: account }, subs: [] }); return { TopicArn: arn }; }
             case 'GetTopicAttributesCommand': return topic ?? missing();
             case 'ListTagsForResourceCommand': return topic;
-            case 'SetTopicAttributesCommand': topic!.Attributes.Policy = i.AttributeValue; return {};
+            case 'SetTopicAttributesCommand': topic!.Attributes[i.AttributeName] = i.AttributeValue; return {};
             case 'ListSubscriptionsByTopicCommand': return { Subscriptions: topic!.subs };
             case 'SubscribeCommand': {
               assert.equal(i.Endpoint, `${origin}/v1/events/ses`);
@@ -878,6 +878,12 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(sets.size, 4); assert.equal(topics.size, 4); assert.equal(rules.size,2); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 4);
         assert.equal(identityChecks,1,'Sending and receiving pool preparation reuse the verified platform principal across regions.');
         assert.equal(calls.filter(n => n === 'CreateTenantResourceAssociationCommand').length, 4);
+        await providerTest.test('ready Ohio receiving reconciliation preserves the binding and applies the retry policy',async()=>{
+          const {reconcileReadyPool}=await import('./scripts/reconcile-pool-receiving.js');const scoped={...runtime,config:{...runtime.config,platformAccount:platform}};
+          const state=async()=>(await pool.query('SELECT receiving_state,inbound_bucket,inbound_topic_arn,lease_until FROM provider_pool_regions WHERE region=$1',[region])).rows[0];
+          const prior=await state();delete topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy;
+          await reconcileReadyPool(scoped);assert.deepEqual(await state(),prior);assert.ok(topics.get(prior.inbound_topic_arn)!.Attributes.DeliveryPolicy);
+        });
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
         const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
@@ -1222,7 +1228,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const mx=checked.dns.find((r:Json)=>r.purpose==='receiving');assert.equal(mx.name,`reply.${domain}`);assert.equal(mx.priority,10);assert.equal(mx.status,'pending');assert.ok(mx.note.includes('existing.invalid') && mx.note.includes(mx.name));
             assert.equal(checked.sending,'verified');assert.equal(checked.receiving,'pending');
             const {BucketName:bucket,TopicArn:topicArn}=rules.get(region)!.Actions[0].S3Action;
-            const probe=async(addr:string)=>{const id=unique('probe');return acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});};
+            assert.ok(JSON.parse(topics.get(topicArn)!.Attributes.DeliveryPolicy).http.defaultHealthyRetryPolicy.numRetries>3);
+            const probe=async(addr:string,id=unique('probe'))=>acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});
             assert.equal(await probe(custom),0,'Sending verification cannot authorize receipt before MX.');
             // Proven ownership is enough to create addresses; nothing routes until the MX record is observed.
             const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-opensend-environment':'live'}),201);
@@ -1230,6 +1237,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
             activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
+            await it.test('inbound held recipients replay after MX proof and expire without transferring old mail',async()=>{
+              const {recoverHeldReceipts}=await import('./src/mailbox-receipts.js');
+              const held=(await pool.query("SELECT ses_message_id FROM mail_receipt_holds WHERE bucket=$1 AND recipients=$2 AND status='held'",[bucket,JSON.stringify([custom])])).rows[0];assert.ok(held);
+              const expired=unique('expired');await probe(`expired@${domain}`,expired);
+              await pool.query("UPDATE mail_receipt_holds SET expires_at=now()-interval '1 second' WHERE bucket=$1 AND ses_message_id=$2",[bucket,expired]);
+              await recoverHeldReceipts(runtime);await recoverHeldReceipts(runtime);
+              assert.deepEqual((await pool.query('SELECT workspace_id,recipients FROM mail_receipts WHERE bucket=$1 AND ses_message_id=$2',[bucket,held.ses_message_id])).rows,[{workspace_id:b.org.id,recipients:[custom]}]);
+              assert.deepEqual((await pool.query('SELECT status,error FROM mail_receipt_holds WHERE bucket=$1 AND ses_message_id=$2',[bucket,expired])).rows,[{status:'failed',error:'MAILBOX_UNROUTED_HOST'}]);
+            });
             assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly DNS upkeep must use neither SES nor ownership TXT.');
             const stable=ok(await local('GET',detail,undefined,b.cookie));
             fault='mixed';for(let i=0;i<3;i++)await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified','Additional MX records are not proof that the verified record disappeared.');fault='';await mxCheck();
@@ -1238,6 +1254,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             }
             fault='MX-servfail';await assert.rejects(mxCheck(),{code:'DOMAIN_DNS_UNAVAILABLE'});assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);fault='';
             assert.equal(await probe(`support@${domain}`),0,'Verifying the suggested reply host must not activate the conflicting root MX.');
+            const moved=unique('moved'),moveMessage={notificationType:'Received',mail:{messageId:moved},receipt:{timestamp:new Date(Date.now()+60_000).toISOString(),recipients:[blind],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+moved}}};
+            // An originally suggested host is relinquished before the other workspace creates and verifies its own claim.
+            await runtime.db.transaction(async tx=>{const {sql}=await import('drizzle-orm');await tx.execute(sql`UPDATE mailbox_domains SET receiving_host=${otherHost} WHERE domain_id=${created.id}`);
+              assert.equal(await acceptInboundNotification({...runtime,db:tx},{topicArn,region,message:moveMessage}),0);await tx.execute(sql`UPDATE mailbox_domains SET receiving_host=${mx.name} WHERE domain_id=${created.id}`);});
             const other=ok(await add(a.cookie,otherHost),201),otherProof=other.dns.find((r:Json)=>r.purpose==='sending' && r.type==='TXT').value;
             const identity=identities.get(`${platform}:${otherHost}`)!;identity.DkimAttributes={...identity.DkimAttributes,Status:'PENDING'};identity.VerifiedForSendingStatus=false;identity.VerificationStatus='PENDING';
             const verifyOther=()=>operationJobs['domain.verify']!(runtime,{domainId:other.id,token:otherProof},{id:unique('job'),attempts:1,workspaceId:a.org.id});
@@ -1246,6 +1266,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'pending');
             identity.VerificationStatus='SUCCESS';identity.VerifiedForSendingStatus=true;identity.DkimAttributes={...identity.DkimAttributes,Status:'SUCCESS',SigningEnabled:false};await pace();await assert.rejects(verifyOther(),JobDeferred);const receiveOnly=ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie));
             assert.equal(receiveOnly.sending,'pending');assert.equal(receiveOnly.receiving,'verified');assert.equal(receiveOnly.dns.find((r:Json)=>r.purpose==='receiving').status,'verified');
+            await it.test('a held recipient never transfers to a different workspace that subsequently proves MX',async()=>{
+              const hold=()=>pool.query('SELECT status,owners FROM mail_receipt_holds WHERE bucket=$1 AND ses_message_id=$2',[bucket,moved]);assert.deepEqual((await hold()).rows,[{status:'held',owners:{[blind]:[b.org.id]}}]);
+              await (await import('./src/mailbox-receipts.js')).recoverHeldReceipts(runtime);assert.equal(await acceptInboundNotification(runtime,{topicArn,region,message:moveMessage}),0);
+              assert.equal((await pool.query('SELECT FROM mail_receipts WHERE bucket=$1 AND ses_message_id=$2',[bucket,moved])).rowCount,0);assert.equal((await hold()).rows[0].status,'held');
+            });
             // DKIM regression does not stop an established receive-only claim checking TXT and its own grace.
             identity.DkimAttributes.Status='PENDING';
             const otherState=async()=>(await pool.query('SELECT sending_state,receiving_state,receiving_lost_since IS NOT NULL AS receiving_lost FROM domain_claims WHERE name=$1',[otherHost])).rows[0];
@@ -1258,7 +1283,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const raw=Buffer.concat([Buffer.from(trace),body]);objects.set(`${bucket}/staging/${sesMessageId}`,Buffer.concat([Buffer.from(`Bcc: ${blind},\r\n ${dropped}\r\nResent-Bcc: ${blind}\r\n`),raw]));
             const message={notificationType:'Received',mail:{messageId:sesMessageId,source:'sender@example.org',destination:[blind,custom,dropped],commonHeaders:{bcc:[blind]}},receipt:{timestamp:new Date().toISOString(),recipients:[blind,custom,dropped],action:{type:'S3',bucketName:bucket,topicArn,objectKey:`staging/${sesMessageId}`}}};
             const accept=()=>acceptInboundNotification(runtime,{topicArn,region,message});
-            const count=queries.mock.callCount(); assert.equal(await accept(),2);it.diagnostic(`MX inbound notification: ${queries.mock.callCount()-count} pg statement(s) for 2 workspaces`);assert.equal(await accept(),0);
+            await runtime.db.transaction(async tx=>{const count=queries.mock.callCount();assert.equal(await acceptInboundNotification({...runtime,db:tx},{topicArn,region,message}),2);it.diagnostic(`MX inbound notification: ${queries.mock.callCount()-count} pg statement(s) for 2 workspaces`);
+              const {sql}=await import('drizzle-orm');await tx.execute(sql`UPDATE jobs SET available_at=now()+interval '1 day' WHERE type='mailbox.ingest' AND payload->>'sesMessageId'=${sesMessageId}`);});assert.equal(await accept(),0);
             const receipts=await pool.query('SELECT * FROM mail_receipts WHERE ses_message_id=$1',[sesMessageId]);assert.equal(receipts.rowCount,2);
             for(const [user,recipient,expected] of [[a,blind,raw],[b,custom,body]] as const){
               const wid=user.org.id,r=receipts.rows.find(r=>r.workspace_id===wid);assert.deepEqual(r.recipients,[recipient]);assert.ok(!JSON.stringify(r.notification).includes(blind));assert.ok(!JSON.stringify(r.notification).includes(dropped));
@@ -1271,6 +1297,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             }
             message.receipt.recipients=[dropped];message.mail.messageId=unique('unmatched');message.receipt.action.objectKey='staging/'+message.mail.messageId;
             assert.equal(await accept(),0);assert.equal((await pool.query('SELECT 1 FROM mail_receipts WHERE ses_message_id=$1',[message.mail.messageId])).rowCount,0);
+            await it.test('a verified SES identity outside receiving setup does not fill the hold table',async()=>{
+              const unrelated=unique('unrelated');assert.ok(identities.has(`${platform}:${foreign}`));assert.equal(await probe(`dest@${foreign}`,unrelated),0);
+              assert.equal((await pool.query('SELECT FROM mail_receipt_holds WHERE bucket=$1 AND ses_message_id=$2',[bucket,unrelated])).rowCount,0);
+            });
             message.receipt.recipients=[custom];message.receipt.timestamp='2020-01-01T00:00:00Z';assert.equal(await accept(),0,'A delayed notification predating this domain claim does not transfer old mail.');
             const deliveries=await pool.query('SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1',[hook]);assert.equal(deliveries.rowCount,1);assert.ok(!JSON.stringify(deliveries.rows).includes(blind));
             const live={'x-opensend-environment':'live'},awsCount=calls.length;
@@ -4756,7 +4786,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const receive=()=>acceptInboundNotification(runtime,{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:'cross-region-fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['reply@trusted.regional.example'],action:{type:'S3',bucketName:'ohio-fixture',topicArn:inbound,objectKey:'staging/cross-region-fixture'}}}});
       assert.equal(await receive(),0); // Sending proof cannot grant receiving.
       await db.query(`UPDATE domain_claims SET receiving_state='active',receiving_host=name WHERE token=$1`,[reserved.token]);
-      assert.equal(await receive(),1); // A separately active Ohio host routes regardless of its Virginia send binding.
+      await db.query(`UPDATE mailbox_domains SET enabled_at=clock_timestamp()+interval '1 second' WHERE id=$1`,[md]);
+      await (await import('./src/mailbox-receipts.js')).recoverHeldReceipts(runtime);
+      assert.equal((await db.query("SELECT FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='cross-region-fixture'",[wid])).rowCount,1,'Ohio activation after receipt releases held Virginia mail.');assert.equal(await receive(),0);
       const box=await createMailbox(runtime.db,{workspaceId:wid},{domainId:md,domainName:'trusted.regional.example',address:'reply@trusted.regional.example',origin:'api'});
       const thread=ok(await local('POST','/v1/inbound/threads',{addressId:box.id,to:[parent.to],subject:'Thread',text:'Fixture.'}),202);
       const stored=(await db.query(`SELECT m.region AS archive,e.region AS send_region,e.id FROM mail_messages m JOIN sending_emails e ON m.sending_email_id=e.id WHERE m.workspace_id=$1 AND m.thread_id=$2`,[wid,thread.threadId??thread.id])).rows[0];
@@ -5837,6 +5869,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
         assert.ok(cmd instanceof GetObjectCommand);
         const bytes = raw.get(cmd.input.Key!)!;
+        if(cmd.input.Range){const [,start,end]=/^bytes=(\d+)-(\d+)$/.exec(cmd.input.Range)!;return {ContentRange:`bytes ${start}-${end}/${bytes.length}`,Body:{transformToByteArray:async()=>bytes.subarray(+start!,+end!+1)}};}
         return { Body: { transformToByteArray: async () => bytes } };
       });
       const parseSpy = t.mock.method(PostalMime, 'parse');
@@ -6078,6 +6111,182 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const crRes = await ingest(crMime, 'Internal CR run', 'cr-linear@example.net');
       assert.equal(crRes.status, 'unparsed');
       assert.equal(crRes.automated, false);
+    });
+  });
+
+  test('inbound staging recovery and ingest limits',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,jobs,local})=>{
+      const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
+      const wid=runtime.config.workspaceId,bucket=unique('bucket'),topic=`arn:aws:sns:${REGION}:111122223333:inbound`,domain=unique('mdom');
+      runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')",[domain,wid,REGION]);
+      const submit=(mid:string,recipients:string[],subject='Subject')=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
+      const run=(type:string,p:Json,attempts=1)=>mailboxIngestJobs[type]!(runtime,p,{id:unique('job'),workspaceId:wid,attempts});
+      const raw=new Map<string,Buffer>(),quarantined:string[]=[],parts:Json[]=[],largeReads:string[]=[];let page=0,stageError='',quarantineDenied=false,interruptCopy=false;
+      const old=new Date(Date.now()-2*3600_000),listed=(mid:string)=>({Key:'staging/'+mid,ETag:'"fixture"',LastModified:old});
+      t.mock.method(S3Client.prototype,'send',async(cmd:any)=>{
+        const i=cmd.input,mid=i.Key?.split('/')[1];
+        if(stageError && ['ListObjectsV2Command','GetObjectCommand'].includes(cmd.constructor.name))throw Object.assign(Error(),{name:stageError});
+        if(mid==='large' || mid==='scrub'){
+          const size=39*1024*1024;largeReads.push(cmd.constructor.name);
+          if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:size,ETag:'"large"'};
+          const [,start,end]=/^bytes=(\d+)-(\d+)$/.exec(i.Range)!;assert.equal(i.IfMatch,'"large"');assert.equal(i.ResponseContentEncoding,'identity');assert.ok(+end!<6*1024*1024);
+          const bytes=Buffer.alloc(Number(end)-Number(start)+1,120);if(Number(start)===0)bytes.write((mid==='scrub'?'Bcc: private@foreign.example\r\n':'')+'Auto-Submitted: auto-replied\r\n\r\n');return {ContentRange:`bytes ${start}-${end}/${size}`,Body:{transformToByteArray:async()=>bytes}};
+        }
+        switch(cmd.constructor.name){
+          case 'ListObjectsV2Command': assert.equal(i.Prefix,'staging/');assert.ok(i.MaxKeys<=1000);page++;return i.StartAfter?{Contents:[listed('spoof')]}:{Contents:[listed('orphan')],IsTruncated:true};
+          case 'HeadObjectCommand': if(mid==='denied')throw Object.assign(Error(),{name:'AccessDenied'});if(mid==='unavailable')throw Error('synthetic temporary outage');return {ContentLength:raw.get(mid)!.length,ETag:'"fixture"'};
+          case 'GetObjectCommand': if(i.Range)assert.equal(i.Range,'bytes=0-16383');assert.equal(i.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>raw.get(mid)!}};
+          case 'CopyObjectCommand': if(i.Key.startsWith('quarantine/')){if(quarantineDenied)throw Object.assign(Error(),{name:'AccessDenied'});assert.equal(i.CopySourceIfMatch,'"fixture"');quarantined.push(i.Key);}if(i.CopySource.endsWith('/large')){assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.TaggingDirective,'REPLACE');assert.equal(i.Tagging,'opensend-kind=raw');largeReads.push('copy');}return {};
+          case 'CreateMultipartUploadCommand':assert.equal(i.Tagging,'opensend-kind=raw');return {UploadId:'upload'};
+          case 'UploadPartCommand':assert.ok(i.Body.length>=5*1024*1024);assert.equal(i.Body.subarray(0,14).toString(),'Auto-Submitted');parts.push({size:i.Body.length});return {ETag:'first'};
+          case 'UploadPartCopyCommand':assert.equal(i.CopySourceIfMatch,'"large"');assert.equal(i.CopySourceRange,`bytes=${5.25*1024*1024}-${39*1024*1024-1}`);if(interruptCopy)throw Error('interrupted copy');return {CopyPartResult:{ETag:'second'}};
+          case 'AbortMultipartUploadCommand':assert.equal(i.UploadId,'upload');parts.push({aborted:true});return {};
+          case 'CompleteMultipartUploadCommand':assert.deepEqual(i.MultipartUpload.Parts.map((p:Json)=>p.ETag),['first','second']);parts.push({complete:true});return {};
+          case 'PutObjectCommand': return {};
+          default:throw Error(cmd.constructor.name);
+        }
+      });
+      await t.test('inbound staging sweep resumes, recovers only an object-bound SES trace, and quarantines ambiguity',async()=>{
+        const {JobDeferred}=await import('./src/jobs.js');
+        const trace=(id:string)=>`Received: from mx.invalid\r\n by inbound-smtp.${REGION}.amazonaws.com with SMTP id ${id}  \r\n for blind@receive.example; ${old.toUTCString()}\r\n`;
+        raw.set('orphan',Buffer.from(`Return-Path: <a@example.net>\r\n${trace('orphan')}X-SES-Spam-Verdict: FAIL\r\nX-SES-Virus-Verdict: PASS\r\nTo: misleading@receive.example\r\nX-SES-Spam-Verdict: PASS\r\nX-SES-Virus-Verdict: FAIL\r\n\r\nhello`));
+        raw.set('spoof',Buffer.from(trace('wrong-id')+trace('spoof')+'Bcc: wrong@receive.example\r\n\r\nBody'));
+        await scheduleMailRecovery(runtime);const [j]=await jobs('mailbox.sweepStaging');assert.ok(j);
+        let after:Json={};await assert.rejects(run(j.type,j.payload),e=>{assert.ok(e instanceof JobDeferred);after=e.payload!;return true;});assert.equal(after.after,'staging/orphan');
+        await run(j.type,after);await run(j.type,after);assert.equal(page,3);
+        const items=await jobs('mailbox.recoverStaging');assert.equal(items.length,2);
+        for(const {type,payload} of items){if(payload.mid==='spoof')await assert.rejects(run(type,payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN'});else {await run(type,payload);await run(type,payload);}}
+        assert.deepEqual(quarantined,['quarantine/spoof']);assert.equal((await jobs('mailbox.ingest')).length,1);
+        await run('mailbox.ingest',{sesMessageId:'orphan'});
+        assert.deepEqual((await db.query("SELECT envelope_to,verdicts FROM mail_messages WHERE workspace_id=$1 AND ses_message_id='orphan'",[wid])).rows,[{envelope_to:['blind@receive.example'],verdicts:{spam:'FAIL',virus:'PASS'}}]);
+        const spoof=items.find(j=>j.payload.mid==='spoof')!;
+        for(stageError of ['NoSuchKey','NotFound','PreconditionFailed']) await run(spoof.type,spoof.payload);
+        stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
+        stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
+      });
+      await t.test('inbound PostgreSQL boundary repairs NUL, split surrogate pairs, and filenames',async()=>{
+        const mid='unicode';raw.set(mid,Buffer.from('From: A\0B <a@example.net>\r\nSubject: x\0y\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n'+ 'x=00y'+'a'.repeat(999996)+'=F0=9F=98=80\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="a\0b"\r\n\r\ndata\r\n--p--\r\n'));
+        assert.equal(await submit(mid,['a@receive.example'],'sns\0\ud800'),1);await run('mailbox.ingest',{sesMessageId:mid});
+        const {rows:[r]}=await db.query('SELECT m.subject,left(m.text,3) AS start,right(m.text,1) AS tail,m.body_truncated,f.filename FROM mail_messages m JOIN mail_attachments f ON f.message_id=m.id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid]);
+        assert.deepEqual(r,{subject:'x�y',start:'x�y',tail:'�',body_truncated:true,filename:'a�b'});
+      });
+      await t.test('large inbound mail stays downloadable using a pinned copy or multipart Bcc scrub',async()=>{
+        for(const mid of ['large','scrub']){await submit(mid,['a@receive.example']);
+          if(mid==='scrub'){interruptCopy=true;await assert.rejects(run('mailbox.ingest',{sesMessageId:mid}),{code:'MAILBOX_RAW_UNAVAILABLE'});assert.ok(parts.pop()?.aborted);parts.pop();largeReads.splice(3);interruptCopy=false;}
+          await run('mailbox.ingest',{sesMessageId:mid},2);
+          const {rows:[m]}=await db.query('SELECT id,size_bytes,status,automated FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);assert.equal(m.status,'unparsed');assert.equal(m.automated,true);assert.equal(m.size_bytes,39*1024*1024-(mid==='scrub'?Buffer.byteLength('Bcc: private@foreign.example\r\n'):0));
+          assert.match(ok(await local('GET',`/v1/inbound/messages/${m.id}?includeDelivery=true`)).rawUrl,/\.eml/);}
+        assert.deepEqual(largeReads,['HeadObjectCommand','GetObjectCommand','copy','HeadObjectCommand','GetObjectCommand','GetObjectCommand']);assert.equal(parts.length,2);assert.ok(parts[1]!.complete);
+      });
+      await t.test('inbound partial replay extends a processed receipt without duplicating the message or stored event',async()=>{
+        const {recoverHeldReceipts}=await import('./src/mailbox-receipts.js'),mid='partial',first='a@receive.example',late='b@late.example';
+        const other=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'late.example',$3,'disabled','store')",[other,wid,REGION]);
+        raw.set(mid,Buffer.from('From: a@example.net\r\nSubject: Partial\r\n\r\nbody'));assert.equal(await submit(mid,[first,late]),1);await run('mailbox.ingest',{sesMessageId:mid});await db.query("UPDATE mailbox_domains SET status='active' WHERE id=$1",[other]);
+        await recoverHeldReceipts(runtime);await run('mailbox.ingest',{sesMessageId:mid});assert.equal(await submit(mid,[first,late]),0);
+        const {rows:[m]}=await db.query('SELECT id,envelope_to FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);assert.deepEqual(m.envelope_to,[first,late]);
+        assert.equal((await db.query("SELECT FROM mailbox_events WHERE workspace_id=$1 AND message_id=$2 AND type='message.stored'",[wid,m.id])).rowCount,1);
+        assert.deepEqual((await db.query('SELECT address FROM mail_unrouted WHERE workspace_id=$1 AND message_id=$2 ORDER BY address',[wid,m.id])).rows,[{address:first},{address:late}]);
+      });
+      await t.test('inbound catch-all enforces hourly, domain and workspace caps with unrouted fallback',async()=>{
+        await db.query("UPDATE mailbox_domains SET catch_all='create_mailbox' WHERE id=$1",[domain]);
+        const seed=(count:number,d:string)=>db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,origin,created_at) SELECT gen_random_uuid()::text,$1,$2,gen_random_uuid()||'@receive.example','auto',now()-interval '2 days' FROM generate_series(1,$3)",[wid,d,count]);
+        const burst=async(mid:string,n:number)=>{raw.set(mid,Buffer.from('Subject: '+mid+'\r\n\r\nhello'));await submit(mid,Array.from({length:n},(_,i)=>`${mid}${i}@receive.example`));await run('mailbox.ingest',{sesMessageId:mid});return (await db.query('SELECT count(*)::int AS n FROM mail_unrouted u JOIN mail_messages m ON m.id=u.message_id AND m.workspace_id=u.workspace_id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid])).rows[0].n;};
+        assert.equal(await burst('hour',51),1);
+        await db.query("UPDATE mailboxes SET created_at=now()-interval '2 days' WHERE workspace_id=$1",[wid]);await seed(449,domain);
+        assert.equal(await burst('domain',2),1);
+        const other=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'other.example',$3,'active')",[other,wid,REGION]);await seed(1500,other);
+        await db.query('DELETE FROM mailboxes WHERE domain_id=$1 AND id IN (SELECT id FROM mailboxes WHERE domain_id=$1 AND address NOT IN (SELECT address FROM mailbox_addresses WHERE workspace_id=$2) LIMIT 1)',[domain,wid]);await seed(1,other);
+        assert.equal(await burst('workspace',1),1);
+      });
+      await t.test('inbound ingest keeps accepted mail pending after an unclassified database disconnect',async it=>{
+        const mid='disconnect';raw.set(mid,Buffer.from('Subject: retry\r\n\r\nbody'));await submit(mid,['a@receive.example']);
+        const fault=it.mock.method(runtime.db,'transaction',async()=>{throw Error('Connection terminated unexpectedly');});
+        await assert.rejects(run('mailbox.ingest',{sesMessageId:mid}),{code:'MAILBOX_INGEST_UNAVAILABLE',retryable:true});
+        const receipt=()=>db.query('SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);
+        assert.deepEqual((await receipt()).rows,[{status:'pending',error:null}]);
+        fault.mock.restore();await run('mailbox.ingest',{sesMessageId:mid},2);
+        assert.deepEqual((await receipt()).rows,[{status:'processed',error:null}]);
+      });
+      await t.test('inbound permanent and exhausted failures settle; oldest lost receipts recover first with a cap',async()=>{
+        for(const [mid,attempts] of [['denied',1],['unavailable',6]] as const){await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid},attempts);}
+        assert.deepEqual((await db.query("SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id IN ('denied','unavailable') ORDER BY ses_message_id",[wid])).rows,[{status:'failed',error:'MAILBOX_RAW_ACCESS_DENIED'},{status:'failed',error:'MAILBOX_RAW_UNAVAILABLE'}]);
+        await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,created_at,recovery_attempts) SELECT $1,'lost-'||i,$2,$3,'unused','[]','{}',now()-interval '2 hours'-i*interval '1 minute',CASE WHEN i=101 THEN 3 ELSE 0 END FROM generate_series(1,101)i",[wid,REGION,bucket]);
+        await recoverMailReceipts(runtime);
+        assert.deepEqual((await db.query("SELECT ses_message_id,recovery_attempts,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id IN ('lost-1','lost-101','lost-2') ORDER BY ses_message_id",[wid])).rows,[{ses_message_id:'lost-1',recovery_attempts:0,error:null},{ses_message_id:'lost-101',recovery_attempts:4,error:'MAILBOX_RECOVERY_EXHAUSTED'},{ses_message_id:'lost-2',recovery_attempts:1,error:null}]);
+        await recoverMailReceipts(runtime);assert.equal((await jobs('mailbox.ingest')).filter(j=>j.payload.sesMessageId.startsWith('lost-')).length,100);
+      });
+    });
+  });
+
+  test('inbound migration is repeatable and retention drains only terminal receipts and holds past 30 days',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {readFile}=await import('node:fs/promises'),{mailReceiptHolds,mailReceipts}=await import('./src/db/mailbox.js'),{eq}=await import('drizzle-orm'),{cleanup}=await import('./src/maintenance.js');
+      await db.query(await readFile(new URL('./migrations/084_mail_recovery.sql',import.meta.url),'utf8'));const wid=runtime.config.workspaceId;
+      await db.query("INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,owners,recipients,notification,received_at,expires_at,status) SELECT $1,i::text,$2,'topic','{}','[]','{}',now(),now()-interval '31 days',CASE WHEN i=0 THEN 'held' WHEN i%2=0 THEN 'released' ELSE 'failed' END FROM generate_series(0,5001)i",[wid,REGION]);
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,status,processed_at) SELECT $1,i::text,$2,$1,'key','{}','[]',CASE WHEN i=0 THEN 'pending' WHEN i=1 THEN 'failed' ELSE 'processed' END,CASE WHEN i=3 THEN now() ELSE now()-interval '31 days' END FROM generate_series(0,3)i",[wid,REGION]);
+      await cleanup(runtime);assert.deepEqual((await runtime.db.select({status:mailReceiptHolds.status}).from(mailReceiptHolds).where(eq(mailReceiptHolds.bucket,wid))),[{status:'held'}]);
+      const remaining=await runtime.db.select({status:mailReceipts.status,n:mailReceipts.recoveryAttempts,at:mailReceipts.lastRecoveredAt}).from(mailReceipts).where(eq(mailReceipts.workspaceId,wid)).orderBy(mailReceipts.sesMessageId);
+      assert.deepEqual(remaining,[{status:'pending',n:0,at:null},{status:'processed',n:0,at:null}]);
+    });
+  });
+
+  test('inbound IAM confines staging list, quarantine and multipart grants to receiving resources',async()=>{
+    const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{load}=await import('js-yaml'),{readFile}=await import('node:fs/promises');
+    const account='905840579680',docs=render('--fresh',{account,origin:'https://dev.bane.mx'}),all=(Object.values(docs) as Json[]).flatMap(d=>d.Statement);
+    const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),byo=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources.ReceivingPolicy.Properties.PolicyDocument.Statement;
+    for(const [rows,bucket] of [[all,`arn:aws:s3:::opensend-mx-${account}-mail-us-east-2`],[byo,'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}']] as [Json[],string][]){
+      assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:ListBucket' && s.Resource===bucket && s.Condition.StringEquals['s3:prefix']==='staging/'));
+      assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:PutObject' && s.Resource===bucket+'/quarantine/?*'));
+      assert.ok(rows.some(s=>s.Action.includes('s3:AbortMultipartUpload') && s.Effect==='Allow' && s.Resource.startsWith(bucket+'/workspaces/') && s.Resource.endsWith('/raw/?*.eml')));
+    }
+    assert.ok(all.some(s=>s.Effect==='Deny' && s.Action?.includes('s3:ListBucket') && s.Condition?.StringNotEquals?.['s3:ResourceAccount']===account));
+  });
+
+  test('concurrent inbound drains reserve only claimed rows and rotate past a flooded workspace',async t=>{
+    await simulatedSesFixture(t,async({runtime})=>{
+      const {processJobs}=await import('./src/jobs.js'),{drizzle}=await import('drizzle-orm/node-postgres'),a=await fixtureDatabase(t),b=await fixtureDatabase(t),schema='queue_'+randomUUID().replaceAll('-','');
+      await a.query(`CREATE SCHEMA ${schema}`);
+      try {
+        for(const c of [a,b])await c.query(`SET search_path TO ${schema}, public`);
+        await a.query(`CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL);CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL)`);
+        await a.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'a'||i,'mailbox.ingest','A','{}'::jsonb,now()-interval '1 hour' FROM generate_series(1,50)i UNION ALL SELECT 'b','mailbox.ingest','B','{}',now() UNION ALL SELECT 'other','fixture.other','B','{}',now()-interval '2 hours'");
+        const unavailable=drizzle(a),fault=t.mock.method(unavailable,'execute',()=>{throw Error('claim unavailable');});
+        await assert.rejects(processJobs({...runtime,db:unavailable},{},1,1),/claim unavailable/);fault.mock.restore();
+        let start!:(id:string)=>void,release!:()=>void;const begun=new Promise<string>(r=>{start=r;}),gate=new Promise<void>(r=>{release=r;});
+        const seen:string[]=[],record:import('./src/core.js').JobHandler=async(_r,_p,j)=>{seen.push(j.workspaceId);};
+        const blocking:import('./src/core.js').JobHandler=async(_r,_p,j)=>{start(j.id);await gate;};
+        const first=drizzle(a).transaction(async db=>processJobs({...runtime,db},{'mailbox.ingest':blocking,'fixture.other':blocking},1,1));
+        try {
+          const id=await Promise.race([begun,first.then(()=>assert.fail('expected a blocked handler'))]);assert.match(id,/^a/);
+          assert.equal(await processJobs({...runtime,db:drizzle(b)},{'fixture.other':record},1,1),1);
+          assert.equal((await b.query("SELECT id FROM jobs WHERE type='mailbox.ingest' AND id<>$1 FOR UPDATE NOWAIT",[id])).rowCount,50);
+        } finally {release();await first;}
+        seen.length=0;await processJobs({...runtime,db:drizzle(b)},{'mailbox.ingest':record},2,1);assert.deepEqual(seen,['B','A']);
+      } finally {await a.query(`DROP SCHEMA ${schema} CASCADE`);}
+    });
+  });
+
+  test('exhausted inbound leases never reclaim a worker or requeue the pending receipt',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {processJobs,MAX_ATTEMPTS}=await import('./src/jobs.js'),{recoverMailReceipts}=await import('./src/mailbox-ingest.js'),wid=runtime.config.workspaceId;
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('poison','mailbox.ingest',$1,'{\"sesMessageId\":\"exhausted\"}','running',$2,now()-interval '1 hour')",[wid,MAX_ATTEMPTS]);
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,created_at) VALUES($1,'exhausted',$2,'bucket','key','{}','[]',now()-interval '1 hour')",[wid,REGION]);
+      assert.equal(await processJobs(runtime,{},1,1),0);await recoverMailReceipts(runtime);
+      assert.deepEqual((await db.query("SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='exhausted'",[wid])).rows,[{status:'failed',error:'MAILBOX_INGEST_EXHAUSTED'}]);assert.equal((await db.query("SELECT FROM jobs WHERE status='pending'")).rowCount,0);
+    });
+  });
+
+  test('inbound claim leaves waiting ingest jobs unleased while sibling lanes serve other work',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {processJobs,enqueue}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      for(const type of ['mailbox.ingest','mailbox.ingest','fixture.other']) await enqueue(runtime.db,{type,workspaceId:wid,payload:{}});
+      let release!:()=>void,enter!:()=>void;const signal=new Promise<void>(r=>{release=r;}),entered=new Promise<void>(r=>{enter=r;});
+      const seen:number[]=[];
+      await processJobs(runtime,{'mailbox.ingest':async()=>{enter();if(!seen.length){seen.push((await db.query("SELECT count(*)::int AS n FROM jobs WHERE type='mailbox.ingest' AND status='running'")).rows[0].n);await signal;}},'fixture.other':async()=>{await entered;release();}},3,3);
+      assert.deepEqual(seen,[1]);
     });
   });
 
@@ -6481,14 +6690,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const ws = unique('follow-due-workspace');
     let active = false, completed = 0, wakes = 0;
     const handlers: Record<string, import('./src/core.js').JobHandler> = {
-      'mailbox.ingest': async () => {
+      'fixture.defer': async () => {
         if (active) throw new JobDeferred(new Date(Date.now() + 2_000).toISOString());
         active = true;
         try { await new Promise(resolve => setTimeout(resolve, 40)); completed++; } finally { active = false; }
       },
     };
-    const first = await enqueue(scoped.db, { type: 'mailbox.ingest', workspaceId: ws, payload: { n: 1 } });
-    const second = await enqueue(scoped.db, { type: 'mailbox.ingest', workspaceId: ws, payload: { n: 2 } });
+    const first = await enqueue(scoped.db, { type: 'fixture.defer', workspaceId: ws, payload: { n: 1 } });
+    const second = await enqueue(scoped.db, { type: 'fixture.defer', workspaceId: ws, payload: { n: 2 } });
     const started = Date.now();
     const outcome = await followDueJobs(scoped, () => processJobs(scoped, handlers, 100, 2), async () => { wakes++; }, 10_000);
     const elapsed = Date.now() - started;

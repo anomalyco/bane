@@ -229,6 +229,14 @@ Resources:
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-us-east-1'
                   Condition: {StringEquals: {'aws:RequestedRegion': us-east-1}, StringEqualsIfExists: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}, 'Null': {'s3:prefix': 'true'}}
                 - Effect: Allow
+                  Action: s3:ListBucket
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
+                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:prefix': 'staging/'}}
+                - Effect: Allow
+                  Action: s3:PutObject
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/quarantine/?*'
+                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
+                - Effect: Allow
                   Action: ['s3:GetBucketTagging', 's3:PutBucketTagging', 's3:PutBucketPublicAccessBlock', 's3:PutBucketPolicy', 's3:PutLifecycleConfiguration']
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
                   Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
@@ -243,10 +251,12 @@ Resources:
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/att/msg_????????????????????????????????/matt_????????????????????????????????'
                   Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
                 - Effect: Allow
-                  Action: ['s3:PutObject', 's3:PutObjectTagging']
+                  # Only initiation carries tags; UploadPart/Copy and Complete are authorized as PutObject without tags.
+                  Action: ['s3:PutObject', 's3:PutObjectTagging', 's3:AbortMultipartUpload']
                   Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/?*.eml'
                   Condition:
-                    StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/opensend-kind': raw}
+                    StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}
+                    StringEqualsIfExists: {'s3:RequestObjectTag/opensend-kind': raw}
                     'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': opensend-kind}
 Outputs:
   AccountId: {Value: !Ref 'AWS::AccountId'}

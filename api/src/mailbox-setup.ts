@@ -154,6 +154,7 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     await aws('s3:PutBucketPolicy', () => s3.send(new PutBucketPolicyCommand({ Bucket: names.bucket, Policy: JSON.stringify(bucketPolicy(names.bucket, region, account, names.rulePrefix)) }), { abortSignal: signal }));
     await aws('s3:PutLifecycleConfiguration', () => s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: names.bucket, LifecycleConfiguration: { Rules: [
       { ID:'opensend-staging',Status:'Enabled',Filter:{Prefix:STAGING_PREFIX},Expiration:{Days:3} },
+      { ID:'opensend-unattributed',Status:'Enabled',Filter:{Prefix:'quarantine/'},Expiration:{Days:30} },
       { ID: 'opensend-raw-retention', Status: 'Enabled', Filter: { Tag:{Key:'opensend-kind',Value:'raw'} }, Expiration: { Days: RAW_RETENTION_DAYS } },
       { ID:'opensend-legacy-raw',Status:'Enabled',Filter:{Prefix:'raw/'},Expiration:{Days:RAW_RETENTION_DAYS} },
       ...(installationId!==POOL_INSTALLATION ? [{ID:'opensend-legacy-downloads',Status:'Enabled' as const,Filter:{Tag:{Key:'opensend-kind',Value:'legacy-raw'}},Expiration:{Days:1}}] : []),
@@ -167,6 +168,8 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     const topicTags = await aws('sns:ListTagsForResource', () => sns.send(new ListTagsForResourceCommand({ ResourceArn: expectedTopic }), { abortSignal: signal }));
     if (!tags(installationId).every(tag => topicTags.Tags?.some(value => value.Key === tag.Key && value.Value === tag.Value))) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'The inbound SNS topic exists without this installation’s ownership tags.');
     await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({ TopicArn: expectedTopic, AttributeName: 'Policy', AttributeValue: JSON.stringify(topicPolicy(expectedTopic, region, account, names.rulePrefix)) }), { abortSignal: signal }));
+    // Topic default protects already-confirmed subscriptions too. SNS caps HTTP retry time at one hour.
+    await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({TopicArn:expectedTopic,AttributeName:'DeliveryPolicy',AttributeValue:JSON.stringify({http:{defaultHealthyRetryPolicy:{minDelayTarget:20,maxDelayTarget:120,numRetries:30,numNoDelayRetries:0,numMinDelayRetries:2,numMaxDelayRetries:24,backoffFunction:'exponential'},disableSubscriptionOverrides:true}})}),{abortSignal:signal}));
 
     // Trust the topic before subscribing so the signed confirmation passes the ingress allowlist.
     await register(account,names.bucket,expectedTopic);

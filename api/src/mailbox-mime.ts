@@ -1,7 +1,8 @@
-import {HeadObjectCommand,GetObjectCommand,PutObjectCommand,CopyObjectCommand,type S3Client} from '@aws-sdk/client-s3';
+import {HeadObjectCommand,GetObjectCommand,PutObjectCommand,CopyObjectCommand,CreateMultipartUploadCommand,UploadPartCommand,UploadPartCopyCommand,CompleteMultipartUploadCommand,AbortMultipartUploadCommand,type S3Client} from '@aws-sdk/client-s3';
 import { ApiError } from './core.js';
 
-const MAX_RAW_BYTES = 40 * 1024 * 1024; // SES receiving maximum, before MIME parsing or copying.
+const MiB=1024*1024, PREFIX=2*MiB, FIRST_PART=5.25*MiB;
+export const PARSE_LIMIT=6*MiB;
 
 // AWS's receiving-email-notifications-examples shows the SES-added first Received field can end
 // in "for recipient@example.com;". Remove that field (including folds) when not ours. The S3
@@ -10,7 +11,7 @@ const MAX_RAW_BYTES = 40 * 1024 * 1024; // SES receiving maximum, before MIME pa
 function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
   const raw=Buffer.from(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   let pos=0,kept=0,seenReceived=false;
-  const chunks:Uint8Array[]=[];
+  let copy:Buffer|undefined,written=0;
   while(pos<raw.length) {
     const start=pos;
     let end=raw.indexOf(10,pos); if (end===pos || (end===pos+1 && raw[pos]===13)) break;
@@ -22,27 +23,52 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
     let remove=maybeBlind && /^(?:bcc|resent-bcc)[ \t]*:/i.test(raw.toString('latin1',start,firstEnd));
     if (!seenReceived && name.startsWith('received:')) {
       seenReceived=true;
-      const field=raw.toString('latin1',start,pos).replace(/\r?\n[ \t]+/g,' ');
+      const field=pos-start<=64*1024 ? raw.toString('latin1',start,pos).replace(/\r?\n[ \t]+/g,' ') : '';
       const match=/\bby\s+inbound-smtp\.([\w-]+)\.amazonaws\.com\b[^;]*?\sfor\s+([^;]+);/i.exec(field);
-      remove=match?.[1]===region && !recipients.includes(match[2]!.trim().replace(/^<|>$/g,'').toLowerCase());
+      remove=!field || (match?.[1]===region && !recipients.includes(match[2]!.trim().replace(/^<|>$/g,'').toLowerCase()));
     }
-    if (remove) { chunks.push(raw.subarray(kept,start));kept=pos; }
+    if (remove) { copy??=Buffer.allocUnsafe(raw.length);written+=raw.copy(copy,written,kept,start);kept=pos; }
   }
-  return chunks.length ? Buffer.concat([...chunks,raw.subarray(kept)]) : bytes;
+  if (!copy) return bytes;
+  return copy.subarray(0,written+raw.copy(copy,written,kept));
 }
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
-export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw') {
+export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string) {
   const location={Bucket:bucket,Key:source};
   const head=await client.send(new HeadObjectCommand(location));
   if (head.ContentLength === undefined || !head.ETag) throw new Error('Raw message metadata unavailable');
-  if (head.ContentLength > MAX_RAW_BYTES) throw new ApiError(413,'RAW_MESSAGE_TOO_LARGE','The raw message exceeds the 40 MiB receiving limit.');
+  if (etag && head.ETag!==etag) throw new ApiError(409,'MAILBOX_STAGING_CHANGED','The recovered message no longer matches the inspected object.');
+  const size=head.ContentLength;
+  if (size>40*MiB) throw new ApiError(413,'RAW_MESSAGE_TOO_LARGE','The raw message exceeds 40 MiB.');
   // Pin the checked object and do not let fetch transparently expand BYO Content-Encoding metadata.
-  const object=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,ResponseContentEncoding:'identity'}));
-  const original=await object.Body!.transformToByteArray();
-  const bytes=workspaceMime(original,region,recipients);
+  const get=async(start:number,end:number,range:boolean)=>{
+    const object=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,ResponseContentEncoding:'identity',Range:range?`bytes=${start}-${end-1}`:undefined}));
+    if(range && object.ContentRange!==`bytes ${start}-${end-1}/${size}`) throw new Error('Expected a bounded S3 range response');
+    const bytes=await object.Body!.transformToByteArray();if(bytes.length!==end-start)throw new Error('Incomplete S3 response');return bytes;
+  };
+  const large=size>PARSE_LIMIT;
+  let original=await get(0,large?PREFIX:size,large);
+  const hasEnd=(p:Uint8Array)=>{const b=Buffer.from(p.buffer,p.byteOffset,p.length);return b[0]===10 || b[0]===13 && b[1]===10 || b.includes('\n\n') || b.includes('\n\r\n');};
+  const headerLimit=()=>new ApiError(422,'MAILBOX_RAW_HEADERS_TOO_LARGE','The raw headers exceed the bounded workspace scrub budget.');
+  if(large && !hasEnd(original)){original=await get(0,FIRST_PART,true);if(!hasEnd(original))throw headerLimit();}
+  const bytes=workspaceMime(original,region,recipients),removed=original.length-bytes.length;
   const destination={Bucket:bucket,Key:key,Tagging:`opensend-kind=${kind}`};
-  if(bytes===original) await client.send(new CopyObjectCommand({...destination,CopySource:`${bucket}/${source}`,CopySourceIfMatch:head.ETag,TaggingDirective:'REPLACE'}));
-  else await client.send(new PutObjectCommand({...destination,Body:bytes,ContentType:'message/rfc822'}));
-  return bytes;
+  const copy={CopySource:`${bucket}/${source}`,CopySourceIfMatch:head.ETag};
+  if(!removed) await client.send(new CopyObjectCommand({...destination,...copy,TaggingDirective:'REPLACE'}));
+  else if(!large) await client.send(new PutObjectCommand({...destination,Body:bytes,ContentType:'message/rfc822'}));
+  else {
+    const end=Math.max(FIRST_PART,5*MiB+removed);if(end>=size)throw headerLimit();
+    const first=end===original.length?bytes:Buffer.concat([bytes,await get(original.length,end,true)]);
+    const {UploadId}=await client.send(new CreateMultipartUploadCommand({...destination,ContentType:'message/rfc822'}));
+    if(!UploadId) throw new Error('Missing S3 multipart upload id');
+    const upload={Bucket:bucket,Key:key,UploadId};
+    try {
+      const a=await client.send(new UploadPartCommand({...upload,PartNumber:1,Body:first}));
+      const b=await client.send(new UploadPartCopyCommand({...upload,...copy,PartNumber:2,CopySourceRange:`bytes=${end}-${size-1}`}));
+      if(!a.ETag || !b.CopyPartResult?.ETag)throw new Error('Incomplete S3 multipart upload');
+      await client.send(new CompleteMultipartUploadCommand({...upload,MultipartUpload:{Parts:[{PartNumber:1,ETag:a.ETag},{PartNumber:2,ETag:b.CopyPartResult.ETag}]}}));
+    } catch(error){try{await client.send(new AbortMultipartUploadCommand(upload));}catch{/* bucket lifecycle also aborts abandoned uploads */}throw error;}
+  }
+  return {bytes,sizeBytes:size-removed,large};
 }
