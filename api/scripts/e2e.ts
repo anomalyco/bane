@@ -41,7 +41,8 @@ const SKIP: Partial<Record<Op, string>> = {
 
 const started = Date.now();
 const prefix = `e2e-${started}-${randomUUID().slice(0, 12)}`;
-const domain = 'e2e.opensend.mx', domainId = 'dom_1aa89a5a687348e89699f5cd97f5496b', region = 'us-east-2';
+// Each installation has its own verified E2E fixture domain; the defaults are production's.
+const domain = process.env.OPENSEND_E2E_DOMAIN || 'e2e.opensend.mx', domainId = process.env.OPENSEND_E2E_DOMAIN_ID || 'dom_1aa89a5a687348e89699f5cd97f5496b', region = process.env.OPENSEND_E2E_REGION || 'us-east-2';
 const from = `${prefix}@${domain}`, inbox = `${prefix}-in@${domain}`;
 // SES supports +labels on all three mailboxes. Never reuse a real contact or retained suppression.
 const simulator = (kind: 'success' | 'bounce' | 'complaint', label = '') => `${kind}+${prefix}${label}@simulator.amazonses.com`;
