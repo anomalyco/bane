@@ -1,0 +1,105 @@
+name: Deploy dev
+run-name: Dev ${{ github.event.workflow_run.head_sha || github.sha }}
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  authorize:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.path == '.github/workflows/ci.yml' &&
+      github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - id: resolve
+        name: Require successful main push CI for the deployment SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$SHA&status=success" |
+            jq -e --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" 'any(.workflow_runs[]; .head_sha == $sha and .head_repository.full_name == $repo)' || { echo 'No passing main push CI for this SHA' >&2; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: authorize
+    name: Verify dev ${{ needs.authorize.outputs.sha }}
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    environment: dev
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/build-release
+      - id: tip
+        name: Check main after acquiring deployment slot and building
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.authorize.outputs.sha }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          [[ $tip =~ ^[0-9a-f]{40}$ ]]
+          if [[ $tip != "$SHA" ]]; then
+            echo "Skipped deployment: $SHA was superseded by main at $tip before migration." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          fi
+      - run: npm run migrate
+        if: steps.tip.outputs.current == 'true'
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          PUBLIC_URL: https://dev.bane.mx
+          DEFAULT_SES_REGION: us-east-2
+          MULTI_TENANT: 'true'
+      - run: bash ../.github/scripts/deploy-worker.sh wrangler.dev.jsonc
+        if: steps.tip.outputs.current == 'true'
+        working-directory: api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AUTH_ALLOWED_DOMAINS: ${{ vars.DEV_AUTH_ALLOWED_DOMAINS }}
+          AUTH_ALLOWED_EMAILS: ${{ vars.DEV_AUTH_ALLOWED_EMAILS }}
+      - run: bash .github/scripts/health.sh https://dev.bane.mx
+        if: steps.tip.outputs.current == 'true'
+      - name: Live dev E2E
+        if: steps.tip.outputs.current == 'true'
+        id: e2e
+        working-directory: api
+        timeout-minutes: 5
+        env:
+          BANE_E2E_URL: https://dev.bane.mx
+          BANE_E2E_API_KEY: ${{ secrets.DEV_E2E_API_KEY }}
+          BANE_E2E_DOMAIN: ${{ vars.DEV_E2E_DOMAIN }}
+          BANE_E2E_DOMAIN_ID: ${{ vars.DEV_E2E_DOMAIN_ID }}
+          BANE_E2E_REGION: us-east-2
+          BANE_E2E_ALLOW_DESTRUCTIVE: '1'
+        run: npm run e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}
+        with:
+          name: dev-e2e-${{ needs.authorize.outputs.sha }}-${{ github.run_attempt }}
+          path: api/e2e-report.json
+          if-no-files-found: error

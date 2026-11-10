@@ -1,0 +1,18 @@
+name: Build release
+description: Install locked release dependencies and build Worker assets and the SDK CLI
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+      with:
+        node-version: 24.16.0
+        cache: npm
+        cache-dependency-path: |
+          api/package-lock.json
+          app/package-lock.json
+          sdk/package-lock.json
+    - shell: bash
+      run: |
+        for pkg in api app sdk; do npm ci --prefix "$pkg" --no-audit --no-fund; done
+        npm run build --prefix sdk
+        npm run build --prefix app

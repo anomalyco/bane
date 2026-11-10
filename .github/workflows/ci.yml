@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: '*/package-lock.json'
+      - run: for pkg in api sdk app mcp; do npm ci --prefix "$pkg" --no-audit --no-fund; done
+      - run: npm run check --prefix api && npm run build --prefix sdk && npm run check --prefix mcp && npm run build --prefix mcp
+      - name: Type-check the live SDK CLI probe
+        working-directory: api
+        run: ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --lib ES2023,DOM,DOM.Iterable --types node scripts/e2e-upload-cli.ts
+      - run: npm run build --prefix app
+      - name: Build API and bundle both Workers without deploying
+        working-directory: api
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          npm run build
+          ./node_modules/.bin/wrangler deploy --dry-run --config wrangler.dev.jsonc --outdir "$RUNNER_TEMP/worker"
+          ./node_modules/.bin/wrangler deploy --dry-run --config wrangler.prod.jsonc --outdir "$RUNNER_TEMP/worker-prod"
+      - name: Regenerate and verify public docs, spec and SDK
+        run: |
+          npm run docs:check --prefix api
+          git diff --exit-code -- api/openapi.json sdk/src
+          test -z "$(git ls-files --others --exclude-standard -- sdk/src)"
+      - name: Public API compatibility
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          ALLOWED: ${{ contains(github.event.pull_request.labels.*.name, 'api-breaking') }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node api/scripts/check-api-contract.mjs --self-test
+          head=$GITHUB_SHA
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
+            # HEAD in the build checkout is GitHub's synthetic merge. Compare
+            # the actual PR head against its merge-base, not the updated main.
+            head=$PR_HEAD; BASE=$(git merge-base "$head" "$BASE")
+          else
+            repo="repos/$GITHUB_REPOSITORY"
+            prs=$(gh api --paginate --slurp "$repo/commits/$head/pulls?per_page=100")
+            pr=$(jq -r --arg sha "$head" --arg repo "$GITHUB_REPOSITORY" '[.[][] | select(.merged_at and .base.repo.full_name == $repo and .base.ref == "main" and .merge_commit_sha == $sha and any(.labels[]; .name == "api-breaking"))][0].number // empty' <<< "$prs")
+            ALLOWED=false
+            if [[ -n $pr ]] && git merge-base --is-ancestor "$BASE" "$head"; then
+              commits=$(git rev-list "$BASE..$head"); ALLOWED=true
+              for sha in $commits; do
+                associated=$(gh api --paginate --slurp "$repo/commits/$sha/pulls?per_page=100")
+                if ! jq -e --argjson pr "$pr" 'any(.[][]; .number == $pr)' <<< "$associated" >/dev/null; then ALLOWED=false; break; fi
+              done
+            fi
+          fi
+          git show "$BASE:api/openapi.json" > "$RUNNER_TEMP/base.json"
+          git show "$head:api/openapi.json" > "$RUNNER_TEMP/head.json"
+          args=(); if [[ $ALLOWED == true ]]; then args+=(--allow-breaking); fi
+          node api/scripts/check-api-contract.mjs "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" "${args[@]}"
+
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_PASSWORD: fixture-admin
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: |
+            api/package-lock.json
+            .github/s3-fixture/package-lock.json
+      - run: npm ci --prefix api --no-audit --no-fund
+      - run: npm ci --prefix .github/s3-fixture --no-audit --no-fund
+      - name: Run all acceptance tests with isolated database and object storage
+        run: bash ../.github/scripts/acceptance.sh
+        working-directory: api
