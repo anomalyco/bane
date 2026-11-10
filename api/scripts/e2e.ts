@@ -1,8 +1,10 @@
 // Public client only: no database, dashboard session, provider credentials or test-mode shortcuts.
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { appendFileSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { execFile, execFileSync } from 'node:child_process';
+import { appendFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { promisify } from 'node:util';
+import { assertResponse, contract } from './e2e-contract.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { crc32, deflateSync } from 'node:zlib';
 import * as sdk from '../../sdk/src/sdk.gen.js';
@@ -13,9 +15,9 @@ type Op = keyof typeof sdk;
 const dashboard = 'Requires a signed-in dashboard session, not an API key.';
 const shared = 'Would change shared domain, routing, provider or workspace configuration.';
 const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subdomain fixture.';
-const byoV2 = 'Bring-your-own AWS v2 is behind MX_BYO_V2 and needs a non-platform AWS account, not this Hosted workspace.';
+const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
-const SKIP: Partial<Record<Op, string>> = {
+const safeModeSkips: Partial<Record<Op, string>> = {
   listMcpConnections: dashboard, revokeMcpConnection: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
@@ -38,30 +40,45 @@ const SKIP: Partial<Record<Op, string>> = {
   getInboundSubdomain: subdomain,
   refreshConnectionScan: byoV2, importConnectionDomains: byoV2, getConnectionRegionStatus: byoV2,
 };
+const destructive = process.env.BANE_E2E_ALLOW_DESTRUCTIVE === '1';
+const SKIP: Partial<Record<Op,string>> = destructive ? {
+  createWorkspace: 'Google dashboard only; no public delete for a newly created workspace.',
+  createConnection: 'Would replace or reconfigure the sole shared Hosted connection; happy path requires a dashboard owner.',
+  deleteConnection: 'Would disconnect the fixture and release shared domain claims if authorization regressed.',
+  provisionRegion: 'Queues real AWS resource provisioning; no run-owned region or rollback.',
+  configureRegionAutoValidation: 'Changes SES validation behavior for shared configuration sets; no run-owned configuration set.',
+  disableInboundDomain: 'Would disable receiving on the shared MX fixture if the Hosted guard regressed.',
+  createInboundSubdomain: 'Hosted receiving has no wildcard claim; creating the first child could enable catch-all routing on the shared fixture.',
+  completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating Google session for the success flow.',
+  receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
+} : safeModeSkips;
 
 const started = Date.now();
 const prefix = `e2e-${started}-${randomUUID().slice(0, 12)}`;
-// Each installation has its own verified E2E fixture domain; the defaults are production's.
-const domain = process.env.OPENSEND_E2E_DOMAIN || 'e2e.opensend.mx', domainId = process.env.OPENSEND_E2E_DOMAIN_ID || 'dom_1aa89a5a687348e89699f5cd97f5496b', region = process.env.OPENSEND_E2E_REGION || 'us-east-2';
+// Workflows supply the verified domain and ID for their own installation.
+const setting = (suffix: string) => process.env[`BANE_E2E_${suffix}`] ?? process.env[`OPENSEND_E2E_${suffix}`];
+const domain = setting('DOMAIN') ?? 'e2e.bane.mx', domainId = setting('DOMAIN_ID') ?? 'dom_1aa89a5a687348e89699f5cd97f5496b', region = setting('REGION') ?? 'us-east-2';
 const from = `${prefix}@${domain}`, inbox = `${prefix}-in@${domain}`;
 // SES supports +labels on all three mailboxes. Never reuse a real contact or retained suppression.
 const simulator = (kind: 'success' | 'bounce' | 'complaint', label = '') => `${kind}+${prefix}${label}@simulator.amazonses.com`;
 const success = simulator('success'), singleSuccess = simulator('success', '-single'), bounce = simulator('bounce'), complaint = simulator('complaint');
-const subject = `OpenSend MX E2E ${prefix}`, text = `OpenSend MX delivery check ${prefix}.`;
+const subject = `Bane E2E ${prefix}`, text = `Bane delivery check ${prefix}.`;
 const html = `<p>${text}</p>`;
-const webhookUrl = 'https://httpbin.org/status/204';
-const key = process.env.OPENSEND_E2E_API_KEY;
-const base = new URL(process.env.OPENSEND_E2E_URL || 'https://opensend.mx');
+const webhookUrl = 'https://example.com/';
+const key = setting('API_KEY');
+const base = new URL(setting('URL') ?? 'https://bane.mx');
 const client = createClient({ baseUrl: base.origin, redirect: 'error', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
-const openapi: { paths: Record<string, Record<string, { operationId: string }>> } = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8'));
-const contract = new Set(Object.values(openapi.paths).flatMap(path => Object.values(path).map(op => op.operationId)));
 const attempted = new Set<Op>();
+const successResponses = new Set<Op>();
+const errorResponses = new Set<Op>();
+const providerAccepted = new Set<string>();
+let sendBudget = 0;
 type Step = { name: string; operationIds: Op[]; status: 'pass' | 'fail'; ms: number; requestId?: string | null; error?: string };
 const steps: Step[] = [];
-const ctx = new AsyncLocalStorage<{ last?: Op; requestId: string | null; ops: Set<Op> }>();
+const ctx = new AsyncLocalStorage<{ last?: string; requestId: string | null; ops: Set<Op> }>();
 const cleanups: { name: string; fn: () => Promise<unknown> }[] = [];
 const defer = (name: string, fn: () => Promise<unknown>) => cleanups.push({ name, fn });
-let deadline = started + 205_000, failures = 0;
+let deadline = started + 155_000, failures = 0;
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
@@ -79,11 +96,27 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   const state = ctx.getStore();
   if (state) { state.last = op; state.requestId = null; state.ops.add(op); }
   attempted.add(op);
+  // Count pessimistically: replays, conflicts and tomorrow's canceled campaign also reserve
+  // capacity before the request. Never assume a failed transport implies nothing was sent.
+  if (['sendEmail','sendEmailBatch','sendCampaign','testCampaign','scheduleCampaign','createInboundThread','replyToInboundThread'].includes(op)) {
+    sendBudget += op === 'sendEmailBatch' ? (input as Input<'sendEmailBatch'>).body.emails.length : 1;
+    check(sendBudget <= 25, 'refusing to exceed 25 live recipient admissions');
+  }
   // Keep the generated method's input/output tied to its key; no handwritten route or schema.
   const call = sdk[op] as (opts: Input<K>) => ReturnType<typeof sdk[K]>;
-  const result = await call({ ...input, client: input.client ?? client, signal: AbortSignal.timeout(ms) });
+  const result = await call({ ...input, client: input.client ?? client, signal: AbortSignal.timeout(ms), fetch: async (request: Request) => {
+    const response = await fetch(request);
+    if (state) state.requestId = response.headers.get('x-request-id');
+    return response;
+  }});
   const apiError = 'error' in result ? result.error?.error : undefined;
   if (state) state.requestId = result.response?.headers.get('x-request-id') ?? apiError?.requestId ?? null;
+  if (result.response) {
+    assertResponse(op,result.response.status,result.response.headers.get('content-type'),result.response.ok ? result.data : 'error' in result ? result.error : undefined);
+    const requestId = result.response.headers.get('x-request-id');
+    check(requestId && (!apiError || apiError.requestId === requestId),`${op}: missing or mismatched request ID`);
+    (result.response.ok ? successResponses : errorResponses).add(op);
+  }
   // Never serialize SDK errors: request objects, tokens, and unrelated mail can all be sensitive.
   if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code);
   return result.data as Output<K>;
@@ -107,7 +140,7 @@ async function step<T>(name: string, work: () => Promise<T>) {
     } catch (error) {
       failures++;
       const message = error instanceof Error ? error.message : 'unexpected failure';
-      steps.push({ name, operationIds: [...trace.ops], status: 'fail', ms: Date.now() - start, requestId: trace.requestId, error: message });
+      steps.push({ name, operationIds: [...trace.ops], status: 'fail', ms: Date.now() - start, requestId: trace.requestId, error: `${ctx.getStore()?.last ?? 'local'}: ${message}` });
       console.error(`✗ ${name} (${Date.now() - start} ms): ${message} [${ctx.getStore()?.last ?? 'local'} requestId=${trace.requestId ?? 'unavailable'}]`);
     }
   });
@@ -143,19 +176,81 @@ async function workspaceReads() {
   await expectDenial(() => api('getSesSettings', { query: { region } }), 403, 'SHARED_ACCOUNT_PRIVATE');
   await expectDenial(() => api('discoverRegion', { path: { region } }), 409, 'CONNECTION_MANAGED_REGION');
 }
+async function devBoundaries() {
+  // Valid inputs, nonexistent IDs where possible. A 403/404 covers isolation, NOT the
+  // dashboard/BYO happy path: report these operations separately from 2xx coverage.
+  const fake = {id:prefix}, path = {id:domainId}, child = {...path, subdomainId:prefix};
+  const invite = {email:simulator('success','-invite'),role:'member'} as const;
+  // The generated SDK correctly does not attach bearer auth to cookie-only routes.
+  // Explicitly present the real E2E API key here to test 403, not anonymous 401.
+  const apiKeyClient = createClient({baseUrl:base.origin,redirect:'error',headers:{Authorization:`Bearer ${key}`}});
+  async function denied<K extends Op>(op: K, input: Input<K>, status = 403, code = 'DASHBOARD_AUTH_REQUIRED') {
+    await step(`${op}: rejects unauthorized or invalid input`,()=>expectDenial(()=>api(op,{...input,client:apiKeyClient}),status,code));
+  }
+  // Intentionally sequential: don't issue a burst of requests against dashboard endpoints.
+  for (const op of ['listWorkspaces','listWorkspaceMembers','listWorkspaceInvitations','listMcpConnections'] as const) await denied(op,{});
+  await denied('renameCurrentWorkspace',{body:{name:'E2E'}});
+  await denied('inviteWorkspaceMember',{body:invite});
+  await denied('createWorkspaceInvitation',{body:invite});
+  await denied('revokeWorkspaceInvitation',{query:fake});
+  await denied('acceptWorkspaceInvitation',{path:fake,headers:{Origin:base.origin}});
+  await denied('updateWorkspaceMember',{path:fake,body:{role:'member'}});
+  await denied('removeWorkspaceMember',{path:fake});
+  await denied('revokeMcpConnection',{path:fake});
+  await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');
+  await denied('revokeAgentToken',{path:fake},404,'NOT_FOUND');
+  for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');
+  await denied('verifyConnection',{body:{awsAccountId:'000000000000'}},403,'PERMISSION_DENIED');
+  await denied('importConnectionDomains',{body:{revision:1,candidateIds:[prefix],confirm:true}},403,'PERMISSION_DENIED');
+  await denied('getDomainDnsSetup',{path},403,'PERMISSION_DENIED');
+  await denied('configureDomainMailFrom',{path,body:{mailFromDomain:domain}},422,'MAIL_FROM_DOMAIN_INVALID');
+  await denied('deleteDomain',{path:fake},404,'NOT_FOUND');
+  await denied('configureRegion',{path:{region},body:{enabled:true}},409,'CONNECTION_MANAGED_REGION');
+  await denied('getInboundSubdomain',{path:child},404,'NOT_FOUND');
+  await denied('updateInboundSubdomain',{path:child,body:{metadata:{test:prefix}}},404,'NOT_FOUND');
+  await denied('removeInboundSubdomain',{path:child},409,'HOSTED_RECEIVING_MANAGED');
+  const row = await api('getInboundDomain',{path});
+  check(row.status === 'active','refusing to enable an inactive shared fixture');
+  await denied('updateInboundDomain',{path,body:{acceptSubdomains:row.subdomains.enabled}},409,'HOSTED_RECEIVING_MANAGED');
+  check((await api('enableInboundDomain',{path,body:{force:false}})).status === 'active','already-enabled Hosted domain changed state');
+  check((await api('updateWorkspaceSettings',{body:{name:'E2E'}})).name === 'E2E','idempotent workspace update failed');
+  const existing = await api('createDomain',{body:{name:domain}});
+  check('id' in existing && existing.id === domainId,'re-adding the verified claim allocated another domain');
+  await denied('getCurrentIdentity',{headers:{'X-Bane-Environment':'test','X-OpenSend-Environment':'test'}},400,'ENVIRONMENT_REMOVED');
+  await denied('createContact',{body:{email:'not-an-email'}},422,'VALIDATION_FAILED');
+}
+
+async function regionalSend() {
+  const va = 'e2e-va.bane.mx', sendRegion = 'us-east-1', sender = `${prefix}@${va}`, to = simulator('success','-va');
+  const page = await api('listDomains',{query:{region:sendRegion,refresh:'false',limit:10}});
+  check(page.data.some(d => d.name === va && d.region === sendRegion && d.ready),'Virginia verified sending fixture not ready');
+  const receipt = await api('sendEmail',{headers:idKey('virginia'),body:{from:sender,to:[to],region:sendRegion,subject,text}});
+  await outcome(receipt.id,to,'delivered',sender,sendRegion);
+}
+
+async function mcpChallenge() {
+  const trace = ctx.getStore()!; trace.last='POST /mcp'; trace.requestId=null;
+  // /mcp accepts an OAuth access token (ES256 JWT), not the API's delegated agent tokens.
+  const res = await fetch(new URL('/mcp',base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(12000),headers:{'content-type':'application/json',accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
+  trace.requestId=res.headers.get('x-request-id');
+  const challenge=res.headers.get('www-authenticate') ?? '';
+  const rpc = await res.json() as {jsonrpc?:string;error?:{code:number}};
+  check(res.status===401 && rpc.jsonrpc==='2.0' && rpc.error?.code===-32000 && challenge.includes(`${base.origin}/.well-known/oauth-protected-resource/mcp`) && /(?:bane|opensend):read/.test(challenge),'MCP OAuth discovery challenge changed');
+}
 const idKey = (name: string) => ({ 'Idempotency-Key': `${prefix}:${name}` });
 function message(to: string): SendEmailInput {
   check([singleSuccess, bounce, complaint].includes(to), 'refusing a recipient outside this run');
   // Add send-route header coverage here when the deployed contract supports it.
   return { region, from, to: [to], subject, text };
 }
-async function outcome(id: string, recipient: string, status: 'delivered' | 'bounced' | 'complained') {
+async function outcome(id: string, recipient: string, status: 'delivered' | 'bounced' | 'complained', sender = from, sendRegion = region) {
   const email = await until(`${id} → ${status}`, () => api('getEmail', { path: { id } }), e => {
-    check(!e.simulated && e.id === id && e.from === from && e.to.length === 1 && e.to[0] === recipient, `unexpected envelope or simulated email ${id}`);
+    check(!e.simulated && e.id === id && e.from === sender && e.region === sendRegion && e.to.length === 1 && e.to[0] === recipient, `unexpected region, envelope or simulated email ${id}`);
     check(!['rejected', 'canceled', 'suppressed', 'rendering_failed', 'acceptance_unknown'].includes(e.status), `${id}: ${e.status} ${e.errorCode ?? ''}`);
     return e.status === status;
   }, e => `${e.status} ${e.errorCode ?? ''}`);
   check(email.providerId && !email.providerId.startsWith('sim_'), `missing live SES id for ${id}`);
+  providerAccepted.add(email.providerId);
   const event = { delivered: 'delivery', bounced: 'bounce', complained: 'complaint' }[status];
   const events = await api('listEmailEvents', { path: { id } });
   check(events.data.some(e => e.type === event && !e.simulated && e.emailId === id), `${id}: no live ${event} event`);
@@ -166,6 +261,7 @@ async function direct() {
   check(!a.simulated && a.status === 'queued', 'expected a live queued receipt');
   const b = await api('sendEmail', options);
   check(a.id === b.id, 'idempotency replay created another email');
+  if (destructive) await expectDenial(() => api('sendEmail', { ...options, body: { ...options.body, subject: `${subject}-conflict` } }), 409, 'IDEMPOTENCY_CONFLICT');
   await outcome(a.id, singleSuccess, 'delivered');
   const content = await api('getEmailContent', { path: { id: a.id } });
   check(content.text === text && content.subject === subject && !content.simulated, 'stored email content differs');
@@ -187,6 +283,15 @@ async function batch() {
     step('SES bounce feedback', () => outcome(data[0].id, bounce, 'bounced')),
     step('SES complaint feedback', () => outcome(data[1].id, complaint, 'complained')),
   ]);
+  if (destructive) {
+    const page = await api('listContacts', {query:{ email:bounce, suppressed:'true' }});
+    check(page.data.length === 1 && page.data[0].email === bounce && page.data[0].suppressed,'permanent SES bounce did not suppress this contact');
+    const replay = await api('sendEmail', {body:message(bounce), headers:idKey('post-bounce')});
+    const blocked = await until('local suppression before SES',()=>api('getEmail',{path:{id:replay.id}}), row=>{
+      check(!row.providerId && ['queued','attempting','suppressed'].includes(row.status),'suppressed recipient reached SES'); return row.status === 'suppressed';
+    },row=>row.status);
+    check(blocked.to[0] === bounce && !blocked.simulated,'wrong suppressed recipient');
+  }
 }
 
 async function audience() {
@@ -308,19 +413,20 @@ async function template() {
 function retireCampaign(id: string) {
   const path = { id };
   // Only draft/unreleased failed campaigns can be deleted. Archive dispatch history instead.
-  defer(`retire campaign ${id}`, async () => {
-    const row = await api('getCampaign', { path });
-    if (row.state === 'draft' || (row.state === 'failed' && !row.delivery?.expanded)) {
-      check((await api('deleteCampaign', { path })).deleted, 'draft not deleted');
-    } else {
-      if (row.state !== 'done' && row.state !== 'canceled') {
-        try { await api('cancelCampaign', { path }); }
-        catch (error) { if ((await api('getCampaignState', { path })).state !== 'done') throw error; }
-      }
-      check((await api('setCampaignArchived', { path, body: { archived: true } })).archivedAt, 'terminal campaign not archived');
-    }
-  });
+  defer(`retire campaign ${id}`, () => cleanCampaign(id));
   return path;
+}
+async function cleanCampaign(id: string) {
+  const path = {id}, row = await api('getCampaign', { path });
+  if (row.state === 'draft' || (row.state === 'failed' && !row.delivery?.expanded)) {
+    check((await api('deleteCampaign', { path })).deleted, 'draft not deleted');
+  } else {
+    if (row.state !== 'done' && row.state !== 'canceled') {
+      try { await api('cancelCampaign', { path }); }
+      catch (error) { if ((await api('getCampaignState', { path })).state !== 'done') throw error; }
+    }
+    check((await api('setCampaignArchived', { path, body: { archived: true } })).archivedAt, 'terminal campaign not archived');
+  }
 }
 type Audience = { listId: string; segmentId: string };
 async function scheduledCampaign(audience: Audience) {
@@ -378,6 +484,12 @@ async function campaign(audience: Audience, templateId?: string) {
     const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
     check(page.includes('<form method="post">'), 'GET must display a confirmation form');
     check((await api('previewCampaignAudience', { path })).eligible === 1, 'GET changed audience consent');
+    if (destructive) {
+      const page = await api('unsubscribeOneClick',{path:{token},parseAs:'text'});
+      check(page.includes('unsubscribed'),'one-click did not confirm opt-out');
+      const [row] = (await api('listContacts',{query:{email:success}})).data;
+      check(row?.email === success && row.marketingConsent === 'unsubscribed','one-click did not opt out this run’s contact');
+    }
   });
   await outcome(test.id, success, 'delivered');
   // Cancellation must not retroactively retract a finished, delivered campaign.
@@ -391,7 +503,7 @@ async function campaign(audience: Audience, templateId?: string) {
 
 async function webhook() {
   // Synthetic tests bypass pause, actual workspace subscriptions do not. No customer events
-  // or signing secrets leave MX. httpbin's fixed 204 endpoint is not a public request inbox.
+  // or signing secrets leave the workspace. example.com is not a public request inbox.
   // A throwaway bearer value: proves custom headers are stored, masked on read and kept on edit.
   const bearer = `Bearer ${randomUUID()}`;
   const item = await api('createWebhook', { body: { url: webhookUrl, description: prefix, eventTypes: ['email.delivered'], paused: true, headers: [{ name: 'Authorization', value: bearer }] } });
@@ -410,7 +522,7 @@ async function webhook() {
   const test = await api('testWebhook', { path });
   const detail = await until('synthetic signed webhook HTTP attempt', () => api('getWebhookDelivery', { path: { ...path, deliveryId: test.id } }), d => d.attempts.some(a => a.statusCode !== null), d => `${d.status}, attempts=${d.attemptCount} ${d.lastError ?? ''}`);
   // Even an HTTP error proves the request reached a receiver. Do not gate an MX deploy on
-  // httpbin's uptime; a DNS/connect/signing failure (no HTTP response) does not qualify.
+  // a 2xx status; a DNS/connect/signing failure (no HTTP response) does not qualify.
   check(detail.synthetic && detail.webhookId === item.id && detail.payload.id === detail.eventId && detail.attempts.some(a => a.deliveryId === test.id && a.statusCode !== null && a.statusCode >= 100 && a.statusCode < 600), `no HTTP attempt recorded for synthetic delivery ${test.id}`);
   check(hasId(await api('listWebhookDeliveries', { path }), test.id), 'signed test attempt not listed');
   // Retry only our synthetic probe. HTTP errors can already have an automatic retry pending;
@@ -432,6 +544,29 @@ async function apiKey() {
   defer(`revoke throwaway key ${item.id}`, async () => check((await api('revokeApiKey', { path })).revoked, 'key not revoked'));
   check(item.name === prefix && item.domains.length === 1 && item.domains[0] === domain && item.permissions.join() === 'read', 'wrong child key scope');
   check(hasId(await api('listApiKeys', { query: { includeRevoked: 'false', limit: 100 } }), item.id), 'throwaway key not listed');
+}
+
+const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+async function cliUpload() {
+  const key = await api('createApiKey',{body:{name:`${prefix}-cli`,permissions:['send'],domains:[domain]}});
+  defer(`revoke CLI key ${key.id}`,()=>api('revokeApiKey',{path:{id:key.id}}));
+  const file=`${prefix}.txt`, bytes=Buffer.from(text);
+  writeFileSync(file,bytes,{flag:'wx',mode:0o600});
+  const trace=ctx.getStore()!; trace.last='SDK CLI POST /v1/attachments/upload'; trace.requestId=null;
+  try {
+    const cmd = promisify(execFile);
+    const {stdout,stderr} = await cmd(process.execPath,['--import','tsx','scripts/e2e-upload-cli.ts',file,base.origin],{env:{PATH:process.env.PATH,CLI_TEMP_KEY:key.secret},timeout:16000}).catch((err: {stderr?:string})=>{
+      trace.requestId = err.stderr?.match(/requestId=(req_[a-zA-Z0-9_-]+)/)?.[1] ?? null;
+      throw new Error('SDK upload CLI failed; build sdk first (child stderr withheld)');
+    });
+    trace.requestId=stderr.match(/requestId=(req_[a-zA-Z0-9_-]+)/)?.[1] ?? null;
+    let uploaded: {filename?:unknown; size?:unknown; id?:unknown} | null;
+    try { uploaded = JSON.parse(stdout); } catch { throw new Error('Invalid SDK upload CLI JSON (stdout withheld)'); }
+    check(uploaded && typeof uploaded === 'object','Invalid SDK upload CLI receipt');
+    check(uploaded.filename === file && uploaded.size === bytes.length && typeof uploaded.id === 'string','CLI receipt differs');
+    const path={id:uploaded.id}; defer(`delete CLI upload ${path.id}`,()=>api('deleteAttachment',{path}));
+    check(hash(Buffer.from((await api('getAttachmentContent',{path})).content,'base64'))===hash(bytes),'CLI SHA-256 mismatch');
+  } finally {unlinkSync(file);}
 }
 
 async function inboundKey(addressId: string, otherId: string) {
@@ -460,14 +595,19 @@ async function inboundWebhook(addressId: string, threadId: string) {
   const rotated = await api('rotateInboundWebhookSecret', { path });
   check(rotated.secret.startsWith('whsec_') && rotated.secret !== item.secret, 'inbound webhook secret did not rotate');
   const before = await api('listInboundEvents', { query: { addressId, types: 'thread.updated' } });
-  const active = await api('updateInboundWebhook', { path, body: { paused: false, addressIds: [addressId], eventTypes: ['thread.updated'] } });
-  check(!active.paused && active.addressIds?.[0] === addressId && active.addressIds.length === 1 && active.eventTypes.join() === 'thread.updated', 'inbound subscription scope changed');
-  const state = await api('updateInboundThread', { path: { threadId }, body: { addressId, addLabels: [prefix] } });
-  check(state.labels.includes(prefix), 'test label was not applied');
-  const events = await api('listInboundEvents', { query: { addressId, types: 'thread.updated', after: before.cursor } });
-  const event = events.data.find(e => e.addressId === addressId && e.threadId === threadId && e.type === 'thread.updated');
-  check(event, 'no matching thread metadata event');
-  await until('scoped thread metadata HTTP attempt', () => api('listInboundWebhookDeliveries', { path }), page => page.data.some(d => d.webhookId === item.id && d.eventId === event.id && d.attemptCount > 0 && d.lastStatusCode !== null), page => `${page.data.length} deliveries`);
+  try {
+    const active = await api('updateInboundWebhook', { path, body: { paused: false, addressIds: [addressId], eventTypes: ['thread.updated'] } });
+    check(!active.paused && active.addressIds?.[0] === addressId && active.addressIds.length === 1 && active.eventTypes.join() === 'thread.updated', 'inbound subscription scope changed');
+    const state = await api('updateInboundThread', { path: { threadId }, body: { addressId, addLabels: [prefix] } });
+    check(state.labels.includes(prefix), 'test label was not applied');
+    const events = await api('listInboundEvents', { query: { addressId, types: 'thread.updated', after: before.cursor } });
+    const event = events.data.find(e => e.addressId === addressId && e.threadId === threadId && e.type === 'thread.updated');
+    check(event, 'no matching thread metadata event');
+    await until('scoped thread metadata HTTP attempt', () => api('listInboundWebhookDeliveries', { path }), page => page.data.some(d => d.webhookId === item.id && d.eventId === event.id && d.attemptCount > 0 && d.lastStatusCode !== null), page => `${page.data.length} deliveries`);
+  } finally {
+    // Don't wait for unrelated campaign polling or end-of-run cleanup to stop delivery.
+    await step('Pause the run-owned inbound webhook',async()=>check((await api('updateInboundWebhook',{path,body:{paused:true}})).paused,'webhook still active'));
+  }
 }
 
 async function inbound() {
@@ -494,10 +634,17 @@ async function inbound() {
   await api('updateInboundAddress', { path: { addressId }, body: { displayName: prefix } });
   check((await api('getInboundAddress', { path: { addressId } })).displayName === prefix, 'receiving address edit not persisted');
   check(hasId(await api('listInboundAddresses', { query: { domain, q: prefix } }), addressId), 'receiving address not listed');
+  if (destructive) {
+    const query = {domain,q:prefix,limit:1};
+    const a = await api('listInboundAddresses',{query});
+    check(a.data.length===1 && a.nextCursor,'first address page missing cursor');
+    const b = await api('listInboundAddresses',{query:{...query,cursor:a.nextCursor}});
+    check(b.data.length===1 && !b.nextCursor && [a.data[0].id,b.data[0].id].sort().join() === [sender.id,receiver.id].sort().join(),'cursor duplicated, skipped or leaked an address');
+  }
   const events = await api('listInboundEvents', { query: { addressId, types: 'message.received' } });
   const sent = await api('createInboundThread', {
     headers: idKey('self-loop'), body: { addressId: sender.id, from, to: [inbox], subject, text,
-      attachments: [{ filename: `${prefix}.txt`, content: Buffer.from(prefix).toString('base64') }] },
+      attachments: [{ filename: `${prefix}.png`, contentType:'image/png', content: pixelPng().toString('base64') }] },
   });
   check(sent.direction === 'outbound' && sent.from.address === from && sent.to.length === 1 && sent.to[0].address === inbox, 'wrong self-loop envelope');
   const arrival = await until('new inbound message event', () => api('listInboundEvents', { query: { addressId, types: 'message.received', after: events.cursor } }), e => e.data.some(v => v.addressId === addressId && v.type === 'message.received'), e => `${e.data.length} matching events`);
@@ -506,9 +653,19 @@ async function inbound() {
   const path = { threadId: event.threadId };
   const msg = await api('getInboundMessage', { path: { messageId: event.messageId }, query: { addressId } });
   check(msg.direction === 'inbound' && msg.from.address === from && msg.subject === subject && msg.text.includes(text) && msg.to.some(a => a.address === inbox), 'inbound message differs from sent content');
-  check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.txt`, 'inbound attachment missing');
+  check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.png`, 'inbound attachment missing');
   const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
   check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
+  if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
+    const url = new URL(link.url);
+    check(/(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port && !url.username && !url.password,'refusing non-S3 attachment URL');
+    const res=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(12000)});
+    const trace=ctx.getStore()!; trace.last='S3 GetObject'; trace.requestId=res.headers.get('x-amz-request-id');
+    check(res.ok && hash(new Uint8Array(await res.arrayBuffer()))===hash(pixelPng()),'inbound attachment SHA-256 mismatch');
+    const imported=await api('importTemplateImage',{body:{url:link.url,contentId:prefix,filename:`${prefix}.png`}});
+    const path={id:imported.asset.id}; defer(`delete imported PNG ${path.id}`,()=>api('deleteTemplateAsset',{path}));
+    check(imported.src===`cid:${prefix}` && hash(Buffer.from((await api('getTemplateAssetContent',{path})).content,'base64'))===hash(pixelPng()),'import changed image bytes or CID');
+  });
   check(hasId(await api('listInboundThreads', { query: { addressId, q: prefix } }), path.threadId), 'arrived thread not listed');
   check(hasId(await api('listInboundMessages', { query: { addressId, direction: 'inbound', q: prefix } }), msg.id), 'arrived message not listed');
   check((await api('getInboundThread', { path, query: { addressId } })).messages.some(m => m.id === msg.id), 'message absent from thread');
@@ -522,11 +679,18 @@ async function inbound() {
   const received = replies.data.find(m => m.from.address === inbox && m.threadId === sent.threadId)!;
   const delivered = await api('getInboundMessage', { path: { messageId: received.id }, query: { addressId: sender.id } });
   check(delivered.text.includes(text) && msg.messageId && delivered.inReplyTo === msg.messageId, 'reply body or In-Reply-To differs');
+  for (const emailId of [sent.emailId,reply.emailId]) {
+    check(emailId,'inbound send missing email ID');
+    const email = await api('getEmail',{path:{id:emailId}});
+    check(!email.simulated && email.providerId,'inbound loop missing provider acceptance'); providerAccepted.add(email.providerId);
+  }
 }
 
 async function prepare() {
-  check(base.protocol === 'https:' && base.href === base.origin + '/', 'OPENSEND_E2E_URL must be a bare HTTPS origin');
-  check(key, 'missing OPENSEND_E2E_API_KEY');
+  check(base.protocol === 'https:' && base.href === base.origin + '/', 'BANE_E2E_URL must be a bare HTTPS origin');
+  check(!destructive || (base.origin === 'https://dev.bane.mx' && domain === 'e2e.bane.mx' && domainId === 'dom_e53755830a0141a5bd6e71e45e942f06' && region === 'us-east-2'),'destructive tests require the exact dev fixture');
+  check(key && domain && domainId, 'missing BANE_E2E_API_KEY, DOMAIN or DOMAIN_ID');
+  check((await api('getWorkspaceSettings',{})).name === 'E2E','refusing non-E2E workspace');
   const me = await api('getCurrentIdentity', {});
   check(me.multiTenant && !me.simulated && me.origin === base.origin && me.connection?.kind === 'shared' && me.connection.region === region && me.connection.state === 'ready' && me.connection.tenant === 'ready', 'expected live MX, ready Hosted mail, us-east-2');
   // Inbound, webhooks, templates, metrics and key management need an unrestricted key; the domain ID
@@ -541,12 +705,88 @@ async function prepare() {
   return true;
 }
 
+// A broad name like "e2e-operator" must NEVER be taken as ownership. The label
+// must be exactly one minted by this suite (including the pre-rename form), and
+// both its embedded timestamp and the server's creation timestamp must be old.
+function staleRun(label: string | null | undefined, createdAt: string) {
+  const m = label?.match(/^(?:(?:Bane|OpenSend MX) E2E )?(e2e-(\d{13})-[a-f0-9]{8}-[a-f0-9]{3})(?:-(?:cli|schedule|attachment|import))?$/);
+  if (!m) return null;
+  const minted = Number(m[2]), created = Date.parse(createdAt), cutoff = started - 30*60_000;
+  return minted < cutoff && created < cutoff && Math.abs(created-minted) < 5*60_000 ? m[1] : null;
+}
+async function pages<T>(read: (cursor?:string)=>Promise<{data:T[]; nextCursor:string|null}>) {
+  const rows:T[] = [], seen=new Set<string>();
+  let cursor:string|undefined;
+  do {
+    const page=await read(cursor); rows.push(...page.data); cursor=page.nextCursor ?? undefined;
+    if (cursor) {check(!seen.has(cursor),'stale-object scan received a duplicate cursor'); seen.add(cursor);}
+  } while(cursor);
+  return rows;
+}
+async function sweepStaleObjects() {
+  // prepare() already checked E2E workspace, live Hosted identity and exact domain ID.
+  // Enumerate each collection BEFORE deleting from it so mutations cannot shift pages.
+  const q={limit:100,search:'e2e-'};
+  for (const k of await pages(cursor=>api('listApiKeys',{query:{cursor,limit:100,includeRevoked:'false'}}))) {
+    const run=staleRun(k.name,k.createdAt);
+    if (run && k.domains.length===1 && k.domains[0]===domain && k.permissions.length===1 &&
+        ((k.name===run && k.permissions[0]==='read') || (k.name===`${run}-cli` && k.permissions[0]==='send'))) {
+      check((await api('revokeApiKey',{path:{id:k.id}})).revoked,'stale API key not revoked');
+    }
+  }
+  for (const k of await pages(cursor=>api('listInboundKeys',{query:{cursor,limit:100,includeRevoked:'false'}}))) {
+    if (staleRun(k.name,k.createdAt)===k.name && k.addressIds?.length===1 && k.permissions.join()==='read')
+      check((await api('revokeInboundKey',{path:{id:k.id}})).revokedAt,'stale inbound key not revoked');
+  }
+  for (const h of await pages(cursor=>api('listWebhooks',{query:{limit:100,cursor}}))) {
+    if (staleRun(h.description,h.createdAt) && h.eventTypes.join()==='email.delivered')
+      check((await api('deleteWebhook',{path:{id:h.id}})).deleted,'stale webhook not deleted');
+  }
+  for (;;) {
+    // This endpoint returns at most 100 hooks and has no cursor. Drain complete
+    // pages only while we make progress; never silently miss a hidden active hook.
+    const {data}=await api('listInboundWebhooks',{});
+    const stale=data.filter(h=>staleRun(h.description,h.createdAt) && h.addressIds?.length===1 && h.eventTypes.join()==='thread.updated');
+    for (const h of stale)
+      check((await api('deleteInboundWebhook',{path:{id:h.id}})).ok,'stale inbound webhook not deleted');
+    if (data.length<100) break;
+    check(stale.length,'inbound webhook scan hit API limit of 100 with no stale fixture on this page; inspect E2E workspace');
+  }
+  // Retire live dispatch before deleting its template or audience. Already-archived
+  // dispatch history is immutable; listCampaigns defaults to unarchived rows only.
+  for (const c of await pages(cursor=>api('listCampaigns',{query:{...q,cursor}}))) {
+    const run=staleRun(c.draft.name,c.createdAt);
+    if (run && c.draft.from===`${run}@${domain}` && c.draft.region===region) await cleanCampaign(c.id);
+  }
+  for (const archived of ['true','false'] as const) {
+    for (const t of await pages(cursor=>api('listCampaignTemplates',{query:{...q,cursor,archived}}))) {
+      if (staleRun(t.name,t.createdAt)===t.name) check((await api('deleteCampaignTemplate',{path:{id:t.id}})).deleted,'stale template not deleted');
+    }
+  }
+  for (const s of await pages(cursor=>api('listSegments',{query:{...q,cursor}}))) {
+    const run=staleRun(s.name,s.createdAt);
+    if (run && 'value' in s.rule && s.rule.value===`success+${run}@simulator.amazonses.com`)
+      check((await api('deleteSegment',{path:{id:s.id}})).deleted,'stale segment not deleted');
+  }
+  for (const l of await pages(cursor=>api('listContactLists',{query:{...q,cursor}}))) {
+    if (staleRun(l.name,l.createdAt)===l.name) check((await api('deleteContactList',{path:{id:l.id}})).deleted,'stale list not deleted');
+  }
+  for (const c of await pages(cursor=>api('listContacts',{query:{...q,cursor}}))) {
+    const run=staleRun(c.name,c.createdAt);
+    if (run && ['bounce','complaint','success'].some(kind=>c.email===`${kind}+${run}@simulator.amazonses.com`))
+      check((await api('deleteContact',{path:{id:c.id}})).deleted,'stale simulator contact not deleted');
+  }
+  return true;
+}
+
 async function run() {
   console.log(`${prefix} ${base.origin}`);
   try {
     const ready = await step('Live identity and verified domain', prepare);
     if (!ready) return;
+    if (!await step('Retire interrupted E2E fixtures older than 30 minutes',sweepStaleObjects)) return;
     await Promise.all([
+      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP HTTP authorization challenge',mcpChallenge)] : []),
       step('Single send, replay, delivery and email log', direct),
       step('Batch send', batch), step('Attachment upload, bytes and draft use', attachment),
       step('Temporary inbound addresses, self-loop, thread and reply', inbound),
@@ -592,11 +832,12 @@ function finish() {
   }
   const skipped = Object.keys(SKIP).length;
   const covered = new Set(steps.filter(s => s.status === 'pass').flatMap(s => s.operationIds));
-  const headline = `MX E2E ${failures ? 'FAIL' : 'PASS'} — ${covered.size}/${contract.size} operations in passing steps, ${attempted.size} attempted, ${skipped} intentionally skipped, ${missing.length} not reached (${((ended - started) / 1000).toFixed(1)} s)`;
+  const headline = `Bane E2E ${failures ? 'FAIL' : 'PASS'} — ${covered.size}/${contract.size} operations in passing steps, ${attempted.size} attempted, ${skipped} intentionally skipped, ${missing.length} not reached (${((ended - started) / 1000).toFixed(1)} s)`;
   console.log(headline);
-  const commit = process.env.GITHUB_SHA || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const report = { commit, targetUrl: base.origin, run: prefix, start: new Date(started).toISOString(), end: new Date(ended).toISOString(), ms: ended - started,
-    status: failures ? 'fail' : 'pass', steps, coverage: { total: contract.size, passed: [...covered].sort(), attempted: [...attempted].sort(), notReached: missing.sort(), skipped: SKIP, staleSkips: stale } };
+    status: failures ? 'fail' : 'pass', destructive, ses: { observedProviderAcceptances:providerAccepted.size, reservedRecipientBudget:sendBudget }, steps,
+    coverage: { total: contract.size, passed: [...covered].sort(), attempted: [...attempted].sort(), successResponses:[...successResponses].sort(), negativeOnly:[...errorResponses].filter(op=>!successResponses.has(op)).sort(), notReached: missing.sort(), skipped: SKIP, staleSkips: stale } };
   // Atomic replacement also makes a shared working directory safe for concurrent invocations.
   const tmp = `.${prefix}-report.tmp`;
   writeFileSync(tmp, JSON.stringify(report, null, 2) + '\n');
@@ -604,7 +845,9 @@ function finish() {
   if (process.env.GITHUB_STEP_SUMMARY) {
     const escape = (v: string) => v.replaceAll('|', '\\|').replace(/[<>\r\n]/g, ' ');
     const failed = steps.filter(s => s.status === 'fail');
-    const md = [`## ${headline}`, '', ...failed.map(s => `- **${escape(s.name)}**: ${s.name === 'OpenAPI coverage' ? 'See unaccounted operations in the JSON artifact.' : escape(s.error!)} (request ID: \`${s.requestId ?? 'unavailable'}\`)`), '', '<details><summary>Every step</summary>', '', '| Step | Result | ms |', '|---|---|---:|', ...steps.map(s => `| ${escape(s.name)} | ${s.status} | ${s.ms} |`), '', '</details>', ''];
+    const md = [`## ${headline}`, '', `Commit: \`${commit}\`. ${successResponses.size} operations returned a validated success; ${report.coverage.negativeOnly.length} exercised only their error contract.`,
+      `SES: ${providerAccepted.size} distinct provider IDs observed; ${sendBudget}/25 recipient admissions reserved (including replays, suppressed and canceled sends).`, '',
+      ...failed.map(s => `- **${escape(s.name)}**: ${s.name === 'OpenAPI coverage' ? 'See unaccounted operations in the JSON artifact.' : escape(s.error!)} (request ID: \`${s.requestId ?? 'unavailable'}\`)`), '', '<details><summary>Every step</summary>', '', '| Step | Result | ms |', '|---|---|---:|', ...steps.map(s => `| ${escape(s.name)} | ${s.status} | ${s.ms} |`), '', '</details>', ''];
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
   }
   if (failures) process.exitCode = 1;

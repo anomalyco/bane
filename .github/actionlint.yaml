@@ -1,0 +1,9 @@
+# GitHub supports concurrency.queue=max. actionlint 1.7.12 predates that key;
+# keep every other syntax check, including all checks on the CI workflow.
+paths:
+  .github/workflows/deploy-*.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section'
+  .github/workflows/publish-sdk.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section'
