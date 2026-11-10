@@ -2,7 +2,9 @@
 
 Production (`009882681002`, `https://bane.mx`) and dev (`905840579680`, `https://dev.bane.mx`) have separate dedicated accounts. No policy or key is shared between them.
 
-## Bootstrap once per account
+The [hosted Pulumi stacks](../pulumi/README.md) adopt the existing IAM and SES resources and own the new runtime access key. Do not rerun the manual bootstrap or create another key in those accounts. The renderer below remains the policy source for both stacks and the acceptance suite.
+
+## Manual bootstrap reference (non-Pulumi installations)
 
 1. Create `bane-runtime`, an IAM user with no console access or groups.
 2. Render all three customer-managed policies for this account and its canonical origin. From this directory, for example:

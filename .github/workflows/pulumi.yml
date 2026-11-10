@@ -108,21 +108,6 @@ jobs:
             printf 'region = auto\n'
           } >> "$HOME/.aws/config"
 
-          # The Hyperdrive origin's password is never returned by Cloudflare, and
-          # the program ignores origin.password on adoption and updates. Only the
-          # runtime user, host, port and database matter, so the password here is
-          # a placeholder.
-          case "$STAGE" in
-            dev) hyperdrive=67bf6907a42a483da37f4d2256847281 ;;
-            production) hyperdrive=556aba191add406eaa58a0e26eebb6b1 ;;
-            *) echo "::error::unknown stage $STAGE"; exit 1 ;;
-          esac
-          origin=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/hyperdrive/configs/%s"\n' \
-            "$token" "$account" "$hyperdrive" |
-            curl --config - --silent --show-error --fail-with-body --max-time 20 |
-            jq -er '.result.origin | [.user, .host, (.port | tostring), .database] | @tsv')
-          IFS=$'\t' read -r db_user db_host db_port db_name <<< "$origin"
-          echo "BANE_HYPERDRIVE_DATABASE_URL=postgres://${db_user}:placeholder@${db_host}:${db_port}/${db_name}" >> "$GITHUB_ENV"
           echo "::notice::Cloudflare token ready; expires $expires"
 
       - name: Install Pulumi

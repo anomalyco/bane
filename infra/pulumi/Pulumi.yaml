@@ -1,0 +1,3 @@
+name: bane
+description: Shared infrastructure for the hosted Bane Worker
+runtime: bun
