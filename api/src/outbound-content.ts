@@ -2,7 +2,9 @@ import { z } from '@hono/zod-openapi';
 import { Buffer } from 'node:buffer';
 import { ApiError } from './core.js';
 
-// Shared attachment validation for /v1/emails, campaigns, templates and inbound replies.
+// Shared validation for sending, audience/consent and template reply addresses.
+export const mailAddress = (base=z.string()) => base.email({pattern:/^(?!\.)(?!.*\.\.)[a-z0-9_'+.\-]*[a-z0-9_+\-]@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9][a-z0-9-]*[a-z0-9])$/i}).max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).')
+  .refine(v => v.indexOf('@') <= 64 && v.slice(v.indexOf('@')+1).split('.').every(label => label.length <= 63), 'The local part may not exceed 64 bytes or a domain label 63 bytes.');
 
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 // Base64 of 8 MiB plus padding and the line breaks MIME tools and SDKs insert.
@@ -13,8 +15,8 @@ const BANNED_EXTENSIONS = new Set(['ade', 'adp', 'app', 'asp', 'bas', 'bat', 'ce
   'reg', 'scf', 'scr', 'sct', 'shb', 'shs', 'sys', 'ps1', 'ps1xml', 'ps2', 'ps2xml', 'psc1', 'psc2', 'tmp', 'url', 'vb', 'vbe', 'vbs', 'vps', 'vsmacros', 'vss', 'vst', 'vsw', 'vxd', 'ws', 'wsc', 'wsf', 'wsh', 'xnk']);
 
 export const AttachmentFilename = z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/);
-export const AttachmentContentType = z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+(?:\s*;[ -~]*)?$/, 'Use a MIME type such as application/pdf, optionally with parameters.');
-export const AttachmentContentId = z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/);
+export const AttachmentContentType = z.string().max(78).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$/, 'Use a MIME type such as application/pdf, optionally with parameters.');
+export const AttachmentContentId = z.string().min(1).max(78).regex(/^[a-zA-Z0-9_.@-]+$/);
 export const AttachmentDisposition = z.enum(['attachment', 'inline']);
 export const AttachmentMetadata = z.object({ filename: AttachmentFilename, contentType: AttachmentContentType.default('application/octet-stream'), disposition: AttachmentDisposition.default('attachment'), contentId: AttachmentContentId.optional() }).strict();
 export const AttachmentUpload = AttachmentMetadata.extend({ content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB.') }).strict().openapi('AttachmentUpload');

@@ -7,7 +7,7 @@ import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, Del
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
-import { claimedWithWebhooks, enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
+import { claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
@@ -1116,7 +1116,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
-  const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
+  const retry = Boolean(error) && retryable && job.attempts < WEBHOOK_ATTEMPTS;
   const records = sql`attempt AS (INSERT INTO operation_delivery_attempts(id,workspace_id,delivery_id,status_code,error,duration_ms)
     SELECT ${id('wha')},${job.workspaceId},${delivery.delivery_id},${statusCode}::int,${error}::text,${Date.now()-start}::int FROM settled),
     recorded AS (UPDATE operation_deliveries SET attempt_count=attempt_count+1,status=${!error ? 'delivered' : retry ? 'pending' : 'failed'},
@@ -1135,6 +1135,13 @@ function sesFeedbackIdentity(data: Record<string, any>) {
   if (typeof kind !== 'string' || (kind !== 'Subscription' && !Object.hasOwn(sesEvents,kind))) throw new ApiError(422, 'SES_UNSUPPORTED_EVENT', 'Unsupported SES event type.');
   return { providerId, kind };
 }
+// ISPs can omit feedback type on an actual complaint. An explicit non-abuse report
+// (notably not-spam) is an observation, not permission to suppress the recipient.
+function feedbackClass(kind: string, detail: Record<string, any>) {
+  if (kind === 'Complaint') return typeof detail.complaintFeedbackType === 'string' && detail.complaintFeedbackType.trim().toLowerCase()==='not-spam' ? 'complaint_feedback' : 'complaint';
+  if (kind === 'Bounce') return detail.bounceType !== 'Permanent' ? 'non_permanent_bounce' : detail.bounceSubType === 'EmailValidationSuppressed' ? 'validation_suppressed' : 'bounce';
+  return sesEvents[kind]?.rawType;
+}
 function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress {
   const data = item.message as Record<string, any>;
   const { kind, providerId } = sesFeedbackIdentity(data);
@@ -1148,14 +1155,14 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const timestamp = detail.timestamp;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
-  const validation = kind === 'Bounce' && detail.bounceSubType === 'EmailValidationSuppressed';
+  const classification = feedbackClass(kind, detail), validation = classification === 'validation_suppressed';
   const engagement = kind === 'Open' || kind === 'Click';
   const reported = kind === 'Bounce' ? detail.bouncedRecipients : kind === 'Complaint' ? detail.complainedRecipients : undefined;
-  return { type: extended ? validation ? 'validation_suppressed' : sesEvents[kind]!.rawType : type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`,
+  return { type: extended ? classification! : type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`,
     data: { providerId, ...(validation ? {suppressionReason:'email_validation'} : {}), ...(engagement ? { isBotEvent: detail.isBotEvent ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof detail.link === 'string' ? { link: detail.link } : {}),
-      ...(kind === 'Bounce' ? { bounceType: detail.bounceType ?? 'Unknown', bounceSubType: detail.bounceSubType ?? 'Unknown' } : {}) },
+      ...(kind === 'Bounce' ? { bounceType: detail.bounceType ?? 'Unknown', bounceSubType: detail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Complaint' && detail.complaintFeedbackType != null ? {complaintFeedbackType:detail.complaintFeedbackType} : {}) },
     ...(extended ? { effects: { reported: Array.isArray(reported) && reported.length ? reported.map(r => typeof r?.emailAddress === 'string' ? r.emailAddress.toLowerCase() : null) : null,
-      suppress: kind === 'Complaint' ? 'complaint' : kind === 'Bounce' && detail.bounceType === 'Permanent' ? validation ? 'email_validation' : 'hard_bounce' : null,
+      suppress: classification === 'complaint' ? 'complaint' : validation ? 'email_validation' : classification === 'bounce' ? 'hard_bounce' : null,
       observe: engagement && detail.isBotEvent !== true && detail.isBotEvent !== 'Likely' ? kind.toLowerCase() : null,
       receiptTime: !(typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp))) } } : {}),
     ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther && !extended ? undefined : simulated ? 'operation.simulatedFeedbackRecovery' : 'operation.ses' } };
@@ -1178,37 +1185,77 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       group.push({ index, input: routineInput(item) });
     } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
   }
-  if (group.length) {
+  const persist = async (batch: typeof group, retry = true): Promise<void> => {
+    if (!batch.length) return;
+    let results: Awaited<ReturnType<typeof ingestRoutineSesEvents>>;
     try {
-      const results = await ingestRoutineSesEvents(runtime, group.map(entry => entry.input));
-      for (const [position, entry] of group.entries()) {
-        const result = results[position]!;
-        if (result.error || !result.workspaceId) {
-          const error = result.error ?? 'SES_EMAIL_NOT_FOUND';
-          outcomes[entry.index] = { ok: false, error: !result.workspaceId && error === 'SES_EMAIL_NOT_FOUND' ? 'SES_FEEDBACK_UNMATCHED' : error };
-          continue;
-        }
-        if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
-        outcomes[entry.index] = { ok: true };
-        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+      results = await ingestRoutineSesEvents(runtime, batch.map(entry => entry.input));
+    } catch (error) {
+      const failure=feedbackFailure(error);
+      if (failure!=='retry' && (batch.length>1 || retry)) {
+        if (failure==='conflict') await feedbackBackoff();
+        if (batch.length===1) return persist(batch,false);
+        const mid=Math.ceil(batch.length/2);
+        await persist(batch.slice(0,mid)); await persist(batch.slice(mid)); return;
       }
-      // Deferred recoveries and webhook deliveries are jobs; nudge the scheduler once per batch.
-      if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
-    } catch (error) {
-      for (const entry of group) outcomes[entry.index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PERSIST_FAILED' };
+      for (const {index} of batch) outcomes[index]=failure==='data' ? await quarantineFeedback(runtime,items[index]!) : {ok:false,error:'FEEDBACK_PERSIST_FAILED'};
+      return;
     }
-  }
+    for (const [position, entry] of batch.entries()) {
+      const result = results[position]!;
+      if (result.error || !result.workspaceId) {
+        const error = result.error ?? 'SES_EMAIL_NOT_FOUND';
+        outcomes[entry.index] = { ok: false, error: !result.workspaceId && error === 'SES_EMAIL_NOT_FOUND' ? 'SES_FEEDBACK_UNMATCHED' : error };
+        continue;
+      }
+      if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
+      outcomes[entry.index] = { ok: true };
+      log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+    }
+    if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
+  };
+  await persist(group);
   // Subscription changes include separate consent audit records; preserve their input order.
-  for (const { index, item, workspaceId } of other) {
-    try {
-      await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId });
-      outcomes[index] = { ok: true };
+  for (const { index, item, workspaceId } of other.sort((a,b)=>a.index-b.index)) {
+    for (let attempt=1; attempt<=2; attempt++) try {
+      await processSesReceipt(runtime, item, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: attempt, workspaceId });
+      outcomes[index] = { ok: true }; break;
     } catch (error) {
-      outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED' };
-      log(error instanceof ApiError && !error.retryable ? 'warn' : 'error', { code: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED', message: error instanceof ApiError ? error.message : 'Feedback processing failed; the message will be retried.' });
+      if (error instanceof ApiError && (error.code === 'SES_EMAIL_NOT_FOUND' || error.code === 'SES_ENVIRONMENT_MISMATCH')) {
+        outcomes[index] = {ok:false,error:error.code}; break;
+      }
+      const failure=feedbackFailure(error);
+      if (failure==='retry' || attempt===2) {
+        outcomes[index]=failure==='data' ? await quarantineFeedback(runtime,item,workspaceId) : {ok:false,error:'FEEDBACK_PROCESS_FAILED'}; break;
+      }
+      if (failure==='conflict') await feedbackBackoff();
     }
   }
   return outcomes;
+}
+
+function feedbackFailure(error: unknown) {
+  if (error instanceof ApiError) return error.retryable ? 'retry' : 'data';
+  const pg=error as {cause?:{code?:string};code?:string}|null, code=pg?.cause?.code ?? pg?.code ?? '';
+  if (code==='40P01' || code==='40001') return 'conflict';
+  return /^(22|23|54)[0-9A-Z]{3}$/.test(code) ? 'data' : 'retry';
+}
+const feedbackBackoff=()=>new Promise(resolve=>setTimeout(resolve,10+Math.random()*20));
+async function quarantineFeedback(runtime: Runtime, item: FeedbackItem, workspaceId?:string) {
+  try {
+    // Keep the verified input as escaped JSON text, not JSONB: a diagnostic may contain NUL.
+    const key = await digest(JSON.stringify([item.topicArn,item.messageId]));
+    const provider=(item.message.mail as {messageId?:unknown})?.messageId, tag=taggedEmailId(item.message);
+    const simulated=item.topicArn===`urn:opensend:simulated-ses:${item.region}`;
+    // Never take a workspace ID from a payload. Prefer the receipt; a rolled-back first
+    // receipt can still be attributed if its pinned topic/region/provider match is unique.
+    await runtime.db.execute(sql`INSERT INTO operation_feedback_failures(id,payload,topic_arn,workspace_id) VALUES (${key},${JSON.stringify(item)},${item.topicArn},
+      coalesce(${workspaceId??null}::text,(SELECT workspace_id FROM operation_sns_receipts WHERE topic_arn=${item.topicArn} AND message_id=${item.messageId}),
+        (SELECT min(workspace_id) FROM sending_emails WHERE region=${item.region} AND simulated=${simulated} AND provider_id=${typeof provider==='string' && /^[!-~]+$/.test(provider)?provider:null}
+          ${tag?sql`AND id=${tag}`:sql``} ${!simulated && runtime.config.multiTenant?sql`AND feedback_topic_arn=${item.topicArn}`:sql``} HAVING count(*)=1))) ON CONFLICT DO NOTHING`);
+    log('error',{code:'SES_FEEDBACK_QUARANTINED',id:key});
+    return {ok:false,error:'SES_FEEDBACK_QUARANTINED'};
+  } catch { return {ok:false,error:'FEEDBACK_PERSIST_FAILED'}; }
 }
 
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {
@@ -1247,7 +1294,8 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const routine = kind === 'Send' || kind === 'Delivery';
   // SES Auto Validation drops risky recipients before sending and reports each as a Permanent bounce with this subtype.
   // It never left SES, so record it as suppressed (not bounced); the contact is still suppressed below.
-  const validationSuppressed = kind === 'Bounce' && eventDetail.bounceSubType === 'EmailValidationSuppressed';
+  const classification = feedbackClass(kind,eventDetail)!, validationSuppressed = classification === 'validation_suppressed';
+  if (kind === 'Complaint' && eventDetail.complaintFeedbackType != null) normalized.data.complaintFeedbackType=eventDetail.complaintFeedbackType;
   if (validationSuppressed) normalized.data.suppressionReason='email_validation';
   const candidates: unknown[] = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
   const envelope = new Set([...email.to,...email.cc,...email.bcc].map(v => v.toLowerCase()));
@@ -1255,14 +1303,14 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   // One SNS notification can identify up to 50 recipients. Scope hashes to this message so they
   // deduplicate overlapping reports without linking recipients across mail. [] means no real matched recipient;
   // absent recipient evidence counts as one, just like legacy feedback rows.
-  const recipientHashes = input.hostedFeedback && !email.simulated && !validationSuppressed && candidates.length
+  const recipientHashes = input.hostedFeedback && !email.simulated && (classification === 'bounce' || classification === 'complaint') && candidates.length
     ? await Promise.all(recipients.filter(realDestination).map(v => digest(`${email.id}\0${v}`))) : undefined;
-  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, emailId: email.id, providerId, type: validationSuppressed ? 'validation_suppressed' : mapped.rawType,
+  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, emailId: email.id, providerId, type: classification,
     ...(validationSuppressed ? { errorCode: 'EMAIL_VALIDATION_SUPPRESSED' } : {}), externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime, recipientHashes,
     ...(routine ? { receipt: { topicArn: String(payload.topicArn), messageId: String(payload.messageId) } } : {}),
   });
   if (routine) return;
-  const suppress = kind === 'Complaint' || (kind === 'Bounce' && eventDetail.bounceType === 'Permanent');
+  const suppress = classification === 'complaint' || classification === 'bounce' || validationSuppressed;
   const observeEngagement = (kind === 'Open' || kind === 'Click') && normalized.data.isBotEvent !== true && normalized.data.isBotEvent !== 'Likely';
   if (recipients.length && (suppress || observeEngagement)) await runtime.db.transaction(async tx => {
     for (const address of recipients) {

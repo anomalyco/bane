@@ -1,8 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, log, type Runtime, type JobHandler } from './core.js';
 import { sendingConnections } from './domain-claims.js';
-import { processJobs } from './jobs.js';
-import { jobHandlers } from './sending.js';
+import { processJobs, wakeWebhooks } from './jobs.js';
+import { jobHandlers, terminalColumns, terminalEvents } from './sending.js';
 import { operationJobs } from './operations.js';
 import { sesRegionJobs } from './ses-regions.js';
 import { initialGate, runDispatcher, type GateState } from './dispatcher.js';
@@ -34,23 +34,23 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   // Match cancel/claim: lock the parent before locking any of its envelopes, skipping a
   // busy campaign as well as busy mail. Direct mail has no parent. Commit cancellation
   // before the global finisher below so it never waits on another campaign with these locks.
-  if (recoverInterrupted && runtime.config.multiTenant) await runtime.db.execute(sql`WITH disabled AS MATERIALIZED (
+  if (recoverInterrupted && runtime.config.multiTenant) {
+    const canceled=await runtime.db.execute<{n:number}>(sql`WITH disabled AS MATERIALIZED (
     SELECT q.id FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id
     CROSS JOIN LATERAL (SELECT e.id FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=r.region AND e.status='queued'
       AND e.snapshot#>>'{binding,connection}'=r.connection_id AND (e.campaign_id IS NULL OR EXISTS (
         SELECT 1 FROM sending_campaigns p WHERE p.workspace_id=e.workspace_id AND p.id=e.campaign_id FOR NO KEY UPDATE OF p SKIP LOCKED))
       LIMIT 1000 FOR UPDATE OF e SKIP LOCKED) q
     WHERE NOT r.legacy AND r.sending_state='disabled' LIMIT 1000
-  ) UPDATE sending_emails e SET status='canceled',error_code='SENDER_BINDING_CHANGED',lease_until=NULL,updated_at=clock_timestamp()
-    FROM disabled d WHERE EXISTS (SELECT FROM disabled) AND e.id=d.id AND e.status='queued'`);
+  ), canceled AS (UPDATE sending_emails e SET status='canceled',error_code='SENDER_BINDING_CHANGED',lease_until=NULL,updated_at=clock_timestamp()
+    WHERE EXISTS (SELECT FROM disabled) AND e.id IN (SELECT id FROM disabled) AND e.status='queued' RETURNING ${terminalColumns}
+  ), ${terminalEvents(sql`SELECT * FROM canceled`)} SELECT count(*)::int AS n FROM webhook_jobs`);
+    await wakeWebhooks(runtime,canceled.rows[0]!.n);
+  }
   const recovery = recoverInterrupted ? sql`WITH stale AS (
     UPDATE sending_emails SET status='acceptance_unknown', error_code='INTERRUPTED_PROVIDER_ATTEMPT', lease_until=NULL, updated_at=now()
-    WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING id, workspace_id, simulated, dispatch_version
-  ), events AS (
-    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
-    SELECT 'event_' || replace(gen_random_uuid()::text,'-',''), workspace_id, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version,
-      simulated, '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb FROM stale ON CONFLICT DO NOTHING
-  ), finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale`)})` : sql``;
+    WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING ${terminalColumns}
+  ), ${terminalEvents(sql`SELECT * FROM stale`)}, finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale`)})` : sql``;
   const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
     SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind FROM ${sendingConnections(runtime)} c
@@ -60,7 +60,10 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
       AND e.scheduled_at <= now() AND (e.lease_until IS NULL OR e.lease_until < now()))` : sql`
     SELECT DISTINCT e.region FROM sending_emails e JOIN ses_installation_settings s ON s.workspace_id=e.workspace_id
     WHERE ${due} AND s.enabled_regions ? e.region`;
-  return (await runtime.db.execute<Partition>(sql`${recovery} ${partitions}`)).rows;
+  if (!recoverInterrupted) return (await runtime.db.execute<Partition>(partitions)).rows;
+  const {rows:[result]}=await runtime.db.execute<{n:number;partitions:Partition[]}>(sql`${recovery} SELECT (SELECT count(*)::int FROM webhook_jobs) AS n,
+    coalesce((SELECT jsonb_agg(to_jsonb(p)) FROM (${partitions}) p),'[]') AS partitions`);
+  await wakeWebhooks(runtime,result!.n); return result!.partitions;
 }
 /** Jobs plus due mail for every account/region, in this process. Node runners and tests use this. */
 export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true, priorityWake?: EventTarget) {

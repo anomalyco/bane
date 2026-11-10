@@ -4,8 +4,9 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
 import { contacts, consentAudit, imports, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
 import { enqueue } from './jobs.js';
+import { mailAddress } from './outbound-content.js';
 
-const Email = z.string().trim().email().max(320).transform(v => v.toLowerCase());
+const Email = mailAddress(z.string().trim()).transform(v => v.toLowerCase()).openapi({format:'email'});
 const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= 50, 'At most 50 properties are supported.');
 const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: Properties.default({}) }).strict();
 const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: Properties.optional() }).strict();
@@ -19,7 +20,7 @@ const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().in
 const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
 const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.') }).openapi('ListContactListsQuery');
-const ContactQuery = SearchQuery.extend({ email: z.string().trim().email().max(320).transform(v => v.toLowerCase()).optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
+const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
 // Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
 let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
