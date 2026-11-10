@@ -243,56 +243,50 @@ jobs:
           role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
           aws-region: us-east-1
 
-      - name: Mint Cloudflare token and R2 credentials
+      - name: Mint a short-lived Cloudflare token
+        id: cloudflare
         if: steps.guard.outputs.skip != 'true'
+        uses: ./.github/actions/cloudflare-token
+        with:
+          account-id: ${{ env.CF_ACCOUNT_ID }}
+
+      - name: Configure R2 credentials and the Hyperdrive URL
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
+          R2_ACCESS_KEY_ID: ${{ steps.cloudflare.outputs.id }}
+          R2_SECRET_ACCESS_KEY: ${{ steps.cloudflare.outputs.secret }}
         run: |
           set -euo pipefail
           set +x
 
-          url="https://kjivkui2evldapbok5fhrrl6oy0fctkp.lambda-url.us-east-1.on.aws/"
           account="$CF_ACCOUNT_ID"
-          url_pattern='^https://[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws/$'
-          if ! [[ "$url" =~ $url_pattern ]]; then echo "::error::bad token issuer URL"; exit 1; fi
-          if ! [[ "$account" =~ ^[a-f0-9]{32}$ ]]; then echo "::error::bad account id"; exit 1; fi
-          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
-            [ -n "${!name:-}" ] || { echo "::error::$name is not set"; exit 1; }
-          done
-
-          # The response is captured, never streamed: it contains the token.
-          response=$(
-            printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' \
-              "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" |
-              curl --config - \
-                --proto '=https' --proto-redir '=https' \
-                --aws-sigv4 "aws:amz:us-east-1:lambda" \
-                --request POST --url "$url" \
-                --fail-with-body --silent --show-error --max-time 20
-          )
-          token=$(printf '%s' "$response" | jq -er '.token | strings')
-          expires=$(printf '%s' "$response" | jq -er '.expires_on | strings')
-          case "$token" in ""|*[[:space:]]*) echo "::error::invalid token"; exit 1 ;; esac
-          printf '::add-mask::%s\n' "$token"
-
-          # Account-owned tokens verify under the account, not /user.
-          id=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/tokens/verify"\n' \
-            "$token" "$account" | curl --config - --silent --show-error --fail-with-body --max-time 20 |
-            jq -er 'select(.success == true and .result.status == "active") | .result.id | strings')
-          secret=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
-          printf '::add-mask::%s\n' "$secret"
-
-          echo "CLOUDFLARE_API_TOKEN=$token" >> "$GITHUB_ENV"
           mkdir -p "$HOME/.aws"
           {
             printf '\n[r2]\n'
-            printf 'aws_access_key_id = %s\n' "$id"
-            printf 'aws_secret_access_key = %s\n' "$secret"
+            printf 'aws_access_key_id = %s\n' "$R2_ACCESS_KEY_ID"
+            printf 'aws_secret_access_key = %s\n' "$R2_SECRET_ACCESS_KEY"
           } >> "$HOME/.aws/credentials"
           {
             printf '\n[profile r2]\n'
             printf 'region = auto\n'
           } >> "$HOME/.aws/config"
 
-          echo "::notice::Cloudflare token ready; expires $expires"
+          # The Hyperdrive origin's password is never returned by Cloudflare, and
+          # the program ignores origin.password on adoption and updates. Only the
+          # runtime user, host, port and database matter, so the password here is
+          # a placeholder.
+          case "$STAGE" in
+            dev) hyperdrive=67bf6907a42a483da37f4d2256847281 ;;
+            production) hyperdrive=556aba191add406eaa58a0e26eebb6b1 ;;
+            *) echo "::error::unknown stage $STAGE"; exit 1 ;;
+          esac
+          origin=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/hyperdrive/configs/%s"\n' \
+            "$CLOUDFLARE_API_TOKEN" "$account" "$hyperdrive" |
+            curl --config - --silent --show-error --fail-with-body --max-time 20 |
+            jq -er '.result.origin | [.user, .host, (.port | tostring), .database] | @tsv')
+          IFS=$'\t' read -r db_user db_host db_port db_name <<< "$origin"
+          echo "BANE_HYPERDRIVE_DATABASE_URL=postgres://${db_user}:placeholder@${db_host}:${db_port}/${db_name}" >> "$GITHUB_ENV"
 
       - name: Install Pulumi
         if: steps.guard.outputs.skip != 'true'
@@ -327,6 +321,8 @@ jobs:
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
         with:
           command: ${{ inputs.preview && 'preview' || 'up' }}
           stack-name: ${{ env.STAGE }}
@@ -407,7 +403,8 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # The deploy secrets live in AWS Secrets Manager as bane/<stage>/* and are
-      # read by the environment's own role (github/bane-<stage>).
+      # read by the environment's own role (github/bane-<stage>). That role also
+      # mints the short-lived Cloudflare token; no Cloudflare credential is stored.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -415,12 +412,16 @@ jobs:
           role-session-name: bane-${{ needs.authorize.outputs.stage }}-secrets-${{ github.run_id }}
           aws-region: us-east-1
 
+      - name: Mint a short-lived Cloudflare token
+        id: cloudflare
+        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
+        uses: ./.github/actions/cloudflare-token
+
       - name: Fetch the dev secrets
         if: needs.authorize.outputs.stage == 'dev'
         uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
         with:
           secret-ids: |
-            CLOUDFLARE_API_TOKEN,bane/dev/CLOUDFLARE_API_TOKEN
             DATABASE_URL,bane/dev/DEV_DATABASE_URL
             DEV_E2E_API_KEY,bane/dev/DEV_E2E_API_KEY
           parse-json-secrets: false
@@ -430,7 +431,6 @@ jobs:
         uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
         with:
           secret-ids: |
-            CLOUDFLARE_API_TOKEN,bane/production/CLOUDFLARE_API_TOKEN
             DATABASE_URL,bane/production/PROD_DATABASE_URL
           parse-json-secrets: false
 
@@ -447,7 +447,7 @@ jobs:
         if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         working-directory: api
         env:
-          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
           AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
