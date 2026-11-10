@@ -1,2 +1,4 @@
 config:
+  bane:deployRoleArn: arn:aws:iam::905840579680:role/bane-deploy
+  bane:permissionsBoundary: arn:aws:iam::905840579680:policy/bane-runtime-boundary
   bane:writeWorkerSecrets: true
