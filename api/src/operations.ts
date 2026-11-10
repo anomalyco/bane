@@ -1011,13 +1011,32 @@ function snsHost(envelope: SnsEnvelope) {
 }
 function trustedSnsUrl(value: string, host: string, certificate: boolean) {
   const url = new URL(value);
-  if (url.protocol !== 'https:' || url.hostname !== host || url.port || url.username || url.password || url.hash || (certificate ? !/^\/SimpleNotificationService-[a-zA-Z0-9_-]+\.pem$/.test(url.pathname) || Boolean(url.search) : url.pathname !== '/')) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS certificate or subscription URL is not trusted.');
+  if (url.protocol !== 'https:' || url.hostname !== host || url.port || url.username || url.password || url.hash || (certificate ? !/^\/SimpleNotificationService-[0-9a-fA-F]{32}\.pem$/.test(url.pathname) || value !== `https://${host}${url.pathname}` : url.pathname !== '/')) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS certificate or subscription URL is not trusted.');
   return url;
 }
 // Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
 const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
 const missingCertificates=new Map<string,number>();
-async function verifySns(envelope: SnsEnvelope) {
+// Node has no edge rate-limit binding. Reserve a miss synchronously, before I/O;
+// at capacity refuse new miss buckets rather than evicting a live peer's budget.
+const certMissPeers = new Map<string, { count: number; until: number }>();
+function allowLocalCertMiss(peer: string) {
+  const now = Date.now();
+  for (const [key, bucket] of certMissPeers) {
+    if (bucket.until > now) break;
+    certMissPeers.delete(key);
+  }
+  const bucket = certMissPeers.get(peer);
+  if (bucket) {
+    if (bucket.count >= 60) return false;
+    bucket.count++;
+    return true;
+  }
+  if (certMissPeers.size >= 4096) return false;
+  certMissPeers.set(peer, { count: 1, until: now + 60_000 });
+  return true;
+}
+async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
   const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
   const trusted = snsHost(envelope);
   const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
@@ -1030,6 +1049,7 @@ async function verifySns(envelope: SnsEnvelope) {
   let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
   if (!cert) {
     if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
+    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw new ApiError(429, 'SNS_CERTIFICATE_RATE_LIMITED', 'Too many SNS certificate lookups from this connection. Retry after one minute.', undefined, true);
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
@@ -1102,7 +1122,8 @@ function registerPublicEvents(app: App) {
     const envelope = parsed.data;
     // Prove AWS signed this exact topic before looking up its tenant. A valid
     // signature is NOT topic authorization: all binding checks below still apply.
-    const trusted = await verifySns(envelope);
+    // Both entry points overwrite this header with the socket/edge peer (IPv6 /64).
+    const trusted = await verifySns(envelope, c.env, c.req.header('x-bane-client-ip') ?? 'unknown');
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     let stack: Awaited<ReturnType<typeof import('./provider-connections.js').byoStackTopic>>;
     let binding:TopicBinding|undefined;

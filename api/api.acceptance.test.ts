@@ -71,6 +71,7 @@ const identity = await probe.json().catch(() => null) as { service?: string } | 
 if (!probe.ok || identity?.service !== 'bane' || !probe.headers.get('x-request-id')) throw new Error('API_TARGET_MISMATCH: API_BASE_URL is not a Bane API. No authenticated scenarios were run.');
 const secrets = new Set<string>([AUTH_SECRET]);
 const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')}`;
+const snsCertName = () => `SimpleNotificationService-${randomUUID().replaceAll('-', '')}.pem`;
 const address = () => `${unique('acceptance')}@example.com`;
 const REGION = process.env.API_TEST_REGION ?? 'us-east-1';
 // bun run test loads .env. Remote APIs require an explicitly paired fixture database;
@@ -1769,7 +1770,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           identities.set(`${customer}:mail.${reserved}`,{...verifiedIdentity,DkimAttributes:{Status:'SUCCESS',SigningEnabled:false}});
           identities.set(`${customer}:${reserved}`,{...verifiedIdentity,DkimAttributes:{Status:'PENDING',SigningEnabled:true}});
           await pool.query('INSERT INTO domain_claims(name,workspace_id) VALUES($1,$2)',[reserved,b.org.id]);
-          const certUrl=host+`SimpleNotificationService-${unique('fixture')}.pem`;
+          const certUrl=host+snsCertName();
           const pem=await selfSignedPem(privateKey);
           let confirms=0;const dns=new Map<string,string>();
           bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{
@@ -2142,6 +2143,17 @@ describe('Hosted MCP OAuth and tools', () => {
       const rpc=(bearer:string)=>request('POST','/mcp',bearer,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
       assert.ok(ok(await rpc(legacy(claims.bane_grant))).result.tools.length);
       assert.equal((await rpc(legacy('mcp_unknown'))).status,401);
+      const wire=t.mock.method(db,'query'), [header, payload] = token.split('.');
+      const unknown = () => [encode({alg:'ES256',typ:'at+jwt',kid:randomUUID()}),payload,Buffer.alloc(64).toString('base64url')].join('.');
+      for (let i=0; i<8; i++) {
+        assert.equal((await rpc(unknown())).status,401);
+        assert.equal((await rpc([header,payload,Buffer.alloc(64,i).toString('base64url')].join('.'))).status,401);
+      }
+      assert.equal(wire.mock.callCount(),0,'Neither unknown kids nor bad signatures for a cached key touch PostgreSQL');
+      const later=Date.now()+61_000, clock=t.mock.method(Date,'now',()=>later);
+      assert.equal((await rpc(unknown())).status,401);const cold=wire.mock.callCount();assert.ok(cold>0);
+      assert.equal((await rpc(unknown())).status,401);assert.equal(wire.mock.callCount(),cold,'Key rotation permits one refresh per minute');
+      clock.mock.restore();wire.mock.restore();
     });
   });
 
@@ -4601,7 +4613,33 @@ describe('Operational configuration and public event boundaries', () => {
       error(await http('POST', '/v1/events/ses', undefined, {}, { 'content-type': contentType }), 422, 'VALIDATION_FAILED');
     }
     // Signature shape is checked before any topic lookup or certificate fetch.
-    error(await http('POST', '/v1/events/ses', undefined, { ...envelope, SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`, Signature: '!!!' }), 403, 'SNS_INVALID_SIGNATURE');
+    error(await http('POST', '/v1/events/ses', undefined, { ...envelope, SigningCertURL:`https://sns.${REGION}.amazonaws.com/${snsCertName()}`, Signature: '!!!' }), 403, 'SNS_INVALID_SIGNATURE');
+  });
+
+  test('SNS charges only certificate misses against the trusted peer budget', async t => {
+    await simulatedSesFixture(t, async ({db, local}) => t.test('mocked certificate origin', async t => {
+      const { admissionPeer } = await import('./src/core.js');
+      const host=`https://sns.${REGION}.amazonaws.com/`, positive=snsCertName(), negative=snsCertName();
+      const pem=await selfSignedPem(generateKeyPairSync('rsa',{modulusLength:2048}).privateKey);
+      const transport=t.mock.method(globalThis,'fetch',async(input:URL)=>{
+        assert.equal(input.origin+'/',host);return input.href===host+positive ? new Response(pem) : new Response(null,{status:404});
+      });
+      const wire=t.mock.method(db,'query');
+      const envelope={Type:'Notification',MessageId:'fixture',TopicArn:`arn:aws:sns:${REGION}:111122223333:fixture`,Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:Buffer.alloc(256).toString('base64')};
+      const check=(name:string,peer='2001:db8:123::1')=>local('POST','/v1/events/ses',{...envelope,SigningCertURL:host+name},'live',{'x-bane-client-ip':admissionPeer(peer)});
+      for (const name of ['SimpleNotificationService-fixture.pem',positive+'?',positive+'#','other/../'+positive]) error(await check(name),403,'SNS_UNTRUSTED_URL');
+      assert.equal(transport.mock.callCount(),0);
+      error(await check(positive),403,'SNS_INVALID_SIGNATURE');
+      error(await check(negative),403,'SNS_INVALID_CERTIFICATE');
+      for (let i=2; i<60; i++) error(await check(snsCertName()),403,'SNS_INVALID_CERTIFICATE');
+      for (let i=60; i<200; i++) error(await check(snsCertName(),'2001:db8:123::2'),429,'SNS_CERTIFICATE_RATE_LIMITED');
+      error(await check(positive),403,'SNS_INVALID_SIGNATURE'); // Signature still verified on a hot certificate.
+      error(await check(negative),403,'SNS_INVALID_CERTIFICATE');
+      assert.equal(transport.mock.callCount(),60);
+      error(await check(snsCertName(),'2001:db8:124::1'),403,'SNS_INVALID_CERTIFICATE');
+      assert.equal(transport.mock.callCount(),61);assert.equal(wire.mock.callCount(),0);wire.mock.restore();
+      t.diagnostic('SNS: 200 cold certificate paths in one /64, 60 mocked fetches, 0 SQL');
+    }));
   });
 
   test('MOCK REDIRECT TRANSPORT: SNS certificates and webhook delivery refuse redirects and retain retryable failures', async t => {
@@ -4630,7 +4668,7 @@ describe('Operational configuration and public event boundaries', () => {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     const loopback = `http://127.0.0.1:${address.port}`;
-    const certUrl = `https://sns.${REGION}.amazonaws.com/SimpleNotificationService-${unique('redirect')}.pem`;
+    const certUrl = `https://sns.${REGION}.amazonaws.com/${snsCertName()}`;
     const webhookUrl = `https://example.com/hooks/${unique('redirect')}`;
     const nativeFetch = globalThis.fetch;
     t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
@@ -4870,7 +4908,7 @@ test('reply quotes rebuild received HTML from an allow-list',async()=>{
   assert.equal(rest,'<img><a>j</a><a href="https://ok.example/">ok</a>text<img src="cid:logo"><img><table border="1"><tbody><tr><td colspan="2">c</td></tr></tbody></table>');
 });
 
-test('reply quotes of crafted received HTML stay within time and memory bounds and fall back to text (N6)',async()=>{
+test('reply quotes of crafted received HTML stay within time and memory bounds and fall back to text (N6)',async t=>{
   const {safeForwardHtml}=await import('./src/mailbox-send.js');
   const reopen=(open:number,blocks:number)=>'<p>'+Array.from({length:open},(_,i)=>`<b a${i}>`).join('')+'<p>x'.repeat(blocks);
   const cases:[string,string,boolean][]=[
@@ -4878,6 +4916,8 @@ test('reply quotes of crafted received HTML stay within time and memory bounds a
     ['1,000 x 10,000 (47 KB, exhausted a 4 GB heap)',reopen(1000,10000),false],
     ['5,000 nested <div> (25 KB, overflowed the call stack)','<div>'.repeat(5000)+'x',false],
     ['40,000 nested <div> (200 KB, 4 s in the parser)','<div>'.repeat(40000)+'x',false],
+    ['repaired formatting depth',('<b>'+'<div>'.repeat(9)+'</b>').repeat(600),false],
+    ['oversized attribute list','<p '+Array.from({length:40000},(_,i)=>'a'+i.toString(16)).join(' ')+'>text',false],
     ['over the 256 KiB input bound','<p>'+'y'.repeat(256*1024)+'</p>',false],
     ['one large attribute cloned by re-opened elements','<p><b title="'+'t'.repeat(60000)+'">'+'<p>x'.repeat(20),false],
     ['1 MB of "<a " (over the input bound)','<a '.repeat(333333),false],
@@ -4886,6 +4926,7 @@ test('reply quotes of crafted received HTML stay within time and memory bounds a
   for(const [name,html,rich] of cases){
     const rss=process.resourceUsage().maxRSS,started=performance.now(),out=safeForwardHtml(html),ms=performance.now()-started,grown=(process.resourceUsage().maxRSS-rss)/1024;
     assert.equal(out!==null,rich,name);assert.ok(ms<1500,`${name}: ${ms.toFixed(0)} ms`);assert.ok(grown<256,`${name}: peak RSS grew ${grown.toFixed(0)} MiB`);
+    if (name==='repaired formatting depth' || name==='oversized attribute list') { assert.ok(ms<250,name);t.diagnostic(`Quote fallback (${name}): ${ms.toFixed(1)}ms`); }
     if(out)assert.ok(out.length<=html.length*2,`${name}: output grew to ${out.length}`);
   }
 });
@@ -5159,7 +5200,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       }
     }
     t.mock.method(SESv2Client.prototype,'send',aws);t.mock.method(SNSClient.prototype,'send',aws);
-    const privateKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,certUrl=`https://sns.${r}.amazonaws.com/SimpleNotificationService-rehomefixture.pem`;
+    const privateKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,certUrl=`https://sns.${r}.amazonaws.com/${snsCertName()}`;
     const pem=await selfSignedPem(privateKey);
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.href===certUrl)return new Response(pem);
       if(u.hostname===bucket(dest)+`.s3.${r}.amazonaws.com`){assert.match(u.searchParams.get('X-Amz-Credential')!,/^fixture-rehome\//);return new Response(new Uint8Array(objects.get(decodeURIComponent(u.pathname.slice(1)))!));}
@@ -5508,7 +5549,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok((await Promise.allSettled([prepare(),prepare()])).every(s=>s.status==='rejected' && s.reason instanceof JobDeferred));
     // AWS reporting a confirmed subscription is not signed-ingress evidence.
     confirmed=true;await assert.rejects(prepare(),JobDeferred);confirmed=false;assert.equal(JSON.parse(policy).Statement.length,1);
-    const host=`https://sns.${va}.amazonaws.com/`,signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'},body={...signed,SignatureVersion:'2',SigningCertURL:host+'SimpleNotificationService-trustedfixture.pem',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
+    const host=`https://sns.${va}.amazonaws.com/`,signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'},body={...signed,SignatureVersion:'2',SigningCertURL:host+snsCertName(),Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
     error(await api('POST','/v1/events/ses',{...body,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');ok(await api('POST','/v1/events/ses',body),202);
     await assert.rejects(prepare(),{code:'POOL_SENDING_DRIFT',retryable:false});policy=JSON.stringify(deployedFeedback(va,acct,'bane-trusted')); // operator promotes after signed confirmation
     // The same Pulumi run wires the destinations. Until then, or if one is redirected, the Worker refuses rather than writing them.
@@ -5882,7 +5923,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await poll()).importedDomains,0);assert.equal((await db.query('SELECT FROM domain_sending_bindings WHERE workspace_id=$1',[wid])).rowCount,0);
     const confirm=async(region:string)=>{const TopicArn=`arn:aws:sns:${region}:${account}:${params.get('param_ResourcePrefix')}-feedback`,host=`https://sns.${region}.amazonaws.com/`;
       const signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn,Type:'SubscriptionConfirmation'};
-      const body={...signed,SignatureVersion:'2',SigningCertURL:host+'SimpleNotificationService-v5fixture.pem',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
+      const body={...signed,SignatureVersion:'2',SigningCertURL:host+snsCertName(),Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
       error(await api('POST','/v1/events/ses',{...body,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');ok(await api('POST','/v1/events/ses',body),202);
     };
     await confirm(oh);assert.ok(await run('byo.provision',oh));await run('byo.bind',oh);await run('byo.bind',oh);assert.equal((await poll()).importedDomains,1);
@@ -5926,7 +5967,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const bare={id:v5.id,kind:'byo' as const,aws_account_id:account,role_arn:binding.role_arn,external_id:external};
         for(const b of [bare,{...bare,legacy_names:true},{...bare,legacy:true,template_version:'v5'}]) await assert.rejects(workspaceCredentials(scoped,oh,b),{code:'BYO_SESSION_SCOPE_REQUIRED'});
         await assert.rejects(mailboxS3(scoped,wid,oh,bucket),{code:'MAILBOX_OBJECT_NOT_FOUND'});assert.equal(policies.length,keyReads);
-        error(await api('POST','/v1/events/ses',{Type:'SubscriptionConfirmation',MessageId:randomUUID(),Message:'fixture',TopicArn:topicArn,Timestamp:new Date().toISOString(),Token:'fixture',SignatureVersion:'2',Signature:'invalid',SigningCertURL:`https://sns.${oh}.amazonaws.com/SimpleNotificationService-fixture.pem`}),403,'SNS_INVALID_SIGNATURE');
+        error(await api('POST','/v1/events/ses',{Type:'SubscriptionConfirmation',MessageId:randomUUID(),Message:'fixture',TopicArn:topicArn,Timestamp:new Date().toISOString(),Token:'fixture',SignatureVersion:'2',Signature:'invalid',SigningCertURL:`https://sns.${oh}.amazonaws.com/${snsCertName()}`}),403,'SNS_INVALID_SIGNATURE');
         await assert.rejects(acceptInboundNotification(scoped,{topicArn,region:oh,message:{notificationType:'Received',mail:{messageId:'fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['a@both.example'],action:{type:'S3',topicArn,bucketName:bucket,objectKey:'staging/fixture'}}}}),{code:'MAILBOX_NOTIFICATION_UNTRUSTED'});
       } finally {await db.query('DELETE FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,oh]);}
     });
@@ -6789,7 +6830,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await drain(account)).sent,0); assert.deepEqual(quotaReads,['fixture-customer','fixture-platform']);
       exhausted=false; await db.query("UPDATE provider_account_limits SET refresh_after='-infinity', checked_at='-infinity' WHERE aws_account_id=$1",[account]);
       assert.equal((await drain(account)).sent,1); assert.equal(assumptions.mock.callCount(),1);
-      const envelope={Type:'Notification',MessageId:unique('sns'),Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'!!!',SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`};
+      const envelope={Type:'Notification',MessageId:unique('sns'),Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'!!!',SigningCertURL:`https://sns.${REGION}.amazonaws.com/${snsCertName()}`};
       for(const topic of [poolTopic,byoTopic]) error(await local('POST','/v1/events/ses',{...envelope,TopicArn:topic}),403,'SNS_INVALID_SIGNATURE');
       error(await local('POST','/v1/events/ses',{...envelope,TopicArn:byoTopic+'-unregistered'}),403,'SNS_INVALID_SIGNATURE');
       const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{bane_email_id:[tag]}}:{})}}});
@@ -6886,6 +6927,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       const calls=bodies.length;await assert.rejects(screenSnapshot(runtime,{...s,kind:'marketing',html:'a'.repeat(40000)},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
       assert.equal(bodies.length,calls);t.diagnostic('Jev coverage: seven sampled markers visible, one over-limit refused before classification');
+      for (const [label,prefix] of [['depth','<div>'.repeat(80_000)],['elements','<br>'.repeat(21_000)]]) {
+        const html=prefix+'<a href="https://link.fixture.invalid">Sample&#77;arker</a>';
+        const start=performance.now(), result=await screenSnapshot(runtime,{...s,html},true), ms=performance.now()-start;
+        assert.equal(result?.spam,.99);assert.match(bodies.at(-1)!,/link\.fixture\.invalid/);assert.ok(bodies.at(-1)!.length<=8000);
+        assert.ok(ms<1000,`Screening the over-${label} projection took ${ms}ms`);
+        t.diagnostic(`Hosted screen (${label}): ${html.length} bytes, ${ms.toFixed(1)}ms`);
+      }
     }));
   });
 
@@ -6942,7 +6990,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const queries=t.mock.method(db,'query');
       for(const multiTenant of [false,true]) {
         runtime.config.multiTenant=multiTenant;
-        const body={Type:'Notification',MessageId:'fixture',TopicArn:'arn:aws:sns:us-east-1:111122223333:fixture',Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'invalid',SigningCertURL:'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-fixture.pem'};
+        const body={Type:'Notification',MessageId:'fixture',TopicArn:'arn:aws:sns:us-east-1:111122223333:fixture',Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'invalid',SigningCertURL:`https://sns.us-east-1.amazonaws.com/${snsCertName()}`};
         const res=await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/ses`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),runtime);
         assert.equal(res.status,403);assert.equal((await res.json() as Json).error.code,'SNS_INVALID_SIGNATURE');
       }
@@ -8806,7 +8854,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, context(deliver)), { code: 'SES_ACCOUNT_MISMATCH' });
       error(await local('POST', '/v1/events/ses', { Type: 'Notification', MessageId: unique('unsigned-synthetic'), TopicArn: topicArn,
         Message: JSON.stringify(deliver.payload.message), Timestamp: new Date().toISOString(), SignatureVersion: '2', Signature: '!!!',
-        SigningCertURL: `https://sns.${REGION}.amazonaws.com/SimpleNotificationService-synthetic.pem` }), 403, 'SNS_INVALID_SIGNATURE');
+        SigningCertURL: `https://sns.${REGION}.amazonaws.com/${snsCertName()}` }), 403, 'SNS_INVALID_SIGNATURE');
       assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 2);
     });
   });
@@ -9874,6 +9922,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
       const versions = (await db.query('SELECT dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
       assert.deepEqual(versions, [{ dispatch_version: 3 }, { dispatch_version: 0 }, { dispatch_version: 0 }]);
+    });
+  });
+
+  test('runtime key rotation publishes a complete pair and only definitive SES credential failures retry',async t=>{
+    const {loadConfig}=await import('./src/config.js');
+    const legacy={BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:PUBLIC_ORIGIN,AWS_ACCESS_KEY_ID:'old',AWS_SECRET_ACCESS_KEY:'old-secret',AWS_SESSION_TOKEN:'old-token'};
+    const pair={accessKeyId:'new',secretAccessKey:'new-secret'};
+    assert.deepEqual(loadConfig({...legacy,AWS_RUNTIME_CREDENTIALS:JSON.stringify(pair)}).aws,pair);
+    assert.throws(()=>loadConfig({...legacy,AWS_RUNTIME_CREDENTIALS:'{}'}),{code:'CONFIG_INVALID'});
+    await simulatedSesFixture(t,async({local,db,run})=>{
+      const {SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
+      const outcomes=[['InvalidClientTokenId',403,'invalid token'],['SignatureDoesNotMatch',403,'bad signature'],['UnrecognizedClientException',400,'unrecognized client'],['Forbidden',403,'The security token included in the request is invalid'] ] as const;
+      let sends=0;
+      t.mock.method(SESv2Client.prototype,'send',async(command:any)=>{
+        if(command instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
+        const failure=outcomes[sends++];
+        if(failure)throw Object.assign(new Error(failure[2]),{name:failure[0],$metadata:{httpStatusCode:failure[1]}});
+        return {MessageId:'accepted-after-rotation'};
+      });
+      const email=ok(await local('POST','/v1/emails/send',mail()),202);
+      for(let i=0;i<outcomes.length;i++) {
+        const before=Date.now();await run('email.dispatch');
+        const row=(await db.query('SELECT status,error_code,scheduled_at,provider_id FROM sending_emails WHERE id=$1',[email.id])).rows[0];
+        assert.deepEqual([row.status,row.error_code,row.provider_id],['queued','SES_CREDENTIALS_INVALID',null]);
+        assert.ok(Date.parse(row.scheduled_at.toISOString())>=before+5000*2**i-10);
+        await run('email.dispatch');assert.equal(sends,i+1,'No retry before the backoff expires');
+        await db.query('UPDATE sending_emails SET scheduled_at=now() WHERE id=$1',[email.id]);
+      }
+      await run('email.dispatch');const accepted=ok(await local('GET',`/v1/emails/${email.id}`));
+      assert.equal(accepted.status,'accepted');assert.equal(accepted.errorCode,null);assert.equal(sends,5);
     });
   });
 

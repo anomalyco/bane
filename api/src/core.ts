@@ -91,6 +91,8 @@ export interface Runtime {
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   allowFeedbackTopic?: (arn:string)=>Promise<boolean>;
+  allowSnsCertMiss?: (peer: string) => Promise<boolean>;
+  jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
