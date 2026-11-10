@@ -1,7 +1,7 @@
 config:
-  # opensend-mx is still sending from the old AWS account.
-  bane:writeWorkerSecrets: false
-  bane:publishDomainConnectKey: false
+  bane:writeWorkerSecrets: "true"
+  bane:publishDomainConnectKey: "false"
   bane:deployRoleArn: arn:aws:iam::009882681002:role/bane-deploy
   bane:permissionsBoundary: arn:aws:iam::009882681002:policy/bane-runtime-boundary
 secretsprovider: awskms://alias/pulumi/bane-production?region=us-east-1
+encryptedkey: AQICAHi4jVSzrmLwXsODflz6qiRbZ0JAEMb2xDbTZTLHj7dcOgHF7glAsx6bKexc6+o9sQKLAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMUp1e9x2SL7jBf+MGAgEQgDv45CvP8nVAA+zbRV5x7ZsfNoMnUM506ujzmrcPKe+UmUyB/pmsZnAn59G+kpWv9bTjvA+x3CXUnB2NxA==

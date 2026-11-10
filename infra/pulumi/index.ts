@@ -10,7 +10,7 @@ const stages = {
     queues: { work: "9c0d42c6410842c38d9304094dccccc4", feedback: "e655c22094e14e198abb3a254e235c7d" },
   },
   production: {
-    account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "opensend-mx",
+    account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
   },
 };
@@ -26,7 +26,6 @@ if (!roleArn.startsWith(`arn:aws:iam::${stage.account}:role/`)) {
   throw new Error(`bane:deployRoleArn must identify a role in the ${stack} account`);
 }
 const permissionsBoundary = config.get("permissionsBoundary");
-// opensend-mx sends on the old AWS account until the coordinated production cutover.
 const writeWorkerSecrets = config.getBoolean("writeWorkerSecrets") ?? !production;
 const publishDomainConnectKey = config.getBoolean("publishDomainConnectKey") ?? false;
 if (!production && publishDomainConnectKey) throw new Error("Domain Connect publication is production-only");
