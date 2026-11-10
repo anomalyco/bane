@@ -57,8 +57,15 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `dev` | `bane/dev/DEV_DATABASE_URL`, `bane/dev/DEV_E2E_API_KEY` | `DEV_E2E_DOMAIN`, `DEV_E2E_DOMAIN_ID`, `DEV_AUTH_ALLOWED_DOMAINS`, `DEV_AUTH_ALLOWED_EMAILS` |
-| `production` | `bane/production/PROD_DATABASE_URL`, `bane/production/PROD_E2E_API_KEY` | `PROD_DEPLOY_ENABLED`, `PROD_E2E_DOMAIN`, `PROD_E2E_DOMAIN_ID`, `PROD_AUTH_ALLOWED_DOMAINS`, `PROD_AUTH_ALLOWED_EMAILS` |
+| `dev` | `DATABASE_URL`, `E2E_API_KEY` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
+| `production` | `DATABASE_URL` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
+
+**Both stages use the same key names.** The stage comes from the GitHub environment,
+which selects that environment's variables, and from the `bane/<stage>/` folder, which
+selects that stage's secrets. Never prefix a key with `DEV_` or `PROD_`; the deploy reads
+`bane/${stage}/DATABASE_URL` and `vars.AUTH_ALLOWED_DOMAINS` for either stage. Only dev
+runs a live E2E, so only `bane/dev/` holds an `E2E_API_KEY`. `PROD_DEPLOY_ENABLED` keeps
+its name for now because the production freeze check reads it.
 
 The Cloudflare token is not stored anywhere. Each deploy mints a 30-minute token from the
 token issuer in `anomalyco/secrets` with the environment's own role, scoped to the stage's
