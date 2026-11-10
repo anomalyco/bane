@@ -11,7 +11,7 @@ import { HOST_COOKIE, hasSessionCookie, isSimulatedSes, ApiError, errors, log, r
 import type { Actor, App, DbExecutor, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 import { workspaceMembers } from './db/workspaces.js';
-import { claimInvitation, onboardNewUser, WorkspaceRole } from './workspaces.js';
+import { onboardNewUser, pendingInvitation, WorkspaceRole } from './workspaces.js';
 import { ConnectionSummary, connectionSummary } from './provider-connections.js';
 
 const day = 24 * 60 * 60;
@@ -220,11 +220,12 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
         create: { before: async (session, context) => {
           const profile = profileFor(context);
           let approved = await isApprovedUser(runtime, session.userId);
-          // Sign-in claims an invitation only for an account with no membership, for which it is the
-          // only way in. Anyone with a workspace confirms the invitation in the dashboard (M9).
-          if (!approved && runtime.config.multiTenant && profile.returning) {
+          // Sign-in never joins a workspace (M9). An account with no membership gets a session only for
+          // the pending invitation it followed. With no membership, every workspace route still refuses
+          // it; it can review that invitation and accept it with its own click, or sign out.
+          if (!approved && runtime.config.multiTenant) {
             const invitationId = await callbackInvitation();
-            if (invitationId && await claimInvitation(runtime.db, session.userId, profile.email, invitationId)) approved = await isApprovedUser(runtime, session.userId);
+            approved = !!invitationId && await pendingInvitation(runtime.db, profile.email, invitationId);
           }
           if (!approved) throw new APIError('FORBIDDEN');
         } },

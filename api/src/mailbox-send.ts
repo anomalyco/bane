@@ -1,6 +1,6 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { S3Client } from '@aws-sdk/client-s3';
-import { parseFragment, serialize, type DefaultTreeAdapterMap } from 'parse5';
+import { defaultTreeAdapter, parseFragment, serialize, type DefaultTreeAdapterMap } from 'parse5';
 import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
@@ -9,7 +9,7 @@ import { regionalSending, unverifiedSender, verifiedClaim } from './domain-claim
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
-import { assertMailboxKey,readableMailboxKey,workspacePrefix, mailboxS3 } from './mailbox-setup.js';
+import { assertMailboxKey,readableMailboxKey,sentAttachmentKey, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
 import { decodeBase64 } from './outbound-content.js';
@@ -168,7 +168,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
-    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:`${workspacePrefix(message.scope.workspaceId,'att')}${messageRowId}/${attachmentId}`};
+    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
   }));
   const references = referencesHeader(message.references);
   const headers = [
@@ -284,33 +284,79 @@ function quoteUrl(value: string, image: boolean) {
   const url = value.replace(/[\x00-\x20\x7f]/g, '');
   return (image ? /^(?:https?:|cid:)/i : /^(?:https?:|mailto:|tel:|#)/i).test(url) ? value.trim() : null;
 }
-function cleanQuoteNodes(parent: QuoteParent): void {
-  const next: QuoteNode[] = [];
-  for (const node of parent.childNodes) {
-    if (node.nodeName === '#text') { next.push(node); continue; }
-    if (!('tagName' in node)) continue; // Comments (including Outlook conditional HTML) and doctypes.
-    const tag = node.tagName.toLowerCase();
-    if (QUOTE_DROP.has(tag) || node.namespaceURI !== 'http://www.w3.org/1999/xhtml') continue;
-    cleanQuoteNodes(node);
-    if (!QUOTE_KEEP.has(tag)) { for (const child of node.childNodes) { child.parentNode = parent; next.push(child); } continue; } // Unwrap html, body, form, unknown tags.
-    node.attrs = node.attrs.flatMap(({ name, value, prefix }) => {
-      if (prefix) return [];
-      const attribute = name.toLowerCase();
-      if ((tag === 'a' && attribute === 'href') || (tag === 'img' && attribute === 'src')) { const url = quoteUrl(value, tag === 'img'); return url ? [{ name: attribute, value: url }] : []; }
-      if (!QUOTE_ATTRIBUTES.has(attribute)) return [];
-      if (attribute === 'style') { const style = quoteStyle(value); return style ? [{ name: attribute, value: style }] : []; }
-      return [{ name: attribute, value }];
-    });
-    next.push(node);
+// N6: the HTML tree builder re-opens formatting elements and clones them, so a few KB of received
+// HTML can grow by N x M nodes, and nesting makes its scope checks quadratic. Every quote is bounded
+// before and during parsing; over any bound the caller quotes the escaped plain text instead.
+const QUOTE_MAX_INPUT = 256 * 1024; // Characters of received HTML.
+const QUOTE_MAX_NODES = 20_000; // Elements (clones included) and comments the parser may create. Text is linear in the input.
+const QUOTE_MAX_DEPTH = 256;
+const QUOTE_MAX_ATTRIBUTES = 512 * 1024; // Attribute characters visited, cloned elements included.
+const QUOTE_MAX_MS = 250;
+class QuoteBudgetExceeded extends Error {}
+const HTML_NS = 'http://www.w3.org/1999/xhtml';
+function cleanAttributes(tag: string, attrs: QuoteElement['attrs'], spend: (n: number) => void) {
+  return attrs.flatMap(({ name, value, prefix }) => {
+    spend(name.length + value.length);
+    if (prefix) return [];
+    const attribute = name.toLowerCase();
+    if ((tag === 'a' && attribute === 'href') || (tag === 'img' && attribute === 'src')) { const url = quoteUrl(value, tag === 'img'); return url ? [{ name: attribute, value: url }] : []; }
+    if (!QUOTE_ATTRIBUTES.has(attribute)) return [];
+    if (attribute === 'style') { const style = quoteStyle(value); return style ? [{ name: attribute, value: style }] : []; }
+    return [{ name: attribute, value }];
+  });
+}
+// Iterative and post-order, so any depth the parser produced costs no call stack. Children are
+// cleaned before their parent splices unwrapped (html, body, form, unknown) elements into place.
+function cleanQuoteNodes(root: QuoteParent, spend: (n: number) => void): void {
+  const order: QuoteParent[] = [], stack: QuoteParent[] = [root];
+  while (stack.length) {
+    const parent = stack.pop()!;
+    order.push(parent);
+    for (const node of parent.childNodes) if ('tagName' in node && node.namespaceURI === HTML_NS && !QUOTE_DROP.has(node.tagName.toLowerCase())) stack.push(node);
   }
-  parent.childNodes = next;
+  for (let i = order.length - 1; i >= 0; i--) {
+    const parent = order[i]!, next: QuoteNode[] = [];
+    for (const node of parent.childNodes) {
+      if (node.nodeName === '#text') { next.push(node); continue; }
+      if (!('tagName' in node)) continue; // Comments (including Outlook conditional HTML) and doctypes.
+      const tag = node.tagName.toLowerCase();
+      if (QUOTE_DROP.has(tag) || node.namespaceURI !== HTML_NS) continue;
+      if (!QUOTE_KEEP.has(tag)) { for (const child of node.childNodes) { child.parentNode = parent; next.push(child); } continue; }
+      node.attrs = cleanAttributes(tag, node.attrs, spend);
+      next.push(node);
+    }
+    parent.childNodes = next;
+  }
 }
 type QuoteParent = DefaultTreeAdapterMap['parentNode'];
 type QuoteNode = DefaultTreeAdapterMap['childNode'];
-export function safeForwardHtml(html: string) {
-  const fragment = parseFragment(html);
-  cleanQuoteNodes(fragment);
-  return serialize(fragment);
+type QuoteElement = DefaultTreeAdapterMap['element'];
+/** Allow-listed copy of received HTML for a reply quote, or null when it exceeds the quote bounds. */
+export function safeForwardHtml(html: string): string | null {
+  if (html.length > QUOTE_MAX_INPUT) return null;
+  const started = performance.now(), depth = new WeakMap<object, number>();
+  let nodes = 0, attributes = 0;
+  const tick = () => { if (++nodes > QUOTE_MAX_NODES || ((nodes & 255) === 0 && performance.now() - started > QUOTE_MAX_MS)) throw new QuoteBudgetExceeded(); };
+  const place = (parent: QuoteParent, child: QuoteNode) => {
+    const level = (depth.get(parent) ?? 0) + 1;
+    if (level > QUOTE_MAX_DEPTH) throw new QuoteBudgetExceeded();
+    depth.set(child, level);
+  };
+  const treeAdapter: typeof defaultTreeAdapter = {
+    ...defaultTreeAdapter,
+    createElement: (tagName, namespaceURI, attrs) => { tick(); return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs); },
+    createCommentNode: data => { tick(); return defaultTreeAdapter.createCommentNode(data); },
+    appendChild: (parent, child) => { place(parent, child); defaultTreeAdapter.appendChild(parent, child); },
+    insertBefore: (parent, child, reference) => { place(parent, child); defaultTreeAdapter.insertBefore(parent, child, reference); },
+  };
+  try {
+    const fragment = parseFragment(html, { treeAdapter });
+    cleanQuoteNodes(fragment, n => { attributes += n; if (attributes > QUOTE_MAX_ATTRIBUTES) throw new QuoteBudgetExceeded(); });
+    return serialize(fragment);
+  } catch (error) {
+    if (error instanceof QuoteBudgetExceeded) return null;
+    throw error;
+  }
 }
 
 /** Copies delivery status and the SES Message-ID from the sending pipeline onto outbound mailbox messages and emits events. Every minute. */

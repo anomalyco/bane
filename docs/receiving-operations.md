@@ -68,6 +68,41 @@ Sending and receiving checkpoint independently. Pulumi provisions the mail contr
 
    Expected: health 200 and successful assertions. If not, keep traffic gated and inspect `shared-receiving-setup` / `shared-pool-setup` logs; do **not** delete or replace the active set. Finally use a separately authorized canary from a controlled sender to a proven test address; confirm one mailbox message and verify its webhook signature. No such email was sent as part of these local checks.
 
+## Rollout of the m52 recheck IAM changes (N1, N7, feedback dead letters)
+
+Order matters: the old Worker writes attachment keys the old policy refuses, and the new Worker refuses to send until Pulumi owns the event destinations. Do these per stage, dev first, before the Worker deploy. Nothing here was run against AWS during development.
+
+1. **Deploy role.** Rerun step 1 above unchanged: it re-applies `receiving-deploy-policy.json`, which now also grants the two feedback dead-letter queues and alarms, the Ohio feedback subscription and redrive, and the four pool event destinations.
+2. **Runtime boundary (N1).** The `bane-runtime-boundary` policy is not in this repository. Confirm it allows `s3:GetObject`, `s3:PutObject` and `s3:PutObjectTagging` on `arn:aws:s3:::bane-<account>-mail-us-east-2/workspaces/*/att/*`, or on the exact key shapes in `infra/aws-shared/runtime-ohio-policy.json`:
+
+   ```bash
+   aws iam get-policy-version --policy-arn "arn:aws:iam::$account:policy/bane-runtime-boundary" \
+     --version-id "$(aws iam get-policy --policy-arn "arn:aws:iam::$account:policy/bane-runtime-boundary" --query Policy.DefaultVersionId --output text)" --query PolicyVersion.Document
+   aws iam simulate-principal-policy --policy-source-arn "arn:aws:iam::$account:user/bane-runtime" --action-names s3:PutObject s3:GetObject \
+     --resource-arns "arn:aws:s3:::bane-$account-mail-us-east-2/workspaces/ws_$(printf 'a%.0s' {1..32})/att/msg_$(printf 'b%.0s' {1..32})/$(printf 'c%.0s' {1..64})/matt_$(printf 'd%.0s' {1..32})" \
+     --context-entries ContextKeyName=aws:RequestedRegion,ContextKeyValues=us-east-2,ContextKeyType=string ContextKeyName=s3:ResourceAccount,ContextKeyValues=$account,ContextKeyType=string --query 'EvaluationResults[].EvalDecision'
+   ```
+
+   Run the simulation after the Pulumi update in step 5; expected `["allowed","allowed"]`. Before it, the same call shows the denial the old policy causes.
+3. **Pool configuration sets (N7).** Confirm the four sets carry the values the Worker now requires, because it can no longer correct them:
+
+   ```bash
+   for spec in us-east-2:bane us-east-1:bane-trusted; do for stream in transactional marketing; do
+     aws sesv2 get-configuration-set --region "${spec%%:*}" --configuration-set-name "${spec#*:}-$stream" --query '[SendingOptions,SuppressionOptions,Tags]'
+   done; done
+   ```
+
+   Expected: sending enabled, `SuppressionScope` `TENANT`, reasons `BOUNCE` and `COMPLAINT`, Auto Validation disabled on transactional and `MANAGED` on marketing, and the installation and purpose tags. Correct a drifted set with the operator's own credentials, for example `aws sesv2 put-configuration-set-suppression-options --region us-east-2 --configuration-set-name bane-marketing --suppression-scope TENANT --suppressed-reasons BOUNCE COMPLAINT --validation-options '{"ConditionThreshold":{"ConditionThresholdEnabled":"ENABLED","OverallConfidenceThreshold":{"ConfidenceVerdictThreshold":"MANAGED"}}}'`. A missing Virginia set is created with the [bootstrap commands](../infra/aws-shared/README.md#pool-configuration-sets-operator-once-per-account).
+4. **Inventory and stack settings.** Rerun step 2 above. The inventory now also adopts the feedback HTTPS subscriptions and the existing `bane-events` / `bane-trusted-events` destinations. Set the Virginia pager, an existing monitored us-east-1 topic in the same account (CloudWatch alarm actions must be in the alarm's region):
+
+   ```bash
+   (cd infra/pulumi && pulumi config set --stack "$STAGE" bane:virginiaAlarmTopicArn "$VIRGINIA_PAGER_ARN")
+   ```
+5. **Pulumi, then the Worker.** Preview, expect imports for the existing destinations and feedback subscriptions, creates for the two feedback queues, queue policies and alarms, and in-place updates for the topic delivery policies and the three runtime policies. Then run the normal deploy. If the Worker logs `POOL_SENDING_DRIFT … event destinations`, Pulumi has not applied the destinations; do not restore the old runtime grants.
+6. **BYO v5 customers (N1).** Received attachments need the updated `api/byo-template.yaml` stack before the new Worker serves their receiving. BYO receiving is not enabled in production.
+
+Rotate the runtime key every 90 days, or at once on suspicion: confirm `bane-deploy` may call `iam:DeleteAccessKey` on `user/bane-runtime`, then `pulumi config set --stack "$STAGE" bane:runtimeKeyRotation "$(date +%Y-%m-%d)"` and deploy. The update creates the new key, rewrites both Worker secrets and deletes the old key.
+
 ## Redrive one failed notification
 
 The work queue contains wake hints, not envelopes. The SNS HTTPS subscription redrives undeliverable original messages to an encrypted SQS Standard queue scoped to that exact topic and account. Inspect/replay as an authorized operator **before staging expires**; the staging sweeper cannot reconstruct a Bcc envelope. Do not log payloads or publish them to a different topic. Replay causes fresh SNS signing and the same topic/account/bucket, receipt-time, workspace and dedup checks; it does not override quarantine or a failed receipt.
@@ -94,7 +129,7 @@ No SQS message means no replay. If an object or binding is gone, or a step fails
 
 ## Capacity and alerts
 
-Alert on CloudTrail management events from `arn:aws:iam::<account>:user/bane-runtime` for `PutBucketPolicy`, `CreateReceiptRule`, `UpdateReceiptRule`, `SetTopicAttributes` and `SetSubscriptionAttributes` in both hosted accounts, including denied attempts. After rollout these are never normal. A successful write calls for inspection/restoration of the affected control, not just key rotation.
+Alert on CloudTrail management events from `arn:aws:iam::<account>:user/bane-runtime` for `PutBucketPolicy`, `CreateReceiptRule`, `UpdateReceiptRule`, `SetTopicAttributes`, `SetSubscriptionAttributes`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, `DeleteConfigurationSetEventDestination` and `PutConfigurationSetSuppressionOptions` in both hosted accounts, including denied attempts. After rollout these are never normal. A successful write calls for inspection/restoration of the affected control, not just key rotation.
 
 `SES_IDENTITY_QUOTA_EXHAUSTED` is non-retryable. Monitor this error in Worker logs and configure `REPUTATION_ALERT_SLACK_URL` for the daily deduplicated account/region alert. Identity count—not receipt-rule count—limits independent domains. To check or request headroom in the **receiving account and region**, before admitting a batch:
 

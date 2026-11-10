@@ -33,12 +33,21 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
   return result.rows[0]?.workspace_id;
 }
 
+// The invitation the verified recipient followed is still claimable (the same conditions as
+// claimInvitation). Reading it changes nothing.
+export async function pendingInvitation(db: DbExecutor, email: string, invitationId: string) {
+  const result = await db.execute(sql`SELECT FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
+    WHERE i.id = ${invitationId} AND i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
+      AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner'))`);
+  return !!result.rowCount;
+}
+
 // Called only in the transaction that *inserts* the Google user. Ordinary dashboard requests,
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
-// An invitation is claimed here only when it is the account's sole way in. An approved account
-// gets its own workspace and confirms the invitation in the dashboard, never during sign-in (M9).
+// Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
+// created with no membership; its session can only review and accept that invitation.
 export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
-  if (!allowSignup) return !!invitationId && !!await claimInvitation(db, user.id, user.email, invitationId);
+  if (!allowSignup) return !!invitationId && await pendingInvitation(db, user.email, invitationId);
   await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`, region);
   return true;
 }

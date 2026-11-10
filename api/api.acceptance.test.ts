@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
-import {bucketPolicy,deliveryPolicy,feedbackPolicy,inboundPolicy,lifecycleRules,publicAccessBlock,receiptRule,redrivePolicy} from './src/mail-controls.js';
+import {bucketPolicy,deliveryPolicy,feedbackPolicy,inboundPolicy,lifecycleRules,POOL_STREAMS,poolEventDestination,poolSuppression,publicAccessBlock,receiptRule,redrivePolicy} from './src/mail-controls.js';
 // On Linux, Node gives a child a socket as stdin, which openssl cannot reopen through /dev/stdin, so pass a private temp file.
 async function selfSignedPem(key:import('node:crypto').KeyObject) {
   const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
@@ -13,6 +13,41 @@ async function selfSignedPem(key:import('node:crypto').KeyObject) {
     const file=path.join(dir,'key.pem');fs.writeFileSync(file,key.export({format:'pem',type:'pkcs8'}),{mode:0o600});
     return (await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key',file,'-days','1','-subj','/CN=fixture'],{encoding:'utf8'});
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+}
+
+// Offline IAM evaluation of checked-in identity policies: wildcard ARNs (* any run, ? exactly one
+// character), the condition operators these documents use, and explicit Deny. No AWS call.
+type IamStatement={Effect:string;Action?:string|string[];NotAction?:string|string[];Resource?:string|string[];NotResource?:string|string[];Condition?:Record<string,Record<string,string|string[]>>};
+function iamAllows(statements:IamStatement[],action:string,resource:string,context:Record<string,string|string[]>) {
+  const like=(pattern:string,value:string)=>new RegExp('^'+pattern.replace(/[.+^${}()|[\]\\]/g,'\\$&').replaceAll('*','.*').replaceAll('?','.')+'$','is').test(value);
+  const matches=(list:string|string[]|undefined,not:string|string[]|undefined,value:string)=>list!==undefined ? [list].flat().some(p=>like(p,value)) : not!==undefined && ![not].flat().some(p=>like(p,value));
+  const condition=(op:string,key:string,want:string|string[])=>{
+    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat();
+    switch(op){
+      case 'StringEquals':case 'Bool':case 'ArnEquals':return values.length>0 && values.some(v=>wanted.includes(v));
+      case 'StringLike':case 'ArnLike':return values.length>0 && values.some(v=>wanted.some(w=>like(w,v)));
+      case 'StringNotEquals':return !values.some(v=>wanted.includes(v));
+      case 'StringEqualsIfExists':return !values.length || values.some(v=>wanted.includes(v));
+      case 'ForAllValues:StringEquals':return values.every(v=>wanted.includes(v));
+      case 'Null':return (wanted[0]==='true')===(have===undefined);
+      default:throw new Error(`Unsupported IAM condition operator ${op}`);
+    }
+  };
+  const applies=(s:IamStatement)=>matches(s.Action,s.NotAction,action) && matches(s.Resource,s.NotResource,resource) && Object.entries(s.Condition??{}).every(([op,keys])=>Object.entries(keys).every(([key,want])=>condition(op,key,want)));
+  return statements.some(s=>s.Effect==='Allow' && applies(s)) && !statements.some(s=>s.Effect==='Deny' && applies(s));
+}
+// The S3 calls Bane makes on one attachment object: ingest/archive PutObject, signed-link and
+// reuse GetObject, and the orphan expiry tag (any other tag value must stay refused).
+function attachmentAccess(statements:IamStatement[],arn:string,account:string) {
+  const base={'aws:RequestedRegion':'us-east-2','s3:ResourceAccount':account},tag=(kind:string)=>({...base,'s3:RequestObjectTag/bane-kind':kind,'s3:RequestObjectTagKeys':['bane-kind']});
+  return {get:iamAllows(statements,'s3:GetObject',arn,base),put:iamAllows(statements,'s3:PutObject',arn,base),
+    orphan:iamAllows(statements,'s3:PutObjectTagging',arn,tag('orphan')),otherTag:iamAllows(statements,'s3:PutObjectTagging',arn,tag('raw'))};
+}
+// Against the three rendered hosted runtime policies (the runtime user carries all three).
+async function hostedAttachmentAccess(key:string,account='905840579680') {
+  const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href);
+  const statements=Object.values(render('--fresh',{account,origin:'https://dev.bane.mx'}) as Record<string,{Statement:IamStatement[]}>).flatMap(d=>d.Statement);
+  return attachmentAccess(statements,`arn:aws:s3:::bane-${account}-mail-us-east-2/${key}`,account);
 }
 
 // Run against the actual server and normal background-job runner with bun run test.
@@ -76,10 +111,11 @@ function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:strin
       case 'GetAccountCommand':return {ProductionAccessEnabled:true,SendingEnabled:true,EnforcementStatus:'HEALTHY'};
       case 'GetConfigurationSetCommand':return set??missing();
       case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:set!.destinations};
-      case 'CreateConfigurationSetCommand':assert.equal(/^bane-(transactional|marketing)$/.test(i.ConfigurationSetName),account===platform);sets.set(key,{...i,destinations:[]});return {};
-      case 'PutConfigurationSetSuppressionOptionsCommand':assert.equal(i.SuppressionScope,account===platform?'TENANT':'ACCOUNT');set!.SuppressionOptions=i;return {};
-      case 'CreateConfigurationSetEventDestinationCommand':set!.destinations.push({...i.EventDestination,Name:i.EventDestinationName});return {};
-      case 'UpdateConfigurationSetEventDestinationCommand':set!.destinations=[{...i.EventDestination,Name:i.EventDestinationName}];return {};
+      // N7: the operator and Pulumi own the pool sets, their suppression and destinations; the runtime key only reads them.
+      case 'CreateConfigurationSetCommand':assert.notEqual(account,platform,'pool set create');assert.ok(!/^bane-(transactional|marketing)$/.test(i.ConfigurationSetName));sets.set(key,{...i,destinations:[]});return {};
+      case 'PutConfigurationSetSuppressionOptionsCommand':assert.notEqual(account,platform,'pool suppression write');assert.equal(i.SuppressionScope,'ACCOUNT');set!.SuppressionOptions=i;return {};
+      case 'CreateConfigurationSetEventDestinationCommand':assert.notEqual(account,platform,'pool destination write');set!.destinations.push({...i.EventDestination,Name:i.EventDestinationName});return {};
+      case 'UpdateConfigurationSetEventDestinationCommand':assert.notEqual(account,platform,'pool destination write');set!.destinations=[{...i.EventDestination,Name:i.EventDestinationName}];return {};
       case 'CreateTopicCommand':{assert.notEqual(account,platform);const arn=`arn:aws:sns:${region}:${account}:${i.Name}`;topics.set(arn,{Tags:i.Tags,Attributes:{TopicArn:arn,Owner:account},subs:[]});return {TopicArn:arn};}
       case 'GetTopicAttributesCommand':return topic??missing();
       case 'ListTagsForResourceCommand':return topic??missing();
@@ -89,10 +125,12 @@ function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:strin
     }
   };
 }
-function seedPool(topics:Map<string,Json>,region:string,account:string,endpoint:string) {
+function seedPool(topics:Map<string,Json>,region:string,account:string,endpoint:string,sets:Map<string,Json>) {
   const {topic}=deployedReceiving(region,account,endpoint);topics.set(topic.Attributes.TopicArn,topic);
-  const arn=`arn:aws:sns:${region}:${account}:bane-feedback`;
-  topics.set(arn,{Tags:[{Key:'bane:installation-id',Value:'bane:pool'},{Key:'bane:purpose',Value:'ses-feedback'}],Attributes:{TopicArn:arn,Owner:account,Policy:JSON.stringify(deployedFeedback(region,account,'bane'))},subs:[]});
+  const arn=`arn:aws:sns:${region}:${account}:bane-feedback`,tags=[{Key:'bane:installation-id',Value:'bane:pool'},{Key:'bane:purpose',Value:'ses-feedback'}];
+  topics.set(arn,{Tags:tags,Attributes:{TopicArn:arn,Owner:account,Policy:JSON.stringify(deployedFeedback(region,account,'bane'))},subs:[]});
+  // The operator created the sets with tenant suppression; Pulumi wired their destinations.
+  for(const stream of POOL_STREAMS)sets.set(`${region}:bane-${stream}`,{ConfigurationSetName:`bane-${stream}`,Tags:tags,SendingOptions:{SendingEnabled:true},SuppressionOptions:poolSuppression(stream),destinations:[poolEventDestination('bane',arn)]});
 }
 type Key = { id: string; secret: string };
 const cleanups = new WeakMap<TestContext, Array<() => Promise<void>>>();
@@ -755,7 +793,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     let approvedCookie = '';
     const returningSub = unique('mock-returning-sub');
     const returningEmail = `${unique('mock-returning')}@example.com`;
-    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string; notApproved?: boolean }> = [
+    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string; notApproved?: boolean; invitee?: boolean }> = [
       { allowed: true, email: emailAllowed, hd: undefined, verified: true },
       { allowed: true, email: `${unique('mock-domain')}@example.com`, hd: 'example.com', verified: true },
       { allowed: false, email: `${unique('mock-unverified')}@example.com`, hd: 'example.com', verified: false },
@@ -815,9 +853,13 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.ok(/;\s*Max-Age=604800(?:;|$)/i.test(sessionCookie), 'A new Google login must last seven days in the browser.');
         approvedCookie = sessionCookie.split(';')[0];
         secrets.add(approvedCookie);
-        const me = ok(await local('GET', '/v1/me', undefined, approvedCookie));
-        assert.equal(me.id, users.rows[0].id);
-        assert.equal(me.email, scenario.email);
+        // M9: a first-time invitee's session has no workspace until the recipient joins.
+        if (scenario.invitee) error(await local('GET', '/v1/me', undefined, approvedCookie), 401, 'AUTH_REQUIRED');
+        else {
+          const me = ok(await local('GET', '/v1/me', undefined, approvedCookie));
+          assert.equal(me.id, users.rows[0].id);
+          assert.equal(me.email, scenario.email);
+        }
       } else {
         // A verified identity outside the hosted allow-list is told sign-up is invite-only; every other failure stays generic.
         assert.equal(callback.headers.get('location'), `${origin}/?auth=${scenario.notApproved ? 'not_approved' : 'error'}`);
@@ -926,7 +968,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub });
       await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub }, unsolicited.acceptUrl);
       assert.equal((await pool.query('SELECT attempts FROM access_requests WHERE email = $1', [guestEmail])).rows[0]?.attempts, 2);
-      const guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
+      const guest = await login({ allowed: true, invitee: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
+      // M9: signing in through the link joins nothing, even for an account with no other way in. The
+      // session can review the invitation it followed and accept it with the recipient's own click.
+      assert.equal((await pool.query('SELECT FROM workspace_members m JOIN auth_user u ON u.id = m.user_id WHERE u.email = $1', [guestEmail])).rowCount, 0);
+      for (const path of ['/v1/workspaces', '/v1/emails', '/v1/domains', '/v1/workspaces/current/members']) error(await local('GET', path, undefined, guest), 401);
+      const review = ok(await local('GET', `/v1/workspaces/invitations/${invitation.id}`, undefined, guest));
+      assert.deepEqual([review.status, review.workspaceId, review.role], ['pending', a.org.id, 'member']);
+      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
       error(await local('POST', '/v1/workspaces', { name: 'Guest workspace' }, guest), 403, 'SIGNUP_NOT_APPROVED');
@@ -1026,7 +1075,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         }
         providerTest.mock.method(SESv2Client.prototype, 'send', aws); providerTest.mock.method(SNSClient.prototype, 'send', aws);
         const offered = [region, 'eu-west-1'], originalRegions = runtime.config.sharedRegions;
-        for(const r of offered)seedPool(topics,r,platform,origin+'/v1/events/ses');
+        for(const r of offered)seedPool(topics,r,platform,origin+'/v1/events/ses',sets);
         runtime.config.aws = platformKey; runtime.config.liveEnabled = true; runtime.config.sharedRegions = offered;
         providerTest.after(async () => { runtime.config.aws = undefined; runtime.config.liveEnabled = false; runtime.config.byoTemplateUrl = undefined; runtime.config.sharedRegions = originalRegions; await pool.query('DELETE FROM provider_pool_regions WHERE region=ANY($1) AND aws_account_id=$2', [offered, platform]); });
         const choose = (kind: string, cookie: string) => local('POST', path, { kind, region }, cookie);
@@ -1542,6 +1591,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const {rows:[stored]}=await pool.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);assert.deepEqual(stored.envelope_to,[recipient]);assert.deepEqual(stored.bcc,[]);assert.equal(stored.to[0].address,custom);assert.deepEqual(objects.get(`${bucket}/${stored.raw_key}`),expected);
               assert.equal(stored.raw_key,`workspaces/${wid}/raw/${sesMessageId}.eml`);assert.equal((await pool.query('SELECT 1 FROM mailboxes WHERE workspace_id=$1 AND address=$2 AND origin=\'auto\'',[wid,recipient])).rowCount,1);
               const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
+              // N1: the fixture S3 has no IAM, so check the key this ingest wrote against the checked-in runtime policies.
+              assert.deepEqual(await hostedAttachmentAccess(file.storage_key),{get:true,put:true,orphan:true,otherTag:false},`runtime IAM must authorize ${file.storage_key}`);
               if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-bane-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
               const detailed=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,user.cookie,{'x-bane-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
             }
@@ -1961,7 +2012,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       ok(await local('DELETE', `${base}/invitations?id=${revoked.id}`, undefined, a.cookie));
       error(await local('POST', `/v1/workspaces/invitations/${revoked.id}/accept`, undefined, guest), 404);
       const rejoin = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role:'member' }, a.cookie), 201);
-      await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub }, rejoin.acceptUrl);
+      // A removed member signing in through a new link rejoins only by accepting it (M9).
+      await login({ allowed: true, invitee: true, email: guestEmail, verified: true, sub: guestSub }, rejoin.acceptUrl);
+      error(await local('GET', '/v1/me', undefined, guest), 401);
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${rejoin.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const invited = ok(await local('POST', `${base}/members`, { email: guestEmail, role:'admin' }, b.cookie), 201);
       const returning = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
@@ -3180,6 +3233,8 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.equal(ok(await http('GET', `/v1/emails/${allowed.id}`, domainReader.secret)).id, allowed.id);
     ok(await http('GET', `/v1/emails/${allowed.id}/content`, domainReader.secret));
     for (const path of ['', '/content', '/events', '/detail']) error(await http('GET', `/v1/emails/${other.id}${path}`, domainReader.secret), 404);
+    // N9: workspace-wide totals would count other domains' mail, so a restricted key gets none.
+    for (const query of ['', '?include=previous,streams', '?granularity=hour']) error(await http('GET', `/v1/metrics${query}`, domainReader.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const visible = await allPages('/v1/emails', domainReader.secret);
     assert.ok(visible.some(row => row.id === allowed.id));
     assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));
@@ -4814,6 +4869,26 @@ test('reply quotes rebuild received HTML from an allow-list',async()=>{
   assert.equal(rest,'<img><a>j</a><a href="https://ok.example/">ok</a>text<img src="cid:logo"><img><table border="1"><tbody><tr><td colspan="2">c</td></tr></tbody></table>');
 });
 
+test('reply quotes of crafted received HTML stay within time and memory bounds and fall back to text (N6)',async()=>{
+  const {safeForwardHtml}=await import('./src/mailbox-send.js');
+  const reopen=(open:number,blocks:number)=>'<p>'+Array.from({length:open},(_,i)=>`<b a${i}>`).join('')+'<p>x'.repeat(blocks);
+  const cases:[string,string,boolean][]=[
+    ['500 re-opened formatting elements x 5,000 blocks (24 KB, was +1.3 GiB)',reopen(500,5000),false],
+    ['1,000 x 10,000 (47 KB, exhausted a 4 GB heap)',reopen(1000,10000),false],
+    ['5,000 nested <div> (25 KB, overflowed the call stack)','<div>'.repeat(5000)+'x',false],
+    ['40,000 nested <div> (200 KB, 4 s in the parser)','<div>'.repeat(40000)+'x',false],
+    ['over the 256 KiB input bound','<p>'+'y'.repeat(256*1024)+'</p>',false],
+    ['one large attribute cloned by re-opened elements','<p><b title="'+'t'.repeat(60000)+'">'+'<p>x'.repeat(20),false],
+    ['1 MB of "<a " (over the input bound)','<a '.repeat(333333),false],
+    ['an ordinary 2,000-row table',`<table>${'<tr><td style="color:red">cell</td><td><b>bold</b></td></tr>'.repeat(2000)}</table>`,true],
+  ];
+  for(const [name,html,rich] of cases){
+    const rss=process.resourceUsage().maxRSS,started=performance.now(),out=safeForwardHtml(html),ms=performance.now()-started,grown=(process.resourceUsage().maxRSS-rss)/1024;
+    assert.equal(out!==null,rich,name);assert.ok(ms<1500,`${name}: ${ms.toFixed(0)} ms`);assert.ok(grown<256,`${name}: peak RSS grew ${grown.toFixed(0)} MiB`);
+    if(out)assert.ok(out.length<=html.length*2,`${name}: output grew to ${out.length}`);
+  }
+});
+
 test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   const {spawnSync}=await import('node:child_process');
   const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:'opensend'});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:'OpenSend API',version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
@@ -5042,7 +5117,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const apiKey='os_'+'1'.repeat(64),app=createApp();await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key',$1,'fixture',$2,'os_fixture','["manage","read","send"]','[]')`,[w[0],createHash('sha256').update(apiKey).digest('hex')]);
     const api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{authorization:'Bearer '+apiKey,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const sets=new Map<string,Json>(),topics=new Map<string,Json>(),setup=setupStore(sets,topics,dest),identities=new Map<string,Json>(),tenants=new Set<string>(),associations=new Set<string>();
-    seedPool(topics,r,dest,origin+'/v1/events/ses');const deployed=deployedReceiving(r,dest,origin+'/v1/events/ses');
+    seedPool(topics,r,dest,origin+'/v1/events/ses',sets);const deployed=deployedReceiving(r,dest,origin+'/v1/events/ses');
     const tags=(ts:Json[])=>Object.fromEntries(ts.map(t=>[t.Key,t.Value]));
     const owned={'bane:owner':'bane','bane:installation-id':'bane:pool'};
     let awsCalls=0; t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){awsCalls++;assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');return {Account:dest,Arn:`arn:aws:iam::${dest}:user/bane-runtime`};});
@@ -5379,10 +5454,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       switch(n){
         case 'GetAccountCommand':return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:true,SendQuota:{Max24HourSend:100000,MaxSendRate:100}};
         case 'GetConfigurationSetCommand':if(!sets.has(i.ConfigurationSetName))throw missing();return sets.get(i.ConfigurationSetName);
-        case 'CreateConfigurationSetCommand':assert.ok(!sets.has(i.ConfigurationSetName));checkTags(i.Tags,'ses-feedback');sets.set(i.ConfigurationSetName,{...i,dest:[]});return {};
+        // N7: no CreateConfigurationSet, suppression or destination write reaches SES from the runtime key.
         case 'GetConfigurationSetEventDestinationsCommand':{const d=sets.get(i.ConfigurationSetName)!.dest;return d.length?{EventDestinations:d}:{};} // Real SES omits an empty list.
-        case 'PutConfigurationSetSuppressionOptionsCommand':assert.equal(i.SuppressionScope,'TENANT');sets.get(i.ConfigurationSetName)!.SuppressionOptions=i;return {};
-        case 'CreateConfigurationSetEventDestinationCommand':assert.ok(confirmed);assert.equal(i.EventDestination.SnsDestination.TopicArn,topic);sets.get(i.ConfigurationSetName)!.dest.push({Name:i.EventDestinationName,...i.EventDestination});return {};
         case 'CreateTenantCommand':assert.equal(i.TenantName,tenant);checkTags(i.Tags,'workspace-tenant');assert.deepEqual(i.SuppressionAttributes,{SuppressionScope:'TENANT',SuppressedReasons:['BOUNCE','COMPLAINT']});return {TenantName:tenant,TenantArn:tenantArn};
         case 'UpdateReputationEntityPolicyCommand':assert.equal(i.ReputationEntityReference,tenantArn);assert.equal(i.ReputationEntityPolicy,`arn:aws:ses:${va}:aws:reputation-policy/strict`);return {};
         case 'CreateTenantResourceAssociationCommand':assert.equal(i.TenantName,tenant);if(i.ResourceArn.includes(':configuration-set/'))assert.ok(sets.has(i.ResourceArn.split('/')[1]));else if (failAssociation && members.size===3){failAssociation=false;throw new Error('interrupted');}assert.ok(!members.has(i.ResourceArn));members.add(i.ResourceArn);return {};
@@ -5406,6 +5479,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
     });
     const prepare=()=>trustedProvision(runtime,{connectionId:wid},{workspaceId:wid,id:'hosted.trusted:'+wid,attempts:1});
+    // The operator creates both trusted sets with tenant suppression before enrollment (N7).
+    for(const stream of POOL_STREAMS)sets.set(`bane-trusted-${stream}`,{ConfigurationSetName:`bane-trusted-${stream}`,Tags:Object.entries(tags('ses-feedback')).map(([Key,Value])=>({Key,Value})),SendingOptions:{SendingEnabled:true},SuppressionOptions:poolSuppression(stream),dest:[]});
     await assert.rejects(setDomainPool(db,[wid,managed,'trusted'],{...flags,BANE_TRUSTED_POOL:'false'}),/enabled/);
     runtime.config.trustedPool=false;await assert.rejects(prepare(),JobDeferred);assert.deepEqual(calls,[]);runtime.config.trustedPool=true;
     await setDomainPool(db,[wid,managed,'trusted'],flags);
@@ -5426,8 +5501,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const host=`https://sns.${va}.amazonaws.com/`,signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'},body={...signed,SignatureVersion:'2',SigningCertURL:host+'SimpleNotificationService-trustedfixture.pem',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
     error(await api('POST','/v1/events/ses',{...body,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');ok(await api('POST','/v1/events/ses',body),202);
     await assert.rejects(prepare(),{code:'POOL_SENDING_DRIFT',retryable:false});policy=JSON.stringify(deployedFeedback(va,acct,'bane-trusted')); // operator promotes after signed confirmation
-    await assert.rejects(prepare(),JobDeferred);await Promise.allSettled([prepare(),prepare()]);await prepare();
-    assert.deepEqual(['SetTopicAttributesCommand','SetSubscriptionAttributesCommand','CreateTopicCommand','SubscribeCommand','CreateTenantCommand','CreateConfigurationSetCommand','CreateConfigurationSetEventDestinationCommand'].map(n=>calls.filter(c=>c===n).length),[0,0,0,1,1,2,2]);
+    // The same Pulumi run wires the destinations. Until then, or if one is redirected, the Worker refuses rather than writing them.
+    await assert.rejects(prepare(),{code:'POOL_SENDING_DRIFT',message:/event destinations/});
+    for(const set of sets.values())set.dest=[poolEventDestination('bane-trusted',topic)];
+    sets.get('bane-trusted-marketing')!.dest=[{...poolEventDestination('bane-trusted',topic),SnsDestination:{TopicArn:topic.replace(acct,'999988887777')}}];
+    await assert.rejects(prepare(),{code:'POOL_SENDING_DRIFT',message:/bane-trusted-marketing event destinations/});
+    sets.get('bane-trusted-marketing')!.dest=[poolEventDestination('bane-trusted',topic)];
+    await Promise.allSettled([prepare(),prepare()]);await prepare();
+    assert.deepEqual(['SetTopicAttributesCommand','SetSubscriptionAttributesCommand','CreateTopicCommand','SubscribeCommand','CreateTenantCommand','CreateConfigurationSetCommand','CreateConfigurationSetEventDestinationCommand','PutConfigurationSetSuppressionOptionsCommand'].map(n=>calls.filter(c=>c===n).length),[0,0,0,1,1,0,0,0]);
     const added=ok(await api('POST','/v1/domains',{name:managed}),201);assert.equal(added.region,va);await assert.rejects(setDomainPool(db,[wid,managed,'probation'],flags),/Already bound/);
     const {operationJobs}=await import('./src/operations.js');await operationJobs['domain.verify']!(runtime,{domainId:added.id,token:managedTags[0]!.Value},{workspaceId:wid,id:'verify',attempts:1});
     assert.equal(ok(await api('GET',`/v1/domains/${added.id}`)).ready,true);
@@ -7510,7 +7591,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('inbound IAM confines receiving storage and BYO sending cannot use another installation\'s identities',async()=>{
     const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{load}=await import('js-yaml'),{readFile}=await import('node:fs/promises');
     const account='905840579680',docs=render('--fresh',{account,origin:'https://dev.bane.mx'}),all=(Object.values(docs) as Json[]).flatMap(d=>d.Statement);
-    const forbidden=['s3:CreateBucket','s3:PutBucketTagging','s3:PutBucketPublicAccessBlock','s3:PutBucketPolicy','s3:PutLifecycleConfiguration','ses:CreateReceiptRule','ses:UpdateReceiptRule','ses:CreateReceiptRuleSet','ses:SetActiveReceiptRuleSet','sns:CreateTopic','sns:SetTopicAttributes','sns:SetSubscriptionAttributes','sns:TagResource'];
+    const forbidden=['s3:CreateBucket','s3:PutBucketTagging','s3:PutBucketPublicAccessBlock','s3:PutBucketPolicy','s3:PutLifecycleConfiguration','ses:CreateReceiptRule','ses:UpdateReceiptRule','ses:CreateReceiptRuleSet','ses:SetActiveReceiptRuleSet','sns:CreateTopic','sns:SetTopicAttributes','sns:SetSubscriptionAttributes','sns:TagResource',
+      // N7: event feedback cannot be redirected, disabled or un-suppressed with the runtime key.
+      'ses:CreateConfigurationSet','ses:DeleteConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSetEventDestination','ses:PutConfigurationSetSendingOptions'];
     for(const s of all.filter(s=>s.Effect==='Allow'))for(const action of [s.Action].flat())assert.ok(!forbidden.some(f=>new RegExp('^'+action.replaceAll('*','.*').replaceAll('?','.')+'$','i').test(f)),`runtime grants ${action}`);
     const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),resources=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources;
     const byo=resources.ReceivingPolicy.Properties.PolicyDocument.Statement;
@@ -7534,17 +7617,51 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok(all.some(s=>s.Effect==='Deny' && s.Action?.includes('s3:ListBucket') && s.Condition?.StringNotEquals?.['s3:ResourceAccount']===account));
   });
 
+  test('attachment keys built by the code are authorized by the hosted, BYO and self-hosted IAM policies, and nothing wider (N1)',async()=>{
+    const {receivedAttachmentKey,sentAttachmentKey,mailboxResources}=await import('./src/mailbox-setup.js'),{digest}=await import('./src/core.js'),{load}=await import('js-yaml');
+    const wid=`ws_${'a1'.repeat(16)}`,other=`ws_${'c3'.repeat(16)}`,msg=`msg_${(await digest('fixture')).slice(0,32)}`,matt=`matt_${(await digest(`${msg}:0`)).slice(0,32)}`,batch=await digest('batch');
+    const received=receivedAttachmentKey(wid,msg,batch,matt),sent=sentAttachmentKey(wid,msg,matt);
+    assert.match(received,/^workspaces\/ws_[0-9a-f]{32}\/att\/msg_[0-9a-f]{32}\/[0-9a-f]{64}\/matt_[0-9a-f]{32}$/);
+    const none={get:false,put:false,orphan:false,otherTag:false},near=[`workspaces/${wid}/att/${msg}/${batch}/x/${matt}`,`workspaces/${wid}/att/${msg}/${batch.slice(1)}/${matt}`,`workspaces/${wid}/raw/${msg}/${batch}/${matt}`,receivedAttachmentKey(other,msg,batch,matt).replace(other,'ws_x')];
+    for(const key of [received,sent])assert.deepEqual(await hostedAttachmentAccess(key),{get:true,put:true,orphan:true,otherTag:false},key);
+    for(const key of near)assert.deepEqual(await hostedAttachmentAccess(key),none,key);
+    // BYO v5: resolve the CloudFormation parameters, and the IAM policy variable the way a request in Ohio sees it.
+    const account='123456789012',connection=`conn_${'b2'.repeat(16)}`,{bucket,prefix}=mailboxResources(connection,'us-east-2');
+    assert.equal(bucket,`${prefix}-mail-us-east-2`);
+    const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),params:Record<string,string>={ResourcePrefix:prefix,WorkspaceId:wid,'AWS::AccountId':account};
+    const receiving=(region?:string)=>(load(template.replace(/!Sub '([^']*)'/g,(_,s:string)=>JSON.stringify(s.replace(/\$\{(!?)([^}]+)\}/g,(m,bang:string,k:string)=>bang?(region??'${'+k+'}'):params[k]??m)))
+      .replace(/!Ref '?(ConnectionId|AWS::AccountId)'?/g,(_,k:string)=>JSON.stringify(k==='ConnectionId'?connection:account)).replace(/!Ref (?:ReceivingRegions|AccountRequestRegions)/g,'[us-east-2]')
+      .replace(/!(?:Ref|If|Equals|Not|GetAtt)\b/g,'')) as Json).Resources.ReceivingPolicy.Properties.PolicyDocument;
+    const byo=receiving('us-east-2').Statement as IamStatement[],arn=(key:string)=>`arn:aws:s3:::${bucket}/${key}`;
+    assert.deepEqual(attachmentAccess(byo,arn(received),account),{get:true,put:true,orphan:true,otherTag:false});
+    assert.deepEqual({...attachmentAccess(byo,arn(sent),account),orphan:false},{get:true,put:true,orphan:false,otherTag:false});
+    for(const key of near)assert.deepEqual(attachmentAccess(byo,arn(key),account),none,key);
+    assert.deepEqual(attachmentAccess(byo,arn(received.replace(wid,other)),account),none,'Another workspace in the same BYO account');
+    assert.ok(JSON.stringify(receiving()).length<=6144,'The BYO receiving managed policy must stay within the 6,144-character IAM quota.');
+    // Self-hosted: one installation's bucket, any object (the account and bucket prefix bound it).
+    const selfHosted=JSON.parse((await readFile(new URL('./iam-policy.json',import.meta.url),'utf8')).replaceAll('YOUR_AWS_ACCOUNT_ID',account)).Statement as IamStatement[],own=mailboxResources(randomUUID(),'us-east-2').bucket;
+    for(const key of [received,sent])assert.deepEqual(attachmentAccess(selfHosted,`arn:aws:s3:::${own}/${key}`,account),{get:true,put:true,orphan:true,otherTag:true},key);
+  });
+
   test('receiving CI manages the Ohio rule but cannot create or activate a set and refuses a missing or foreign set',async()=>{
     const {spawnSync}=await import('node:child_process'),{readFile}=await import('node:fs/promises');
     const policy=JSON.parse(await readFile(new URL('../infra/aws-shared/receiving-deploy-policy.json',import.meta.url),'utf8'));
-    const ses=policy.Statement.filter((s:Json)=>[s.Action].flat().some((a:string)=>a.startsWith('ses:')));assert.deepEqual(ses,[{Effect:'Allow',Action:['ses:DescribeActiveReceiptRuleSet','ses:DescribeReceiptRule','ses:CreateReceiptRule','ses:UpdateReceiptRule'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'us-east-2'}}}]);
+    const ses=policy.Statement.filter((s:Json)=>[s.Action].flat().some((a:string)=>a.startsWith('ses:')));
+    // Pulumi owns the four pool event destinations (N7) and nothing else on the sets: no create, suppression or sending change.
+    const set=(region:string,name:string)=>`arn:aws:ses:${region}:YOUR_AWS_ACCOUNT_ID:configuration-set/${name}`;
+    assert.deepEqual(ses,[{Effect:'Allow',Action:['ses:DescribeActiveReceiptRuleSet','ses:DescribeReceiptRule','ses:CreateReceiptRule','ses:UpdateReceiptRule'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'us-east-2'}}},
+      {Effect:'Allow',Action:['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSetEventDestination'],
+        Resource:[set('us-east-2','bane-transactional'),set('us-east-2','bane-marketing'),set('us-east-1','bane-trusted-transactional'),set('us-east-1','bane-trusted-marketing')]}]);
+    // Feedback dead letters (Mythos 5.1 N-M3): each queue accepts only its own topic; Pulumi may subscribe only Ohio's feedback to the stage endpoint.
+    const subscribe=policy.Statement.find((s:Json)=>s.Action==='sns:Subscribe');
+    assert.deepEqual(subscribe.Resource,['arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound','arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback']);assert.deepEqual(subscribe.Condition,{StringEquals:{'sns:Protocol':'https','sns:Endpoint':'YOUR_STAGE_ORIGIN/v1/events/ses'}});
     for(const [active,status] of [['None',1],['another-set',1],['bane-inbound',0]] as const){
       const r=spawnSync('bash',['-c',`ACTIVE=$2; aws(){ case "$*" in '--profile fixture sts get-caller-identity --query Account --output text') echo 905840579680;; '--profile fixture --region us-east-2 ses describe-active-receipt-rule-set --query Metadata.Name --output text') echo "$ACTIVE";; *) exit 99;; esac; }; source "$1" 905840579680 fixture`, '_',new URL('../.github/scripts/receiving-rule-set.sh',import.meta.url).pathname,active]);assert.equal(r.status,status);
     }
     // The offline AWS double also proves a denied inventory is not converted into
     // an empty import list (which would cause a conflicting resource create).
     const script=new URL('../infra/aws-shared/mail-control-imports.sh',import.meta.url).pathname;
-    for(const mode of ['fresh','existing','denied','foreign','pending']){
+    for(const mode of ['fresh','existing','denied','foreign','pending','sesdenied']){
       const account='905840579680',arn=`arn:aws:sns:us-east-2:${account}:bane-inbound`,bucket=`bane-${account}-mail-us-east-2`,sub=arn+':11111111-2222-3333-4444-555555555555';
       const result=spawnSync('bash',['-c',`aws(){ case "$*" in
         *'sts get-caller-identity') echo '{"Account":"${account}"}';;
@@ -7554,8 +7671,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         *'sns list-topics') [[ $mode != denied ]] || return 13;echo '{"Topics":[{"TopicArn":"${arn}"}]}';;
         *'sns list-tags-for-resource'*) echo '{"Tags":[{"Key":"bane:installation-id","Value":"bane:pool"},{"Key":"bane:purpose","Value":"mailbox-inbound"}]}';;
         *'sns list-subscriptions-by-topic'*) echo '${JSON.stringify({Subscriptions:mode==='fresh'?[]:[{Owner:account,TopicArn:arn,Protocol:'https',Endpoint:'https://dev.bane.mx/v1/events/ses',SubscriptionArn:mode==='pending'?'PendingConfirmation':sub}]})}';;
+        *'--region us-east-2 '*'sesv2 list-configuration-sets') [[ $mode != sesdenied ]] || return 13;echo '${JSON.stringify({ConfigurationSets:mode==='existing'?['other','bane-transactional','bane-marketing']:[]})}';;
+        *'--region us-east-1 '*'sesv2 list-configuration-sets') echo '{"ConfigurationSets":["bane-trusted-transactional"]}';;
+        *'sesv2 get-configuration-set-event-destinations --configuration-set-name bane-transactional') echo '{"EventDestinations":[{"Name":"bane-events"}]}';;
+        *'sesv2 get-configuration-set-event-destinations --configuration-set-name '*) echo '{}';;
         *) return 99;; esac; }; mode=$2; source "$1" dev`,'_',script,mode],{encoding:'utf8'});
-      if(mode==='existing') {assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),[bucket,'bane-inbound:bane-inbound-all',arn,sub]);}
+      // The marketing set has no destination yet and the trusted set has none: Pulumi creates them rather than adopting.
+      if(mode==='existing') {assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),[bucket,'bane-inbound:bane-inbound-all',arn,sub,'bane-transactional|bane-events']);}
       else if(mode==='fresh') {assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),[arn]);}
       else assert.notEqual(result.status,0);
     }
@@ -7566,6 +7688,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const prefix='arn:aws:sns:us-east-2:111122223333:',queue='bane-inbound-dead-letters',pager=prefix+'oncall';
     assert.deepEqual(receivingAlarm('111122223333',queue,pager),{name:queue,namespace:'AWS/SQS',metricName:'ApproximateNumberOfMessagesVisible',dimensions:{QueueName:queue},statistic:'Maximum',period:60,evaluationPeriods:1,comparisonOperator:'GreaterThanThreshold',threshold:0,treatMissingData:'notBreaching',alarmActions:[pager]});
     for(const bad of [prefix+'bane-inbound',pager.replace('us-east-2','us-east-1'),pager.replace('111122223333','444455556666')])assert.throws(()=>receivingAlarm('111122223333',queue,bad));
+    // SES feedback dead letters (Mythos 5.1 N-M3): Virginia's alarm pages a Virginia topic, never a Bane feedback topic.
+    const {deadLetterAlarm}=await import(new URL('../infra/pulumi/receiving-alarm.ts',import.meta.url).href),va='arn:aws:sns:us-east-1:111122223333:';
+    assert.deepEqual(deadLetterAlarm('111122223333','us-east-1','bane-trusted-feedback-dead-letters','q',va+'oncall').alarmActions,[va+'oncall']);
+    for(const bad of [pager,va+'bane-trusted-feedback',prefix+'bane-feedback'])assert.throws(()=>deadLetterAlarm('111122223333',bad===prefix+'bane-feedback'?'us-east-2':'us-east-1','x','q',bad));
   });
 
   test('095 preserves both claim indexes and counts only ingest job transitions',async t=>{

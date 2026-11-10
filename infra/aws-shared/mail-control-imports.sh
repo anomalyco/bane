@@ -9,7 +9,7 @@ esac
 stage=$1; region=us-east-2; export AWS_PAGER=''
 read_aws() { aws --profile "bane-$stage" --region "$region" --output json "$@"; }
 test "$(read_aws sts get-caller-identity | jq -er .Account)" = "$account"
-bucket=bane-$account-mail-us-east-2; inbound=arn:aws:sns:us-east-2:$account:bane-inbound
+bucket=bane-$account-mail-us-east-2
 ids='[]'; add() { ids=$(jq -c --arg id "$1" '.+[$id]' <<<"$ids"); }
 owned() { jq -e --arg p "$1" 'map({key:.Key,value:.Value})|from_entries|.["bane:installation-id"]=="bane:pool" and .["bane:purpose"]==$p' >/dev/null; }
 # Check the result of each AWS read; AccessDenied is never evidence of absence.
@@ -28,12 +28,22 @@ for name in bane-inbound bane-feedback bane-trusted-feedback; do
   if ! jq -e --arg t "$arn" 'any(.Topics[]?;.TopicArn==$t)' <<<"$topics" >/dev/null; then continue; fi
   read_aws sns list-tags-for-resource --resource-arn "$arn" | jq '.Tags' | owned "$purpose"
   add "$arn"
-  if [[ $arn == "$inbound" ]]; then
-    subs=$(read_aws sns list-subscriptions-by-topic --topic-arn "$arn")
-    if ! jq -e '.Subscriptions|length==0' <<<"$subs" >/dev/null; then
-      sub=$(jq -er --arg t "$arn" --arg u "$origin/v1/events/ses" --arg a "$account" '.Subscriptions|select(length==1)|.[0]|select(.Owner==$a and .TopicArn==$t and .Endpoint==$u and .Protocol=="https")|.SubscriptionArn|select(startswith($t+":"))' <<<"$subs") || { echo 'Stop: unexpected or pending inbound subscription; inspect before adoption.' >&2; exit 1; }
-      add "$sub"
-    fi
+  # Inbound and both feedback topics: adopt the one confirmed HTTPS subscription (redrive is Pulumi's).
+  subs=$(read_aws sns list-subscriptions-by-topic --topic-arn "$arn")
+  if ! jq -e '.Subscriptions|length==0' <<<"$subs" >/dev/null; then
+    sub=$(jq -er --arg t "$arn" --arg u "$origin/v1/events/ses" --arg a "$account" '.Subscriptions|select(length==1)|.[0]|select(.Owner==$a and .TopicArn==$t and .Endpoint==$u and .Protocol=="https")|.SubscriptionArn|select(startswith($t+":"))' <<<"$subs") || { echo "Stop: unexpected or pending $name subscription; inspect before adoption." >&2; exit 1; }
+    add "$sub"
   fi
+done
+# Pool event destinations (N7): adopt only Bane's exact destination on a set that already exists.
+for spec in us-east-2:bane us-east-1:bane-trusted; do
+  region=${spec%%:*}; prefix=${spec#*:}
+  sets=$(read_aws sesv2 list-configuration-sets)
+  for stream in transactional marketing; do
+    set=$prefix-$stream
+    jq -e --arg s "$set" 'any(.ConfigurationSets[]?;.==$s)' <<<"$sets" >/dev/null || continue
+    dests=$(read_aws sesv2 get-configuration-set-event-destinations --configuration-set-name "$set")
+    if jq -e --arg d "$prefix-events" 'any(.EventDestinations[]?;.Name==$d)' <<<"$dests" >/dev/null; then add "$set|$prefix-events"; fi
+  done
 done
 jq -c . <<<"$ids"
