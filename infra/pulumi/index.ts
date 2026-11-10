@@ -63,7 +63,6 @@ if (production && publishDomainConnectKey) {
 
 const credentials = { allowedAccountIds: [stage.account], assumeRoles: [{ roleArn }] };
 const iam = new aws.Provider("virginia", { ...credentials, region: "us-east-1" });
-const ses = new aws.Provider("ohio", { ...credentials, region: "us-east-2" });
 const runtime = "bane-runtime";
 const user = new aws.iam.User(runtime, {
   name: runtime, path: "/", tags: { "bane:purpose": "hosted-runtime" }, permissionsBoundary,
@@ -76,9 +75,8 @@ const attachments = Object.entries(policies).map(([name, document]) => {
   return new aws.iam.UserPolicyAttachment(name, { user: user.name, policyArn: policy.arn }, adopt(`${runtime}/${arn}`, iam));
 });
 
-const inbound = "bane-inbound";
-const ruleSet = new aws.ses.ReceiptRuleSet(inbound, { ruleSetName: inbound }, adopt(inbound, ses));
-new aws.ses.ActiveReceiptRuleSet("active-inbound", { ruleSetName: ruleSet.ruleSetName }, adopt(inbound, ses));
+// SES is deliberately outside this program: the receipt rule set, rules, identities,
+// tenants and DNS all belong to the app and the operator.
 
 // Never import an IAM access key: AWS returns its secret only on creation.
 const key = new aws.iam.AccessKey("runtime-key", { user: user.name }, { provider: iam, dependsOn: attachments });

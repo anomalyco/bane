@@ -2,7 +2,7 @@
 
 Production (`009882681002`, `https://bane.mx`) and dev (`905840579680`, `https://dev.bane.mx`) have separate dedicated accounts. No policy or key is shared between them.
 
-The [hosted Pulumi stacks](../pulumi/README.md) adopt the existing IAM and SES resources and own the new runtime access key. Do not rerun the manual bootstrap or create another key in those accounts. The renderer below remains the policy source for both stacks and the acceptance suite.
+The [hosted Pulumi stacks](../pulumi/README.md) adopt the existing IAM user and its policies and own the new runtime access key; SES is outside Pulumi. Do not rerun the manual bootstrap or create another key in those accounts. The renderer below remains the policy source for both stacks and the acceptance suite.
 
 ## Manual bootstrap reference (non-Pulumi installations)
 
