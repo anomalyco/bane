@@ -1,11 +1,10 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { and, eq, inArray, isNull, sql,type SQLWrapper } from 'drizzle-orm';
-import { SESClient, CreateReceiptRuleCommand, CreateReceiptRuleSetCommand, DeleteReceiptRuleCommand, DescribeActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, UpdateReceiptRuleCommand, type ReceiptRule } from '@aws-sdk/client-ses';
-import { S3Client, CopyObjectCommand, CreateBucketCommand, HeadBucketCommand, PutBucketLifecycleConfigurationCommand, PutBucketPolicyCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand } from '@aws-sdk/client-s3';
-import { SNSClient, CreateTopicCommand, ListSubscriptionsByTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, SubscribeCommand } from '@aws-sdk/client-sns';
-import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
-import { FetchHttpHandler } from '@smithy/fetch-http-handler';
-import { ApiError, assertSesConfigured, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import type { SESClient as SESClientType, ReceiptRule } from '@aws-sdk/client-ses';
+import type { S3Client as S3ClientType } from '@aws-sdk/client-s3';
+import type { SNSClient as SNSClientType } from '@aws-sdk/client-sns';
+import type { STSClient as STSClientType } from '@aws-sdk/client-sts';
+import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { mailboxDomains, mailboxRegions,type MxReport } from './db/mailbox.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
@@ -32,8 +31,19 @@ export function mailboxResources(installationId: string, region: string, account
   return { prefix, topicName: `${prefix}-inbound`, bucket: `${prefix}${installationId===POOL_INSTALLATION?`-${account}`:''}-mail-${region}`, ruleSetName: `${prefix}-inbound`, rulePrefix: `${prefix}-inbound-` };
 }
 
-function awsConfig(region:string, credentials:NonNullable<Runtime['config']['aws']>) {
-  return { region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) };
+type MailboxSetupSdk = {
+  ses: typeof import('@aws-sdk/client-ses');
+  s3: typeof import('@aws-sdk/client-s3');
+  sns: typeof import('@aws-sdk/client-sns');
+  sts: typeof import('@aws-sdk/client-sts');
+  FetchHttpHandler: typeof import('@smithy/fetch-http-handler').FetchHttpHandler;
+};
+export const loadMailboxSetupSdk = lazyModule((): Promise<MailboxSetupSdk> => Promise.all([
+  import('@aws-sdk/client-ses'), import('@aws-sdk/client-s3'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-sts'), import('@smithy/fetch-http-handler'),
+]).then(([ses, s3, sns, sts, { FetchHttpHandler }]) => ({ ses, s3, sns, sts, FetchHttpHandler })));
+async function awsConfig(region:string, credentials:NonNullable<Runtime['config']['aws']>) {
+  const sdk = await loadMailboxSetupSdk();
+  return { sdk, config: { region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new sdk.FetchHttpHandler({ requestTimeout: 15000 }) } };
 }
 export function storageBinding(wid:string,region:string|SQLWrapper,bucket:string|SQLWrapper) {
   return sql<ReadyConnection|null>`(SELECT to_jsonb(matched) FROM (
@@ -50,11 +60,12 @@ export async function mailboxS3(runtime: Runtime, wid:string, region: string, bu
     if (!binding) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The mailbox storage connection is unavailable.');
     credentials=await workspaceCredentials(runtime,region,binding);
   }
-  return new S3Client({ ...awsConfig(region, credentials), maxAttempts: 3 });
+  const { sdk, config } = await awsConfig(region, credentials);
+  return new sdk.s3.S3Client({ ...config, maxAttempts: 3 });
 }
 
 /** Upgrade old single-tenant objects on first read. Never sign a legacy key or touch it on MX. */
-export async function readableMailboxKey(runtime:Runtime,wid:string,region:string,bucket:string,key:string,kind:'raw'|'att',db:DbExecutor=runtime.db,client?:S3Client) {
+export async function readableMailboxKey(runtime:Runtime,wid:string,region:string,bucket:string,key:string,kind:'raw'|'att',db:DbExecutor=runtime.db,client?:S3ClientType) {
   if (!runtime.config.multiTenant && !key.startsWith('workspaces/')) {
     const raw=kind==='raw';
     if (!(raw ? /^raw\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/ : /^att\/msg_[a-f0-9]{32}\/matt_[a-f0-9]{32}$/).test(key)) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Unknown legacy object key.');
@@ -62,8 +73,8 @@ export async function readableMailboxKey(runtime:Runtime,wid:string,region:strin
     const binding=raw ? sql`SELECT envelope_to FROM mail_messages WHERE workspace_id=${wid} AND region=${region} AND raw_bucket=${bucket} AND raw_key=${key} AND raw_key='raw/'||ses_message_id` : sql`SELECT 1 FROM mail_attachments WHERE workspace_id=${wid} AND bucket=${bucket} AND storage_key=${key} AND storage_key='att/'||message_id||'/'||id`;
     const row=(await db.execute<{envelope_to:string[]}>(binding)).rows[0];
     if (!row) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Unknown legacy mailbox object.');
-    const s3=client ?? await mailboxS3(runtime,wid,region,bucket,db);
-    try { if(raw) await copyWorkspaceRaw(s3,region,bucket,key,dest,row.envelope_to,'legacy-raw');else await s3.send(new CopyObjectCommand({Bucket:bucket,Key:dest,CopySource:`${bucket}/${key}`})); }
+    const [sdk, s3] = await Promise.all([loadMailboxSetupSdk(), client ? Promise.resolve(client) : mailboxS3(runtime,wid,region,bucket,db)]);
+    try { if(raw) await copyWorkspaceRaw(s3,region,bucket,key,dest,row.envelope_to,'legacy-raw');else await s3.send(new sdk.s3.CopyObjectCommand({Bucket:bucket,Key:dest,CopySource:`${bucket}/${key}`})); }
     finally {if(!client)s3.destroy();}
     // A raw download must continue to expire with its original, not 90 days from its last download.
     if(!raw) await db.execute(sql`UPDATE mail_attachments SET storage_key=${dest} WHERE workspace_id=${wid} AND bucket=${bucket} AND storage_key=${key}`);
@@ -74,7 +85,7 @@ export async function readableMailboxKey(runtime:Runtime,wid:string,region:strin
 }
 
 // SES control-plane actions (including receipt rules) are limited to one request per second.
-function pacedSes(client: SESClient, signal: AbortSignal) {
+function pacedSes(client: SESClientType, signal: AbortSignal) {
   let last = -Infinity; let queue: Promise<unknown> = Promise.resolve();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return <T = unknown>(label: string, command: any): Promise<T> => {
@@ -96,6 +107,7 @@ function pacedSes(client: SESClient, signal: AbortSignal) {
 // Name the failing AWS action so an IAM gap is obvious from the stored error.
 type StepError = ApiError & { awsName?: string };
 function step(label: string, error: unknown): StepError {
+  if (error instanceof ModuleLoadError) throw error;
   if (error instanceof ApiError) return error;
   const mapped = awsError(error), name = errorName(error);
   const result: StepError = new ApiError(mapped.status, mapped.code, `${mapped.message} (${label}${name ? `: ${name}` : ''})`, mapped.field, mapped.retryable);
@@ -124,8 +136,12 @@ function topicPolicy(topicArn: string, region: string, account: string, rulePref
 export type RegionResources = { account: string; bucket: string; topicArn: string; ruleSetName: string };
 
 /** Idempotently creates the Bane-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
-type Clients = { sts: STSClient; s3: S3Client; sns: SNSClient; ses: ReturnType<typeof pacedSes> };
-async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>, knownAccount?:string): Promise<RegionResources & { rules: ReceiptRule[] }> {
+type Clients = { sts: STSClientType; s3: S3ClientType; sns: SNSClientType; ses: ReturnType<typeof pacedSes>; sdk: MailboxSetupSdk };
+async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses, sdk }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>, knownAccount?:string): Promise<RegionResources & { rules: ReceiptRule[] }> {
+  const { DescribeActiveReceiptRuleSetCommand, CreateReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand } = sdk.ses;
+  const { HeadBucketCommand, CreateBucketCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand, PutBucketPolicyCommand, PutBucketLifecycleConfigurationCommand } = sdk.s3;
+  const { CreateTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, ListSubscriptionsByTopicCommand, SubscribeCommand } = sdk.sns;
+  const { GetCallerIdentityCommand } = sdk.sts;
   const endpoint = feedbackUrl(runtime.config);
   {
     const account = knownAccount ?? (await aws('sts:GetCallerIdentity', () => sts.send(new GetCallerIdentityCommand({}), { abortSignal: signal }))).Account;
@@ -205,8 +221,9 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
 export async function preparePoolReceiving(runtime:Runtime,region:string,account:string,register:(account:string,bucket:string,arn:string)=>Promise<void>) {
   if (region==='us-east-1' || (runtime.config.regionalSending && region!=='us-east-2')) throw new ApiError(409,'HOSTED_RECEIVING_REGION','Hosted receiving is only available in Ohio.');
   assertSesConfigured(runtime);
-  const config=awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
-  const ses=new SESClient(config),clients={ses:pacedSes(ses,signal),s3:new S3Client(config),sns:new SNSClient(config),sts:new STSClient(config)};
+  const { sdk, config }=await awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
+  const { CreateReceiptRuleCommand, UpdateReceiptRuleCommand } = sdk.ses;
+  const ses=new sdk.ses.SESClient(config),clients={ses:pacedSes(ses,signal),s3:new sdk.s3.S3Client(config),sns:new sdk.sns.SNSClient(config),sts:new sdk.sts.STSClient(config),sdk};
   try {
     const resources=await ensureRegion(runtime,region,POOL_INSTALLATION,signal,clients,register,account);
     const rule=ruleFor(mailboxResources(POOL_INSTALLATION,region,account).rulePrefix+'all',[],resources);
@@ -232,7 +249,8 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
   const connection=runtime.config.multiTenant ? await workspaceConnection(scoped,region) : undefined;
   if (connection?.kind==='shared') return; // Pool preparation is never a per-domain operation.
   if (connection?.legacy===false) return; // Sending enrollment never authorizes the v4 receipt-rule reconciler.
-  const config = awsConfig(region,connection ? await workspaceCredentials(scoped,region,connection) : platformCredentials(runtime));
+  const { sdk, config } = await awsConfig(region,connection ? await workspaceCredentials(scoped,region,connection) : platformCredentials(runtime));
+  const { DeleteReceiptRuleCommand, CreateReceiptRuleCommand, UpdateReceiptRuleCommand } = sdk.ses;
   await runtime.db.insert(mailboxRegions).values({ workspaceId, region }).onConflictDoNothing();
   // The lease must expire before the job's own lease (3 minutes), so a retry of a run that died can take over
   // instead of failing as busy. A normal run takes seconds; the abort below keeps a live run inside the lease.
@@ -240,8 +258,8 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
     .where(and(eq(mailboxRegions.workspaceId, workspaceId), eq(mailboxRegions.region, region), sql`(${mailboxRegions.reconcileLeaseUntil} IS NULL OR ${mailboxRegions.reconcileLeaseUntil} < now())`)).returning({ region: mailboxRegions.region });
   if (!lease) throw new ApiError(503, 'MAILBOX_RECONCILE_BUSY', 'Another mailbox setup run owns this region; retrying.', undefined, true);
   const signal = AbortSignal.timeout(100000);
-  const sesClient = new SESClient(config);
-  const clients = { sts: new STSClient(config), s3: new S3Client(config), sns: new SNSClient(config), ses: pacedSes(sesClient, signal) };
+  const sesClient = new sdk.ses.SESClient(config);
+  const clients = { sts: new sdk.sts.STSClient(config), s3: new sdk.s3.S3Client(config), sns: new sdk.sns.SNSClient(config), ses: pacedSes(sesClient, signal), sdk };
   try {
     const settings = await getRegionSettings(runtime.db, workspaceId);
     const resources = { ...await ensureRegion({...runtime,config:{...runtime.config,awsAccountId:connection?.aws_account_id ?? runtime.config.awsAccountId}}, region, settings.installationId, signal, clients,async(account,bucket,arn)=>{
@@ -303,6 +321,7 @@ const reconcileJob: JobHandler = async (runtime, payload, job) => {
   if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid mailbox reconcile job.');
   try { await reconcileRegion(runtime, region,job.workspaceId); }
   catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
     const failure = error instanceof ApiError ? error : new ApiError(503, 'MAILBOX_SETUP_FAILED', 'Mailbox setup could not complete; it will be retried.', undefined, true);
     const final = !failure.retryable || job.attempts >= MAX_ATTEMPTS;
     const message = `${failure.code}: ${failure.message}`.slice(0, 500);

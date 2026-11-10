@@ -1,6 +1,6 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
-import { GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { ApiError, isSimulatedSes, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
+import type { S3Client } from '@aws-sdk/client-s3';
+import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
 import { domains } from './db/operations.js';
@@ -10,7 +10,7 @@ import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMe
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
 import { assertMailboxKey,readableMailboxKey,workspacePrefix, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
-import { queueMailboxEmail, storeAttachmentBytes, verifiedAttachment, type SendRequest } from './sending.js';
+import type { SendRequest } from './sending.js';
 import { decodeBase64 } from './outbound-content.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
@@ -36,8 +36,10 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
   if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${mailboxSender(runtime,from)}`)).rowCount)throw unverifiedSender();
   for(const item of items){
     if ('content' in item){
+      const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},decodeBase64(item.content,'attachments')));
     } else if(item.id.startsWith('matt_')){
+      const [{ GetObjectCommand }, { storeAttachmentBytes }] = await wrapModuleLoad(() => Promise.all([import('@aws-sdk/client-s3'), import('./sending.js')]));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
         .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id)));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
@@ -47,7 +49,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
         if(file.file.sourceId) await archiveMailboxFiles(runtime,scope.workspaceId,file.file.messageId,s3);
         const key=await readableMailboxKey(runtime,scope.workspaceId,file.region,file.file.bucket,file.file.storageKey,'att',runtime.db,s3);
         const object=await s3.send(new GetObjectCommand({Bucket:file.file.bucket,Key:key}));bytes=await object.Body!.transformToByteArray();
-      } catch (e) {if(e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3.destroy();}
+      } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3.destroy();}
       out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
     } else {
       const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.id,item.id)));
@@ -68,7 +70,7 @@ export async function archiveMailboxFiles(runtime:Runtime,wid:string,messageId:s
   if(!rows.length)return;
   const {region,file:first}=rows[0]!;
   if(!region || rows.some(r=>r.file.bucket!==first.bucket))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Inconsistent storage binding.');
-  const s3=client??await mailboxS3(runtime,wid,region,first.bucket);
+  const [{ PutObjectCommand }, { verifiedAttachment }, s3] = await Promise.all([wrapModuleLoad(() => import('@aws-sdk/client-s3')), wrapModuleLoad(() => import('./sending.js')), client ? Promise.resolve(client) : mailboxS3(runtime,wid,region,first.bucket)]);
   try {for(const {file,source} of rows){
     assertMailboxKey(wid,file.storageKey,'att');
     if(!ownsUpload(wid,source) || source.checksum!==file.sha256)throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Invalid archive source.');
@@ -174,6 +176,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     ...message.headers.map(header => ({ Name: header.name, Value: header.value })),
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
+  const { queueMailboxEmail } = await wrapModuleLoad(() => import('./sending.js'));
   const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen }, locked.replyAuthors);
   const now = new Date().toISOString();
   let threadId = message.threadId;

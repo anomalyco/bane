@@ -1,19 +1,16 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed } from './core.js';
+import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, wrapModuleLoad } from './core.js';
 import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
-import { getDashboardActor, requireDashboardOrigin } from './google-auth.js';
-import { createAgentToken, verifyAgentToken } from './agent-token.js';
-import { getMcpGrantActor } from './mcp-auth.js';
 
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
 const delegatedActor = Symbol('mcpActor');
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
-export async function dispatchAsActor(app: App, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
+export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
   if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
   const delegatedRuntime: DelegatedRuntime = { ...runtime, [delegatedActor]: identity };
   return await app.fetch(request, delegatedRuntime);
@@ -60,6 +57,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
     if (/^(?:bane|os)_agent_/.test(token)) {
+      const [{ verifyAgentToken }, { getMcpGrantActor }] = await wrapModuleLoad(() => Promise.all([import('./agent-token.js'), import('./mcp-auth.js')]));
       const temporary = await verifyAgentToken(c.env.config, token);
       const grant = temporary && await getMcpGrantActor(c.env, temporary.grant);
       const invalid = () => new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
@@ -84,6 +82,11 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
+    if (!Boolean(c.env.config.googleClientId && c.env.config.googleClientSecret && c.env.config.authSecret)) {
+      throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Google sign-in is not configured for this deployment.');
+    }
+    if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
+    const { getDashboardActor, requireDashboardOrigin } = await wrapModuleLoad(() => import('./google-auth.js'));
     const dashboard = await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work), headers => {
       for (const cookie of headers.getSetCookie()) c.header('set-cookie', cookie, { append: true });
     });
@@ -115,6 +118,7 @@ export function registerAuth(app: App) {
     if (identity.domains.length && (!input.domains.length || input.domains.some(domain => !senderDomainAllowed(identity.domains, domain)))) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'The temporary token must remain restricted to the approved sender domains or their subdomains.', 'domains');
     const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1000).toISOString();
     const tokenId = id('agt');
+    const { createAgentToken } = await wrapModuleLoad(() => import('./agent-token.js'));
     const token = await createAgentToken(c.env.config, { id: tokenId, grant: identity.keyId, permissions: input.permissions, domains: input.domains, expiresAt });
     await c.env.db.insert(agentTokens).values({ id: tokenId, workspaceId: identity.workspaceId, grantId: identity.keyId, permissions: input.permissions, domains: input.domains, purpose: input.purpose, expiresAt });
     return c.json({ id: tokenId, token, expiresAt, permissions: input.permissions, domains: input.domains, purpose: input.purpose }, 201);

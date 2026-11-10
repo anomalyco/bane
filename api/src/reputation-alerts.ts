@@ -1,11 +1,8 @@
-import { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
-import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { ApiError, log, type JobHandler, type Runtime } from './core.js';
+import { ApiError, lazyModule, log, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { sesSettings } from './db/ses-regions.js';
 import { enqueue } from './jobs.js';
-import { readReputation } from './ses-setup.js';
 
 // SES console thresholds. "Near" alerts fire at 80% of a threshold.
 const THRESHOLDS = { bounceRate: { warning: 0.05, risk: 0.1 }, complaintRate: { warning: 0.001, risk: 0.005 } } as const;
@@ -44,12 +41,16 @@ const DAY_MS = 24 * 3600_000;
  * after 30 days, so a sustained elevated level re-alerts at most monthly. A per-metric advisory
  * lock keeps overlapping checks from queueing the same alert twice.
  */
+const loadReputationDeps = lazyModule(() => Promise.all([import('@aws-sdk/client-cloudwatch'), import('@smithy/fetch-http-handler'), import('./ses-setup.js')]));
 export async function checkReputationAlerts(runtime: Runtime): Promise<number> {
   if (!runtime.config.reputationAlertUrl || !runtime.config.aws || !runtime.config.liveEnabled) return 0;
   // CloudWatch rates still describe one provider account. Read each region once, but keep alert ledgers per workspace.
   const settings = await runtime.db.select({ workspaceId: sesSettings.workspaceId, regions: sesSettings.enabledRegions }).from(sesSettings);
+  const regions = new Set(settings.flatMap(row => row.regions));
+  if (!regions.size) return 0;
+  const [{ CloudWatchClient }, { FetchHttpHandler }, { readReputation }] = await loadReputationDeps();
   let queued = 0;
-  for (const region of new Set(settings.flatMap(row => row.regions))) {
+  for (const region of regions) {
     const cw = new CloudWatchClient({ region, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) });
     try {
       const reputation = await readReputation(cw, AbortSignal.timeout(20000));

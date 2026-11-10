@@ -1,7 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
-import { ApiError, digest, errors, getSes, id, json, log, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential } from './auth.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
@@ -18,6 +17,7 @@ import { withRegionSettings } from './ses-region-state.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
+const loadMailboxSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 
 // ---------- access ----------
 function access(c: Ctx, permission?: MailboxPermission): MailboxAccess {
@@ -244,7 +244,11 @@ function registerReceivingDomains(app: App) {
     c.env = await withRegionSettings(c.env, value.workspaceId);
     if (c.env.config.multiTenant) return c.json((await domainViews(c,[row]))[0]!,202);
     if (!c.env.config.regions.includes(row.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable the domain’s SES region first.');
-    const identity = await getSes(c.env, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch(() => { throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true); });
+    const { GetEmailIdentityCommand } = await loadMailboxSesv2();
+    const identity = await (await getSes(c.env, row.region)).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch((error: unknown) => {
+      if (error instanceof ModuleLoadError) throw error;
+      throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true);
+    });
     if (identity.VerificationStatus !== 'SUCCESS') throw new ApiError(409, 'DOMAIN_NOT_VERIFIED', 'Verify the domain in SES before enabling mailboxes.');
     const mx = await checkMx(row.name, row.region);
     if (mx.state === 'error' && !input.force) throw new ApiError(503, 'MX_LOOKUP_FAILED', 'Could not verify the current MX records. Retry before enabling receiving.', undefined, true);
@@ -378,7 +382,9 @@ function registerAddresses(app: App) {
       if (local !== input.address.split('@')[0] || !host.endsWith(`.${publicHost}`)) throw new ApiError(422, 'PUBLIC_ADDRESS_MISMATCH', 'Use the same local part on a parent domain of the receiving address.', 'publicAddress');
       if (!c.env.config.multiTenant) {
       c.env = await withRegionSettings(c.env, value.workspaceId);
-      const identity = await getSes(c.env, domain.region).send(new GetEmailIdentityCommand({ EmailIdentity: publicHost })).catch((error: unknown) => {
+      const { GetEmailIdentityCommand } = await loadMailboxSesv2();
+      const identity = await (await getSes(c.env, domain.region)).send(new GetEmailIdentityCommand({ EmailIdentity: publicHost })).catch((error: unknown) => {
+        if (error instanceof ModuleLoadError) throw error;
         if (error instanceof Error && error.name === 'NotFoundException') throw new ApiError(409, 'PUBLIC_DOMAIN_NOT_VERIFIED', `Verify the exact SES domain identity ${publicHost} in ${domain.region}.`, 'publicAddress');
         throw new ApiError(503, 'SES_UNAVAILABLE', `Could not read the SES identity for ${publicHost} in ${domain.region}. Check GetEmailIdentity access.`, 'publicAddress', true);
       });

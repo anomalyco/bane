@@ -2,20 +2,31 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
-import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand, type Tenant } from '@aws-sdk/client-sesv2';
-import { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
-import { DeleteConfigurationSetCommand, ListConfigurationSetsCommand } from '@aws-sdk/client-sesv2';
-import { DeleteTopicCommand } from '@aws-sdk/client-sns';
-import { SESClient, DescribeActiveReceiptRuleSetCommand } from '@aws-sdk/client-ses';
-import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
+import type { SESv2Client, Tenant } from '@aws-sdk/client-sesv2';
 import type { Subscription } from '@aws-sdk/client-sns';
-import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
-import { FetchHttpHandler } from '@smithy/fetch-http-handler';
-import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
-import { ApiError, assertSesConfigured, log } from './core.js';
+import type { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
+import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError } from './core.js';
 import type { Config, Runtime } from './core.js';
 import { claimNameAllowed, domainName } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
+
+type SetupSdk = {
+  sesv2: typeof import('@aws-sdk/client-sesv2');
+  ses: typeof import('@aws-sdk/client-ses');
+  sns: typeof import('@aws-sdk/client-sns');
+  sts: typeof import('@aws-sdk/client-sts');
+  cw: typeof import('@aws-sdk/client-cloudwatch');
+  FetchHttpHandler: typeof import('@smithy/fetch-http-handler').FetchHttpHandler;
+};
+export const loadSetupSdk = lazyModule((): Promise<SetupSdk> => Promise.all([
+  import('@aws-sdk/client-sesv2'),
+  import('@aws-sdk/client-ses'),
+  import('@aws-sdk/client-sns'),
+  import('@aws-sdk/client-sts'),
+  import('@aws-sdk/client-cloudwatch'),
+  import('@smithy/fetch-http-handler'),
+]).then(([sesv2, ses, sns, sts, cw, { FetchHttpHandler }]) => ({ sesv2, ses, sns, sts, cw, FetchHttpHandler })));
+const loadCloudWatch = lazyModule(() => import('@aws-sdk/client-cloudwatch'));
 
 const flag = z.boolean().nullable();
 const issue = z.object({ code: z.string(), message: z.string() });
@@ -63,8 +74,8 @@ function autoValidationMode(options: { ValidationOptions?: { ConditionThreshold?
   return condition.ConditionThresholdEnabled === 'ENABLED' && ['managed', 'medium', 'high'].includes(threshold ?? '') ? threshold as AutoValidationMode : 'unknown';
 }
 
-function validationInput(name: string, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, pooled = false) {
-  return new PutConfigurationSetSuppressionOptionsCommand({ ConfigurationSetName: name, SuppressionScope: pooled ? 'TENANT' : 'ACCOUNT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'], ValidationOptions: { ConditionThreshold: mode === 'off' ? { ConditionThresholdEnabled: 'DISABLED' } : { ConditionThresholdEnabled: 'ENABLED', OverallConfidenceThreshold: { ConfidenceVerdictThreshold: mode.toUpperCase() as 'MANAGED' | 'MEDIUM' | 'HIGH' } } } });
+function validationInput(sdk: SetupSdk, name: string, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, pooled = false) {
+  return new sdk.sesv2.PutConfigurationSetSuppressionOptionsCommand({ ConfigurationSetName: name, SuppressionScope: pooled ? 'TENANT' : 'ACCOUNT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'], ValidationOptions: { ConditionThreshold: mode === 'off' ? { ConditionThresholdEnabled: 'DISABLED' } : { ConditionThresholdEnabled: 'ENABLED', OverallConfidenceThreshold: { ConfidenceVerdictThreshold: mode.toUpperCase() as 'MANAGED' | 'MEDIUM' | 'HIGH' } } } });
 }
 
 export const POOL_INSTALLATION = 'bane:pool';
@@ -112,6 +123,7 @@ function errorName(error: unknown): string { return error instanceof Error ? err
 function missing(error: unknown): boolean { return ['NotFoundException', 'NotFound', 'ResourceNotFoundException'].includes(errorName(error)); }
 function collision(error: unknown): boolean { return ['AlreadyExistsException', 'AlreadyExists'].includes(errorName(error)); }
 export function awsError(error: unknown): ApiError {
+  if (error instanceof ModuleLoadError) throw error;
   if (error instanceof ApiError) return error;
   const name = errorName(error);
   if (/Abort|Timeout/.test(name)) return new ApiError(503, 'AWS_SETUP_TIMEOUT', 'AWS setup timed out. Retry later.', undefined, true);
@@ -137,6 +149,7 @@ function sesSend<T>(context: SetupContext, send: () => Promise<T>): Promise<T> {
         try { return await send(); }
         finally { context.lastSesFinished = performance.now(); }
       } catch (error) {
+        if (error instanceof ModuleLoadError) throw error;
         // Retry only explicit throttling, not arbitrary errors or ambiguous mutations.
         if (attempt >= 2 || !/Throttl|TooManyRequests/.test(errorName(error))) throw error;
         await delay(1000 * 2 ** attempt + Math.floor(Math.random() * 250), undefined, { signal: context.signal });
@@ -151,12 +164,13 @@ export function paceSetupSes(client:SESv2Client,context=setupContext(300_000)) {
   const paced = <Input extends object, Output>(next: (args: { input: Input }) => Promise<Output>) => (args: { input: Input }) => sesSend(context, () => next(args));
   client.middlewareStack.add(paced, { step: 'initialize', priority: 'high', name: 'baneSesPacing' });
 }
-function clients(runtime: Runtime, region: string, context: SetupContext) {
+async function clients(runtime: Runtime, region: string, context: SetupContext) {
   const deadlineSignal = context.signal;
   assertSesConfigured(runtime);
   if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Use a valid AWS region.', 'region');
-  const config = { region, credentials: runtime.config.aws, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) };
-  const result = { ses: new SESv2Client(config), sns: new SNSClient(config), sts: new STSClient(config), cw: new CloudWatchClient(config) };
+  const sdk = await loadSetupSdk();
+  const config = { region, credentials: runtime.config.aws, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new sdk.FetchHttpHandler({ requestTimeout: 10000 }) };
+  const result = { ses: new sdk.sesv2.SESv2Client(config), sns: new sdk.sns.SNSClient(config), sts: new sdk.sts.STSClient(config), cw: new sdk.cw.CloudWatchClient(config), sdk };
   const deadline = <Input extends object, Output>(next: (args: { input: Input }) => Promise<Output>) => async (args: { input: Input }) => {
     if (deadlineSignal.aborted) throw new ApiError(503, 'AWS_SETUP_TIMEOUT', 'The AWS setup time budget was exceeded. Retry later.', undefined, true);
     return next(args);
@@ -168,7 +182,7 @@ function clients(runtime: Runtime, region: string, context: SetupContext) {
   result.cw.middlewareStack.add(deadline, { step: 'initialize', name: 'baneSetupDeadline' });
   return result;
 }
-type Clients = ReturnType<typeof clients>;
+type Clients = Awaited<ReturnType<typeof clients>>;
 function tags(options: SesSetupOptions) { return [{ Key: OWNER_TAG, Value: options.installationId }, { Key: PURPOSE_TAG, Value: PURPOSE },...(options.namespace?[mxOwnerTag]:[])]; }
 function owned(values: { Key?: string; Value?: string }[] | undefined, options: SesSetupOptions) { return tags(options).every(t => values?.some(v => v.Key === t.Key && v.Value === t.Value)); }
 function arns(account: string, region: string, names: ReturnType<typeof setupResources>) {
@@ -236,9 +250,12 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
   try { report.feedbackUrl = feedbackUrl(runtime.config); } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
   const subscriptions: Subscription[] = [];
   let c: Clients;
-  try { c = clients(runtime, options.region, context); } catch (error) { const e = awsError(error); add(report, e.code, e.message); return { report, subscriptions }; }
+  try { c = await clients(runtime, options.region, context); } catch (error) { if (error instanceof ModuleLoadError) throw error; const e = awsError(error); add(report, e.code, e.message); return { report, subscriptions }; }
+  const { GetAccountCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand } = c.sdk.sesv2;
+  const { GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand } = c.sdk.sns;
+  const { GetCallerIdentityCommand } = c.sdk.sts;
   const attempt = async (operation: () => Promise<void>) => {
-    try { await operation(); } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
+    try { await operation(); } catch (error) { if (error instanceof ModuleLoadError) throw error; const e = awsError(error); add(report, e.code, e.message); }
   };
   try {
     // Only scheduled pool preparation supplies the STS identity it already checked for this platform key.
@@ -334,7 +351,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
     ]);
     report.provisioned = report.resources.transactional.owned === true && report.resources.transactional.eventWired === true && report.resources.marketing.owned === true && report.resources.marketing.eventWired === true && topic.owned === true && topic.policyReady === true && topic.subscription === 'confirmed' && topic.rawMessageDelivery === false && !topic.subscriptionsTruncated && !report.blockers.some(b => b.code === 'SNS_SUBSCRIPTION_FILTERED' || b.code.startsWith('AWS_') || b.code === 'SNS_SUBSCRIPTION_UNKNOWN' || b.code === 'SNS_SUBSCRIPTION_OWNERSHIP_CONFLICT');
     report.status = report.blockers.length ? 'blocked' : report.provisioned ? 'ready' : 'needs_provisioning';
-  } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; const e = awsError(error); add(report, e.code, e.message); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
   return { report, subscriptions };
 }
@@ -342,10 +359,11 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
 // Reputation is informational: failures (usually a missing cloudwatch:GetMetricData grant)
 // are reported on the reputation object and never become readiness blockers.
 export async function readReputation(cw: CloudWatchClient, signal: AbortSignal): Promise<NonNullable<SesDiscovery['reputation']>> {
+  const { GetMetricDataCommand: MetricDataCmd } = await loadCloudWatch();
   const end = new Date(), start = new Date(end.getTime() - 14 * 86400_000);
   const metric = (id: string, name: string, period: number) => ({ Id: id, ReturnData: true, MetricStat: { Metric: { Namespace: 'AWS/SES', MetricName: name }, Period: period, Stat: 'Average' } });
   try {
-    const result = await cw.send(new GetMetricDataCommand({ StartTime: start, EndTime: end, ScanBy: 'TimestampDescending', MetricDataQueries: [
+    const result = await cw.send(new MetricDataCmd({ StartTime: start, EndTime: end, ScanBy: 'TimestampDescending', MetricDataQueries: [
       metric('bounceLatest', 'Reputation.BounceRate', 3600), metric('complaintLatest', 'Reputation.ComplaintRate', 3600),
       metric('bounceSeries', 'Reputation.BounceRate', 21600), metric('complaintSeries', 'Reputation.ComplaintRate', 21600),
     ] }), { abortSignal: signal });
@@ -363,6 +381,7 @@ export async function readReputation(cw: CloudWatchClient, signal: AbortSignal):
     }
     return { available: true, reason: null, bounceRate: latest('bounceLatest'), complaintRate: latest('complaintLatest'), series: [...points.values()].sort((a, b) => a.at.localeCompare(b.at)) };
   } catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
     const name = errorName(error);
     const reason = /AccessDenied|AuthorizationError|Unauthorized/.test(name) ? 'Add cloudwatch:GetMetricData to the AWS credentials to show reputation rates.' : awsError(error).message;
     return { available: false, reason, bounceRate: null, complaintRate: null, series: [] };
@@ -387,7 +406,10 @@ function identityDefaults(v:CandidateIdentity):CandidateIdentity {
   return {VerificationStatus,VerifiedForSendingStatus,DkimAttributes,MailFromAttributes,ConfigurationSetName};
 }
 export async function scanRegionPage(runtime:Runtime,region:string,installation:string,stage:ScanStage,token?:string):Promise<ScanPage> {
-  const ctx=setupContext(), c=clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
+  const ctx=setupContext(), c=await clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
+  const { GetAccountCommand, ListConfigurationSetsCommand, GetConfigurationSetCommand, ListEmailIdentitiesCommand, GetEmailIdentityCommand } = c.sdk.sesv2;
+  const { SESClient, DescribeActiveReceiptRuleSetCommand } = c.sdk.ses;
+  const { FetchHttpHandler } = c.sdk;
   const page:ScanPage={facts:{},domains:[]};
   try {
     if (stage==='account') {
@@ -437,7 +459,8 @@ export async function scanRegionPage(runtime:Runtime,region:string,installation:
 }
 
 export async function readSelectedDomains(runtime:Runtime,region:string,names:string[],onRevoked?:(name:string)=>Promise<void>) {
-  const ctx=setupContext(155_000), c=clients(runtime,region,ctx), values=new Map<string,CandidateIdentity>();
+  const ctx=setupContext(155_000), c=await clients(runtime,region,ctx), values=new Map<string,CandidateIdentity>();
+  const { GetEmailIdentityCommand } = c.sdk.sesv2;
   try {
     for (const name of names) {
       let value:CandidateIdentity|undefined;
@@ -455,7 +478,8 @@ export async function readSelectedDomains(runtime:Runtime,region:string,names:st
 /** One durable page at a time, using the assumed role and the normal regional control-plane pace.
  * No discovery limit: an account with many identities continues at the next token in a fresh job turn. */
 export async function verifiedByoDomains(runtime: Runtime, region: string, cursor?: string) {
-  const context = setupContext(), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const context = setupContext(), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const { ListEmailIdentitiesCommand, GetEmailIdentityCommand } = c.sdk.sesv2;
   const domains: {name: string; ses: IdentityFacts['ses']}[] = [];
   try {
     const page = await c.ses.send(new ListEmailIdentitiesCommand({ PageSize: 10, NextToken: cursor }), opts);
@@ -494,7 +518,10 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
     if (e.kind==='subscription' && e.resource===arn.topic && registered===arn.topic && e.target===endpoint && entries.some(v=>v.kind==='topic')) continue;
     throw drift();
   }
-  const context=setupContext(45_000),c=clients(runtime,region,context),request={abortSignal:context.signal};
+  const context=setupContext(45_000),c=await clients(runtime,region,context),request={abortSignal:context.signal};
+  const { GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, DeleteConfigurationSetCommand } = c.sdk.sesv2;
+  const { GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, DeleteTopicCommand } = c.sdk.sns;
+  const { GetCallerIdentityCommand } = c.sdk.sts;
   const present=async<T>(read:()=>Promise<T>)=>{try{return await read();}catch(e){if (!missing(e)) throw e;return null;}};
   try {
     const role=await c.sts.send(new GetCallerIdentityCommand({}),request);
@@ -578,7 +605,9 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
     check('set',a.sets[i]!,s.exists===true);check('destination',a.sets[i]!+'/'+names.eventDestinationName,s.eventDestinationExists===true,a.topic);
     if (s.exists && (!s.owned || s.autoValidation!=='inherit' && s.autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) || s.eventDestinationExists && !s.eventWired || report.warnings.some(w=>w.code==='OTHER_EVENT_DESTINATIONS')) throw drift();
   }
-  const c=clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
+  const c=await clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
+  const { CreateConfigurationSetCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetEventDestinationCommand } = c.sdk.sesv2;
+  const { GetTopicAttributesCommand, CreateTopicCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, SetTopicAttributesCommand, SubscribeCommand } = c.sdk.sns;
   try {
     const finalPolicy=topicPolicy(account,region,names),initialPolicy={...finalPolicy,Statement:finalPolicy.Statement.slice(0,1)};
     const publish=!signedPool || (topic.subscription==='confirmed' && await signedPool());
@@ -593,7 +622,7 @@ export async function provisionJournaledFeedback(runtime:Runtime,region:string,i
       if (!report.resources[stream].exists || report.resources[stream].autoValidation==='inherit') {
         const s=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts);
         if (!owned(s.Tags,options)) throw drift();
-        await fence();await c.ses.send(validationInput(names[stream],DEFAULT_AUTO_VALIDATION[stream],namespace==='trusted'),opts);
+        await fence();await c.ses.send(validationInput(c.sdk,names[stream],DEFAULT_AUTO_VALIDATION[stream],namespace==='trusted'),opts);
       } else if (report.resources[stream].autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) throw drift();
     }
     if (!topic.exists) {
@@ -650,7 +679,9 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
   const names = setupResources(options.installationId,options.namespace);
   const accountId = report.account.id;
   const expected = arns(accountId, options.region, names);
-  const c = clients(runtime, options.region, context);
+  const c = await clients(runtime, options.region, context);
+  const { GetConfigurationSetCommand, CreateConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, UpdateConfigurationSetEventDestinationCommand, CreateConfigurationSetEventDestinationCommand } = c.sdk.sesv2;
+  const { GetTopicAttributesCommand, ListTagsForResourceCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, GetSubscriptionAttributesCommand, SetSubscriptionAttributesCommand } = c.sdk.sns;
   const assertSetOwned = async (name: string) => {
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: deadlineSignal });
     if (!owned(set.Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
@@ -669,7 +700,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
       }
       const set = await assertSetOwned(names[kind]); // Recheck after create/AlreadyExists races; never adopt by name.
       const pooled = options.installationId === POOL_INSTALLATION;
-      if (!set.SuppressionOptions?.ValidationOptions || (pooled && set.SuppressionOptions.SuppressionScope !== 'TENANT')) await c.ses.send(validationInput(names[kind], DEFAULT_AUTO_VALIDATION[kind], pooled), { abortSignal: deadlineSignal });
+      if (!set.SuppressionOptions?.ValidationOptions || (pooled && set.SuppressionOptions.SuppressionScope !== 'TENANT')) await c.ses.send(validationInput(c.sdk, names[kind], DEFAULT_AUTO_VALIDATION[kind], pooled), { abortSignal: deadlineSignal });
     }
     if (report.resources.topic.exists === false) {
       // SNS CreateTopic is idempotent, so its success alone is not ownership evidence.
@@ -706,26 +737,28 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
       if (attrs?.TopicArn !== expected.topic || attrs.Endpoint !== endpoint || attrs.Protocol !== 'https' || attrs.Owner !== accountId) throw new ApiError(409, 'SNS_SUBSCRIPTION_OWNERSHIP_CONFLICT', 'Refusing to modify an SNS subscription outside the expected account, topic and endpoint.');
       if (attrs.PendingConfirmation === 'false' && attrs.RawMessageDelivery !== 'false') await c.sns.send(new SetSubscriptionAttributesCommand({ SubscriptionArn: arn, AttributeName: 'RawMessageDelivery', AttributeValue: 'false' }), { abortSignal: deadlineSignal });
     }
-  } catch (error) { throw awsError(error); }
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
   return (await inspect(runtime, options, context)).report;
 }
 
 export async function setAutoValidation(runtime: Runtime, options: SesSetupOptions, stream: 'transactional' | 'marketing', mode: 'off' | 'managed' | 'medium' | 'high'): Promise<void> {
   const context = setupContext();
-  const c = clients(runtime, options.region, context);
+  const c = await clients(runtime, options.region, context);
+  const { GetConfigurationSetCommand } = c.sdk.sesv2;
   const name = setupResources(options.installationId,options.namespace)[stream];
   try {
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: context.signal });
     if (!owned(set.Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
-    await c.ses.send(validationInput(name, mode, options.installationId === POOL_INSTALLATION), { abortSignal: context.signal });
-  } catch (error) { throw awsError(error); }
+    await c.ses.send(validationInput(c.sdk, name, mode, options.installationId === POOL_INSTALLATION), { abortSignal: context.signal });
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }
 
 export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string, managed=false,namespace?:'trusted'|'probation',persistedName?:string|null,
   journal?:{arn:string|null;created:(arn:string)=>Promise<void>;fence:()=>Promise<void>}) {
-  const context = setupContext(20_000), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const context = setupContext(20_000), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const { GetTenantCommand, CreateTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand } = c.sdk.sesv2;
   const TenantName=persistedName??(managed?mxResourceName(workspaceId):`bane-${workspaceId}`);
   if (persistedName && persistedName!==poolTenantName(workspaceId,region==='us-east-1'?'trusted':'probation')) throw new ApiError(409,'TENANT_MISMATCH','Incorrect regional tenant name.');
   const Tags=persistedName?[mxOwnerTag,{Key:OWNER_TAG,Value:POOL_INSTALLATION},{Key:PURPOSE_TAG,Value:'workspace-tenant'}]:managed?[mxOwnerTag,{Key:OWNER_TAG,Value:workspaceId},{Key:PURPOSE_TAG,Value:'tenant'}]:undefined;
@@ -755,6 +788,6 @@ export async function provisionTenant(runtime: Runtime, region: string, account:
       try { await c.ses.send(new CreateTenantResourceAssociationCommand({ TenantName, ResourceArn }), opts); }
       catch (error) { if (!collision(error)) throw error; }
     }
-  } catch (error) { throw awsError(error); }
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }

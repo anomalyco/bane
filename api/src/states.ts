@@ -18,6 +18,31 @@ export type ConnectionState = typeof CONNECTION_STATES[number];
 export type TenantState = typeof TENANT_STATES[number];
 export type PoolState = typeof POOL_STATES[number];
 
+// Publish local terminal transitions from UPDATE ... RETURNING, never by scanning mail
+// after commit. The event, subscribed deliveries and jobs either all exist or none do.
+export const terminalColumns = sql`id,workspace_id,status,region,simulated,error_code,suppression_reason,dispatch_version`;
+export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
+  return sql`terminal AS (${rows}), emitted AS (
+    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
+    SELECT 'event_'||replace(gen_random_uuid()::text,'-',''),workspace_id,id,CASE WHEN status='rejected' THEN 'reject' ELSE status END,
+      CASE status WHEN 'acceptance_unknown' THEN 'interrupted:'||id||':'||dispatch_version WHEN 'rejected' THEN 'preflight-failed:'||id ELSE status||':'||id END,simulated,
+      jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}
+    FROM terminal ON CONFLICT DO NOTHING RETURNING *
+  ), published AS (
+    INSERT INTO operation_events(id,workspace_id,type,region,created_at,data)
+    SELECT v.id,v.workspace_id,'email.rejected',t.region,v.created_at,v.data||jsonb_build_object('emailId',t.id,'simulated',t.simulated)
+    FROM emitted v JOIN terminal t ON t.id=v.email_id ON CONFLICT DO NOTHING RETURNING *
+  ), deliveries AS (
+    INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload)
+    SELECT 'whd_'||replace(gen_random_uuid()::text,'-',''),p.workspace_id,w.id,p.id,
+      jsonb_build_object('id',p.id,'workspaceId',p.workspace_id,'type',p.type,'region',p.region,'createdAt',p.created_at,'data',p.data)
+    FROM published p JOIN operation_webhooks w ON w.workspace_id=p.workspace_id AND NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR w.regions ? p.region)
+    ON CONFLICT DO NOTHING RETURNING id,workspace_id
+  ), webhook_jobs AS (
+    INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),workspace_id,'operation.webhook',jsonb_build_object('deliveryId',id,'generation',0) FROM deliveries RETURNING 1
+  )`;
+}
+
 /** `lost` is a grace period: proof went missing, the claim keeps working, and a later check either restores it or expires it. */
 export const LOST_GRACE_MS = 2 * 3_600_000;
 

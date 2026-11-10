@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { dispatchAsActor } from './auth.js';
-import type { Actor, App, Runtime } from './core.js';
+import { ModuleLoadError, type Actor, type App, type Runtime } from './core.js';
 import { withMcpAuthorization } from './mcp-auth.js';
 import { buildMcpCatalog, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation, type McpStepResult } from './mcp-catalog.js';
 
@@ -137,6 +137,7 @@ async function serve(app: App, request: Request, runtime: Runtime, actor: Actor,
       if (!op.validateOutput(output.structuredContent)) fail('INVALID_API_RESPONSE', 'API response does not match the tool output schema. The operation may already have completed; reconcile before retrying.');
       return output;
     } catch (error) {
+      if (error instanceof ModuleLoadError) return result({ status: error.status, requestId: apiRequestId, error: { code: error.code, message: error.message, retryable: true } }, true);
       if (error instanceof ApiFailure) return result(error.value, true);
       return result({ status, requestId: apiRequestId, error: { code: error instanceof Failure ? error.code : 'MCP_REQUEST_FAILED', message: error instanceof Failure ? error.message : 'The API request could not be completed. No automatic retry was attempted; reconcile an uncertain write before retrying.' } }, true);
     }

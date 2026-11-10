@@ -80,7 +80,7 @@ try {
     SELECT $1 || '-' || n, 'default',$1 || '-' || n || '@example.invalid','subscribed','{}'::jsonb FROM generate_series(1,$2::int) n RETURNING id
   ) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT 'default',$3,id FROM inserted`, [runId, count, listId]);
   const call = async (path: string, body: unknown) => {
-    const response = await app.request(path, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }, runtime);
+    const response = await app.fetch(new Request(new URL(path, config.publicUrl), { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }), runtime);
     const value = await response.json() as any;
     assert(response.ok, `API ${path}: ${value.error?.code ?? response.status}`);
     return value;

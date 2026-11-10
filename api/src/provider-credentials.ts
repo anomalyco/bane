@@ -1,25 +1,22 @@
-import { AssumeRoleCommand, GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
-import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
-import { ApiError, type Config, type Runtime } from './core.js';
+import { ApiError, assertSharedAccount, lazyModule, type Config, type Runtime } from './core.js';
 import { connectionReady } from './states.js';
 import { setupResources } from './ses-setup.js';
+export { assertSharedAccount };
 
 type Credentials = NonNullable<Config['aws']>;
-export function assertSharedAccount(runtime:Runtime, row:Pick<ReadyConnection,'kind'|'aws_account_id'>) {
-  if (runtime.config.multiTenant && row.kind==='shared' && runtime.config.platformAccount && row.aws_account_id!==null && row.aws_account_id!==runtime.config.platformAccount)
-    throw new ApiError(503,'AWS_ACCOUNT_MISMATCH','This Hosted binding belongs to a different platform account.',undefined,true);
-}
+export const loadStsSdk = lazyModule(() => Promise.all([import('@aws-sdk/client-sts'), import('@smithy/fetch-http-handler')]));
 export function platformCredentials(runtime: Runtime) {
   if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'The platform AWS connection is not configured.');
   return runtime.config.aws;
 }
-function sts(region: string, credentials: Credentials) {
-  return new STSClient({ region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 4000 }) });
+async function sts(region: string, credentials: Credentials) {
+  const [{ STSClient, AssumeRoleCommand, GetCallerIdentityCommand }, { FetchHttpHandler }] = await loadStsSdk();
+  return { client: new STSClient({ region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 4000 }) }), AssumeRoleCommand, GetCallerIdentityCommand };
 }
 export async function caller(region: string, credentials: Credentials) {
-  const client = sts(region, credentials);
+  const { client, GetCallerIdentityCommand } = await sts(region, credentials);
   try { return await client.send(new GetCallerIdentityCommand({})); } finally { client.destroy(); }
 }
 // Only completed credential values cross requests, never a Worker request's promise or SDK client.
@@ -28,7 +25,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
   const platform = platformCredentials(runtime), key = `${platform.accessKeyId}:${roleArn}:${externalId}:${policy ? createHash('sha256').update(policy).digest('hex') : ''}`;
   const cached = sessions.get(key);
   if (!verify && cached && cached.expiration.getTime() - Date.now() > 60_000) return cached;
-  const client = sts(region, platform);
+  const { client, AssumeRoleCommand } = await sts(region, platform);
   try {
     const input = { RoleArn: roleArn, RoleSessionName: 'Bane', DurationSeconds: policy ? 900 : 3600, Policy: policy };
     const opts = { abortSignal: AbortSignal.timeout(4000) };

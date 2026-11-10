@@ -1,9 +1,9 @@
 import { sql } from 'drizzle-orm';
-import { ApiError, type Runtime, type JobHandler } from './core.js';
+import { ApiError, ModuleLoadError, type Runtime, type JobHandler } from './core.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, finishHostedRegion } from './states.js';
-import { awsError, POOL_INSTALLATION, poolTenantName, provisionJournaledFeedback, provisionTenant, type JournalEntry } from './ses-setup.js';
-import { caller, platformCredentials } from './provider-credentials.js';
+import { awsError, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionJournaledFeedback, provisionTenant, type JournalEntry } from './ses-setup.js';
+import { caller, loadStsSdk, platformCredentials } from './provider-credentials.js';
 import { requirePlatformAccount } from './config.js';
 
 export const virginia='us-east-1';
@@ -21,6 +21,7 @@ async function ensureFeedback(r:Runtime,platformAccount:string) {
     if (state.feedback_topic_arn!==topic || state.confirmed_generation!==state.generation) throw new ApiError(409,'POOL_CONFLICT','No signed confirmation for the ready pool generation.');
     return;
   }
+  await loadSetupSdk();
   const lease=(await r.db.execute<{generation:string;ownership_journal:JournalEntry[]}>(sql`UPDATE provider_pool_regions SET generation=generation+1,
     confirmed_generation=CASE WHEN confirmed_generation=generation AND feedback_topic_arn=${topic} THEN generation+1 END,lease_until=clock_timestamp()+interval '4 minutes'
     WHERE ${target} AND sending_state='pending' AND coalesce(lease_until,'-infinity')<=clock_timestamp() RETURNING generation,ownership_journal`)).rows[0];
@@ -44,6 +45,7 @@ export const trustedProvision:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
   const row=(await r.db.execute(sql`SELECT r.sending_state FROM provider_connections c JOIN provider_connection_regions r ON r.connection_id=c.id
     WHERE c.workspace_id=${wid} AND c.id=${cid} AND c.kind='shared' AND c.state='ready' AND c.aws_account_id=${platformAccount} AND r.region=${virginia} AND r.pool_tenant_name=${name} AND NOT r.legacy`)).rows[0];
   if (!row || row.sending_state==='ready' || row.sending_state==='disabled') return;
+  await Promise.all([loadStsSdk(), loadSetupSdk()]);
   const principal=await caller(virginia,platformCredentials(r));
   if (principal.Arn!==`arn:aws:iam::${platformAccount}:user/bane-runtime` || principal.Account!==platformAccount) throw new ApiError(409,'AWS_ACCOUNT_MISMATCH','Use only the Hosted runtime principal for pool setup.');
   await ensureFeedback(r,platformAccount);
@@ -57,6 +59,7 @@ export const trustedProvision:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
       created:async arn=>fenced((await r.db.execute(sql`INSERT INTO hosted_tenant_ownership SELECT ${wid},${virginia},${arn} FROM provider_connection_regions WHERE ${owned}`)).rowCount)});
     fenced((await r.db.execute(finishHostedRegion(ref,gen))).rowCount);
   } catch(e) {
+    if (e instanceof ModuleLoadError) throw e;
     const err=awsError(e);await r.db.execute(sql`UPDATE provider_connection_regions SET sending_state='failed',lease_until=NULL,provision_error=${err.code} WHERE ${owned}`);throw err;
   }
 });

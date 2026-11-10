@@ -1,28 +1,38 @@
 import { sql } from 'drizzle-orm';
-import { ApiError, log, type Runtime, type JobHandler } from './core.js';
+import { ApiError, lazyModule, log, ModuleLoadError, wrapModuleLoad, type Runtime, type JobHandler } from './core.js';
 import { sendingConnections } from './domain-claims.js';
 import { processJobs, wakeWebhooks } from './jobs.js';
-import { jobHandlers, terminalColumns, terminalEvents } from './sending.js';
-import { operationJobs } from './operations.js';
-import { sesRegionJobs } from './ses-regions.js';
-import { initialGate, runDispatcher, type GateState } from './dispatcher.js';
-import { reputationAlertJobs } from './reputation-alerts.js';
-import { mailboxSetupJobs } from './mailbox-setup.js';
-import { mailboxIngestJobs } from './mailbox-ingest.js';
-import { mailboxEventJobs } from './mailbox-events.js';
-import { byoVerifyJob, tenantJob } from './provider-connections.js';
-import { regionalByoJobs } from './byo-regional.js';
-import { trustedProvision } from './trusted-pool.js';
-import { finishCampaigns } from './states.js';
-const mailboxJobs = { ...mailboxSetupJobs, ...mailboxIngestJobs, ...mailboxEventJobs };
+import type { GateState } from './dispatcher.js';
+import { finishCampaigns, terminalColumns, terminalEvents } from './states.js';
+const loadDispatcher = lazyModule(() => import('./dispatcher.js'));
 const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.key !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion job is missing its object key.');
   if (!payload.key.startsWith(`${job.workspaceId}/attachments/`) && !payload.key.startsWith(`${job.workspaceId}/live/attachments/`) && !payload.key.startsWith(`${job.workspaceId}/templates/assets/`)) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion key is outside the job scope.');
   try { await runtime.storage.delete(payload.key); }
-  catch { throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true); }
+  catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
+    throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true);
+  }
 };
+function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
+  return wrapModuleLoad(async () => {
+    if (type === 'maintenance.deleteAttachment') return deleteAttachment;
+    if (type === 'email.dispatch' || type.startsWith('sending.') || type.startsWith('campaign.')) return (await import('./sending.js')).jobHandlers[type];
+    if (type.startsWith('operation.') || type.startsWith('domain.')) return (await import('./operations.js')).operationJobs[type];
+    if (type === 'ses.provision' || type === 'ses.discover') return (await import('./ses-regions.js')).sesRegionJobs[type];
+    if (type === 'reputation.alert') return (await import('./reputation-alerts.js')).reputationAlertJobs[type];
+    if (type === 'mailbox.webhook') return (await import('./mailbox-events.js')).mailboxEventJobs[type];
+    if (type === 'mailbox.reconcile' || type === 'maintenance.domainDns') return (await import('./mailbox-setup.js')).mailboxSetupJobs[type];
+    if (type.startsWith('mailbox.')) return (await import('./mailbox-ingest.js')).mailboxIngestJobs[type];
+    if (type === 'hosted.trusted') return (await import('./trusted-pool.js')).trustedProvision;
+    if (type === 'byo.verify') return (await import('./provider-connections.js')).byoVerifyJob;
+    if (type === 'tenant.provision') return (await import('./provider-connections.js')).tenantJob;
+    if (type.startsWith('byo.')) return (await import('./byo-regional.js')).regionalByoJobs[type];
+    return undefined;
+  });
+}
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
-export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...regionalByoJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'hosted.trusted':trustedProvision,'byo.verify': byoVerifyJob, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
+export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, resolveJobHandler, limit, concurrency, maxDurationMs); }
 type Partition = { region: string; accountId?: string; kind?: 'shared' | 'byo' };
 export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = false): Promise<Partition[]> {
   // Recover once per sweep, even if a disconnected account has no queued mail. A stale attempt may
@@ -68,6 +78,9 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
 /** Jobs plus due mail for every account/region, in this process. Node runners and tests use this. */
 export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true, priorityWake?: EventTarget) {
   let processed = await drainJobs(runtime, limit, concurrency, maxDurationMs);
+  const partitions = await dispatchPartitions(runtime, recoverInterrupted);
+  if (!partitions.length) return processed;
+  const { initialGate, runDispatcher } = await loadDispatcher();
   const dispatch = async ({ accountId, region }: Partition) => {
     const key = `${accountId ? `${accountId}:` : ''}${region}`;
     const gate = gates.get(key) ?? initialGate(); gates.set(key, gate);
@@ -77,7 +90,6 @@ export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDu
       return 0;
     }
   };
-  const partitions = await dispatchPartitions(runtime, recoverInterrupted);
   const width = runtime.config.multiTenant ? Math.max(2, concurrency) : 1;
   for (let i = 0; i < partitions.length; i += width) {
     const counts = await Promise.all(partitions.slice(i, i + width).map(dispatch));

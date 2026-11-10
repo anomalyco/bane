@@ -1,9 +1,10 @@
-import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, errors, json, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { ApiError, errors, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+
+const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages } from './db/mailbox.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
@@ -118,7 +119,7 @@ async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter,
 }
 
 async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client) {
-  const s3 = client ?? await mailboxS3(runtime,wid,region,bucket);
+  const [[{ GetObjectCommand }, { getSignedUrl }], s3] = await Promise.all([loadS3Presign(), client ? Promise.resolve(client) : mailboxS3(runtime,wid,region,bucket)]);
   try {
     if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive,s3);
     key=await readableMailboxKey(runtime,wid,region,bucket,key,kind,runtime.db,s3);

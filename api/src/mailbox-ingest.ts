@@ -3,8 +3,7 @@ import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
-import { ApiError, digest, log, type JobHandler, type Runtime } from './core.js';
+import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
@@ -14,6 +13,7 @@ import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
 export { acceptInboundNotification } from './mailbox-receipts.js';
 
+const loadIngestS3 = lazyModule(() => import('@aws-sdk/client-s3'));
 const PARSE_LINE_LIMIT = 30_000;
 const PARSE_ESCAPE_LIMIT = 131_072; // PostalMime escapeHtml expands [<>"'?&] 6x with per-match callbacks.
 const DEGRADED_PARSE_LIMIT = 256 * 1024; // Raw byte cap if postal-mime's internal hook is unavailable.
@@ -338,7 +338,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined);
   } catch (error) {
     s3.destroy();
-    if (error instanceof ApiError) throw error;
+    if (error instanceof ModuleLoadError || error instanceof ApiError) throw error;
     if (error instanceof Error && ['NoSuchKey','NotFound'].includes(error.name)) throw new ApiError(404,'RAW_MESSAGE_MISSING','The staging object is missing.');
     if (error instanceof Error && error.name==='AccessDenied') throw new ApiError(403,'MAILBOX_RAW_ACCESS_DENIED','Access to the mailbox object was denied.');
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
@@ -372,10 +372,12 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
       const attachmentId = `matt_${(await digest(`${messageRowId}:${index}`)).slice(0, 32)}`;
       const key = `${workspacePrefix(scope.workspaceId,'att')}${messageRowId}/${attachmentId}`;
       const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(part.mimeType) ? part.mimeType : 'application/octet-stream';
+      const { PutObjectCommand } = await loadIngestS3();
       await s3.send(new PutObjectCommand({ Bucket: receipt.bucket, Key: key, Body: new Uint8Array(bytes), ContentType: contentType }));
       attachments.push({ id: attachmentId, ...scope, messageId: messageRowId, filename: (part.filename ?? `attachment-${index + 1}`).slice(0, 255), contentType, sizeBytes: bytes.byteLength, contentId: normalizeMessageId(part.contentId), disposition: part.disposition === 'inline' || part.related ? 'inline' as const : 'attachment' as const, sha256: hex(await crypto.subtle.digest('SHA-256', bytes)), bucket: receipt.bucket, storageKey: key });
     }
   } catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
     if (error instanceof Error && error.name==='AccessDenied') throw new ApiError(403,'MAILBOX_ATTACHMENT_ACCESS_DENIED','Access to mailbox attachment storage was denied.');
     throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
   } finally { s3.destroy(); }
@@ -429,6 +431,7 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,[r
   ingestActive = true;
   try { await ingestJob(runtime, payload, job); }
   catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
     if (job.attempts<MAX_ATTEMPTS) {
       // A transport disconnect need not have a SQLSTATE or SDK error code. Only explicit permanent errors settle early.
       if (!(error instanceof ApiError)) throw new ApiError(503,'MAILBOX_INGEST_UNAVAILABLE','Mailbox ingestion temporarily unavailable.',undefined,true);

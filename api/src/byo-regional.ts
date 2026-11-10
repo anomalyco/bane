@@ -1,14 +1,13 @@
 import { sql } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
-import { ApiError, id, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
-import { assume } from './provider-credentials.js';
+import { ApiError, id, ModuleLoadError, notFound, wrapModuleLoad, type Runtime, type DbExecutor, type JobHandler } from './core.js';
+import { assume, loadStsSdk } from './provider-credentials.js';
 import { requirePlatformAccount } from './config.js';
-import { awsError, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
+import { awsError, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed, releaseConnectionClaims } from './domain-claims.js';
-import { lockAdmission } from './sending.js';
 import { getRegionSettings } from './ses-region-state.js';
 import { byoEnabled } from './byo-pilot.js';
 
@@ -120,6 +119,7 @@ const prove=runV5(async(r,c,p)=>{
   if (c.aws_account_id || p.revision!==c.inventory_revision) return;
   try { await scoped(r,c,c.region,'scan',true); }
   catch(e) {
+    if (e instanceof ModuleLoadError) throw e;
     const err=awsError(e);if (err.code==='AWS_ACCESS_DENIED' || err.retryable) throw defer(30_000);
     await r.db.execute(sql`UPDATE provider_connections SET state='failed' WHERE id=${c.id} AND aws_account_id IS NULL`);throw err;
   }
@@ -142,7 +142,7 @@ const scan=runV5(async(r,c,p)=>{
   const fail=(code:string)=>r.db.transaction(async db=>{await connection(db,c.workspace_id,true);await db.execute(sql`UPDATE provider_connection_regions SET scan_state='failed',scan_error=${code} WHERE ${guard}`);await terminal(db);});
   let page;
   try { page=await scanRegionPage(await scoped(r,c,region,'scan'),region,c.id,stage,token); }
-  catch(e) { await fail(awsError(e).code);return; }
+  catch(e) { if (e instanceof ModuleLoadError) throw e; await fail(awsError(e).code);return; }
   const facts=page.facts;
   const seen=(p.seen as string[]|undefined)??[], fingerprint=page.next?.token?hash(page.next.token):null;
   if (fingerprint && seen.includes(fingerprint)) { await fail('SES_PAGINATION_STALLED');return; }
@@ -228,7 +228,7 @@ export async function selectImports(r:Runtime,wid:string,input:z.infer<typeof Im
   }
   // No DB locks across network I/O. The accepting transaction rechecks both revision
   // and regional completeness; a rescan racing these reads invalidates the request.
-  for (const [region,domains] of groups) try { await readSelectedDomains(await scoped(r,c,region,'scan'),region,domains); } catch(e) { throw awsError(e); }
+  for (const [region,domains] of groups) try { await readSelectedDomains(await scoped(r,c,region,'scan'),region,domains); } catch(e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   return r.db.transaction(async db=>{
     await getRegionSettings(db,wid,'update');
     const locked=usable(await connection(db,wid,true)),replay=await op.read(db);if (replay) return replay;
@@ -257,6 +257,7 @@ export async function newRegionalDomain(r:Runtime,wid:string,name:string,owner:b
 }
 
 const provision=runV5(async(r,c,p,attempt)=>{
+  await Promise.all([loadStsSdk(), loadSetupSdk()]);
   const region=String(p.region),ref={connectionId:c.id,region};
   const task=regionJobId(c,region), active=sql`EXISTS(SELECT FROM jobs WHERE id=${task} AND status='running' AND attempts=${attempt} AND lease_until>clock_timestamp() AND payload->>'run'=${p.run})`;
   const target=sql`connection_id=${c.id} AND region=${region} AND NOT legacy`;
@@ -319,7 +320,7 @@ const provision=runV5(async(r,c,p,attempt)=>{
     await r.db.execute(sql`UPDATE provider_connection_regions SET provision_error='SNS_CONFIRMATION_PENDING' WHERE ${owned}`);
     throw defer(15_000,{...p,generation:gen});
   } catch(e) {
-    if (e instanceof JobDeferred) throw e;
+    if (e instanceof JobDeferred || e instanceof ModuleLoadError) throw e;
     const err=awsError(e);
     if (err.retryable) {
       // Keep the journaled topic eligible for signed confirmations during backoff,
@@ -337,7 +338,7 @@ async function bindIntent(r:Runtime,c:V5Connection,p:Record<string,unknown>) {
   const select=sql`SELECT i.* FROM byo_domain_intents i JOIN provider_connection_regions cr USING(connection_id,region) WHERE ${guard}`;
   const i=(await r.db.execute<Intent>(select)).rows[0];if (!i) return;
   let ses:CandidateIdentity|undefined;
-  if (i.importing) try { ses=(await readSelectedDomains(await scoped(r,c,i.region,'scan'),i.region,[i.name])).get(i.name); } catch(e) { throw awsError(e); }
+  if (i.importing) try { ses=(await readSelectedDomains(await scoped(r,c,i.region,'scan'),i.region,[i.name])).get(i.name); } catch(e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   await r.db.transaction(async db=>{
     await getRegionSettings(db,c.workspace_id,'update');await connection(db,c.workspace_id,true);
     if (!(await db.execute(sql`${select} FOR UPDATE OF i FOR SHARE OF cr`)).rowCount) return;
@@ -354,6 +355,7 @@ async function bindIntent(r:Runtime,c:V5Connection,p:Record<string,unknown>) {
 }
 const bind=runV5(async(r,c,p,attempt)=>{
   try {await bindIntent(r,c,p);} catch(e) {
+    if (e instanceof ModuleLoadError) throw e;
     // Preserve transient failures for retry. Closing only this attempt's intent
     // frees the name and capacity; a new selection gets a distinct ID and job.
     if (e instanceof ApiError && !e.retryable) await r.db.execute(sql`UPDATE byo_domain_intents i SET closed_reason=${e.code}
@@ -365,6 +367,7 @@ const bind=runV5(async(r,c,p,attempt)=>{
 const disconnectId=(c:V5Connection)=>'byo.disconnect:'+c.id;
 export async function disconnectV5(r:Runtime,wid:string,connectionId:string) {
   await writable(r,wid);
+  const { lockAdmission } = await wrapModuleLoad(() => import('./sending.js'));
   return r.db.transaction(async db=>{
     await lockAdmission(db,{workspaceId:wid});await getRegionSettings(db,wid,'update');
     const c=await connection(db,wid,true);if (!c || c.id!==connectionId) throw stale();
@@ -386,6 +389,7 @@ export async function disconnectV5(r:Runtime,wid:string,connectionId:string) {
 
 const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
   if (!await byoEnabled(r,j.workspaceId)) throw defer(300_000);
+  await Promise.all([loadStsSdk(), loadSetupSdk()]);
   let region:string|null=null;
   const ticket=sql`id=${j.id} AND workspace_id=${j.workspaceId} AND status='running' AND attempts=${j.attempts} AND payload->>'run'=${p.run}`;
   try {
@@ -408,7 +412,7 @@ const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
     });
     if (more) throw defer(1000,p);
   } catch(e) {
-    if (e instanceof JobDeferred) throw e;
+    if (e instanceof JobDeferred || e instanceof ModuleLoadError) throw e;
     const err=awsError(e);await r.db.execute(sql`UPDATE provider_connections SET disconnect_error=${JSON.stringify({region,code:err.code})}::jsonb WHERE id=${p.connectionId} AND state='disconnecting' AND EXISTS(SELECT FROM jobs WHERE ${ticket})`);throw err;
   }
 });
