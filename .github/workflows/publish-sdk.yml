@@ -2,9 +2,9 @@ name: Publish SDK
 
 on:
   workflow_run:
-    workflows: [Deploy dev]
+    workflows: [Deploy production]
     types: [completed]
-    branches: [main]
+    branches: [production]
   workflow_dispatch:
 
 permissions:
@@ -13,11 +13,11 @@ permissions:
 jobs:
   gate:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.ref == 'refs/heads/main' && github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.path == '.github/workflows/deploy-dev.yml' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      (github.event.workflow_run.event == 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch'))
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/production') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'production' &&
+      github.event.workflow_run.path == '.github/workflows/deploy-prod.yml' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
@@ -29,33 +29,37 @@ jobs:
       - id: verify
         env:
           GH_TOKEN: ${{ github.token }}
-          TITLE: ${{ github.event.workflow_run.display_title }}
           RUN: ${{ github.event.workflow_run.id }}
           ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SHA: ${{ github.sha }}
         run: |
-          [[ $GITHUB_REF == refs/heads/main ]] || { echo '::error::SDK publishing requires main'; exit 1; }
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
+            [[ $GITHUB_REF == refs/heads/production ]] || { echo '::error::Dispatch SDK publishing from production'; exit 1; }
+          fi
           repo="repos/$GITHUB_REPOSITORY"
           if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
-            sha=$GITHUB_SHA
+            sha=$SHA
+            [[ $sha =~ ^[0-9a-f]{40}$ ]]
+            runs=$(gh api --paginate --slurp "$repo/actions/workflows/deploy-prod.yml/runs?status=success&branch=production&per_page=100")
+            attempts=$(jq -r --arg repo "$GITHUB_REPOSITORY" '.[] | .workflow_runs[] | select(.head_branch == "production" and .head_repository.full_name == $repo) | "\(.id)/attempts/\(.run_attempt)"' <<< "$runs")
           else
-            [[ $TITLE =~ ^Dev\ ([0-9a-f]{40})$ ]]; sha=${BASH_REMATCH[1]}
-          fi
-          [[ $sha =~ ^[0-9a-f]{40}$ ]]
-          gh api "$repo/compare/$sha...main?per_page=1" | jq -e --arg sha "$sha" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$sha is not reachable from main"; exit 1; }
-          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
-            runs=$(gh api --paginate --slurp "$repo/actions/workflows/deploy-dev.yml/runs?status=success&branch=main&per_page=100")
-            attempts=$(jq -r --arg title "Dev $sha" --arg repo "$GITHUB_REPOSITORY" '.[] | .workflow_runs[] | select(.display_title == $title and .head_repository.full_name == $repo and (.event == "workflow_run" or .event == "workflow_dispatch")) | "\(.id)/attempts/\(.run_attempt)"' <<< "$runs")
-          else
+            # The gate job name carries the exact commit deploy-prod shipped,
+            # which can differ from the run's head_sha when it was dispatched
+            # with an older ref.
             attempts="$RUN/attempts/$ATTEMPT"
+            jobs=$(gh api "$repo/actions/runs/$attempts/jobs?filter=latest&per_page=100")
+            sha=$(jq -r 'first(.jobs[] | select(.name | test("^Deploy production [0-9a-f]{40}$")) | .name | sub("^Deploy production "; "")) // empty' <<< "$jobs")
           fi
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo 'Skipped SDK publish: production did not deploy this commit.' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          gh api "$repo/compare/$sha...production?per_page=1" | jq -e --arg sha "$sha" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$sha is not reachable from production"; exit 1; }
           for attempt in $attempts; do
-            jobs=$(gh api "$repo/actions/runs/$attempt/jobs?per_page=100")
-            if jq -e --arg job "Verify dev $sha" 'any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live dev E2E" and .conclusion == "success"))' <<< "$jobs"; then
+            jobs=$(gh api "$repo/actions/runs/$attempt/jobs?filter=latest&per_page=100")
+            if jq -e --arg job "Deploy production $sha" 'any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live production E2E (safe subset)" and .conclusion == "success"))' <<< "$jobs"; then
               echo "sha=$sha" >> "$GITHUB_OUTPUT"; exit 0
             fi
           done
-          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then echo "::error::No successful Live dev E2E for $sha"; exit 1; fi
-          echo 'Skipped SDK publish: dev did not verify this commit.' >> "$GITHUB_STEP_SUMMARY"
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then echo "::error::No successful production deploy for $sha"; exit 1; fi
+          echo 'Skipped SDK publish: production did not deploy this commit.' >> "$GITHUB_STEP_SUMMARY"
   publish:
     needs: gate
     if: needs.gate.outputs.sha != ''

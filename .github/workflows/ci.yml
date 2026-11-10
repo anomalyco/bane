@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
   push:
-    branches: [main]
+    branches: [dev]
 
 permissions:
   contents: read
@@ -60,12 +60,12 @@ jobs:
           head=$GITHUB_SHA
           if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
             # HEAD in the build checkout is GitHub's synthetic merge. Compare
-            # the actual PR head against its merge-base, not the updated main.
+            # the actual PR head against its merge-base, not the updated dev.
             head=$PR_HEAD; BASE=$(git merge-base "$head" "$BASE")
           else
             repo="repos/$GITHUB_REPOSITORY"
             prs=$(gh api --paginate --slurp "$repo/commits/$head/pulls?per_page=100")
-            pr=$(jq -r --arg sha "$head" --arg repo "$GITHUB_REPOSITORY" '[.[][] | select(.merged_at and .base.repo.full_name == $repo and .base.ref == "main" and .merge_commit_sha == $sha and any(.labels[]; .name == "api-breaking"))][0].number // empty' <<< "$prs")
+            pr=$(jq -r --arg sha "$head" --arg repo "$GITHUB_REPOSITORY" '[.[][] | select(.merged_at and .base.repo.full_name == $repo and .base.ref == "dev" and .merge_commit_sha == $sha and any(.labels[]; .name == "api-breaking"))][0].number // empty' <<< "$prs")
             ALLOWED=false
             if [[ -n $pr ]] && git merge-base --is-ancestor "$BASE" "$head"; then
               commits=$(git rev-list "$BASE..$head"); ALLOWED=true
