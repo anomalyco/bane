@@ -4,3 +4,9 @@ paths:
   .github/workflows/deploy-*.yml:
     ignore:
       - '^unexpected key "queue" for "concurrency" section'
+
+# Blacksmith registers its runners in the org, so the label is not one of
+# actionlint's built-in GitHub-hosted images.
+self-hosted-runner:
+  labels:
+    - blacksmith-4vcpu-ubuntu-2404

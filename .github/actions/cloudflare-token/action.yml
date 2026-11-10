@@ -72,10 +72,17 @@ runs:
         secret=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
         printf '::add-mask::%s\n' "$secret"
 
+        # The id is not a credential: it names the token so a reviewer can read
+        # its scope and IP condition from the run log.
+        case "$id" in
+          *[!0-9a-f]*|"") echo "::error::invalid token id"; exit 1 ;;
+        esac
+        if [ ${#id} -ne 32 ]; then echo "::error::invalid token id"; exit 1; fi
+
         {
           printf 'token=%s\n' "$token"
           printf 'id=%s\n' "$id"
           printf 'secret=%s\n' "$secret"
           printf 'expires_on=%s\n' "$expires"
         } >> "$GITHUB_OUTPUT"
-        echo "::notice::Cloudflare token ready; expires $expires"
+        echo "::notice::Cloudflare token $id ready; expires $expires"
