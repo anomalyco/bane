@@ -9,6 +9,11 @@ on:
       - "infra/pulumi/**"
       - ".github/workflows/pulumi.yml"
   workflow_dispatch:
+    inputs:
+      init:
+        description: Create the stack with its KMS secrets provider if it does not exist
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,6 +22,10 @@ permissions:
 concurrency:
   group: pulumi-${{ github.ref_name }}
   cancel-in-progress: false
+
+env:
+  STAGE: ${{ github.ref_name }}
+  CF_ACCOUNT_ID: "15d29c8639fd3733b1b5486a2acfd968"
 
 jobs:
   deploy:
@@ -31,55 +40,109 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Check for a Pulumi program
-        id: program
+        id: guard
         run: |
-          if [ -f "infra/pulumi/${GITHUB_REF_NAME}/Pulumi.yaml" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if [ -f infra/pulumi/Pulumi.yaml ] && [ -f "infra/pulumi/Pulumi.${STAGE}.yaml" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::infra/pulumi/${GITHUB_REF_NAME}/Pulumi.yaml does not exist yet; skipping deploy"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::infra/pulumi/Pulumi.yaml or infra/pulumi/Pulumi.${STAGE}.yaml is missing; skipping deploy"
           fi
 
-      - name: Authenticate with AWS for secrets
-        if: steps.program.outputs.exists == 'true'
+      - name: Authenticate with AWS
+        if: steps.guard.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ github.ref_name }}
+          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
           aws-region: us-east-1
 
-      - name: Read Cloudflare token
-        if: steps.program.outputs.exists == 'true'
-        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
-        with:
-          secret-ids: |
-            CLOUDFLARE_API_TOKEN,bane/${{ github.ref_name }}/PULUMI_CLOUDFLARE_API_TOKEN
+      - name: Mint Cloudflare token and R2 credentials
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          set +x
 
-      - name: Authenticate with AWS for state
-        if: steps.program.outputs.exists == 'true'
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+          url="https://kjivkui2evldapbok5fhrrl6oy0fctkp.lambda-url.us-east-1.on.aws/"
+          account="$CF_ACCOUNT_ID"
+          url_pattern='^https://[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws/$'
+          if ! [[ "$url" =~ $url_pattern ]]; then echo "::error::bad token issuer URL"; exit 1; fi
+          if ! [[ "$account" =~ ^[a-f0-9]{32}$ ]]; then echo "::error::bad account id"; exit 1; fi
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+            [ -n "${!name:-}" ] || { echo "::error::$name is not set"; exit 1; }
+          done
+
+          # The response is captured, never streamed: it contains the token.
+          response=$(
+            printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' \
+              "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" |
+              curl --config - \
+                --proto '=https' --proto-redir '=https' \
+                --aws-sigv4 "aws:amz:us-east-1:lambda" \
+                --request POST --url "$url" \
+                --fail-with-body --silent --show-error --max-time 20
+          )
+          token=$(printf '%s' "$response" | jq -er '.token | strings')
+          expires=$(printf '%s' "$response" | jq -er '.expires_on | strings')
+          case "$token" in ""|*[[:space:]]*) echo "::error::invalid token"; exit 1 ;; esac
+          printf '::add-mask::%s\n' "$token"
+
+          # Account-owned tokens verify under the account, not /user.
+          id=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/tokens/verify"\n' \
+            "$token" "$account" | curl --config - --silent --show-error --fail-with-body --max-time 20 |
+            jq -er 'select(.success == true and .result.status == "active") | .result.id | strings')
+          secret=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
+          printf '::add-mask::%s\n' "$secret"
+
+          echo "CLOUDFLARE_API_TOKEN=$token" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.aws"
+          {
+            printf '\n[r2]\n'
+            printf 'aws_access_key_id = %s\n' "$id"
+            printf 'aws_secret_access_key = %s\n' "$secret"
+          } >> "$HOME/.aws/credentials"
+          {
+            printf '\n[profile r2]\n'
+            printf 'region = auto\n'
+          } >> "$HOME/.aws/config"
+          echo "::notice::Cloudflare token ready; expires $expires"
+
+      - name: Install Pulumi
+        if: steps.guard.outputs.skip != 'true'
+        uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
         with:
-          # dev -> 905840579680, production -> 009882681002
-          role-to-assume: arn:aws:iam::${{ github.ref_name == 'dev' && '905840579680' || '009882681002' }}:role/github/bane-${{ github.ref_name }}-pulumi
-          aws-region: us-east-1
+          pulumi-version: 3.274.1
+
+      - name: Init stack
+        if: steps.guard.outputs.skip != 'true' && github.event_name == 'workflow_dispatch' && inputs.init
+        working-directory: infra/pulumi
+        env:
+          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+        run: |
+          set -euo pipefail
+          if pulumi stack select "$STAGE" >/dev/null 2>&1; then
+            echo "stack $STAGE already exists"
+          else
+            pulumi stack init "$STAGE" --secrets-provider "awskms://alias/pulumi/bane-${STAGE}?region=us-east-1"
+          fi
 
       - name: Setup Bun
-        if: steps.program.outputs.exists == 'true'
+        if: steps.guard.outputs.skip != 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
 
       - name: Install dependencies
-        if: steps.program.outputs.exists == 'true'
-        working-directory: infra/pulumi/${{ github.ref_name }}
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: infra/pulumi
         run: bun install --frozen-lockfile
 
       - name: Deploy
-        if: steps.program.outputs.exists == 'true'
+        if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
         with:
           command: up
-          stack-name: ${{ github.ref_name }}
-          work-dir: infra/pulumi/${{ github.ref_name }}
-          cloud-url: s3://bane-${{ github.ref_name }}-pulumi?region=us-east-1
+          stack-name: ${{ env.STAGE }}
+          work-dir: infra/pulumi
+          cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
           pulumi-version: 3.274.1
           suppress-progress: true
