@@ -1,20 +1,28 @@
 name: Release SDK
 
-# Publishes @banemx/sdk from dev, following Deadbolt's publish.yml: the
-# version is decided, the package is built, npm publishes it, and only then do
-# the v<version> tag and the GitHub release exist, so a failed run leaves
-# neither. There is no npm token: the release environment's OIDC token is the
-# credential for the trusted publisher configured on @banemx/sdk (repository,
-# this file name and the environment are part of that configuration), the way
-# OpenCode's publish-npm.sh publishes without one.
+# Publishes @banemx/sdk from dev. Split so no repository or dependency code
+# ever runs while release credentials exist, the way OpenCode separates its
+# build and publish jobs:
 #
-# Deadbolt commits its versions to its release branch through a changesets
-# "Version packages" pull request. Bane's dev only admits thdxr and R44VC0RP,
-# and only with build and acceptance green on that exact commit; production is
-# fast-forward only from dev. So this workflow never commits: it computes the
-# next version from the newest v<X.Y.Z> tag (or from sdk/package.json before
-# the first tag), sets it in the workspace only, and the tag it pushes on the
-# dispatched commit is the version of record.
+# - build runs repository code (bun install, bun run build, npm pack) with
+#   contents: read, no environment and no id-token. It computes the next
+#   version, packs the tarball and uploads it as an artifact.
+# - publish runs in the release environment (this is where a reviewer
+#   approves), with contents: write and id-token: write. It never checks out
+#   the repository or runs a script from it: it downloads the tarball, checks
+#   its manifest as data, publishes it with the environment's OIDC token, and
+#   then tags the build's commit and creates the GitHub release.
+#
+# There is no npm token: the trusted publisher configured on @banemx/sdk
+# matches this file name, the repository and the release environment. Provenance
+# comes from the publish job's OIDC token and GitHub runner environment, not
+# from a checkout, so publishing a prebuilt tarball keeps it.
+#
+# The version comes from the newest v<X.Y.Z> tag (or from sdk/package.json
+# before the first tag), is set in the build workspace only, and is never
+# committed: dev only admits thdxr and R44VC0RP with build and acceptance green,
+# and production is fast-forward only from dev. The tag on the dispatched commit
+# is the version of record.
 
 on:
   workflow_dispatch:
@@ -43,14 +51,15 @@ defaults:
     shell: bash
 
 jobs:
-  release:
-    name: Publish release
+  build:
+    name: Build package
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    environment: release
+    timeout-minutes: 10
     permissions:
-      contents: write # the tag and the GitHub release
-      id-token: write # npm trusted publishing and provenance
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - name: Require an authorized actor
         env:
@@ -73,7 +82,6 @@ jobs:
         with:
           fetch-depth: 0 # every tag, for the next version
           persist-credentials: false
-      # Node 24.16.0 bundles npm 11.13.0 (trusted publishing requires >=11.5.1).
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: 24.16.0
@@ -104,11 +112,8 @@ jobs:
             echo "::error::v$version is already tagged; publish a newer version instead."
             exit 1
           fi
-          if [ "$(npm view "@banemx/sdk@$version" version 2>/dev/null)" = "$version" ]; then
-            echo "::error::@banemx/sdk@$version is already published; tag and release it by hand, or publish a newer version."
-            exit 1
-          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           echo "Releasing @banemx/sdk@$version from $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
       - name: Set the version
         working-directory: sdk
@@ -119,13 +124,64 @@ jobs:
         working-directory: sdk
       - run: bun run build
         working-directory: sdk
-      - name: Publish
+      - name: Pack
         working-directory: sdk
-        env:
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          # A clean user config, so nothing in the checkout can redirect the
-          # registry or supply a token: trusted publishing uses the OIDC token.
+          npm pack --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/pack.json"
+          jq -e 'length == 1 and (.[0].filename | endswith(".tgz"))' "$RUNNER_TEMP/pack.json" > /dev/null
+          echo "Packed $(jq -r '.[0].filename' "$RUNNER_TEMP/pack.json")" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-package
+          path: ${{ runner.temp }}/*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write # the tag and the GitHub release
+      id-token: write # npm trusted publishing and provenance
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA: ${{ needs.build.outputs.sha }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      # No checkout, bun or repository files in this job: it only runs the npm
+      # CLI and SHA-pinned actions on the artifact, which it treats as data.
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      # Node 24.16.0 bundles npm 11.13.0 (trusted publishing requires >=11.5.1);
+      # no unpinned npm install in a job holding publish rights.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sdk-package
+          path: ${{ runner.temp }}/package
+      - name: Check the package
+        run: |
+          tarball=$(find "$RUNNER_TEMP/package" -maxdepth 1 -name '*.tgz' -print -quit)
+          [ -n "$tarball" ] || { echo "::error::No tarball in the downloaded artifact."; exit 1; }
+          IFS=$'\t' read -r name version install_scripts < <(tar -xzOf "$tarball" package/package.json |
+            jq -r '[.name, .version, ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall")))] | @tsv')
+          [ "$name" = '@banemx/sdk' ] || { echo "::error::Unexpected package $name in $tarball."; exit 1; }
+          [ "$version" = "$VERSION" ] || { echo "::error::Tarball has version $version, expected $VERSION."; exit 1; }
+          [ "$install_scripts" = false ] || { echo "::error::$name has an install script."; exit 1; }
+          if [ "$(npm view "$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "::error::$name@$VERSION is already published; publish a newer version."
+            exit 1
+          fi
+          echo "Publishing $name@$VERSION from $(basename "$tarball")." >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish
+        run: |
+          tarball=$(find "$RUNNER_TEMP/package" -maxdepth 1 -name '*.tgz' -print -quit)
+          # A clean user config, so nothing can redirect the registry or supply
+          # a token: trusted publishing uses the OIDC token.
           printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/npmrc"
           export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
           flags=(--access public)
@@ -134,16 +190,13 @@ jobs:
           else
             flags+=(--provenance)
           fi
-          npm publish "${flags[@]}"
-      # Only after a successful publish: the tag names the dispatched commit
-      # (a bare `gh release create` would tag dev's current tip instead), and
-      # the release links the generated notes.
+          npm publish "$tarball" "${flags[@]}"
+      # Only after a successful publish: the tag names the build's commit (a
+      # bare `gh release create` would tag dev's current tip instead), and the
+      # release links the generated notes.
       - name: Tag and release
         if: inputs.dry_run == false
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           tag="v$VERSION"
-          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null
-          gh release create "$tag" --verify-tag --title "$tag" --generate-notes
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" > /dev/null
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --title "$tag" --generate-notes
