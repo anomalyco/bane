@@ -190,7 +190,8 @@ export const notProvisioning = (pc: SQL = sql`pc`) => sql`NOT (${pc}.state='prov
 /** Queues the one tenant job (retry-safe by id). The request never calls AWS: Hosted is instant and the job owns CreateTenant. */
 export const queueTenantJob = (source: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,jsonb_build_object('connectionId',id) FROM (${source}) c
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
-export const setTenantState = (id: string, to: TenantState, account?: string) => sql`UPDATE provider_connections SET tenant_state=${to}${account ? sql`,aws_account_id=${account}` : sql``} WHERE id=${id} AND tenant_state<>'ready'`;
+export const setTenantState = (id: string, to: TenantState, account?: string) => sql`UPDATE provider_connections SET tenant_state=${to}${account && to==='ready' ? sql`,aws_account_id=${account}` : sql``} WHERE id=${id} AND tenant_state<>'ready'
+  ${account ? sql`AND (aws_account_id IS NULL OR aws_account_id=${account})` : sql``}`;
 export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_state', extra: SQL = sql``) => sql`UPDATE provider_pool_regions SET ${sql.identifier(column)}='ready'${extra} WHERE ${fence}`;
 
 // This is a sending hold, not a provisioning failure: claims and inbound routing keep working.

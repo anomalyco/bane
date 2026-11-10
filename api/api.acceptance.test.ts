@@ -36,6 +36,28 @@ const DATABASE_FIXTURE_SKIP = false; // Bootstrap already requires an explicitly
 const mail = (extra: Json = {}): Json => ({ from: 'sender@example.com', to: address(), region: REGION, subject: unique('Acceptance'), text: 'Synthetic acceptance message; no SES send is authorized.', ...extra });
 type Json = Record<string, any>;
 type Reply = { status: number; body: any; headers: Headers };
+// Shared SNS/SES control-plane store for cold Ohio pool provisioning and legacy BYO repair.
+function setupStore(sets:Map<string,Json>,topics:Map<string,Json>,platform:string) {
+  const missing=()=>{throw Object.assign(Error('Missing fixture resource'),{name:'NotFoundException'});};
+  return (name:string,i:Json,region:string,account:string)=>{
+    const key=`${region}:${i.ConfigurationSetName}`,set=sets.get(key),topic=topics.get(i.TopicArn??i.ResourceArn);
+    switch(name) {
+      case 'GetAccountCommand':return {ProductionAccessEnabled:true,SendingEnabled:true,EnforcementStatus:'HEALTHY'};
+      case 'GetConfigurationSetCommand':return set??missing();
+      case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:set!.destinations};
+      case 'CreateConfigurationSetCommand':assert.equal(i.ConfigurationSetName.startsWith('opensend-mx-'),account===platform);sets.set(key,{...i,destinations:[]});return {};
+      case 'PutConfigurationSetSuppressionOptionsCommand':assert.equal(i.SuppressionScope,account===platform?'TENANT':'ACCOUNT');set!.SuppressionOptions=i;return {};
+      case 'CreateConfigurationSetEventDestinationCommand':set!.destinations.push({...i.EventDestination,Name:i.EventDestinationName});return {};
+      case 'UpdateConfigurationSetEventDestinationCommand':set!.destinations=[{...i.EventDestination,Name:i.EventDestinationName}];return {};
+      case 'CreateTopicCommand':{const arn=`arn:aws:sns:${region}:${account}:${i.Name}`;topics.set(arn,{Tags:i.Tags,Attributes:{TopicArn:arn,Owner:account},subs:[]});return {TopicArn:arn};}
+      case 'GetTopicAttributesCommand':return topic??missing();
+      case 'ListTagsForResourceCommand':return topic??missing();
+      case 'SetTopicAttributesCommand':topic!.Attributes[i.AttributeName]=i.AttributeValue;return {};
+      case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
+      default:throw Error('Unexpected AWS command '+name);
+    }
+  };
+}
 type Key = { id: string; secret: string };
 const cleanups = new WeakMap<TestContext, Array<() => Promise<void>>>();
 function cleanup(t: TestContext, action: () => Promise<void>) {
@@ -764,9 +786,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
         identities.set(`${platform}:${foreign}`, verifiedIdentity);
         const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
+        const setup=setupStore(sets,topics,platform);
         async function aws(this: InstanceType<typeof SNSClient> | InstanceType<typeof SESv2Client>, command: any) {
           const account = (await this.config.credentials()).accessKeyId === platformKey.accessKeyId ? platform : customer;
-          const region = await this.config.region(), name = command.constructor.name, i = command.input, setKey = `${region}:${i.ConfigurationSetName}`, set = sets.get(setKey), topic = topics.get(i.TopicArn ?? i.ResourceArn ?? i.SubscriptionArn?.split(':').slice(0, 6).join(':'));
+          const region = await this.config.region(), name = command.constructor.name, i = command.input, topic = topics.get(i.TopicArn ?? i.ResourceArn ?? i.SubscriptionArn?.split(':').slice(0, 6).join(':'));
           calls.push(name);
           switch (name) {
             case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
@@ -788,18 +811,6 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               return i.NextToken ? {EmailIdentities:[listed(imported),listed(`mail.${reserved}`),listed(reserved)]} : {EmailIdentities:[{...listed(domain),VerificationStatus:'PENDING'}, {...listed('me@'+domain),IdentityType:'EMAIL_ADDRESS'}],NextToken:'second'};
             }
             case 'PutEmailIdentityMailFromAttributesCommand': identities.get(`${account}:${i.EmailIdentity}`)!.MailFromAttributes = { MailFromDomain:i.MailFromDomain, MailFromDomainStatus:'SUCCESS' }; return {};
-            case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY' };
-            case 'GetConfigurationSetCommand': return set ?? missing();
-            case 'GetConfigurationSetEventDestinationsCommand': return { EventDestinations: set!.destinations };
-            case 'CreateConfigurationSetCommand': assert.equal(i.ConfigurationSetName.startsWith('opensend-mx-'), account === platform); sets.set(setKey, { ...i, destinations: [] }); return {};
-            case 'PutConfigurationSetSuppressionOptionsCommand': assert.equal(i.SuppressionScope, account === platform ? 'TENANT' : 'ACCOUNT'); set!.SuppressionOptions = i; return {};
-            case 'CreateConfigurationSetEventDestinationCommand': set!.destinations.push({ ...i.EventDestination, Name: i.EventDestinationName }); return {};
-            case 'UpdateConfigurationSetEventDestinationCommand': set!.destinations = [{ ...i.EventDestination, Name: i.EventDestinationName }]; return {};
-            case 'CreateTopicCommand': { const arn = `arn:aws:sns:${region}:${account}:${i.Name}`; topics.set(arn, { Tags: i.Tags, Attributes: { TopicArn: arn, Owner: account }, subs: [] }); return { TopicArn: arn }; }
-            case 'GetTopicAttributesCommand': return topic ?? missing();
-            case 'ListTagsForResourceCommand': return topic;
-            case 'SetTopicAttributesCommand': topic!.Attributes[i.AttributeName] = i.AttributeValue; return {};
-            case 'ListSubscriptionsByTopicCommand': return { Subscriptions: topic!.subs };
             case 'SubscribeCommand': {
               assert.equal(i.Endpoint, `${origin}/v1/events/ses`);
               const allowed = await pool.query('SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=$1 OR inbound_topic_arn=$1 UNION SELECT 1 FROM provider_connections WHERE feedback_topic_arn=$1 UNION SELECT 1 FROM mailbox_regions WHERE topic_arn=$1', [i.TopicArn]);
@@ -822,7 +833,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
                 associations.add(binding);
               } else assert.match(i.ResourceArn, /:configuration-set\/opensend-mx-(transactional|marketing)$/);
               return {};
-            default: throw new Error(`Unexpected AWS command ${name}`);
+            default: return setup(name,i,region,account);
           }
         }
         providerTest.mock.method(SESv2Client.prototype, 'send', aws); providerTest.mock.method(SNSClient.prototype, 'send', aws);
@@ -4430,6 +4441,302 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
+
+test('Hosted account re-home: drained legacy Ohio installation',async t=>{
+  // The operator script owns its transactions and inventories the entire installation. A separately
+  // migrated schema exercises the real triggers/views without exposing any jobs to the harness runner.
+  assert.ok(['localhost','127.0.0.1','[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname));
+  const db=await fixtureDatabase(t), schema='rehome_'+randomUUID().replaceAll('-','');
+  await db.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema}`);
+  cleanup(t,async()=>{await db.query(`ROLLBACK; RESET search_path; DROP SCHEMA ${schema} CASCADE`);});
+  const {readFile,readdir}=await import('node:fs/promises'),dir=new URL('./migrations/',import.meta.url);
+  for(const file of (await readdir(dir)).filter(f=>/^\d+_[a-z_]+\.sql$/.test(f)).sort()) {
+    // Only the trigram index needs the harness's existing public extension/opclass.
+    await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
+    await db.query(await readFile(new URL(file,dir),'utf8'));await db.query('COMMIT');
+  }
+  await db.query('CREATE TABLE opensend_migrations AS TABLE public.opensend_migrations');
+  const w=['ws_10'+'a'.repeat(30),'ws_2'+'b'.repeat(31)],r='us-east-2',old='000011110001',dest='000011110002',run='fixture-cutover';
+  const bucket=(acct:string)=>`opensend-mx-${acct}-mail-${r}`,topic=(acct:string,kind='feedback')=>`arn:aws:sns:${r}:${acct}:opensend-mx-${kind}`;
+  const personal='ws_'+'c'.repeat(32), inventory=['default',...w,personal];
+  await db.query(`INSERT INTO workspaces(id,name,slug) SELECT w,w,w FROM unnest($1::text[]) w`,[[...w,personal]]);
+  await db.query(`INSERT INTO ses_installation_settings SELECT id,id,$1,jsonb_build_array($1::text) FROM workspaces`,[r]);
+  await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,receiving_state,feedback_topic_arn,inbound_topic_arn,inbound_bucket) VALUES($1,$2,'ready','ready',$3,$4,$5)`,[r,old,topic(old),topic(old,'inbound'),bucket(old)]);
+  await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,region,aws_account_id,state,tenant_state,paused_at,pause_reason) SELECT 'conn_'||w,w,'shared',$2,$3,'ready','ready',now(),'fixture hold' FROM unnest($1::text[]) w`,[w,r,old]);
+  const names=['inbound.example','unknown.example','e2e.example'], dom=names.map(()=>`dom_${randomUUID().replaceAll('-','')}`), tokens=names.map(()=>randomUUID());
+  for(const [n,name] of names.entries()) {
+    const wid=w[n===2?1:0];
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,token,ever_proven,sending_state,receiving_state,receiving_host,identity) VALUES($1,$2,'conn_'||$2,$3,$4,$5,$6,$7,$8)`,
+      [name,wid,tokens[n],n!==1,n!==1?'verified':'pending',n!==1?'active':'off',n!==1?'reply.'+name:null,{proven:n!==1,ses:{DkimAttributes:{Tokens:['old-a','old-b','old-c']}}}]);
+    await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[dom[n],wid,name,r]);
+  }
+  await db.query(`INSERT INTO jobs(id,type,workspace_id,status,attempts,payload) VALUES($1,'domain.verify',$2,'completed',3,$3)`,['domain.verify:'+tokens[0],w[0],{domainId:dom[0],token:tokens[0],poll:7}]);
+  await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,receiving_host,region,status,catch_all,mx,enabled_at) VALUES('mdom',$1,$2,$3,'reply.'||$3,$4,'active','store','{}',now())`,[w[0],dom[0],names[0],r]);
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{sql}=await import('drizzle-orm');
+  const retired='retired.example',retiredToken=randomUUID(),retiredHost='reply.'+retired;
+  await db.query(`INSERT INTO domain_claims(workspace_id,name,token,connection_id) VALUES($1,$2,$3,'conn_'||$1)`,[w[0],retired,retiredToken]);
+  await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES('released',$1,$2,$3)`,[w[0],retired,r]);
+  const {applyClaim}=await import('./src/states.js'),{releasedClaimCleanup}=await import('./src/domain-claims.js');
+  await applyClaim(drizzle(db),{workspaceId:w[0]!,name:retired,token:retiredToken,connectionId:'conn_'+w[0],domainId:'released',region:r},
+    {sending_state:'verified',receiving_state:'active',receiving_host:retiredHost,lost_since:null,receiving_lost_since:null},{ses:{VerificationStatus:'SUCCESS'},proven:true,mx:null,note:null},retiredHost);
+  await drizzle(db).execute(sql`WITH released AS (DELETE FROM domain_claims WHERE token=${retiredToken} RETURNING name,token), ${releasedClaimCleanup(w[0]!)} DELETE FROM operation_domains WHERE id='released'`);
+  const mailboxAddress='fixture@reply.'+names[0];
+  await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES('box',$1,'mdom',$2)`,[w[0],mailboxAddress]);
+  await db.query(`INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,'box','primary')`,[w[0],mailboxAddress]);
+  const resPrefix='opensend-'+'f'.repeat(20),va='us-east-1';
+  await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,trusted_account_id,trusted_topic_arn,credentials_fingerprint) VALUES('default',$1,$2,$3,'fixture')`,[va,old,`arn:aws:sns:${va}:${old}:${resPrefix}-feedback`]);
+  await db.query(`INSERT INTO mailbox_regions(workspace_id,region,account_id,bucket,topic_arn) VALUES('default',$1,$2,$3,$4)`,[va,old,resPrefix+'-mail-'+va,`arn:aws:sns:${va}:${old}:${resPrefix}-inbound`]);
+  const prefix=`workspaces/${w[0]}/`, raw=prefix+'raw/fixture.eml';
+  await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES('thread',$1)`,[w[0]]);
+  await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,raw_bucket,raw_key) VALUES('mail',$1,'inbound','thread',$2,$3,$4)`,[w[0],r,bucket(old),raw]);
+  await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,processed_at) VALUES($1,'fixture',$2,$3,$4,'[]','{}','processed',now())`,[w[0],r,bucket(old),raw]);
+  await db.query(`INSERT INTO mail_attachments(id,workspace_id,message_id,bucket,storage_key,filename,content_type,disposition,sha256,size_bytes) VALUES('attachment',$1,'mail',$2,$3,'fixture','text/plain','attachment','fixture-hash',10)`,[w[0],bucket(old),prefix+'att/mail/attachment']);
+  await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES('blocked',$1,'suppression@example.net',true,'complaint')`,[w[0]]);
+  const seedEmail=(id:string,acct:string)=>db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated,feedback_topic_arn) VALUES($1,$2,$3,'key','sender@example.org','["recipient@example.net"]','[]','[]','fixture','accepted',$1,'{}',false,$4)`,[id,w[0],r,topic(acct)]);
+  await seedEmail('email_old',old);
+  const {rehomeHostedAccount}=await import('./scripts/rehome-hosted-account.js');
+  const inputs=['--old-account',old,'--new-account',dest,'--region',r,'--old-bucket',bucket(old),'--new-bucket',bucket(dest),'--workspaces',[...inventory].reverse().join(',')];
+  let runId=run;
+  const command=(...args:string[])=>rehomeHostedAccount(db,[...inputs,'--run-id',runId,...args]);
+  const apply=(hash:string)=>command('--apply','--expect-plan-sha256',hash), restore=()=>command('--restore',runId);
+  const first=await command(), hash=first.planSha256;
+  const database=async()=>{
+    const names=(await db.query(`SELECT tablename FROM pg_tables WHERE schemaname=$1 ORDER BY tablename`,[schema])).rows.map(row=>row.tablename as string);
+    return Object.fromEntries((await db.query(names.map(n=>`SELECT '${n}' name, md5(coalesce(string_agg(to_jsonb(t)::text,'|' ORDER BY to_jsonb(t)::text),'')) checksum FROM "${n}" t`).join(' UNION ALL '))).rows.map(row=>[row.name,row.checksum]));
+  };
+  const original=await database();
+  const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
+  const origin='https://rehome-fixture.opensend.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);
+  await t.test('deterministic read-only plan and strict inputs',async()=>{
+    assert.deepEqual(await command('--plan'),first);assert.deepEqual(await database(),original);assert.match(hash,/^[a-f0-9]{64}$/);
+    assert.deepEqual(first.domains,[...dom].sort());assert.deepEqual(first.workspaces,inventory);assert.deepEqual(first.unconnected,['default',personal]);assert.deepEqual(first.receivingHosts,['reply.e2e.example','reply.inbound.example']);
+    assert.equal(first.database.system_id,(await db.query('SELECT system_identifier::text FROM pg_catalog.pg_control_system()')).rows[0].system_identifier);assert.match(first.database.migrationsSha256,/^[a-f0-9]{64}$/);
+    await db.query(`CREATE SCHEMA ${schema}_alias; SET search_path TO ${schema}_alias,${schema}; CREATE COLLATION natural_ids(provider=icu,locale='en-u-kn-true'); CREATE VIEW workspaces AS SELECT id COLLATE natural_ids AS id FROM ${schema}.workspaces`);
+    try {assert.notDeepEqual((await db.query('SELECT id FROM workspaces ORDER BY id')).rows.map(r=>r.id),inventory);const clone=await command();assert.deepEqual(clone.workspaces,inventory);assert.notEqual(clone.planSha256,hash);} finally {await db.query(`SET search_path TO ${schema}; DROP SCHEMA ${schema}_alias CASCADE`);}
+    for(const hidden of [...tokens,names[1],'suppression@example.net','fixture-hash',raw])assert.ok(!JSON.stringify(first).includes(hidden));
+    for(const [k,v] of [['--old-account','123'],['--new-account',old],['--region','us-east-1'],['--old-bucket','wrong'],['--workspaces',w.join(',')+','+w[0]]]) {
+      const bad=[...inputs];bad[bad.indexOf(k)+1]=v;await assert.rejects(rehomeHostedAccount(db,[...bad,'--run-id',runId]));
+    }
+    await assert.rejects(apply('0'.repeat(64)),/SHA-256 mismatch/);assert.deepEqual(await database(),original);
+  });
+  // Use the genuine transactional entry point even in refusal tests. Every fixture mutation is committed
+  // in the private schema, so a test cannot accidentally rely on BEGIN nesting or rolling back its caller.
+  const refused=async(label:string,problem:string,undo:string,...params:any[])=>{
+    await db.query(problem,params);try {await assert.rejects(apply(hash),new RegExp(label));}finally {await db.query(undo,undo.includes('$')?params:[]);}
+  };
+  await t.test('inventory, claim, ownership, feedback and maintenance preconditions',async()=>{
+    await refused('account-bound data without connection',`INSERT INTO mail_threads(id,workspace_id) VALUES('personal',$1)`,`DELETE FROM mail_threads WHERE id='personal'`,personal);
+    await refused('foreign mailbox region residue',`INSERT INTO mailbox_regions(workspace_id,region) VALUES($1,'us-east-2')`,`DELETE FROM mailbox_regions WHERE workspace_id=$1`,personal);
+    await db.query(`UPDATE provider_connections SET requested_account='438095551154'`);await assert.rejects(db.query(`UPDATE provider_connections SET requested_account='malformed'`),/check constraint/);await db.query('UPDATE provider_connections SET requested_account=NULL');
+    await refused('migration set or checksum',`UPDATE opensend_migrations SET checksum='changed' WHERE name='090_hosted_rehome_runs.sql'`,`UPDATE opensend_migrations m SET checksum=p.checksum FROM public.opensend_migrations p WHERE p.name=m.name`);
+    await refused('unexpected workspaces',"INSERT INTO workspaces(id,name,slug) VALUES('outsider','extra','extra')","DELETE FROM workspaces WHERE id='outsider'");
+    await refused('unexpected connections',"INSERT INTO workspaces(id,name,slug) VALUES('extra','extra','extra'); INSERT INTO provider_connections(id,workspace_id,region,kind,state) VALUES('extra','extra','us-east-2','shared','ready')","DELETE FROM workspaces WHERE id='extra'");
+    await refused('BYO connections',`INSERT INTO workspaces(id,name,slug) VALUES('byo','byo','byo'); INSERT INTO provider_connections(id,workspace_id,kind,region,template_version,external_id,platform_principal_arn) VALUES('byo','byo','byo','us-east-2','v4',gen_random_uuid(),'fixture')`,`DELETE FROM workspaces WHERE id='byo'`);
+    await refused('non-legacy',`INSERT INTO provider_connection_regions(connection_id,region) SELECT id,'us-east-1' FROM provider_connections`,`DELETE FROM provider_connection_regions WHERE region='us-east-1'`);
+    await refused('missing Ohio workspace settings',`UPDATE ses_installation_settings SET enabled_regions='["us-east-2","us-east-1"]'`,`UPDATE ses_installation_settings SET enabled_regions='["us-east-2"]'`);
+    for(const field of ['managed','adopted','imported'])await refused('managed, adopted or imported',`UPDATE domain_claims SET identity=identity||jsonb_build_object($1::text,true)`,`UPDATE domain_claims SET identity=identity-$1::text`,field);
+    await refused('managed, adopted or imported',`INSERT INTO hosted_adoptions VALUES('host','arn','wid','hash','tenant',false)`,`DELETE FROM hosted_adoptions`);
+    await refused('managed, adopted or imported',`UPDATE domain_claims SET claim_scope='account' WHERE name=$1`,`UPDATE domain_claims SET claim_scope='exclusive' WHERE name=$1`,names[1]);
+    await refused('unmatched claims',`INSERT INTO domain_claims(name,workspace_id) VALUES('detached',$1)`,`DELETE FROM domain_claims WHERE name='detached'`,w[0]);
+    await refused('claim within one hour',`UPDATE domain_claims SET created_at=created_at-interval '72 hours' WHERE NOT ever_proven`,`UPDATE domain_claims SET created_at=created_at+interval '72 hours' WHERE NOT ever_proven`);
+    await refused('unexpected connection binding',`UPDATE provider_connections SET managed_tenant=true`,`UPDATE provider_connections SET managed_tenant=false`);
+    for(const tab of ['provider_pool_regions','provider_connection_regions'])await refused('ownership journals',`UPDATE ${tab} SET ownership_journal='[{}]'`,`UPDATE ${tab} SET ownership_journal='[]'`);
+    await refused('destination already has pool rows',`INSERT INTO provider_pool_regions(region,aws_account_id) VALUES('us-east-1',$1)`,`DELETE FROM provider_pool_regions WHERE region='us-east-1'`,dest);
+    await refused('missing old provider_feedback_history',`DELETE FROM provider_feedback_history`,`INSERT INTO provider_feedback_history SELECT feedback_topic_arn,region,aws_account_id,'shared' FROM provider_pool_regions`);
+    await refused('foreign discovery residue',`UPDATE ses_region_discovery SET trusted_account_id='123456789012'`,`UPDATE ses_region_discovery SET trusted_account_id=(SELECT aws_account_id FROM provider_pool_regions)`);
+    await refused('foreign mailbox region residue',`UPDATE mailbox_regions SET account_id='123456789012'`,`UPDATE mailbox_regions SET account_id=(SELECT aws_account_id FROM provider_pool_regions)`);
+    // Preserve the original operator timestamp across the negative case.
+    await db.query('CREATE TEMP TABLE held AS SELECT id,paused_at,pause_reason FROM provider_connections');
+    await refused('unpaused connections',`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL`,`UPDATE provider_connections p SET paused_at=h.paused_at,pause_reason=h.pause_reason FROM held h WHERE h.id=p.id`);
+  });
+  await t.test('released root keeps its receiving host; unbound children and live projections block cutover',async()=>{
+    assert.deepEqual((await db.query('SELECT status,receiving_host,parent_id FROM mailbox_domains WHERE name=$1',[retired])).rows,[{status:'disabled',receiving_host:retiredHost,parent_id:null}]);
+    assert.equal((await command()).counts.mailbox_domains,1);
+    await refused('unbound mailbox domains',`UPDATE mailbox_domains SET status='waiting_for_mx' WHERE name=$1`,`UPDATE mailbox_domains SET status='disabled' WHERE name=$1`,retired);
+    await refused('unbound mailbox domains',`UPDATE mailbox_domains SET parent_id='mdom' WHERE name=$1`,`UPDATE mailbox_domains SET parent_id=NULL WHERE name=$1`,retired);
+  });
+  await t.test('README reconciliation runs with MX configuration and no application S3 variables',async()=>{
+    const doc=await readFile(new URL('./README.md',import.meta.url),'utf8'),code=doc.match(/node --import tsx --input-type=module <<'RECONCILE'\n([\s\S]*?)\n *RECONCILE\n/)?.[1];assert.ok(code);
+    const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
+    // The old pool and tenants are ready: the exact README command reads the isolated DB and must not call AWS.
+    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',MX_PLATFORM_AWS_ACCOUNT:old,MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
+    // The generated Worker ProcessEnv includes deployment-only bindings; this Node child gets only the fixture allowlist.
+    const result=(await import('node:child_process')).spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(guard),'--import','tsx','--input-type=module'],{input:code,env:env as unknown as NodeJS.ProcessEnv,encoding:'utf8',timeout:10000});
+    assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'');
+  });
+  await t.test('drain fences include future sends, ambiguous attempts, campaigns, unresolved receipts and setup leases',async()=>{
+    for(const status of ['queued','attempting','acceptance_unknown'])await refused(`"kind":"send","state":"${status}"`,`UPDATE sending_emails SET status=$1,scheduled_at=now()+interval '10 days'`,`UPDATE sending_emails SET status='accepted',scheduled_at=NULL`,status);
+    for(const s of ['preparing','scheduled','sending','paused','failed'])await refused('"kind":"campaign"',`INSERT INTO sending_campaigns(id,workspace_id,draft,state,review_id,total,prepared,expanded,paused_at) VALUES('campaign',$1,'{}',$2,'review',2,1,1,CASE WHEN $2='paused' THEN now() END)`,`DELETE FROM sending_campaigns WHERE id='campaign'`,w[0],s);
+    for(const status of ['pending','failed'])await refused('"kind":"receipt"',`UPDATE mail_receipts SET status=$1`,`UPDATE mail_receipts SET status='processed'`,status);
+    for(const [tab,col] of [['provider_pool_regions','lease_until'],['provider_connections','lease_until'],['provider_connection_regions','lease_until'],['mailbox_regions','reconcile_lease_until']])await refused('active provisioning leases',`UPDATE ${tab} SET ${col}=now()+interval '1 minute'`,`UPDATE ${tab} SET ${col}=NULL`);
+    for(const [type,status] of [['operation.webhook','running'],['reputation.alert','pending']])await refused('running jobs or pending reputation alerts',`INSERT INTO jobs(id,type,workspace_id,payload,status) VALUES('busy',$1,'default','{}',$2)`,`DELETE FROM jobs WHERE id='busy'`,type,status);
+    await refused('conflicting verifier job',`UPDATE jobs SET type='wrong'`,`UPDATE jobs SET type='domain.verify'`);
+    await refused('pending attachment archives',`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum) SELECT 'source',workspace_id,filename,content_type,size_bytes,disposition,storage_key,sha256 FROM mail_attachments; UPDATE mail_attachments SET source_attachment_id='source'`,`UPDATE mail_attachments SET source_attachment_id=NULL; DELETE FROM sending_attachments WHERE id='source'`);
+    await refused('foreign or inconsistent mail locators',`UPDATE mail_messages SET raw_bucket='foreign'`,`UPDATE mail_messages SET raw_bucket=(SELECT inbound_bucket FROM provider_pool_regions)`);
+    const before=(await command()).planSha256;await db.query(`UPDATE domain_claims SET identity=identity||'{"note":"new observation"}'`);
+    await assert.rejects(apply(before),/SHA-256 mismatch/);await db.query("UPDATE domain_claims SET identity=identity-'note'");
+  });
+  const baseline=await database(), valid=(await command()).planSha256;
+  await t.test('atomic apply changes only reviewed rows; immediate guarded restore round-trips',async()=>{
+    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images']);
+    for(const [tab,digest] of Object.entries(baseline))if(!allowed.has(tab))assert.equal(changed[tab],digest,tab);
+    assert.equal((await db.query('SELECT FROM regional_sending_connections')).rowCount,0);
+    const targets=(await db.query('SELECT workspace_id,aws_account_id,managed_tenant,tenant_state,pool_tenant_name,legacy_names FROM regional_connections ORDER BY workspace_id')).rows;
+    assert.deepEqual(targets,w.map(workspace_id=>({workspace_id,aws_account_id:dest,managed_tenant:true,tenant_state:'pending',pool_tenant_name:'opensendmx-probation-'+workspace_id,legacy_names:true})));
+    assert.deepEqual((await db.query('SELECT token,ever_proven,identity,sending_state,receiving_state FROM domain_claims ORDER BY name')).rows,names.map((name,n)=>({name,token:tokens[n],ever_proven:n!==1,identity:null,sending_state:'pending',receiving_state:'off'})).sort((a,b)=>a.name.localeCompare(b.name)).map(({name,...row})=>row));
+    assert.deepEqual((await db.query('SELECT raw_bucket b FROM mail_messages UNION ALL SELECT bucket FROM mail_attachments UNION ALL SELECT bucket FROM mail_receipts')).rows,[1,2,3].map(()=>({b:bucket(dest)})));
+    assert.equal((await db.query("SELECT FROM jobs WHERE type='domain.verify' AND status='pending' AND attempts=0")).rowCount,dom.length);
+    assert.equal((await db.query("SELECT FROM jobs WHERE type='tenant.provision'")).rowCount,0);
+    assert.equal((await db.query("SELECT FROM mailbox_domains WHERE name=$1 AND status='disabled' AND receiving_host=$2",[retired,retiredHost])).rowCount,1);
+    assert.equal((await db.query(`SELECT FROM ses_region_discovery WHERE trusted_topic_arn IS NOT NULL UNION ALL SELECT FROM mailbox_regions WHERE bucket IS NOT NULL`)).rowCount,0);
+    const images=(await db.query('SELECT relation,before_image FROM hosted_rehome_images')).rows;
+    for(const val of [...tokens,raw,prefix+'att/mail/attachment','fixture-hash','retired'])assert.ok(!JSON.stringify(images).includes(val));
+    await assert.rejects(apply(valid),/run ID already used/);
+    await seedEmail('email_new',dest);await assert.rejects(restore(),/post-apply state/);await db.query("DELETE FROM sending_emails WHERE id='email_new'");
+    await db.query("UPDATE sending_emails SET attempt_started_at=now() WHERE id='email_old'");await assert.rejects(restore(),/post-apply state/);await db.query('UPDATE sending_emails SET attempt_started_at=NULL');
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region) VALUES('extra',$1,'inbound','thread',$2)`,[w[0],r]);await assert.rejects(restore(),/post-apply state/);await db.query("DELETE FROM mail_messages WHERE id='extra'");
+    // Charge/usage accounting is intentionally untouched by restore (including by the synthetic test attempts).
+    const preRestore=await database();await restore();const after=await database();
+    for(const tab of Object.keys(first.counts))assert.equal(after[tab],baseline[tab],tab);
+    for(const tab of Object.keys(after))if(!allowed.has(tab))assert.equal(after[tab],preRestore[tab],tab);
+    assert.ok((await db.query('SELECT restored_at FROM hosted_rehome_runs')).rows[0]?.restored_at);
+    await command('--finalize',runId);assert.equal((await db.query('SELECT FROM hosted_rehome_images')).rowCount,0);await assert.rejects(restore(),/finalized/);
+  });
+  await t.test('late feedback jobs do not invalidate either fence; before-images are bounded chunks',async()=>{
+    runId=run+'-feedback';await db.query(`INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('fixture',$1,'https://callback.invalid','["email.opened","email.clicked"]','fixture')`,[w[0]]);
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,raw_bucket,raw_key) SELECT 'bulk-'||n,$1,'inbound','thread',$2,$3,$4||'raw/'||n||'.eml' FROM generate_series(1,260) n`,[w[0],r,bucket(old),prefix]);
+    const {ingestFeedbackBatch}=await import('./src/operations.js');
+    const late=async(kind:string)=>assert.deepEqual(await ingestFeedbackBatch(runtime,[{topicArn:topic(old),region:r,messageId:randomUUID(),message:{eventType:kind,mail:{messageId:'email_old',sendingAccountId:old},[kind.toLowerCase()]:{timestamp:new Date().toISOString()}}}]),[{ok:true}]);
+    const plan=await command();await late('Open');const review=await command();assert.equal(review.planSha256,plan.planSha256);assert.notDeepEqual(review.jobs,plan.jobs);await apply(plan.planSha256);
+    const sizes=await db.query(`SELECT (SELECT count(*)::int FROM jsonb_object_keys(before_image)) size FROM hosted_rehome_images WHERE relation='mail_messages' ORDER BY chunk`);assert.deepEqual(sizes.rows,[{size:256},{size:5}]);
+    await late('Click');await restore();assert.equal((await db.query(`SELECT FROM jobs WHERE type='operation.webhook'`)).rowCount,2);
+    await command('--finalize',runId);await db.query(`DELETE FROM mail_messages WHERE id LIKE 'bulk-%'`);
+  });
+  runId+='-reconcile';await apply((await command()).planSha256);
+  await t.test('flags-on reconciliation, fresh claim-tagged identities, receiving and signed historical feedback',async integration=>{
+    const [{operationJobs},{reconcileSharedConnections},{JobDeferred},{SESv2Client},{SNSClient},{SESClient},{S3Client},{STSClient}]=await Promise.all([
+      import('./src/operations.js'),import('./src/provider-connections.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3'),import('@aws-sdk/client-sts')]);
+    const apiKey='os_'+'1'.repeat(64),app=createApp();await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key',$1,'fixture',$2,'os_fixture','["manage","read","send"]','[]')`,[w[0],createHash('sha256').update(apiKey).digest('hex')]);
+    const api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{authorization:'Bearer '+apiKey,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const sets=new Map<string,Json>(),topics=new Map<string,Json>(),setup=setupStore(sets,topics,dest),identities=new Map<string,Json>(),tenants=new Set<string>(),associations=new Set<string>();
+    const tags=(ts:Json[])=>Object.fromEntries(ts.map(t=>[t.Key,t.Value]));
+    const owned={'opensend:owner':'mx','opensend:installation-id':'opensend-mx:pool'};
+    let awsCalls=0; t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){awsCalls++;assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');return {Account:dest,Arn:`arn:aws:iam::${dest}:user/opensend-mx`};});
+    let catchAll=0,buckets=0,sends=0;const objects=new Map<string,Buffer>([[prefix+'att/mail/attachment',Buffer.from('old bytes')]]);
+    t.mock.method(S3Client.prototype,'send',(cmd:any)=>{const i=cmd.input,n=cmd.constructor.name;assert.equal(i.Bucket,bucket(dest));switch(n){
+      case 'HeadObjectCommand':return {ContentLength:objects.get(i.Key)!.length,ETag:'"fixture"'};
+      case 'GetObjectCommand':return {Body:{transformToByteArray:async()=>objects.get(i.Key)!}};
+      case 'CopyObjectCommand':objects.set(i.Key,objects.get(i.CopySource.slice(bucket(dest).length+1))!);return {};
+      case 'PutObjectCommand':objects.set(i.Key,Buffer.from(i.Body));return {};
+      default:assert.match(n,/^(CreateBucket|PutBucketTagging|PutPublicAccessBlock|PutBucketPolicy|PutBucketLifecycleConfiguration)Command$/);if(n==='CreateBucketCommand')buckets++;return {};
+    }});
+    t.mock.method(SESClient.prototype,'send',(cmd:any)=>{if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'opensend-mx-inbound'},Rules:[]};assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.Rule.Name,'opensend-mx-inbound-all');assert.deepEqual(cmd.input.Rule.Actions,[{S3Action:{BucketName:bucket(dest),TopicArn:topic(dest,'inbound'),ObjectKeyPrefix:'staging/'}}]);catchAll++;return {};});
+    async function aws(this:InstanceType<typeof SESv2Client>|InstanceType<typeof SNSClient>,cmd:any){
+      awsCalls++;
+      assert.equal(await this.config.region(),r);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
+      const i=cmd.input,name=cmd.constructor.name;
+      switch(name){
+        case 'GetAccountCommand':return {SendingEnabled:true,ProductionAccessEnabled:true,EnforcementStatus:'HEALTHY',SendQuota:{MaxSendRate:100,Max24HourSend:10000,SentLast24Hours:0}};
+        case 'SendEmailCommand':assert.equal(i.TenantName,'opensendmx-probation-'+w[0]);assert.equal(i.ConfigurationSetName,'opensend-mx-transactional');sends++;return {MessageId:'fixture-new-send'};
+        case 'SubscribeCommand':{assert.equal(i.Endpoint,origin+'/v1/events/ses');const sub={...i,SubscriptionArn:i.TopicArn+':fixture',Owner:dest};topics.get(i.TopicArn)!.subs.push(sub);return sub;}
+        case 'GetSubscriptionAttributesCommand':return {Attributes:{...topics.get(i.SubscriptionArn.split(':').slice(0,6).join(':'))!.subs[0],PendingConfirmation:'false',RawMessageDelivery:'false'}};
+        case 'CreateTenantCommand':assert.ok(w.some(wid=>i.TenantName==='opensendmx-probation-'+wid));assert.ok(!tenants.has(i.TenantName));assert.deepEqual(tags(i.Tags),{...owned,'opensend:purpose':'workspace-tenant'});tenants.add(i.TenantName);return {TenantName:i.TenantName,TenantArn:`arn:aws:ses:${r}:${dest}:tenant/${i.TenantName}/fixture`};
+        case 'UpdateReputationEntityPolicyCommand':assert.equal(i.ReputationEntityPolicy,`arn:aws:ses:${r}:aws:reputation-policy/strict`);return {};
+        case 'CreateTenantResourceAssociationCommand':assert.ok(tenants.has(i.TenantName));assert.ok(i.ResourceArn.startsWith(`arn:aws:ses:${r}:${dest}:`));assert.ok(!associations.has(i.TenantName+':'+i.ResourceArn));associations.add(i.TenantName+':'+i.ResourceArn);return {};
+        case 'GetEmailIdentityCommand':if(!identities.has(i.EmailIdentity))throw Object.assign(Error('fresh account'),{name:'NotFoundException'});return identities.get(i.EmailIdentity);
+        case 'CreateEmailIdentityCommand':{const n=names.indexOf(i.EmailIdentity);assert.ok(n>=0);assert.ok(!identities.has(i.EmailIdentity));assert.deepEqual(tags(i.Tags),{...owned,'opensend:purpose':'domain-identity','opensend:domain-claim':tokens[n]});
+          const dkim={Tokens:['new-a','new-b','new-c'],SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',SigningAttributesOrigin:'AWS_SES'};identities.set(i.EmailIdentity,{Tags:i.Tags,VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{...dkim,Status:'SUCCESS'}});return {DkimAttributes:{...dkim,Status:'PENDING'}};}
+        default:return setup(name,i,r,dest);
+      }
+    }
+    t.mock.method(SESv2Client.prototype,'send',aws);t.mock.method(SNSClient.prototype,'send',aws);
+    const privateKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,certUrl=`https://sns.${r}.amazonaws.com/SimpleNotificationService-rehomefixture.pem`;
+    const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:privateKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.href===certUrl)return new Response(pem);
+      if(u.hostname===bucket(dest)+`.s3.${r}.amazonaws.com`){assert.match(u.searchParams.get('X-Amz-Credential')!,/^fixture-rehome\//);return new Response(new Uint8Array(objects.get(decodeURIComponent(u.pathname.slice(1)))!));}
+      assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name')!,type=u.searchParams.get('type'),n=names.indexOf(name.replace(/^_opensend\./,''));
+      const mx=name===names[0]?'mx.other.invalid.':name==='reply.'+names[0] || name==='reply.'+names[2]?`inbound-smtp.${r}.amazonaws.com.`:null;
+      return Response.json({Status:0,Answer:type==='MX' && mx?[{name,type:15,data:'10 '+mx}]:type==='TXT' && name.startsWith('_opensend.') && n!==1?[{name,type:16,data:JSON.stringify(tokens[n])}]:[]});});
+    const jobs=(await db.query(`SELECT * FROM jobs WHERE type='domain.verify'`)).rows;assert.equal(jobs.length,names.length);
+    const newKey=runtime.config.aws;runtime.config.platformAccount=old;runtime.config.aws={accessKeyId:'fixture-retired',secretAccessKey:'fixture'};
+    const j=jobs[0],jobArgs={id:j.id,workspaceId:j.workspace_id,attempts:1};
+    await assert.rejects(operationJobs['domain.verify']!(runtime,j.payload,jobArgs),JobDeferred);
+    const mismatch={code:'AWS_ACCOUNT_MISMATCH',retryable:true};
+    await assert.rejects(operationJobs['domain.verify']!(runtime,{domainId:j.payload.domainId,token:j.payload.token},jobArgs),mismatch);
+    const tracked=()=>db.query(`SELECT to_jsonb(j) AS job FROM jobs j WHERE type='domain.verify' ORDER BY id`);
+    const before=(await tracked()).rows;error(await api('POST',`/v1/domains/${dom[0]}/verify`),503,'AWS_ACCOUNT_MISMATCH');assert.deepEqual((await tracked()).rows,before);
+    const dashboard=await seedSession(db);await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('owner',$1,$2,'owner')`,[w[0],dashboard.userId]);
+    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Secure-)?opensend/,'__Secure-opensend'),'x-opensend-workspace':w[0]!}}),runtime);
+    assert.equal(detail.status,200);assert.equal((await detail.json() as Json).id,dom[0]);assert.deepEqual((await tracked()).rows,before);
+    const {workspaceCredentials}=await import('./src/provider-credentials.js');await assert.rejects(workspaceCredentials(runtime,r,{kind:'shared',id:'fixture',aws_account_id:dest,role_arn:'',external_id:''}),mismatch);
+    const {tenantJob}=await import('./src/provider-connections.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),cid='conn_'+w[0];
+    await assert.rejects(tenantJob(runtime,{connectionId:cid},{id:'stale',workspaceId:w[0]!,attempts:MAX_ATTEMPTS}));
+    const {setTenantState}=await import('./src/states.js');assert.equal((await runtime.db.execute(setTenantState(cid,'ready',old))).rowCount,0,'An old successful AWS response cannot change the binding back.');
+    assert.equal((await db.query('SELECT tenant_state FROM provider_connections WHERE id=$1',[cid])).rows[0].tenant_state,'pending');
+    await reconcileSharedConnections(runtime);assert.equal(awsCalls,0);assert.equal((await db.query('SELECT FROM domain_claims WHERE identity IS NOT NULL UNION ALL SELECT FROM job_schedule')).rowCount,0);
+    runtime.config.platformAccount=dest;runtime.config.aws=newKey;
+    await db.query(`UPDATE domain_claims SET identity='{"ses":{"VerificationStatus":"SUCCESS","VerifiedForSendingStatus":true,"DkimAttributes":{"Status":"SUCCESS","SigningEnabled":true,"Tokens":["old-selector"]},"MailFromAttributes":{"MailFromDomain":"bounce.inbound.example","MailFromDomainStatus":"SUCCESS"}},"proven":true}' WHERE token=$1`,[tokens[0]]);
+    await reconcileSharedConnections(runtime);await reconcileSharedConnections(runtime);
+    assert.deepEqual([buckets,catchAll,sets.size,topics.size],[1,1,2,2]);assert.deepEqual([...tenants].sort(),w.map(wid=>'opensendmx-probation-'+wid));
+    assert.equal((await db.query(`SELECT FROM provider_pool_regions WHERE aws_account_id=$1 AND sending_state='ready' AND receiving_state='ready' AND inbound_bucket=$2 AND feedback_topic_arn=$3 AND inbound_topic_arn=$4 AND legacy_names AND pool_tier='probation'`,[dest,bucket(dest),topic(dest),topic(dest,'inbound')])).rowCount,1);
+    assert.equal((await db.query('SELECT FROM regional_sending_connections WHERE tenant_state=\'ready\' AND aws_account_id=$1 AND managed_tenant AND legacy_names',[dest])).rowCount,w.length);
+    for(const job of jobs){
+      const verify=async()=>{await db.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:platform'");return operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,workspaceId:job.workspace_id,attempts:1});};
+      if(job.payload.domainId===dom[0])await integration.test('missing identity with custom MAIL FROM resets and saves the recreated DKIM tokens',async()=>{
+        await assert.rejects(verify(),JobDeferred);const facts=async()=>(await db.query('SELECT identity FROM domain_claims WHERE token=$1',[job.payload.token])).rows[0].identity.ses;
+        assert.equal((await facts()).MailFromAttributes,undefined);assert.equal((await facts()).DkimAttributes.Status,'NOT_STARTED');
+        await assert.rejects(verify(),JobDeferred);assert.deepEqual((await facts()).DkimAttributes.Tokens,['new-a','new-b','new-c']);await verify();
+      });else {await assert.rejects(verify(),JobDeferred);if(job.payload.domainId===dom[1])await assert.rejects(verify(),JobDeferred);else await verify();}
+    }
+    assert.equal(identities.size,3);assert.equal(associations.size,6);
+    const claims=(await db.query(`SELECT b.domain_id,c.token,c.sending_state,c.identity#>'{ses,DkimAttributes,Tokens}' dkim FROM domain_claims c JOIN domain_sending_bindings b USING(workspace_id,name,connection_id)`)).rows;
+    for(const [n,id] of dom.entries())assert.deepEqual(claims.find(c=>c.domain_id===id),{domain_id:id,token:tokens[n],sending_state:n===1?'pending':'verified',dkim:['new-a','new-b','new-c']});
+    assert.deepEqual((await db.query(`SELECT id,status,receiving_host,catch_all FROM mailbox_domains WHERE domain_id=$1`,[dom[0]])).rows,[{id:'mdom',status:'active',receiving_host:'reply.'+names[0],catch_all:'store'}]);
+    assert.equal((await db.query(`SELECT FROM domain_claims WHERE receiving_state='active' AND receiving_host='reply.'||name`)).rowCount,2);
+    await db.query(`UPDATE provider_connections SET pause_reason='prior reputation hold' WHERE workspace_id=$1`,[w[1]]);
+    assert.equal((await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE kind='shared' AND pause_reason=$1`,['fixture hold'])).rowCount,1);
+    assert.equal((await db.query(`SELECT FROM provider_connections WHERE resumed_at IS NOT NULL`)).rowCount,0);
+    const sent=ok(await api('POST','/v1/emails/send',{from:'sender@'+names[0],to:'success@simulator.amazonses.com',subject:'Cutover fixture',text:'Simulated transport'}),202);
+    const {runDispatcher}=await import('./src/dispatcher.js');await runDispatcher(runtime,{region:r,accountId:dest,lanes:1});assert.equal(sends,1);
+    assert.deepEqual((await db.query('SELECT provider_id,feedback_topic_arn,status FROM sending_emails WHERE id=$1',[sent.id])).rows,[{provider_id:'fixture-new-send',feedback_topic_arn:topic(dest),status:'accepted'}]);
+    const envelope=async(fields:Record<string,string>)=>{
+      const body={...fields,SigningCertURL:certUrl,SignatureVersion:'2',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(fields).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64')};
+      return app.fetch(new Request(origin+'/v1/events/ses',{method:'POST',headers:{'content-type':'text/plain'},body:JSON.stringify(body)}),runtime);
+    };
+    const notify=(arn:string,msg:Json)=>envelope({Message:JSON.stringify(msg),MessageId:randomUUID(),Timestamp:new Date().toISOString(),TopicArn:arn,Type:'Notification'});
+    const delivered=(id:string)=>({eventType:'Delivery',delivery:{timestamp:new Date().toISOString()},mail:{messageId:id,sendingAccountId:old}});
+    assert.equal((await notify(topic(old),delivered('email_old'))).status,202);assert.notEqual((await notify(topic(old),delivered('fixture-new-send'))).status,202);
+    assert.deepEqual((await db.query(`SELECT status FROM sending_emails ORDER BY id='email_old'`)).rows,[{status:'accepted'},{status:'delivered'}]);
+    assert.equal((await envelope({Message:'fixture',MessageId:randomUUID(),SubscribeURL:`https://sns.${r}.amazonaws.com/?Action=ConfirmSubscription&TopicArn=${encodeURIComponent(topic(old))}&Token=fixture`,Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic(old),Type:'SubscriptionConfirmation'})).status,403);
+    const recv='rehome-incoming',staging='staging/'+recv,incoming=(acct:string)=>({notificationType:'Received',mail:{messageId:recv,source:'sender@example.org',destination:[mailboxAddress]},receipt:{timestamp:new Date().toISOString(),recipients:[mailboxAddress],action:{type:'S3',bucketName:bucket(acct),topicArn:topic(acct,'inbound'),objectKey:staging}}});
+    assert.equal((await notify(topic(old,'inbound'),incoming(old))).status,403);assert.equal((await notify(topic(dest,'inbound'),incoming(dest))).status,202);
+    objects.set(staging,Buffer.from(`From: sender@example.org\r\nTo: ${mailboxAddress}\r\nSubject: fixture\r\n\r\nnew mail`));const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
+    const receiptJob=(await db.query(`SELECT * FROM jobs WHERE type='mailbox.ingest' AND payload->>'sesMessageId'=$1`,[recv])).rows[0];assert.ok(receiptJob);
+    await mailboxIngestJobs['mailbox.ingest']!(runtime,receiptJob.payload,{id:receiptJob.id,workspaceId:receiptJob.workspace_id,attempts:1});assert.equal((await db.query(`SELECT FROM mail_receipts WHERE ses_message_id=$1 AND status='processed' AND bucket=$2`,[recv,bucket(dest)])).rowCount,1);
+    const download=ok(await api('GET','/v1/inbound/messages/mail/attachments/attachment'));assert.equal(await (await fetch(download.url)).text(),'old bytes');
+    await assert.rejects(restore(),/refused/);
+    await command('--finalize',runId);await assert.rejects(restore(),/finalized/);
+  });
+  await t.test('cold Hosted connection can create, list, read and verify domains before the pool binds its account',async cold=>{
+    // POST /connection takes its account only from a ready sending pool.
+    await db.query(`UPDATE provider_pool_regions SET sending_state='pending'`);
+    const owner=await seedSession(db),host='cold-rehome.example.org';await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('personal-owner',$1,$2,'owner')`,[personal,owner.userId]);
+    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Secure-)?opensend/,'__Secure-opensend'),origin,'x-opensend-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
+    let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
+    cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
+      if(cmd.constructor.name==='CreateEmailIdentityCommand'){tags=cmd.input.Tags;return {DkimAttributes:dkim};}assert.equal(cmd.constructor.name,'GetEmailIdentityCommand');return {VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:dkim,Tags:tags};});
+    cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_opensend.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='opensend:domain-claim')!.Value)}]:[]});});
+    ok(await api('POST','/v1/connection',{kind:'shared'}),201);assert.equal((await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[personal])).rows[0].aws_account_id,null);
+    const d=ok(await api('POST','/v1/domains',{name:host}),201);assert.deepEqual(ok(await api('GET','/v1/domains')).data.map((v:Json)=>v.id),[d.id]);
+    assert.ok(ok(await api('GET',`/v1/domains/${d.id}`)).dns.some((v:Json)=>v.name.startsWith('cold-a.')),'Create saved DKIM facts on the unbound connection.');
+    await db.query(`UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='domain.verify'`,[personal]);ok(await api('POST',`/v1/domains/${d.id}/verify`));
+    const job=(await db.query(`SELECT * FROM jobs WHERE workspace_id=$1 AND type='domain.verify' AND status='pending'`,[personal])).rows[0];assert.ok(job);
+    await db.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:platform'");await assert.rejects(operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,workspaceId:personal,attempts:1}),JobDeferred);
+    assert.equal((await db.query('SELECT ever_proven FROM domain_claims WHERE workspace_id=$1 AND name=$2',[personal,host])).rows[0].ever_proven,true,'Proof persists while tenant provisioning waits for the pool.');
+  });
+});
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('an idle DispatcherShard dispatches inline and does not reprobe placement on eviction', async t => {

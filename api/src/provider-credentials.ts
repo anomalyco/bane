@@ -7,6 +7,10 @@ import { connectionReady } from './states.js';
 import { setupResources } from './ses-setup.js';
 
 type Credentials = NonNullable<Config['aws']>;
+export function assertSharedAccount(runtime:Runtime, row:Pick<ReadyConnection,'kind'|'aws_account_id'>) {
+  if (runtime.config.multiTenant && row.kind==='shared' && runtime.config.platformAccount && row.aws_account_id!==null && row.aws_account_id!==runtime.config.platformAccount)
+    throw new ApiError(503,'AWS_ACCOUNT_MISMATCH','This Hosted binding belongs to a different platform account.',undefined,true);
+}
 export function platformCredentials(runtime: Runtime) {
   if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'The platform AWS connection is not configured.');
   return runtime.config.aws;
@@ -87,7 +91,7 @@ export async function workspaceConnection(runtime: Runtime, region?: string) {
 }
 export async function workspaceCredentials(runtime: Runtime, region: string, connection?: ReadyConnection) {
   const row = connection ?? await workspaceConnection(runtime, region);
-  if (row.kind==='shared') return platformCredentials(runtime);
+  if (row.kind==='shared') {assertSharedAccount(runtime,row);return platformCredentials(runtime);}
   // Missing metadata is not evidence of a legacy stack. An explicit managed
   // marker always wins over a contradictory legacy marker or naming convention.
   const legacy=row.template_version!=='v5' && row.legacy!==false && row.legacy_names!==false && (row.legacy===true || !!row.template_version);

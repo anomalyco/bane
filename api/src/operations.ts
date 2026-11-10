@@ -21,7 +21,7 @@ import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, r
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { dmarcView, localDmarc, observeDmarc, type DmarcObservation } from './dmarc.js';
 import { verifiedDashboardUser } from './google-auth.js';
-import { forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
+import { assertSharedAccount, forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
 import { byoEnabled } from './byo-pilot.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
@@ -223,12 +223,13 @@ function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
     JOIN regional_connections pc ON pc.id=b.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=b.region AND ${connectionReady()}
     WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock}`;
 }
-async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheck?: { domains:readonly string[]; mode:'manual'|'dashboard' }) {
+async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheck?: { domains:readonly string[]; mode:'manual'|'dashboard'; platformAccount?:string }) {
   const target=hostedDomainSelect(wid,domainId,lock ? sql`FOR UPDATE OF dc` : recheck ? sql`FOR SHARE OF dc` : sql``);
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
   const allowed = recheck?.domains.length ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheck.domains)}::jsonb) p(parent)
     WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql`true`;
-  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE NOT expired AND ${allowed} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
+  const accountFence=recheck?.platformAccount ? sql`AND (connection->>'kind'<>'shared' OR connection->>'aws_account_id' IS NULL OR connection->>'aws_account_id'=${recheck.platformAccount})` : sql``;
+  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE NOT expired AND ${allowed} ${accountFence} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
     SELECT target.*,EXISTS(SELECT 1 FROM queued) AS queued FROM target` : target;
   return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
@@ -325,7 +326,7 @@ async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
   if (mx.state==='error') throw dnsUnavailable();
   if (mx.state==='mixed' && row.receiving_host===row.name) return {mx,note:mx.message};
   const host=`reply.${row.name}`;
-  if (!['conflict','mixed','wrong_region','cname','null_mx'].includes(mx.state) && row.receiving_host!==host) return {mx};
+  if (mx.state==='active' && row.receiving_host!==host) return {mx};
   const reply=await checkMx(host,row.region);
   if (reply.state==='error') throw dnsUnavailable();
   if (reply.state==='mixed' && row.receiving_host===host) return {mx:reply,note:reply.message};
@@ -353,6 +354,7 @@ function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
     if (current && current.token===token && !current.expired && !current.identity?.adopted) {
+      assertSharedAccount(runtime,current.connection);
       const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
       const pooled=current.connection.kind==='shared' && runtime.config.trustedPool;
       const identity=await ensureIdentity(client,current.name,token,pooled?POOL_INSTALLATION:current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo || pooled);
@@ -442,8 +444,11 @@ function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'superse
 }
 const domainVerify: JobHandler = async (runtime,payload,job) => {
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
+  // A cutover job can arrive at the old consumer. Keep it pending, without consuming a retry or touching SES.
+  if (payload.platformAccount && payload.platformAccount!==runtime.config.platformAccount) throw new JobDeferred(new Date(Date.now()+60_000).toISOString(),payload);
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
   if (!row || row.token!==payload.token || row.expired) return; // Deleted, reclaimed, disconnected or awaiting expiry cleanup.
+  assertSharedAccount(runtime,row.connection);
   // Only previously proven claims keep polling beyond 72 hours (including recovery after lost proof).
   const poll=Number(payload.poll ?? 0);
   const {dashboard,...background}=payload, nextPoll=dashboard===true && !row.ever_proven ? poll : poll+1;
@@ -470,7 +475,11 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     const client=getSes(scoped,row.region,{...row.connection,identitySession:{name:row.name,purpose:row.identity?.imported?'read':'verify'}});
     let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
-    catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity) throw e; }
+    catch (e) {
+      const ses=row.identity?.ses,reset=row.connection.kind==='shared' && !row.identity?.adopted && !row.identity?.imported && !ses?.VerifiedForSendingStatus &&
+        (!ses?.VerificationStatus || ['PENDING','NOT_STARTED'].includes(ses.VerificationStatus)) && (!ses?.DkimAttributes?.Status || ses.DkimAttributes.Status==='NOT_STARTED');
+      if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity && !reset) throw e;
+    }
     // The claim exists but the creating request never reached SES: the job owns the identity from here (ensureIdentity proves ownership itself).
     if (!identity) {
       const recovered=await recoverIdentity(runtime,job.workspaceId,row.id,row.token,client);
@@ -498,7 +507,8 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
     if (shared && report.ready && row.connection.tenant_state!=='ready') {
       // Platform setup delay is not a failure to prove ownership.
-      await runtime.db.execute(sql`UPDATE domain_claims dc SET ever_proven=true WHERE dc.token=${row.token} AND dc.connection_id=${row.connection.id} AND NOT dc.ever_proven AND NOT domain_claim_expired(dc)`);
+      await runtime.db.execute(sql`UPDATE domain_claims dc SET ever_proven=true WHERE dc.token=${row.token} AND dc.connection_id=${row.connection.id} AND NOT dc.ever_proven AND NOT domain_claim_expired(dc)
+        ${runtime.config.platformAccount ? sql`AND EXISTS(SELECT FROM provider_connections c WHERE c.id=dc.connection_id AND (c.aws_account_id IS NULL OR c.aws_account_id=${runtime.config.platformAccount}))` : sql``}`);
       log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),nextPoll);
     }
     const outcome=await runtime.db.transaction(async db=>{
@@ -506,6 +516,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       // Serialize the association with deletion: a stale verifier cannot bind a replacement identity.
       const current=await hostedDomain(db,job.workspaceId,row.id,true);
       if (!current || current.token!==row.token || current.expired) return null;
+      assertSharedAccount(runtime,current.connection); // The account may have changed during the AWS/DNS read.
       const mailFrom=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomainStatus ?? null;
       if (current.receiving_host!==row.receiving_host || mailFrom(current.identity)!==mailFrom(row.identity) || (mailFromStatus(current.identity)==='PENDING' &&
         (mailFromStatus(row.identity)!=='PENDING' || mailFrom(current.identity)!==report.mailFromDomain))) {
@@ -538,8 +549,9 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       await runtime.db.transaction(async db=>{
         const current=await hostedDomain(db,job.workspaceId,row.id,true);
         if (current?.token!==row.token) return;
+        assertSharedAccount(runtime,current.connection);
         const ses=current.identity?.ses ?? {VerificationStatus:'PENDING'};
-        const reset:IdentityFacts['ses']={...ses,VerificationStatus:'PENDING',VerifiedForSendingStatus:false,DkimAttributes:ses.DkimAttributes && {...ses.DkimAttributes,Status:'NOT_STARTED',SigningEnabled:false},MailFromAttributes:ses.MailFromAttributes && {...ses.MailFromAttributes,MailFromDomainStatus:'PENDING'}};
+        const reset:IdentityFacts['ses']={...ses,VerificationStatus:'PENDING',VerifiedForSendingStatus:false,DkimAttributes:ses.DkimAttributes && {...ses.DkimAttributes,Status:'NOT_STARTED',SigningEnabled:false},MailFromAttributes:undefined};
         await saveObservation(db,current,job.workspaceId,reset,undefined,{sending:false,identityVerified:false,proven:false,unavailable:e.code==='DOMAIN_UNAVAILABLE',definitive:true});
       });
       if (e.code==='DOMAIN_UNAVAILABLE') return;
@@ -554,6 +566,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
   if (!row?.identity || row.token!==payload.token) return;
+  assertSharedAccount(runtime,row.connection);
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
   // A definitive missing/invalid/ambiguous answer must still replace it.
@@ -562,6 +575,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
     if (!current?.identity || current.token!==row.token || current.receiving_host!==row.receiving_host) return;
+    assertSharedAccount(runtime,current.connection);
     // Never grant receiving rights (notably to a Virginia sending binding) from a DMARC check.
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
     await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:current.identity.proven},dmarc);
@@ -645,7 +659,7 @@ export function registerOperations(app: App) {
       if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
-      const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL RETURNING ${row.id}::text AS id,token`;
+      const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL ${claim.connection.kind==='shared' && runtime.config.platformAccount ? sql`AND EXISTS(SELECT FROM provider_connections c WHERE c.id=connection_id AND (c.aws_account_id IS NULL OR c.aws_account_id=${runtime.config.platformAccount}))` : sql``} RETURNING ${row.id}::text AS id,token`;
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
       return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
     }
@@ -731,7 +745,9 @@ export function registerOperations(app: App) {
     const a = actor(c, verifyRoute ? 'manage' : 'read');
     if (c.env.config.multiTenant) {
       const mode=verifyRoute ? 'manual' : a.credential==='dashboard' && c.req.method==='GET' ? 'dashboard' : undefined;
-      const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,mode ? {domains:a.domains,mode} : undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
+      const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,mode ? {domains:a.domains,mode,platformAccount:c.env.config.platformAccount} : undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
+      // A stale dashboard may read persisted facts; its opportunistic recheck was fenced in SQL.
+      if (verifyRoute) assertSharedAccount(c.env,row.connection);
       if (row.queued) a.wakeJobs=1;
       return c.json(derivedReadiness(row),200);
     }
