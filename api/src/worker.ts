@@ -156,10 +156,10 @@ export default {
       const admissionStarted = performance.now();
       const address = core.admissionPeer(request.headers.get('CF-Connecting-IP') ?? '127.0.0.1');
       const peer = await core.digest(address);
-      // Separate SNS traffic from normal traffic, but never exempt it from admission.
+      // SNS shares egress IPs across subscriptions. This byte-bounded route
+      // verifies the signature before looking up a topic or queuing feedback.
       const feedbackIngress = pathname === '/v1/events/ses' && request.method === 'POST';
-      const gate = await env.ADMISSION.limit({ key: `bane:${feedbackIngress ? 'sns' : 'default'}:${peer}` });
-      if (!gate.success) return core.admissionDenied();
+      if (!feedbackIngress && !(await env.ADMISSION.limit({ key: `bane:default:${peer}` })).success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
       headers.delete('x-opensend-client-ip');

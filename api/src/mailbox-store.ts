@@ -45,11 +45,22 @@ export function replyText(text: string | null | undefined): string {
   return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 export function htmlToPlain(html: string) {
-  return html.replace(/<(script|style|head)[^>]*>[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|tr|h\d)>/gi, '\n').replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*/g, '\n\n').trim();
+  // Text projection only (not an HTML sanitizer). Each token consumes its
+  // input once, including truncated markup and unmatched delimiters.
+  let hidden=''; const parts:string[]=[];
+  for(const [token] of html.slice(0,512*1024).matchAll(/<[^<>]*>?|[^<]+/g)) {
+    if(token[0]!=='<') { if(!hidden) parts.push(token); continue; }
+    const tag=/^<(\/?)([a-z][a-z0-9]*)\b/i.exec(token);
+    const name=tag?.[2]?.toLowerCase();
+    if(hidden){ if(tag?.[1] && name===hidden) hidden=''; continue; }
+    if(!tag?.[1] && name && ['script','style','head'].includes(name)) hidden=name;
+    parts.push(name==='br' || tag?.[1] && /^(p|div|li|tr|h\d)$/.test(name!)?'\n':' ');
+  }
+  return parts.join('').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'")
+    .replace(/\s+/g,w=>w.includes('\n')?'\n':' ').trim();
 }
 export function snippetOf(text: string | null | undefined, html: string | null | undefined) {
-  const source = replyText(text || (html ? htmlToPlain(html) : ''));
+  const source = replyText(text?.slice(0,16384) || (html ? htmlToPlain(html.slice(0,16384)) : ''));
   return source.replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 export function uniqueAddresses(list: MailAddress[], limit = 20): MailAddress[] {

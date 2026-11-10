@@ -27,26 +27,79 @@ export type ScreenResult = { spam: number; model: string };
 const cache = new Map<string, { expires: number; result: ScreenResult }>();
 const flights=new WeakMap<Runtime['storage'],Map<string,Promise<ScreenResult>>>();
 
-async function body(snapshot: EmailSnapshot) {
-  const parts = [snapshot.text, snapshot.raw];
+const normalize = (s: string) => s.normalize('NFKC').replace(/[\p{Cf}\p{Mn}]/gu, '');
+function copy(s = '') {
+  const sentences = normalize(s).split(/\n+|(?<=[.!?])\s+/).map(p => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  return [...new Set(sentences)].join(' ');
+}
+function sample(s: string, budget: number) {
+  if (s.length <= budget) return s;
+  const head = Math.min(1000, Math.floor(budget / 3)), count = Math.ceil((budget - head) / 401);
+  const width = Math.floor((budget - head) / count) - 1;
+  const starts = new Set<number>();
+  const cue = /https?:\/\/|[$€£]\d|\+?\d[\d() -]{7,}\d|\b(?:verify|claim|log[ -]?in|unsubscribe|redeem)\b/gi;
+  for (const m of s.matchAll(cue)) {
+    if (starts.size >= Math.floor(count / 3)) break;
+    if (m.index >= head && ![...starts].some(i => Math.abs(i - m.index) < width)) starts.add(Math.min(s.length-width, Math.max(head,m.index-80)));
+  }
+  const spaced = count - starts.size;
+  for (let i=1; i<=spaced; i++) {
+    let start=Math.round(head+(s.length-width-head)*i/spaced);
+    if(i!==spaced){
+      const boundary=/[.!?]\s+(?=[^.!?]*$)/.exec(s.slice(start,start+64));
+      if(boundary)start=Math.min(s.length-width,start+boundary.index+boundary[0].length);
+    }
+    starts.add(start);
+  }
+  return [s.slice(0,head), ...[...starts].sort((a,b)=>a-b).map(i=>s.slice(i,i+width))].join('…');
+}
+const tooLarge = () => new ApiError(422,'CONTENT_TOO_LARGE_TO_SCREEN','Shorten the message so Hosted sending can screen it.');
+function host(value: string) {
+  try { return new URL(value.startsWith('//') ? 'https:'+value : value).hostname.toLowerCase(); } catch { return ''; }
+}
+async function body(snapshot: EmailSnapshot, required: boolean) {
+  const plain=copy(snapshot.text), raw=copy(snapshot.raw), hosts=new Set<string>(), mismatches=new Set<string>();
+  let rendered='';
   if (snapshot.html) {
     const { parseFragment } = await import('parse5');
-    const nodes = [...parseFragment(snapshot.html).childNodes].reverse(), text:string[]=[], links=new Set<string>();
+    // Never remove the middle of required mail to fit the parser's memory budget.
+    if (required && snapshot.html.length>512*1024) throw tooLarge();
+    const html=snapshot.html.length<=512*1024?snapshot.html:snapshot.html.slice(0,448*1024)+' '+snapshot.html.slice(-64*1024);
+    const nodes = [...parseFragment(html).childNodes].reverse().map(node=>({node,anchor:''})), text:string[]=[];
     while (nodes.length) {
-      const node=nodes.pop()!;
-      if ('value' in node) text.push(node.value); // Includes hidden/preheader text, not just visible copy.
+      const item=nodes.pop()!, {node}=item; let anchor=item.anchor;
+      if ('tagName' in node && ['style','script','template','head'].includes(node.tagName)) continue;
+      if ('value' in node) {
+        text.push(node.value);
+        if(anchor) for(const word of normalize(node.value).split(/\s+/)) {
+          if(!word.includes('.') || word.length>2048)continue;
+          const label=host(word.includes('://')?word:'https://'+word);
+          if(label && label!==anchor) mismatches.add(`${label} → ${anchor}`);
+        }
+      }
       if ('attrs' in node) for (const a of node.attrs) {
-        if (['href','src','srcset','background','action','style'].includes(a.name)) links.add(a.value);
+        if (['href','src','srcset','background','action','style'].includes(a.name)) {
+          for(const m of normalize(a.value).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
+          if(node.tagName==='a' && a.name==='href') anchor=host(normalize(a.value));
+        }
         if (['alt','title'].includes(a.name)) text.push(a.value);
       }
-      const children='content' in node ? node.content.childNodes : 'childNodes' in node ? node.childNodes : [];
-      for (let i=children.length-1;i>=0;i--) nodes.push(children[i]!);
+      const children='childNodes' in node ? node.childNodes : [];
+      for (let i=children.length-1;i>=0;i--) nodes.push({node:children[i]!,anchor});
     }
-    parts.push(text.join(' '),[...links].join(' '));
+    rendered=copy(text.join('\n'));
   }
-  const content=parts.filter((p):p is string=>!!p).map(p=>p.replace(/\s+/g,' ').trim());
-  const n=Math.floor(MAX_BODY/Math.max(1,content.length))-1;
-  return content.map(p=>p.length<=n?p:p.slice(0,Math.floor(n/2)-1)+'…'+p.slice(-Math.floor(n/2))).join('\n');
+  if(required && new TextEncoder().encode([rendered,plain,raw].filter(Boolean).join('\n')).length>24*1024) throw tooLarge();
+  const signals=[...mismatches,...hosts], joined=signals.slice(0,60).join('\n');
+  if(required && (signals.length>60 || joined.length>1000)) throw tooLarge();
+  const links=joined.slice(0,1000);
+  const available=MAX_BODY-links.length-3;
+  const renderedBudget=available-Math.min(1600,plain.length)-Math.min(1000,raw.length);
+  const html=sample(rendered,renderedBudget), text=sample(plain,available-html.length-Math.min(1000,raw.length));
+  const words=(v:string)=>new Set(v.toLowerCase().match(/[\p{L}\p{N}]+/gu));
+  const a=words(text), b=words(html), common=[...a].filter(w=>b.has(w)).length;
+  return {body:[links,html,text,sample(raw,available-html.length-text.length)].filter(Boolean).join('\n'),
+    textHtmlOverlap:a.size && b.size ? common/(a.size+b.size-common) : undefined};
 }
 async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
   // The deadline includes reading the response body. Never retry inside a send lease.
@@ -72,12 +125,12 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
 }
 
 /** Spam probability for one snapshot, or null when the installation has no classifier configured. */
-export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot): Promise<ScreenResult | null> {
+export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, required=false): Promise<ScreenResult | null> {
   const settings = runtime.config.screen;
   if (!settings) return null;
   const from = formattedSender(snapshot.from, snapshot.fromName);
   const recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
-  const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,from,snapshot.kind,snapshot.subject,snapshot.text,snapshot.html,snapshot.raw,recipients]));
+  const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,required,from,snapshot.kind,snapshot.subject,snapshot.text,snapshot.html,snapshot.raw,recipients]));
   const now = Date.now();
   const hit = cache.get(key);
   if (hit && hit.expires > now) return hit.result;
@@ -85,7 +138,7 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot):
   // Concurrent copies share one request; failures are not cached so the next copy retries.
   let pending=flights.get(runtime.storage);if(!pending){pending=new Map();flights.set(runtime.storage,pending);}
   const existing=pending.get(key);if(existing)return existing;
-  const lookup=body(snapshot).then(body=>evaluate(settings.endpoint,settings.apiKey,settings.model,{email:{from,kind:snapshot.kind,subject:snapshot.subject,body},signals:{recipients}}));pending.set(key,lookup);
+  const lookup=body(snapshot,required).then(({body,textHtmlOverlap})=>evaluate(settings.endpoint,settings.apiKey,settings.model,{email:{from:copy(from).slice(0,100),kind:snapshot.kind,subject:copy(snapshot.subject).slice(0,200),body},signals:{recipients,textHtmlOverlap}}));pending.set(key,lookup);
   try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
     while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;
   }finally{pending.delete(key);}

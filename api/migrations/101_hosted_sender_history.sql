@@ -2,8 +2,8 @@ SET LOCAL lock_timeout='2s';
 -- Sponsorship stays with the approved creator even if ownership is transferred.
 -- For existing tenants the earliest remaining owner is the best available record.
 ALTER TABLE workspaces ADD COLUMN quota_sponsor text;
-UPDATE workspaces w SET quota_sponsor=(SELECT m.user_id FROM workspace_members m WHERE m.workspace_id=w.id AND role='owner' ORDER BY created_at,id LIMIT 1);
 CREATE TABLE hosted_sponsor_locks(sponsor text PRIMARY KEY);
+CREATE TABLE hosted_minute_tiers(connection_id text PRIMARY KEY, epoch timestamptz NOT NULL, tier int NOT NULL, checked_at timestamptz NOT NULL);
 
 -- Only real SES acceptances (not queued, simulated, or simulator destinations)
 -- in this resume epoch count. Give feedback at least a day to catch up.
@@ -53,7 +53,15 @@ BEGIN
 END $$;
 
 CREATE FUNCTION hosted_minute_cap(wid text) RETURNS int LANGUAGE sql STABLE AS $$
- SELECT greatest(CASE hosted_history_tier(wid) WHEN 3 THEN 500 WHEN 2 THEN 100 ELSE 50 END,ceil(w.send_cap_override/1440.0)::int) FROM workspaces w WHERE w.id=wid
+ SELECT greatest(CASE t.tier WHEN 3 THEN 500 WHEN 2 THEN 100 ELSE 50 END,ceil(w.send_cap_override/1440.0)::int)
+ FROM workspaces w JOIN provider_connections c ON c.workspace_id=w.id AND c.kind='shared'
+ LEFT JOIN hosted_minute_tiers t ON t.connection_id=c.id AND t.epoch=coalesce(c.resumed_at,'-infinity') AND t.checked_at>now()-interval '2 hours'
+ WHERE w.id=wid
+$$;
+CREATE FUNCTION refresh_hosted_minute_tiers() RETURNS void LANGUAGE sql AS $$
+ INSERT INTO hosted_minute_tiers SELECT id,coalesce(resumed_at,'-infinity'),hosted_history_tier(workspace_id),now()
+ FROM provider_connections WHERE kind='shared' AND paused_at IS NULL ORDER BY id
+ ON CONFLICT(connection_id) DO UPDATE SET (epoch,tier,checked_at)=(excluded.epoch,excluded.tier,excluded.checked_at)
 $$;
 CREATE OR REPLACE FUNCTION hosted_burst_ok(wid text,domain_key text,cost int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
 DECLARE cap int; tenant int; dom int; sponsor text; tick timestamptz:=date_trunc('minute',statement_timestamp());

@@ -1,4 +1,5 @@
 -- bane:no-transaction
+CREATE INDEX CONCURRENTLY IF NOT EXISTS sending_owner_sender_domain_page ON sending_emails(workspace_id,((reverse(lower(split_part(from_address,'@',2))) || '.') COLLATE "C"),created_at DESC,id DESC);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_ready_page ON jobs(job_class(type),(CASE WHEN status='running' THEN lease_until ELSE available_at END),id) WHERE status IN ('pending','running');
 CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_expired_page ON jobs(lease_until,id) WHERE status='running';
 CREATE INDEX CONCURRENTLY IF NOT EXISTS sending_interrupted_page ON sending_emails(attempt_started_at,id) WHERE status='attempting';

@@ -2,10 +2,9 @@ import { ApiError, type Ctx } from './core.js';
 
 // Content-Length is only an early rejection hint. Count the actual bytes before
 // handing any of them to JSON, Zod, or the atomic admission fast path.
-export async function boundRequestBody(c: Ctx) {
+export async function boundRequestBody(c: Ctx, max = 12 * 1024 * 1024) {
   const raw = c.req.raw;
-  if (!raw.body || c.get('boundedBody')) return;
-  const max = c.req.path === '/v1/events/ses' ? 512 * 1024 : 12 * 1024 * 1024;
+  if (!raw.body || ['GET','HEAD','OPTIONS'].includes(raw.method) || c.get('boundedBody')) return;
   const tooLarge = () => new ApiError(413, 'REQUEST_TOO_LARGE', `Request exceeds the ${max / 1024} KiB limit.`);
   if (Number(raw.headers.get('content-length')) > max) throw tooLarge();
   const reader = raw.body.getReader();

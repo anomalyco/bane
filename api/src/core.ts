@@ -257,8 +257,8 @@ export function admissionPeer(address: string): string {
   } catch { return 'unknown'; }
 }
 
-// Reserve before dispatch (including parallel requests); refund successful
-// authentication. Only numbers survive a request, never IPs, headers or I/O.
+// Identity entry has a request budget; authenticated API routes have a failure
+// budget. Check completed failures before dispatch, never charge concurrency.
 const failureCounts = new Map<string, number>();
 let failureMinute = 0;
 export async function guardPublicRequest(path: string, headers: Headers, peer: string, work: () => Promise<Response>) {
@@ -267,19 +267,18 @@ export async function guardPublicRequest(path: string, headers: Headers, peer: s
   if (!lane) return work();
   const minute = Math.floor(Date.now()/60000);
   if (minute !== failureMinute) { failureCounts.clear(); failureMinute = minute; }
-  const k = `${lane}:${peer}`;
-  const key = failureCounts.has(k) || failureCounts.size < 4096 ? k : `${lane}:overflow`;
+  const key = `${lane}:${peer}`;
+  // At capacity, rely on edge admission for unknown peers. Never share either
+  // a penalty or an in-flight reservation between unrelated credentials.
+  if (!failureCounts.has(key) && failureCounts.size >= 4096) return work();
   const count = failureCounts.get(key) ?? 0;
   if (count >= 40) return publicFailureDenied();
-  failureCounts.set(key, count+1);
-  let response: Response | undefined;
-  try { response = await work(); return response; }
-  finally {
-    if (minute === failureMinute && !entry && (!response || !publicFailureBucket(path,response.status,headers))) {
-      const remaining = (failureCounts.get(key) ?? 1)-1;
-      if (remaining) failureCounts.set(key, remaining); else failureCounts.delete(key);
-    }
+  if(entry) failureCounts.set(key,count+1);
+  const response=await work();
+  if(!entry && minute===failureMinute && publicFailureBucket(path,response.status,headers) && (failureCounts.has(key) || failureCounts.size<4096)) {
+    failureCounts.set(key,Math.min(40,(failureCounts.get(key)??0)+1));
   }
+  return response;
 }
 // All credentials and image-producing routes share one atomic workspace counter.
 export async function chargeRenderBudget(c: Ctx, workspaceId: string) {

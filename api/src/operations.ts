@@ -109,17 +109,29 @@ export function webhookUrl(runtime: Pick<Runtime, 'config'>, value: string) {
   if (own.includes(host)) throw new ApiError(422, 'INVALID_WEBHOOK_URL', 'Webhook endpoints cannot point back at this installation.', 'url');
   return url.toString();
 }
+const hookTimeouts=new Map<string,{count:number;until:number}>();
 /** The one outbound transport for sending and inbound webhooks: no redirects, five-second budget, response bodies discarded. */
 export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string) {
+  const key=await digest(binding+'\n'+url),prior=hookTimeouts.get(key);
+  if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString());
   const custom = await readWebhookHeaders(runtime, encryptedHeaders, binding);
   const merged = new Headers();
   for (const { name, value } of custom.headers) if (!reservedHeader.test(name)) merged.set(name, value);
   for (const [name, value] of Object.entries(headers)) merged.set(name, value);
   merged.set('Content-Type', 'application/json');
   const init = { method: 'POST' as const, headers: Object.fromEntries(merged), body, signal: AbortSignal.timeout(5000) };
-  if (runtime.webhookFetch) return runtime.webhookFetch(url, init);
-  const result = await fetch(url, { ...init, redirect: 'manual' }); await result.body?.cancel();
-  return { status: result.status };
+  try {
+    const result=runtime.webhookFetch?await runtime.webhookFetch(url,init):await fetch(url,{...init,redirect:'manual'});
+    if(result instanceof Response) await result.body?.cancel();
+    hookTimeouts.delete(key);return {status:result.status};
+  }catch(error){
+    if(init.signal.aborted || error instanceof Error && error.name==='TimeoutError'){
+      const last=hookTimeouts.get(key), count=1+(last && last.until>Date.now()?last.count:0);
+      if(!last && hookTimeouts.size>=1024)hookTimeouts.delete(hookTimeouts.keys().next().value!);
+      hookTimeouts.set(key,{count,until:Date.now()+30000});
+    }
+    throw error;
+  }
 }
 async function encryptionKey(value: string) {
   if (!/^[0-9a-f]{64}$/i.test(value)) throw new ApiError(503, 'ENCRYPTION_NOT_CONFIGURED', 'A 32-byte hexadecimal encryption key is required.');
@@ -993,7 +1005,7 @@ export function registerOperations(app: App) {
 const snsSchema = z.object({ Type: z.enum(['Notification', 'SubscriptionConfirmation', 'UnsubscribeConfirmation']), MessageId: z.string().min(1).max(200), TopicArn: z.string().min(1).max(300), Message: z.string().max(262144), Timestamp: z.string().datetime(), SignatureVersion: z.enum(['1', '2']), Signature: z.string().min(1).max(4096), SigningCertURL: z.string().url().max(2048), Subject: z.string().max(1000).optional(), SubscribeURL: z.string().url().max(4096).optional(), Token: z.string().max(4096).optional() }).openapi('SnsSignedEnvelope');
 type SnsEnvelope = z.infer<typeof snsSchema>;
 function snsHost(envelope: SnsEnvelope) {
-  const match = /^arn:aws:sns:([a-z0-9-]+):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
+  const match = /^arn:aws:sns:([a-z]{2}(?:-[a-z]+)+-\d):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
   if (!match) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only registered standard AWS regional SNS topics are supported.');
   return { host: `sns.${match[1]}.amazonaws.com`, region: match[1]! };
 }
@@ -1004,6 +1016,7 @@ function trustedSnsUrl(value: string, host: string, certificate: boolean) {
 }
 // Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
 const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
+const missingCertificates=new Map<string,number>();
 async function verifySns(envelope: SnsEnvelope) {
   const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
   const trusted = snsHost(envelope);
@@ -1016,11 +1029,19 @@ async function verifySns(envelope: SnsEnvelope) {
   const cached = snsCertificates.get(url.href);
   let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
   if (!cert) {
+    if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
     try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(certificateTimeout) }); } catch (error) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', errorType: error instanceof Error ? error.name : 'Unknown', stack: error instanceof Error ? error.stack?.split('\n').slice(1, 7).join('\n') : undefined }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
-    if (!res.ok) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); await res.body?.cancel(); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    if (!res.ok) {
+      await res.body?.cancel();
+      if(res.status===404 || res.status===410){
+        if(missingCertificates.size>=256)missingCertificates.delete(missingCertificates.keys().next().value!);
+        missingCertificates.set(url.href,Date.now()+60000);throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
+      }
+      log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true);
+    }
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
     try { cert = new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
   }
@@ -1292,7 +1313,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
     const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'Bane-Webhooks/1.0', ...(delivery.synthetic ? { 'Bane-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
-  } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
+  } catch (e) { if(e instanceof JobDeferred)throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < WEBHOOK_ATTEMPTS;
   const records = sql`attempt AS (INSERT INTO operation_delivery_attempts(id,workspace_id,delivery_id,status_code,error,duration_ms)
     SELECT ${id('wha')},${job.workspaceId},${delivery.delivery_id},${statusCode}::int,${error}::text,${Date.now()-start}::int FROM settled),

@@ -30,13 +30,14 @@ try {
     const current = Math.floor(Date.now() / 60000);
     if (current !== minute) { peers.clear(); minute = current; }
     const address = admissionPeer(connection.incoming.socket.remoteAddress ?? 'unknown');
-    const key = peers.has(address) || peers.size < 1024 ? address : 'overflow';
-    const count = (peers.get(key) ?? 0) + 1; peers.set(key, count);
-    if (count > 6000) return admissionDenied();
+    if (!(getPath(request)==='/v1/events/ses' && request.method==='POST') && (peers.has(address) || peers.size < 1024)) {
+      const count = (peers.get(address) ?? 0) + 1; peers.set(address, count);
+      if (count > 6000) return admissionDenied();
+    }
     const headers = new Headers(request.headers);
     headers.delete('x-opensend-client-ip');
     headers.set('x-bane-client-ip', address);
-    const response = await guardPublicRequest(getPath(request), headers, await digest(key), async () => app.fetch(new Request(request, { headers }), runtime));
+    const response = await guardPublicRequest(getPath(request), headers, await digest(address), async () => app.fetch(new Request(request, { headers }), runtime));
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
     return response;

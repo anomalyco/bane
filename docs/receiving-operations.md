@@ -1,5 +1,22 @@
 # Hosted receiving: deployment and recovery
 
+## Rolling back
+
+Stop new campaign releases and receiving-host changes first. Run these read-only checks on the stage being rolled back. Both counts must be zero before reverting to a Worker that only understands root/`reply.` hosts and fully materialized campaign snapshots:
+
+```sql
+SELECT count(*) AS unsupported_receiving_hosts FROM domain_claims
+ WHERE receiving_host IS NOT NULL AND receiving_host NOT IN (name, 'reply.' || name);
+SELECT count(*) AS deferred_campaign_snapshots FROM sending_emails
+ WHERE snapshot @> '{"deferredCampaign":true}'::jsonb;
+```
+
+If either count is nonzero, roll forward. Do not clear a binding, rewrite a stub, reset an attempt, or revert the database to make the check pass. Keep the Pulumi-managed controls in place. Rerun the subscription inventory for **both feedback topics** before adopting their HTTPS retry/DLQ configuration; monitor the two regional feedback dead-letter queues separately from the Cloudflare feedback DLQ.
+
+## Receiving capacity holds
+
+The default per-workspace allowance is 5,000 new receipts and 2 GiB per hour, with 5,000 active ingest jobs. On message or backlog exhaustion the workspace-bound receipt remains `held`; the hourly sweep reserves a slot before queuing it. A message that individually fits the byte budget waits for the next window when previous messages used the remaining bytes. Monitor `mail_receipts WHERE status='held'` by workspace and age, and raise `mail_receive_limits` for sustained traffic **before the three-day staging lifetime expires**. Releases do not extend S3 retention or transfer mail to today's domain owner.
+
 ## Why production was empty
 
 `deploy.yml` deploys `api/wrangler.prod.jsonc` to `bane.mx`. Both dedicated Ohio accounts returned `ProductionAccessEnabled=false`, `SendingEnabled=true`, `EnforcementStatus=HEALTHY` from `sesv2 get-account`. Dev permits sending sandbox provisioning; production does not. The old reconciler called `provisionSes` and `checkProvisioned` **before** `preparePoolReceiving`. `SES_SANDBOX` therefore stopped the production run before its first inbound S3 or SNS call. The recent production runtime CloudTrail sample shows repeated successful *sending* configuration-set, feedback topic and subscription reads, not an S3 provisioning or IAM failure. The pre-created active `bane-inbound` **set** is only an IAM bootstrap; it contains no rule on its own. The old health check never inspected it. No production database was queried to make this diagnosis.

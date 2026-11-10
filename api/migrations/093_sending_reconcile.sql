@@ -9,10 +9,13 @@ CREATE FUNCTION reconcile_sending_depth() RETURNS void LANGUAGE sql AS $$
   ON CONFLICT(workspace_id,stripe,marketing) DO UPDATE SET n=sending_stream_depth.n+excluded.n
 $$;
 SELECT reconcile_sending_depth();
+CREATE FUNCTION reconcile_asset_usage() RETURNS void LANGUAGE sql AS $$
 INSERT INTO sending_asset_usage SELECT workspace_id,sum(delta) FROM (
   SELECT workspace_id,size AS delta FROM sending_attachments UNION ALL SELECT workspace_id,size FROM sending_upload_reservations
   UNION ALL SELECT workspace_id,-bytes FROM sending_asset_usage
 ) a GROUP BY 1 HAVING sum(delta)<>0 ORDER BY 1 ON CONFLICT(workspace_id) DO UPDATE SET bytes=sending_asset_usage.bytes+excluded.bytes;
+$$;
+SELECT reconcile_asset_usage();
 INSERT INTO mail_outbound_sync(id) SELECT id FROM mail_messages WHERE direction='outbound' AND sending_email_id IS NOT NULL AND status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') FOR KEY SHARE ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION direct_pending_load(wid text,incoming int,marketing int) RETURNS TABLE(total int,projected int) LANGUAGE sql STABLE AS $$
   SELECT n,CASE WHEN EXISTS(SELECT FROM provider_connections WHERE workspace_id=wid AND kind='shared') THEN greatest(

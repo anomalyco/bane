@@ -123,9 +123,18 @@ function deniedToken(runtime: Runtime) {
     status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${originOf(runtime)}/.well-known/oauth-protected-resource/mcp", scope="bane:read"` },
   });
 }
+const invalidJws=new Map<string,number>();
 export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor) => Promise<Response>): Promise<Response> {
   const authorization = parseAccessTokenAuthorization(request.headers.get('authorization'));
   if (!authorization?.token || authorization.scheme === 'Unknown' || authorization.token.length > 16 * 1024) return deniedToken(runtime);
+  const parts=/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{86})$/.exec(authorization.token);
+  if(!parts) return deniedToken(runtime);
+  try {
+    const h=JSON.parse(Buffer.from(parts[1]!,'base64url').toString()),p=JSON.parse(Buffer.from(parts[2]!,'base64url').toString());
+    if(h.alg!=='ES256' || typeof p.sub!=='string' || typeof p.exp!=='number') return deniedToken(runtime);
+  } catch {return deniedToken(runtime);}
+  const fingerprint=await digest(issuerOf(runtime)+'\n'+authorization.token);
+  if((invalidJws.get(fingerprint)??0)>Date.now())return deniedToken(runtime);
   let actor: Actor;
   try {
     const auth = createAuth(runtime, { mcp: true });
@@ -136,7 +145,10 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
     const claims = await verifyJwsAccessToken(authorization.token, { jwksFetch: async () => jwks,
       verifyOptions: { issuer: issuerOf(runtime), audience: resourceOf(runtime), algorithms: ['ES256'], typ: 'at+jwt', requiredClaims: ['sub', 'exp', 'iat', 'client_id'] },
     }).catch(() => null);
-    if (!claims) return deniedToken(runtime);
+    if (!claims) {
+      if(invalidJws.size>=1024)invalidJws.delete(invalidJws.keys().next().value!);
+      invalidJws.set(fingerprint,Date.now()+30000);return deniedToken(runtime);
+    }
     try {
       await enforceDpopBinding({ payload: claims, authorization, proofJwt: request.headers.get('dpop'), method: request.method, url: request.url,
         replayStore: createDpopReplayStore((await auth.$context).internalAdapter),

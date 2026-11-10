@@ -12,6 +12,7 @@ const RETENTION_BUDGET_MS = 4 * 60_000;
 
 export async function checkHostedHealth(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
+  await runtime.db.execute(sql`SELECT refresh_hosted_minute_tiers()`);
   const result = await runtime.db.execute(pauseHostedSending(sql`WITH counts AS (
     SELECT pc.id,pc.workspace_id,pc.resumed_at,sum(h.accepted) AS sends,
       sum(h.bounces) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS bounces,
@@ -36,7 +37,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   // snapshot difference. Dispatch continues adding deltas while this runs.
   await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
     VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
-    WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth() FROM elected`);
+    WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth(),reconcile_asset_usage(),reconcile_ingest_turns() FROM elected`);
   if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
   const cutoff = sql`now() - interval '30 days'`;
   // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.

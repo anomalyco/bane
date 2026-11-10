@@ -247,8 +247,10 @@ export const scope = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'works
 // A key restricted to sender domains reads only mail sent from those domains or their subdomains (L2).
 export function senderDomainWhere(column: AnyPgColumn, allowed: readonly string[]) {
   if (!allowed.length) return undefined;
-  const domain = sql`lower(split_part(${column}, '@', 2))`;
-  return or(...allowed.map(value => { const parent = value.toLowerCase(); return sql`(${domain} = ${parent} OR right(${domain}, ${parent.length + 1}) = ${'.' + parent})`; }));
+  // Reverse the domain with its label separator: exact names and descendants
+  // occupy one contiguous C-collation index range ('.' immediately before '/').
+  const domain = sql`(reverse(lower(split_part(${column}, '@', 2))) || '.') COLLATE "C"`;
+  return or(...allowed.map(value => { const prefix = [...value.toLowerCase()].reverse().join(''); return sql`(${domain} >= ${prefix+'.'} AND ${domain} < ${prefix+'/'})`; }));
 }
 export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'domains'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains));
 export const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
@@ -436,7 +438,9 @@ export function formattedSender(from: string, fromName?: string, foldMime = fals
   // Domain authorization always uses the bare address; formatting happens only at the MIME/SES boundary.
   Address.parse(from);
   if (!fromName) return from;
-  FromName.parse(fromName);
+  // Current admission validates FromName. Old queued display names are data,
+  // not a new admission: quote punctuation and omit unsafe control characters.
+  if (/[\x00-\x1f\x7f]/.test(fromName)) return from;
   if (/^[\x20-\x7e]+$/.test(fromName)) return `"${fromName.replace(/["\\]/g, '\\$&')}" <${from}>`;
   // RFC 2047 encoded words, each below 75 characters and never splitting a UTF-8 code point.
   const words: string[] = []; let chunk = '';

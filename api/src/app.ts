@@ -124,7 +124,12 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     return authenticate(c, next);
   });
   app.use('*', async (c, next) => {
-    if (!c.req.path.startsWith('/v1/inbound/')) await boundRequestBody(c);
+    // MCP has its own streaming reader after OAuth; inbound authenticates its
+    // own scoped keys. Unknown routes and public forms are not upload routes.
+    if (c.req.path!=='/mcp' && !c.req.path.startsWith('/v1/inbound/')) {
+      const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
+      await boundRequestBody(c,c.req.path==='/v1/events/ses'?512*1024:matched && c.get('actor')?undefined:64*1024);
+    }
     await next();
   });
   // These areas have read or send routes as well as manage routes. An MX member's

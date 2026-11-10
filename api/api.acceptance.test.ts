@@ -1487,6 +1487,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               await pool.query('UPDATE domain_claims SET receiving_proved_at=NULL,receiving_identity_at=NULL WHERE token=$1',[proof.value]);
               const file=await (await import('node:fs/promises')).readFile(new URL('./migrations/095_receiving_rollout.sql',import.meta.url),'utf8');
               await pool.query(file);assert.equal(await probe(custom),1);
+              assert.equal((await pool.query('SELECT available_at>now() AS staggered FROM jobs WHERE id=$1',['domain.verify:'+proof.value])).rows[0]?.staggered,true);
               const read=async()=>ok(await local('GET',detail,undefined,b.cookie));
               answer='';await mxCheck();assert.equal((await read()).receivingIssue.code,'proof_stale');assert.equal((await read()).receivingIssue.blocking,false);assert.equal(await probe(custom),1);
               await pool.query("UPDATE domain_claims SET receiving_proof_missed_at=now()-interval '49 hours' WHERE token=$1",[proof.value]);assert.equal((await read()).receivingIssue.blocking,true);assert.equal(await probe(custom),0);
@@ -4846,7 +4847,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const migrate=(env:Record<string,string>={},failure?:RegExp)=>{
       const child=spawnSync(process.execPath,['--import','tsx','src/migrate.ts'],{encoding:'utf8',timeout:15000,env:{PATH:process.env.PATH,DATABASE_URL:url.href,DEFAULT_SES_REGION:'us-east-2',...env} as unknown as NodeJS.ProcessEnv});
       if (failure) { assert.equal(child.status,1);assert.match(child.stderr,failure);return child.stdout; }
-      assert.equal(child.status,0,child.stderr);return child.stdout;
+      assert.equal(child.status,0,child.stderr);return child.stdout+child.stderr;
     };
     const config={PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:randomUUID()},plain='fixture signing secret',aad='default:live:fixture';
     const encrypted=await encrypt({config:loadConfig(config)},plain,aad);
@@ -4869,6 +4870,15 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       assert.equal((await db.query("SELECT reference_id FROM oauth_consent WHERE id='legacy'")).rows[0].reference_id,reference);
     });
     assert.match(migrate(),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
+    await mt.test('concurrent index waits are bounded and retried before the ledger advances',async()=>{
+      await db.query("DROP INDEX workspace_quota_sponsor; DELETE FROM bane_migrations WHERE name='102_hosted_sponsor_index.sql'");
+      const holder=await fixtureDatabase(mt);
+      await holder.query(`BEGIN; LOCK TABLE ${schema}.workspaces IN SHARE UPDATE EXCLUSIVE MODE`);
+      // PostgreSQL releases this fixture lock independently of the sync child.
+      const release=holder.query('SELECT pg_sleep(4.5); COMMIT');
+      try {assert.match(migrate(),/INDEX_LOCK_RETRY/);} finally {await release;}
+      assert.equal((await db.query("SELECT indisvalid FROM pg_index WHERE indexrelid='workspace_quota_sponsor'::regclass")).rows[0]?.indisvalid,true);
+    });
     assert.equal((await db.query("SELECT name FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
     assert.deepEqual((await db.query("SELECT scopes,reference_id FROM oauth_consent WHERE id='legacy'")).rows,[{scopes:['bane:read','bane:live','offline_access'],reference_id:reference.replaceAll('opensend:','bane:')}]);
     assert.match(migrate({BETTER_AUTH_SECRET:config.BETTER_AUTH_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
@@ -6739,7 +6749,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const rewritten=(await db.query('SELECT count(*)::int n FROM sending_emails WHERE id=ANY($1) AND (scheduled_at IS NOT NULL OR lease_until IS NOT NULL)',[ids])).rows[0].n;
         t.diagnostic(`REVIEW ${name}: ${Date.now()-start}ms, ${screens} screen calls, peak ${peak}, ${q.mock.callCount()} SQL, ${rewritten} rows deferred, ${report.sent} accepted`);
         if(name==='attachment'){assert.equal(report.sent,n);assert.ok(peak>1 && peak<=6);}
-        if(name==='burst')assert.deepEqual([report.sent,screens,rewritten],[0,0,0]);
+        if(name==='burst'){
+          assert.deepEqual([report.sent,screens,rewritten],[0,0,0]);
+          await db.query('SAVEPOINT backlog_benchmark');
+          await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+            SELECT 'backlog_'||i,$1,$2,'fixture','a@bench.invalid','["b@example.invalid"]','[]','[]','fixture','{"kind":"transactional"}',false FROM generate_series(1,9952)i`,[wid,REGION]);
+          await db.query('ANALYZE sending_emails');
+          const lease=q.mock.calls.find(c=>(c.arguments[0] as any)?.text?.includes('queued_owners'))!.arguments as any;
+          const prefix='EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) ';
+          const fixed=(await db.query(prefix+lease[0].text,lease[1])).rows[0]['QUERY PLAN'][0].Plan;
+          const old=(await db.query(prefix+`SELECT id FROM sending_emails e WHERE region=$2 AND workspace_id=$1 AND status='queued' AND scheduled_at IS NULL AND (lease_until IS NULL OR lease_until<statement_timestamp()) AND
+            hosted_real_cost(to_addresses||cc_addresses||bcc_addresses)<=least(0,50-coalesce((SELECT used FROM hosted_burst_windows b WHERE b.workspace_id=e.workspace_id AND b.scope=lower(split_part(e.from_address,'@',2)) AND b.minute=date_trunc('minute',statement_timestamp())),0))
+            ORDER BY (snapshot->>'kind'='transactional') DESC,created_at,id LIMIT 24`,[wid,REGION])).rows[0]['QUERY PLAN'][0].Plan;
+          t.diagnostic(`Exhausted owner (10k rows), old page: ${old['Shared Hit Blocks']} buffer hits; whole fixed lease: ${fixed['Shared Hit Blocks']}`);
+          assert.ok(fixed['Shared Hit Blocks']<500 && old['Shared Hit Blocks']>5000);
+          await db.query('ROLLBACK TO backlog_benchmark; RELEASE backlog_benchmark');
+        }
         if(name==='outage'){assert.equal(report.sent,0);assert.ok(screens<=6 && rewritten<=24 && q.mock.callCount()<=8);}
         await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[ids]);
       }
@@ -6764,13 +6789,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {screenSnapshot}=await import('./src/screen.js');
       runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
       const bodies:string[]=[];
-      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{bodies.push(JSON.parse(String(init.body)).state.email.body);return Response.json({answers:{spam:{noul:.1}}});});
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{const body=JSON.parse(String(init.body)).state.email.body;bodies.push(body);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker') ? 0.99 : 0.1}}});});
       const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,
         text:'plain signal',raw:'rendered MIME signal',html:`<div hidden>${'x'.repeat(16000)} hidden signal</div><p>HTML signal</p><a href="https://link.example.invalid/path">read</a><img src="https://image.example.invalid/tracker">`};
       await screenSnapshot(runtime,s);await screenSnapshot(runtime,s);
       assert.equal(bodies.length,1);assert.ok(bodies[0]!.length<=8000);
-      for(const part of ['plain signal','rendered MIME signal','hidden signal','HTML signal','link.example.invalid/path','image.example.invalid/tracker'])assert.ok(bodies[0]!.includes(part),part);
+      for(const part of ['plain signal','rendered MIME signal','hidden signal','HTML signal','link.example.invalid','image.example.invalid'])assert.ok(bodies[0]!.includes(part),part);
       await screenSnapshot(runtime,{...s,html:s.html.replace('x'.repeat(16000),'x'.repeat(8000)+'y'+'x'.repeat(7999))});assert.equal(bodies.length,2);
+      const links=Array.from({length:300},(_,i)=>`<a href="https://docs.example.invalid/${i}">Guide.</a>`);
+      links.splice(150,0,'<a href="https://samplemarker.invalid">docs.example.invalid</a>');
+      for(const html of ['<p>SampleMarker</p>',`<div hidden>${'x'.repeat(8000)}</div>SampleMarker`,'<img src="https://samplemarker.invalid">',
+        `${'a'.repeat(2500)} SampleMarker ${'b'.repeat(2500)}`,`<style>${'not-rendered '.repeat(200)}</style><script>not-rendered</script>${'a'.repeat(1000)} SampleMarker ${'b'.repeat(2500)}`,
+        links.join(''),'<p>Ｓample\u200bMarker</p>']){
+        const screened=await screenSnapshot(runtime,{...s,fromName:'Maria @ Acme',html},true);assert.equal(screened?.spam,.99);assert.ok(!bodies.at(-1)!.includes('not-rendered'));
+      }
+      const calls=bodies.length;await assert.rejects(screenSnapshot(runtime,{...s,kind:'marketing',html:'a'.repeat(40000)},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
+      assert.equal(bodies.length,calls);t.diagnostic('Jev coverage: seven sampled markers visible, one over-limit refused before classification');
     }));
   });
 
@@ -6812,8 +6846,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '2 days',100,0,0)",[wid]);
       assert.equal((await limit()).cap,1000);
       await db.query('UPDATE hosted_health_hourly SET accepted=1000 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,10000);
+      await db.query('SELECT refresh_hosted_minute_tiers()');assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,500);
       await db.query('UPDATE hosted_health_hourly SET complaints=1 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,100);
       await db.query('UPDATE hosted_health_hourly SET complaints=0,bounces=20 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,100);
+      await db.query('SELECT refresh_hosted_minute_tiers()');assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,50);
       assert.equal((await db.query("SELECT hosted_burst_ok($1,'a.example',50) AS ok",[wid])).rows[0].ok,true);
       assert.equal((await db.query("SELECT hosted_burst_ok($1,'b.example',1) AS ok",[sibling])).rows[0].ok,false);
     });
@@ -6830,6 +6866,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(res.status,403);assert.equal((await res.json() as Json).error.code,'SNS_INVALID_SIGNATURE');
       }
       assert.equal(queries.mock.callCount(),0);
+      const mcp=await app.fetch(new Request(`${PUBLIC_ORIGIN}/mcp`,{method:'POST',headers:{authorization:'Bearer fixture-junk'}}),runtime);
+      assert.equal(mcp.status,401);assert.equal(queries.mock.callCount(),0);
       for (const path of ['/v1/emails/send','/v1/emails/batch','/v1/inbound/webhooks']) {
         let reads=0;
         const body=new ReadableStream({pull(c){reads++;c.close();}},{highWaterMark:0});
@@ -6838,12 +6876,58 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       assert.equal(queries.mock.callCount(),3);
       queries.mock.restore();
+      const unknown=await app.fetch(new Request(`${PUBLIC_ORIGIN}/not-an-upload`,{method:'POST',body:'x'.repeat(65537)}),runtime);
+      assert.equal(unknown.status,413);
       const key=ok(await local('POST','/v1/api-keys',{name:'poll budget',permissions:['manage']}),201);
       runtime.config.apiRateLimitPerMinute=30;
       const query=t.mock.method(db,'query');
       error(await local('GET','/v1/inbound/events?wait=30&after=0',undefined,'live',{authorization:`Bearer ${key.secret}`}),429,'REQUEST_RATE_LIMITED');
       assert.equal(query.mock.callCount(),2,'Only credential and reservation statements, no event query or wait.');
       query.mock.restore();
+    });
+  });
+
+  test('completed failure accounting isolates peers and never charges successful concurrency',async t=>{
+    const {guardPublicRequest}=await import('./src/core.js');
+    const headers=new Headers({authorization:'fixture'}),call=(peer:string,work:()=>Promise<Response>)=>guardPublicRequest('/v1/domains',headers,peer,work);
+    const ok=async()=>new Response(null,{status:204});
+    const replies=await Promise.all(Array.from({length:100},()=>call('parallel-success',ok)));
+    assert.equal(replies.filter(r=>r.status===204).length,100);
+    // Saturate the bounded local directory with ordinary identity entries;
+    // this is a callback-only state test, not traffic against a server.
+    for(let i=0;i<4096;i++) await guardPublicRequest('/api/auth',headers,'fixture-'+i,ok);
+    for(let i=0;i<40;i++) await call('unrelated-failure',async()=>new Response(null,{status:401}));
+    assert.equal((await call('new-success',ok)).status,204);
+    t.diagnostic('100/100 concurrent successes; fresh peer admitted with 4096 directory entries');
+  });
+
+  test('HTML-only snippets and plain text have bounded projection cost',async t=>{
+    const {htmlToPlain,snippetOf}=await import('./src/mailbox-store.js');
+    const dense='<p>Mail</p>'.repeat(49804), start=performance.now();
+    assert.match(snippetOf(null,dense),/^Mail Mail/);assert.ok(htmlToPlain(dense).length<dense.length);
+    const ms=performance.now()-start;t.diagnostic(`HTML-only ${Math.ceil(dense.length/1024)} KiB snippet + text: ${ms.toFixed(1)}ms`);assert.ok(ms<1000);
+  });
+
+  test('counter reconciliation repairs drift without moving the ingest fairness clock',async t=>{
+    await simulatedSesFixture(t,async({db,runtime})=>{
+      const wid=runtime.config.workspaceId;
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('drift_job','mailbox.ingest',$1,'{}')",[wid]);
+      await db.query('UPDATE mail_ingest_turns SET active=99,served_at=now() WHERE workspace_id=$1',[wid]);
+      await db.query('INSERT INTO sending_asset_usage VALUES($1,51) ON CONFLICT(workspace_id) DO UPDATE SET bytes=51',[wid]);
+      for(let i=0;i<2;i++) await db.query('SELECT reconcile_ingest_turns(),reconcile_asset_usage()');
+      assert.deepEqual((await db.query('SELECT active::int,served_at=now() AS unchanged FROM mail_ingest_turns WHERE workspace_id=$1',[wid])).rows,[{active:1,unchanged:true}]);
+      assert.equal((await db.query('SELECT bytes::int FROM sending_asset_usage WHERE workspace_id=$1',[wid])).rows[0].bytes,0);
+    });
+  });
+
+  test('repeated callback timeouts defer only that endpoint without recording a delivery attempt',async t=>{
+    await simulatedSesFixture(t,async({runtime})=>{
+      const {postWebhook}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');let calls=0;
+      runtime.webhookFetch=async()=>{calls++;throw new DOMException('local synthetic timeout','TimeoutError');};
+      const post=(binding:string)=>postWebhook(runtime,'https://fixture.example.org/',{},'{}',null,binding);
+      for(let i=0;i<3;i++)await assert.rejects(post('one'),{name:'TimeoutError'});
+      await assert.rejects(post('one'),JobDeferred);assert.equal(calls,3);
+      await assert.rejects(post('two'),{name:'TimeoutError'});assert.equal(calls,4);
     });
   });
 
@@ -7414,6 +7498,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query('UPDATE mail_receive_limits SET backlog_limit=0 WHERE workspace_id=$1',[wid]);assert.equal(await submit('blocked',['a@receive.example']),0);assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].error,'MAILBOX_RECEIVE_BUDGET');
         const other=wid+'-neighbor';await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,'healthy',$2,$3,'key','[]','{}')",[other,REGION,bucket]);assert.equal((await db.query('SELECT status FROM mail_receipts WHERE workspace_id=$1',[other])).rows[0].status,'pending');
         await db.query('UPDATE mail_receive_limits SET backlog_limit=50000,byte_limit=1 WHERE workspace_id=$1',[wid]);raw.set('big',Buffer.from('test'));await submit('big',['a@receive.example']);await run('mailbox.ingest',{sesMessageId:'big'});assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='big'",[wid])).rows[0].error,'MAILBOX_BYTE_BUDGET');await db.query('UPDATE mail_receive_limits SET byte_limit=68719476736 WHERE workspace_id=$1',[wid]);
+        await db.query("UPDATE mail_receipts SET budget_retry_at=now() WHERE workspace_id=$1 AND status='held'",[wid]);
+        assert.equal((await db.query('SELECT release_receive_budget_holds($1) AS n',[wid])).rows[0].n,1);
+        assert.equal((await db.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].status,'pending');
       });
       await t.test('deduplicated uploads are reclaimed without expiring the owned attachment',async()=>{
         const mime=Buffer.from('From: fixture@example.net\r\nMessage-ID: <same@fixture.invalid>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbody\r\n--p--\r\n');for(const mid of ['physical-1','physical-2']){raw.set(mid,mime);await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid});}
@@ -8021,7 +8108,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const query=t.mock.method(db,'query');const ids:string[]=[];
       assert.equal(await processJobs(runtime,{'campaign.fixture':async(_r,_p,j)=>{ids.push(j.id);}},6,6,10000,'work'),6);query.mock.restore();
       assert.ok(ids.every(id=>id.startsWith('run-')));
-      const claim=query.mock.calls.map(c=>c.arguments).find(([q]:any)=>q?.text?.includes('WITH exhausted AS')) as any;
+      const claim=query.mock.calls.map(c=>c.arguments).find(([q]:any)=>q?.text?.includes('exhausted AS (')) as any;
       assert.ok(claim);await db.query("UPDATE jobs SET status='pending' WHERE type='campaign.fixture'");
       const plan=(await db.query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+claim[0].text,claim[1])).rows[0]['QUERY PLAN'][0];
       const visit=(n:Json):Json[]=>[n,...(n.Plans??[]).flatMap(visit)];const nodes=visit(plan.Plan);
@@ -10490,7 +10577,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal(encodedUnsubRes.status, 429, 'Exhausted unsubscribe failure budget must reject encoded /%75nsubscribe/... with 429.');
           assert.equal((await encodedUnsubRes.json()).error?.code, 'PUBLIC_RATE_LIMITED');
 
-          // 4) Encoded SNS ingress must also be gated before opening Hyperdrive.
+          // 4) Encoded SNS ingress reaches envelope verification, not the shared IP gate.
           admissionAllowed = false;
           const deniedApi = await worker.fetch(new Request('https://dev.bane.mx/%761/domains'), env);
           assert.equal(deniedApi.status, 429);
@@ -10500,8 +10587,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             headers: { 'content-type': 'application/json' },
             body: '{}',
           }), env);
-          assert.equal(exemptSns.status, 429);
-          assert.equal((await exemptSns.json()).error?.code, 'ADMISSION_RATE_LIMITED');
+          assert.ok([400,422].includes(exemptSns.status));
         } finally {
           await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
           await setup.end();

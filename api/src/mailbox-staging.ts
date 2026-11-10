@@ -17,7 +17,7 @@ export async function scheduleMailRecovery(runtime:Runtime) {
   await runtime.db.execute(sql`WITH bindings AS (${resources(runtime)}), work AS (
     SELECT ${sweep}||':'||bucket||':'||p AS id,${sweep}::text AS type,coalesce(owner,${runtime.config.workspaceId}) AS wid,jsonb_build_object('bucket',bucket,'topic',topic,'shared',owner IS NULL,'partition',p,'started',extract(epoch FROM now())*1000) AS payload FROM bindings CROSS JOIN generate_series(0,${runtime.config.multiTenant?15:0}) p
     UNION ALL SELECT 'mailbox.cleanUploads','mailbox.cleanUploads',${runtime.config.workspaceId},'{}'::jsonb WHERE EXISTS(SELECT FROM mail_candidate_uploads WHERE check_at<=now())
-    UNION ALL SELECT ${holds},${holds},${runtime.config.workspaceId},'{}'::jsonb WHERE EXISTS(SELECT FROM mail_receipt_holds WHERE status='held' AND next_check<=now()))
+    UNION ALL SELECT ${holds},${holds},${runtime.config.workspaceId},'{}'::jsonb WHERE EXISTS(SELECT FROM mail_receipt_holds WHERE status='held' AND next_check<=now()) OR EXISTS(SELECT FROM mail_receipts WHERE status='held' AND budget_retry_at<=now()))
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT w.id,w.type,w.wid,w.payload FROM work w LEFT JOIN jobs j ON j.id=w.id
     WHERE j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes') ORDER BY j.created_at NULLS FIRST,w.id LIMIT 100
     ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,payload=excluded.payload,attempts=0,status='pending',lease_until=NULL,last_error=NULL,available_at=now(),created_at=now() WHERE jobs.status NOT IN ('pending','running')`);
@@ -107,5 +107,6 @@ export const cleanCandidates:JobHandler=async(runtime)=>{
   throw new JobDeferred(new Date().toISOString());
 };
 export const stagingJobs:Record<string,JobHandler>={'mailbox.cleanUploads':retryDatabaseFailures(cleanCandidates),[sweep]:retryDatabaseFailures(stagingJob),[orphan]:retryDatabaseFailures(stagingJob),[holds]:retryDatabaseFailures(async runtime=>{
-  if (await recoverHeldReceipts(runtime)===100) throw new JobDeferred(new Date().toISOString());
+  const budget=await runtime.db.execute<{scanned:number}>(sql`SELECT release_receive_budget_holds(${runtime.config.multiTenant?null:runtime.config.workspaceId}) AS scanned`);
+  if (await recoverHeldReceipts(runtime)===100 || budget.rows[0]?.scanned===100) throw new JobDeferred(new Date().toISOString());
 })};

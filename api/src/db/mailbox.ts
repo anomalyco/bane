@@ -117,7 +117,7 @@ export const mailAttachments = pgTable('mail_attachments', {
 export const mailReceipts = pgTable('mail_receipts', {
   workspaceId: text('workspace_id').notNull(), sesMessageId: text('ses_message_id').notNull(),
   region: text('region').notNull(), bucket: text('bucket').notNull(), objectKey: text('object_key').notNull(), recipients: jsonb('recipients').$type<string[]>().notNull(),
-  notification: jsonb('notification').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'processed' | 'failed'>().notNull().default('pending'),
+  notification: jsonb('notification').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'held' | 'processed' | 'failed'>().notNull().default('pending'),
   recoveryAttempts:smallint('recovery_attempts').notNull().default(0),lastRecoveredAt:ts('last_recovered_at'),
   error: text('error'), createdAt: ts('created_at').notNull().defaultNow(), processedAt: ts('processed_at'),
 }, t => [primaryKey({ columns: [t.workspaceId, t.sesMessageId] })]);

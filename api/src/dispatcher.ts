@@ -215,13 +215,11 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
   const domain=sql`lower(split_part(e.from_address,'@',2))`;
   const tick=sql`date_trunc('minute',statement_timestamp())`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
-    ${liveMx ? sql`AND (o.cap IS NULL OR ${cost}<=least(o.remaining,greatest(50,o.cap/2)-coalesce((SELECT used FROM hosted_burst_windows b WHERE b.workspace_id=o.workspace_id AND b.scope=${domain} AND b.minute=${tick}),0)))` : sql``}
     ${liveMx && (gate.screenRetryAt??0)>Date.now() ? sql`AND (NOT o.required_screen OR (o.trusted AND ${transactional}))` : sql``}
     -- A boolean range is an index condition on 061's expression. Equality to true is
     -- simplified to a text comparison and can scan the kind index over delivered mail.
     ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
-    ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
-      WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
+    ${deferred.length ? sql`AND ${transactional} BETWEEN (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='marketing').map(d=>d.workspace_id))}::text[])) AND NOT (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='transactional').map(d=>d.workspace_id))}::text[]))` : sql``}`;
   // Look up each due stream separately: the immediate ordered index contains no future mail,
   // and the scheduled index can stop at this statement's cutoff. Merge only bounded pages.
   const page = (size: SQL, lock = false, exclude = sql``) => {
@@ -243,7 +241,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     FROM queued_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
     ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
       CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap) p`:sql``}
-    WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL` : sql`SELECT workspace_id FROM queued_owners`;
+    WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL ${liveMx?sql`AND (cap IS NULL OR cap-coalesce(b.used,0)>0)`:sql``}` : sql`SELECT workspace_id FROM queued_owners`;
   // A single small, admitted transactional envelope needs no external preflight. For an idle
   // MX lane only, run the SAME durable claim on the locked fair selection. Both UPDATEs below
   // are disjoint: Postgres must never update the same email twice in one WITH statement.
@@ -285,13 +283,13 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       SELECT o.workspace_id, e.id FROM owners o JOIN shares sh USING(workspace_id) CROSS JOIN LATERAL (
         ${page(sql`${limit}`,true,sql`AND e.id NOT IN (SELECT id FROM allocated)`)}
       ) e WHERE sh.candidates > sh.slots LIMIT ${limit}
-    ), due AS MATERIALIZED (${liveMx ? sql`SELECT workspace_id,id FROM (
-      SELECT p.*,o.remaining,o.cap,d.used,c.n,sum(c.n) OVER tenant AS total,sum(c.n) OVER identity AS subtotal
+    ) ${liveMx ? sql`, fit AS MATERIALIZED (
+      SELECT p.*,e.snapshot->>'kind' AS stream,o.remaining,o.cap,d.used,c.n,sum(c.n) OVER tenant AS total,sum(c.n) OVER identity AS subtotal
       FROM picks p JOIN owners o USING(workspace_id) JOIN sending_emails e USING(workspace_id,id)
       CROSS JOIN LATERAL (SELECT ${cost} AS n) c LEFT JOIN hosted_burst_windows d ON d.workspace_id=p.workspace_id AND d.scope=${domain} AND d.minute=${tick}
       WINDOW tenant AS (PARTITION BY p.workspace_id ORDER BY ${transactional} DESC,e.created_at,p.id),
         identity AS (PARTITION BY p.workspace_id,${domain} ORDER BY ${transactional} DESC,e.created_at,p.id)
-      ) fit WHERE cap IS NULL OR n=0 OR (total<=remaining AND subtotal<=greatest(50,cap/2)-coalesce(used,0))` : sql`SELECT * FROM picks`}
+      )`:sql``}, due AS MATERIALIZED (${liveMx ? sql`SELECT workspace_id,id FROM fit WHERE cap IS NULL OR n=0 OR (total<=remaining AND subtotal<=greatest(50,cap/2)-coalesce(used,0))` : sql`SELECT * FROM picks`}
     ), selected AS MATERIALIZED (
       ${inline ? sql`SELECT e.* FROM due JOIN sending_emails e USING (workspace_id,id)` : sql`UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*`}
     ), settings AS MATERIALIZED (
@@ -318,7 +316,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     ) ${simple ? sql`, ${claimCtes(runtime,region,simple)}, slow AS (
       UPDATE sending_emails e SET lease_until=clock_timestamp()+interval '2 minutes' FROM due WHERE e.workspace_id=due.workspace_id AND e.id=due.id AND NOT EXISTS(SELECT 1 FROM input WHERE id=e.id)
     )` : sql``}
-    SELECT meta.cursor,${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
+    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND used>=greatest(50,cap/2)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
       ${simple ? sql`CASE WHEN EXISTS(SELECT 1 FROM input WHERE id=leased.id) THEN coalesce((SELECT status FROM claimed WHERE id=leased.id),'lost') END` : sql`NULL`} AS claim_status,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
@@ -330,6 +328,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     RIGHT JOIN (SELECT max(workspace_id) FILTER(WHERE step=${limit}) AS cursor FROM queued_owners) meta ON true
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
   gate.ownerCursor=result.rows[0]?.cursor as string || undefined;
+  for(const d of (result.rows[0]?.blocked_streams??[]) as DeferredStream[]) deferBurst(deferred,d.workspace_id,d.stream);
   if (!result.rows[0]?.id) return [];
   if (result.rows[0]?.webhooks) await wakeWebhooks(runtime,Number(result.rows[0].webhooks));
   const owners = new Map<string, Owner>();
@@ -384,8 +383,9 @@ async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, requir
     return;
   }
   let result: Awaited<ReturnType<typeof screenSnapshot>>;
-  try { result = await screenSnapshot(runtime, s); }
+  try { result = await screenSnapshot(runtime, s, required); }
   catch (error) {
+    if(!(error instanceof ApiError) || error.code!=='CONTENT_SCREEN_UNAVAILABLE') throw error;
     if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
     if(hostedGate){if((hostedGate.screenRetryAt??0)>Date.now())return;hostedGate.screenRetryAt=Date.now()+30_000;}
     log('warn', { code: 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id, message: error instanceof ApiError ? error.message : 'The content classifier failed; sending unscreened.' });
@@ -833,6 +833,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   // sample and its one provisional batch available for a subsequent deliverable message.
   const status = ready[0]!.claimStatus;
   if (status && status !== 'attempting') {
+    if(status==='queued') deferBurst(lane.deferred,ready[0]!.mail.workspaceId,ready[0]!.mail.snapshot.kind);
     counters.skipped++;
     if (status === 'lost') logLost(1);
     return { processed: 1, blocked: false };
@@ -923,6 +924,24 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error);
     }
   };
+  const streamPage=async(items:typeof ready,coalesce=false)=>{
+    const available:Prepared[]=[]; let notify:(()=>void)|undefined,finished=false,next=0;
+    const workers=Promise.allSettled(Array.from({length:Math.min(items.length,options.sendConcurrency)},async()=>{
+      while(next<items.length){ const p=await prepare(items[next++]!); if(p){available.push(p);notify?.();} }
+    })).then(results=>{finished=true;notify?.();return results;});
+    try {
+      while(!finished || available.length){
+        if(available.length){
+          // Give fast sibling object reads a short collection window. A slow
+          // object never holds the page, and ordinary campaign pages share the
+          // claim and result writer instead of issuing one claim per object.
+          if(coalesce && !finished) await Promise.race([workers,new Promise(resolve=>setTimeout(resolve,10))]);
+          await dispatchPrepared(base,lane,available.splice(0));
+        }
+        else await new Promise<void>(resolve=>{notify=resolve;});
+      }
+    } finally {for(const r of await workers) if(r.status==='rejected') throw r.reason;}
+  };
   if(ready.some(item=>item.mail.snapshot.attachments.length)) {
     // Reserve bytes, not a whole lane. Small pages overlap and share the result
     // writer; disjoint large bodies still cannot accumulate across sibling lanes.
@@ -931,11 +950,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       while(lane.attachmentBytes+bytes>limit) await (lane.bytesReleased??=new Promise(resolve=>{lane.notifyBytes=resolve;}));
       lane.attachmentBytes+=bytes;
       try {
-        const prepared:Prepared[]=[];
-        for(const items of chunk(page,options.sendConcurrency)) {
-          for(const r of await Promise.allSettled(items.map(prepare))) { if(r.status==='rejected') throw r.reason; if(r.value) prepared.push(r.value); }
-        }
-        await dispatchPrepared(base,lane,prepared);
+        await streamPage(page,true);
       }finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
       page=[];bytes=0;
     };
@@ -948,21 +963,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   } else if (ready.some(({mail, owner}) => (mail.snapshot.screen || owner.tenantName && owner.runtime.config.hostedScreen) && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
     // Bound simultaneous probes, but don't gate unrelated sends on the slowest classifier.
     // Drain completions in groups; those arriving during a claim/send form the next group.
-    const available: Prepared[] = [];
-    let notify: (() => void) | undefined, finished = false;
-    let next=0;
-    const preparing = Promise.allSettled(Array.from({length:Math.min(ready.length,options.sendConcurrency)},async () => {
-      while(next<ready.length){const p = await prepare(ready[next++]!);
-        if (p) { available.push(p); notify?.(); }}
-    })).then(results => { finished = true; notify?.(); return results; });
-    try {
-      while (!finished || available.length) {
-        if (available.length) await dispatchPrepared(base, lane, available.splice(0));
-        else await new Promise<void>(resolve => { notify = resolve; });
-      }
-    } finally {
-      for (const result of await preparing) if (result.status === 'rejected') throw result.reason;
-    }
+    await streamPage(ready);
   } else {
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
@@ -973,6 +974,9 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   return { processed: ready.length, blocked: false };
 }
 const logLost = (count:number) => log('warn', { code:'DISPATCH_CLAIM_LOST', count, message:'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
+function deferBurst(deferred:DeferredStream[],workspace_id:string,stream:DeferredStream['stream']) {
+  if(!deferred.some(d=>d.workspace_id===workspace_id && d.stream===stream)) deferred.push({workspace_id,stream,until:(Math.floor(Date.now()/60000)+1)*60000});
+}
 async function recordBatch(base: Runtime,lane: Lane,outcomes: Outcome[]) {
   await lane.phase('record', () => recordOutcomes(base,outcomes));
   for (const outcome of outcomes) {
@@ -1050,6 +1054,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       return checkMcp ? base.db.transaction(tx => claim(group, tx)) : claim(group, base.db);
     });
     if (webhooks) pendingRecords.push(wakeWebhooks(base,webhooks));
+    for(const item of group) if(statuses.get(item.mail.id)==='queued') deferBurst(lane.deferred,item.mail.workspaceId,item.snapshot.kind);
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
     for (const item of group) if (statuses.get(item.mail.id) !== 'attempting') lane.held.recipients -= cost(item);
     const lost = group.filter(item => !statuses.has(item.mail.id));
