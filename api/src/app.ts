@@ -98,7 +98,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
     if (!wake && !dispatch) return;
     const nudge = async (runtime: Runtime) => {
-      if (wake) try { await runtime.wake?.(wakeJobs, c.req.path.startsWith('/v1/webhooks/') ? 'webhook' : undefined); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
+      if (wake) try { await runtime.wake?.(wakeJobs, actor?.wakeJobPool ?? (/^\/v1\/(?:inbound\/)?webhooks\//.test(c.req.path) ? 'webhook' : undefined)); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const [region, { count, priority }] of targets) {
         try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
@@ -162,7 +162,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
-  app.get('/health', c => c.json({ status: 'ok', service: 'bane', multiTenant: c.env.config.multiTenant }));
+  app.get('/health', async c => {const h=await (await import('./receiving-health.js')).health(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
   app.get('/llms.txt', async c => { const { doc, createLlmsText } = await loadDocs(); return markdown(c, createLlmsText(doc)); });

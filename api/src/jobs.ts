@@ -5,6 +5,7 @@ import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js'
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 import { failCampaign } from './states.js';
+import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
 const LOAD_ERROR_THRESHOLD = 6;
@@ -72,6 +73,11 @@ export const webhookClaimCtes = sql`hook_inputs AS MATERIALIZED (
   last_error=CASE WHEN h.url IS NULL THEN 'ENDPOINT_DELETED' ELSE 'ENDPOINT_PAUSED' END,updated_at=now()
   FROM hook_inputs h WHERE d.id=h.delivery_id AND d.workspace_id=h.workspace_id AND d.generation=h.generation AND (h.url IS NULL OR (h.paused AND NOT h.synthetic)))`;
 const hookJoin = sql`LEFT JOIN hook_inputs h ON h.job_id=j.id AND h.url IS NOT NULL AND (NOT h.paused OR h.synthetic)`;
+export const inboundHookClaim=sql`inbound_hooks AS MATERIALIZED (SELECT j.id AS job_id,d.id AS delivery_id,d.generation,d.webhook_id,d.payload,d.payload->>'id' AS event_id,w.url,w.encrypted_secret,w.encrypted_headers,
+  CASE WHEN w.paused THEN 'ENDPOINT_PAUSED' WHEN NOT(w.event_types ? (d.payload->>'type') AND (w.mailbox_ids IS NULL OR (d.payload->>'type'<>'message.stored' AND w.mailbox_ids ? (d.payload->>'addressId')))) THEN 'SUBSCRIPTION_CHANGED' END AS blocked
+  FROM claimed j JOIN mailbox_webhook_deliveries d ON j.type='mailbox.webhook' AND d.workspace_id=j.workspace_id AND d.id=j.payload->>'deliveryId' AND d.status='pending' AND d.generation=coalesce((j.payload->>'generation')::int,0)
+  JOIN LATERAL (SELECT h.url,h.encrypted_secret,h.encrypted_headers,h.paused,h.event_types,h.mailbox_ids FROM mailbox_webhooks h WHERE h.workspace_id=d.workspace_id AND h.id=d.webhook_id FOR SHARE) w ON true),
+  inbound_parked AS (UPDATE mailbox_webhook_deliveries d SET status=CASE WHEN h.blocked='ENDPOINT_PAUSED' THEN 'paused' ELSE 'failed' END,last_error=h.blocked,updated_at=now() FROM inbound_hooks h WHERE h.blocked IS NOT NULL AND d.id=h.delivery_id AND d.generation=h.generation AND d.status='pending')`;
 export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM claimed j ${hookJoin}`;
 // Reserve before awaiting the claim, so overlapping drains in one isolate cannot both lease MIME work.
 let ingestReserved=false;
@@ -92,7 +98,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const regionalRuntime = workspaceRuntimes(runtime);
-  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null };
+  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null;ingest:IngestInput|null };
   const handle = async (job: Claimed, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
@@ -115,7 +121,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
       await handler(ownerRuntime, handlerPayload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id,
-        webhook: job.webhook, recordWithSettlement: ctes => { records = ctes; } });
+        webhook: job.webhook,ingest:job.ingest, recordWithSettlement: ctes => { records = ctes; } });
       await settle(runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null, ...(handlerPayload !== job.payload ? { payload: handlerPayload } : {}) }).where(fence));
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
@@ -140,7 +146,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const code = error instanceof ApiError ? error.code : 'JOB_INTERNAL_ERROR';
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
-      const hook=job.type==='operation.webhook';
+      const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
       const retry = error instanceof ApiError && error.retryable && (job.attempts < (hook ? WEBHOOK_ATTEMPTS : MAX_ATTEMPTS) || error.code === 'JOB_FINALIZATION_FAILED');
       const delay=Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
       await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(handlerPayload !== job.payload ? { payload: handlerPayload } : {}) }).where(fence));
@@ -160,7 +166,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const claimStarted = Date.now();
       // The claim already charged the attempt before the isolate died. Retire exhausted
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
-      const exhausted=sql`j.attempts >= CASE WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
+      const exhausted=sql`j.attempts >= CASE WHEN j.type IN ('operation.webhook','mailbox.webhook') THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
       const allowIngest=pool!=='webhooks' && !ingestReserved;
       // Only the head of each class enters the preference sort. The expression matches
@@ -180,16 +186,16 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         (x.campaign_id IS NULL OR EXISTS(SELECT FROM parents p WHERE (p.workspace_id,p.id)=(x.workspace_id,x.campaign_id)) OR NOT EXISTS(SELECT FROM sending_campaigns c WHERE (c.workspace_id,c.id)=(x.workspace_id,x.campaign_id)))
         RETURNING j.workspace_id,j.type,j.payload,x.campaign_id), campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
       deliveries_failed AS (UPDATE operation_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f
-        WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), feedback AS (
+        WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), mailbox_failed AS (
+        UPDATE mailbox_webhook_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f WHERE f.type='mailbox.webhook' AND d.id=f.payload->>'deliveryId' AND d.workspace_id=f.workspace_id AND d.status='pending' AND d.generation=coalesce((f.payload->>'generation')::int,0)), feedback AS (
         SELECT id FROM (${head('feedback', pool!=='webhooks' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
-      ), heads AS (
-        SELECT DISTINCT ON (j.workspace_id) j.workspace_id,j.available_at,j.id FROM jobs j WHERE ${allowIngest} AND j.type='mailbox.ingest'
-          AND ${due} ORDER BY j.workspace_id,j.available_at,j.id
+      ), ingest_head AS MATERIALIZED (
+        SELECT h.id FROM mail_ingest_turns t CROSS JOIN LATERAL (
+          SELECT j.id FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now()
+            AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT 1
+        ) h WHERE ${allowIngest} AND t.active>0 ORDER BY t.served_at,t.workspace_id LIMIT 1
       ), ingest AS (
-        -- Same due predicate as the other lanes, so exhausted leases are only ever retired, never claimed.
-        SELECT j.id FROM heads h JOIN jobs j ON j.id=h.id LEFT JOIN mail_ingest_turns t ON t.workspace_id=h.workspace_id
-        WHERE ${due}
-        ORDER BY t.served_at NULLS FIRST,h.available_at,h.id FOR UPDATE OF j SKIP LOCKED LIMIT (SELECT least(1,${claimBatchSize}-count(*)) FROM feedback)
+        SELECT j.id FROM ingest_head JOIN jobs j USING(id) WHERE ${due} FOR UPDATE OF j SKIP LOCKED LIMIT (SELECT least(1,${claimBatchSize}-count(*)) FROM feedback)
       ), regular AS (
         SELECT j.id FROM (${sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
         WHERE NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
@@ -201,7 +207,8 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
       ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes'
         FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest'
-          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${webhookClaimCtes} ${claimedWithWebhooks}`); }
+          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${webhookClaimCtes},${inboundHookClaim}
+        SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config.multiTenant,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
       finally { if(allowIngest && !claimed?.rows.some(j=>j.type==='mailbox.ingest')) ingestReserved=false; }
       claimRequests++;
       const claimMs = Date.now() - claimStarted;

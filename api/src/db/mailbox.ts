@@ -144,7 +144,7 @@ export const mailboxWebhooks = pgTable('mailbox_webhooks', {
 
 export const mailboxWebhookDeliveries = pgTable('mailbox_webhook_deliveries', {
   id: text('id').primaryKey(), ...scope(), webhookId: text('webhook_id').notNull(), eventSeq: bigint('event_seq', { mode: 'number' }).notNull(),
-  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'delivered' | 'failed'>().notNull().default('pending'),
+  generation:integer('generation').notNull().default(0),payload: jsonb('payload').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'delivered' | 'failed' | 'paused'>().notNull().default('pending'),
   attemptCount: integer('attempt_count').notNull().default(0), lastStatusCode: integer('last_status_code'), lastError: text('last_error'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });

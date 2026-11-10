@@ -44,7 +44,7 @@
     },
     {
       "Effect": "Allow", "Action": ["sns:GetSubscriptionAttributes", "sns:SetSubscriptionAttributes"],
-      "Resource": "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback"
+      "Resource": ["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback", "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound"]
     },
     {
       "Effect": "Allow", "Action": ["ses:CreateConfigurationSet", "ses:TagResource", "sns:CreateTopic", "sns:TagResource"],

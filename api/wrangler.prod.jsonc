@@ -22,6 +22,7 @@
     "BANE_TRUSTED_POOL": "true",
     "BANE_REQUIRE_DMARC_FOR_BULK": "true",
     "BANE_HOSTED_SCREEN": "true",
+    "BANE_RECEIVING_REDRIVE": "true",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",
@@ -58,7 +59,7 @@
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
-      { "queue": "bane-prod-work", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
+      { "queue": "bane-prod-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
       { "queue": "bane-prod-webhooks", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 2 },
       { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" }

@@ -75,6 +75,9 @@ export function validateRule(rule: string, domain: string) {
 export function checkTemporaryMailboxRouting(input: { aliases?: string[]; rules?: string[] }) {
   if (input.aliases?.length || input.rules?.length) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes do not support aliases or wildcard rules.', input.aliases?.length ? 'aliases' : 'rules');
 }
+export async function checkRuleCapacity(tx:DbExecutor,wid:string,domain:string,except='') {
+  if ((await tx.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${wid} AND domain_id=${domain} AND id<>${except} AND expires_at IS NULL AND rules<>'[]'::jsonb ORDER BY created_at,id LIMIT 1 OFFSET 63`)).rowCount)throw new ApiError(409,'MAILBOX_RULE_LIMIT','At most 64 addresses per domain can have wildcard rules.');
+}
 
 /** Creates a mailbox with its primary address and aliases. Addresses stay reserved until deletion. */
 export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto'; sendLimits?: Partial<SendLimits>; requireDmarc?: boolean; ttlSeconds?: number }) {
@@ -83,6 +86,7 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   const aliases = [...new Set((input.aliases ?? []).map(value => value.trim().toLowerCase()))].filter(value => value !== address);
   for (const value of [address, ...aliases]) if (!ADDRESS.test(value) || !value.endsWith(`@${input.domainName}`)) throw new ApiError(422, 'ADDRESS_DOMAIN_MISMATCH', `Addresses must be valid and end in @${input.domainName}.`, 'address');
   const rules = [...new Set((input.rules ?? []).map(rule => validateRule(rule, input.domainName)))];
+  if(rules.length)await checkRuleCapacity(tx,scope.workspaceId,input.domainId);
   const all = [address, ...aliases];
   const taken = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), inArray(mailboxAddresses.address, all)));
   if (taken.length) throw new ApiError(409, 'ADDRESS_TAKEN', `${taken[0]!.address} already belongs to a mailbox.`, 'address');
@@ -94,20 +98,15 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   return row!;
 }
 
-export const threadSummaryConflict=sql`ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+excluded.unread_count,
-      participants=(SELECT coalesce(jsonb_agg(p ORDER BY n),'[]') FROM (SELECT * FROM (SELECT DISTINCT ON(lower(p->>'address')) p,n FROM jsonb_array_elements(t.participants||excluded.participants) WITH ORDINALITY v(p,n) ORDER BY lower(p->>'address'),n) first_seen ORDER BY n LIMIT 20) limited),
-      snippet=CASE WHEN excluded.last_message_at>=t.last_message_at THEN excluded.snippet ELSE t.snippet END,subject=coalesce(nullif(t.subject,''),excluded.subject),last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=CASE WHEN excluded.last_inbound_at IS NOT NULL THEN false ELSE t.archived END`;
-
 /** Adds a stored message to mailboxes and updates each mailbox's thread summary. Returns mailboxes that newly received it. */
 export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: typeof mailMessages.$inferSelect, mailboxIds: string[]) {
   if (!mailboxIds.length) return [];
   const inbound = message.direction === 'inbound';
-  const people = uniqueAddresses([{ name: message.fromName, address: message.fromAddress }, ...message.to, ...message.cc]);
   const result=await tx.execute<{mailbox_id:string}>(sql`WITH added AS (
     INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at)
     SELECT box,${message.id},${scope.workspaceId},${message.threadId},${message.direction},${!inbound},${message.receivedAt}::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(mailboxIds)}::jsonb) b(box) ON CONFLICT DO NOTHING RETURNING *
-  ) INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,subject,snippet,participants,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
-    SELECT mailbox_id,thread_id,workspace_id,${message.subject},${message.snippet},${JSON.stringify(people)}::jsonb,1,${inbound?1:0},received_at,CASE WHEN ${inbound} THEN received_at END,${message.spam},CASE WHEN ${message.spam} THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM added ORDER BY mailbox_id
-    ${threadSummaryConflict} RETURNING mailbox_id`);
+  ) INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
+    SELECT mailbox_id,thread_id,workspace_id,1,${inbound?1:0},received_at,CASE WHEN ${inbound} THEN received_at END,${message.spam},CASE WHEN ${message.spam} THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM added ORDER BY mailbox_id
+    ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+excluded.unread_count,last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=CASE WHEN excluded.last_inbound_at IS NOT NULL THEN false ELSE t.archived END RETURNING mailbox_id`);
   return result.rows.map(row=>row.mailbox_id);
 }

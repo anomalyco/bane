@@ -67,6 +67,13 @@ if (production && publishDomainConnectKey) {
 
 const credentials = { allowedAccountIds: [stage.account], assumeRoles: [{ roleArn }] };
 const iam = new aws.Provider("virginia", { ...credentials, region: "us-east-1" });
+const ohio = new aws.Provider("ohio-receiving", { ...credentials, region: "us-east-2" });
+const deadLetters = new aws.sqs.Queue("receiving-dead-letters", { name: "bane-inbound-dead-letters", sqsManagedSseEnabled: true,
+  // The original staging object is recoverable for three days. No extension of mail retention.
+  messageRetentionSeconds: 3 * 86400 }, { provider: ohio, protect: true });
+new aws.sqs.QueuePolicy("receiving-dead-letter-policy", {queueUrl:deadLetters.url,policy:deadLetters.arn.apply(arn=>JSON.stringify({Version:"2012-10-17",Statement:[{
+  Effect:"Allow",Principal:{Service:"sns.amazonaws.com"},Action:"sqs:SendMessage",Resource:arn,Condition:{ArnEquals:{"aws:SourceArn":`arn:aws:sns:us-east-2:${stage.account}:bane-inbound`},StringEquals:{"aws:SourceAccount":stage.account}}
+}]}))},{provider:ohio});
 const runtime = "bane-runtime";
 const user = new aws.iam.User(runtime, {
   name: runtime, path: "/", tags: { "bane:purpose": "hosted-runtime" }, permissionsBoundary,

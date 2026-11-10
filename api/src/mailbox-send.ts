@@ -41,7 +41,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
     } else if(item.id.startsWith('matt_')){
       const [{ GetObjectCommand }, { storeAttachmentBytes }] = await wrapModuleLoad(() => Promise.all([import('@aws-sdk/client-s3'), import('./sending.js')]));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
-        .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id)));
+        .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`${mailMessages.verdicts}->>'virus' IS DISTINCT FROM 'FAIL'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
       const s3=await mailboxS3(runtime,scope.workspaceId,file.region,file.file.bucket);
       let bytes:Uint8Array;
@@ -233,7 +233,7 @@ export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, 
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,
     attachments: files, inReplyTo, references, headers: rest,
   });
-  if (runnable) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);
+  if (runnable) {actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);actor.wakeJobPool='webhook';}
   return { id: message.sendingEmailId!, status: 'queued' as const, simulated: isSimulatedSes(runtime), mailboxMessageId: message.id, threadId: message.threadId };
 }
 

@@ -88,15 +88,16 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = 
 // so a crashed isolate's attempt can be retried without a DB transaction spanning AWS calls.
 type Pool = { sending: boolean; receiving: boolean; aws_account_id: string;legacy_names:boolean };
 async function getPool(runtime: Runtime, region: string) {
-  return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, ${poolReceives()} AS receiving, aws_account_id,legacy_names FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
+  return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, (${poolReceives()} AND coalesce(receiving_checked_at,'-infinity')>now()-interval '1 day') AS receiving, aws_account_id,legacy_names FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
 }
 async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof platformIdentity>>, region: string) {
   await Promise.all([loadSetupSdk(), loadMailboxSetupSdk()]);
   const account=principal.account;
   const lease = new Date(Date.now() + 180_000).toISOString();
-  const result = await runtime.db.execute<Pick<Pool,'sending'>>(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
-    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE NOT (${poolSends(sql`provider_pool_regions`)} AND ${poolReceives(sql`provider_pool_regions`)})
-      AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING ${poolSends(sql`provider_pool_regions`)} AS sending`);
+  const fresh=sql`(${poolReceives(sql`provider_pool_regions`)} AND coalesce(provider_pool_regions.receiving_checked_at,'-infinity')>now()-interval '1 day')`;
+  const result = await runtime.db.execute<Pick<Pool,'sending'|'receiving'>>(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
+    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE provider_pool_regions.legacy_names AND NOT (${poolSends(sql`provider_pool_regions`)} AND ${fresh})
+      AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING ${poolSends(sql`provider_pool_regions`)} AS sending,${fresh} AS receiving`);
   if (!result.rowCount) {
     const pool = await getPool(runtime, region);
     if (pool?.aws_account_id !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
@@ -106,6 +107,15 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
   const owned = sql`region=${region} AND lease_until=${lease}::timestamptz`;
   try {
     const scoped = { ...runtime, config: { ...runtime.config, awsAccountId: account, sesFeedbackUrl: undefined } };
+    // Independent checkpoints. Sending sandbox/feedback failures cannot skip receiving, and
+    // waiting for an inbound confirmation must not block a healthy outbound pool either.
+    let receiveFailure: unknown;
+    if (!result.rows[0]!.receiving) try {
+      const bucket=await preparePoolReceiving(scoped,region,account,async(_account,_bucket,arn)=>{
+        if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
+      });
+      if (!(await runtime.db.execute(setPoolState(owned,'receiving_state',sql`,inbound_bucket=${bucket},receiving_checked_at=now()`))).rowCount) throw busy();
+    } catch(e) { receiveFailure=e; }
     if (!result.rows[0]!.sending) {
       const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, verifiedPoolPrincipal:principal, connectionSetup: true, registerTopic: async (_account, arn) => {
         if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
@@ -113,11 +123,8 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
       checkProvisioned(report, true, runtime.config.allowSesSandbox);
       if (!(await runtime.db.execute(setPoolState(owned,'sending_state'))).rowCount) throw busy();
     }
-    const bucket=await preparePoolReceiving(scoped,region,account,async(_account,_bucket,arn)=>{
-      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
-    });
-    if (!(await runtime.db.execute(setPoolState(owned,'receiving_state',sql`,inbound_bucket=${bucket},lease_until=NULL`))).rowCount) throw busy();
-  } catch (e) { await runtime.db.execute(sql`UPDATE provider_pool_regions SET lease_until=NULL WHERE ${owned}`); throw e; }
+    if(receiveFailure) throw receiveFailure;
+  } finally { await runtime.db.execute(sql`UPDATE provider_pool_regions SET lease_until=NULL WHERE ${owned}`); }
 }
 const busy = () => new ApiError(409, 'CONNECTION_BUSY', 'Connection setup is already in progress. Retry shortly.', undefined, true);
 function uniqueAccount(error: unknown) {

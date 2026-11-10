@@ -1,6 +1,6 @@
 SET LOCAL lock_timeout='2s';
 CREATE FUNCTION job_class(t text) RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT CASE
-  WHEN t IN ('operation.webhook','mailbox.webhook') THEN 'hook' WHEN starts_with(t,'campaign.') THEN 'campaign'
+  WHEN t IN ('operation.webhook','mailbox.webhook','mailbox.fanout') THEN 'hook' WHEN starts_with(t,'campaign.') THEN 'campaign'
   WHEN t='mailbox.ingest' THEN 'ingest' WHEN t IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 'feedback'
   WHEN t IN ('operation.publish','operation.publishBatch') THEN 'publish' ELSE 'other' END $$;
 CREATE INDEX jobs_ready_page ON jobs(job_class(type),(CASE WHEN status='running' THEN lease_until ELSE available_at END),id) WHERE status IN ('pending','running');
