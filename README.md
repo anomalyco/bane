@@ -47,7 +47,7 @@ See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client
 
 1. **Pull request:** `CI` builds the dashboard, SDK and MCP, dry-runs both Worker configs, checks types and generated docs, and runs acceptance against disposable PostgreSQL and S3 fixtures. A breaking OpenAPI change fails the build unless maintainers apply **`api-breaking`**. The label waives compatibility only. On a dev push, the waiver applies only when every pushed commit belongs to that merged PR.
 2. **Merge to `dev`:** after push CI passes, `Deploy` runs the `dev` stage: it builds that SHA, then rechecks the dev tip under the deployment lock. Superseded commits are skipped before migration. The current commit applies Pulumi first when infrastructure or the workflow changed, then migrates, deploys and runs live tests on `dev.bane.mx`; its summary and JSON report distinguish success, expected rejections, skips and failures.
-3. **Production:** push `dev` to `production` (fast-forward only), or dispatch `Deploy` from `production` with the desired branch, tag or SHA. It resolves the ref once and requires the commit to be reachable from `origin/production` and from `dev`, and to have passed the dev live E2E. Require the `build` and `acceptance` checks on protected `dev` and the `infra-production` environment on the `production` branch. The production Worker must pass health checks on both domains; Pulumi runs first for that stage too. Only `thdxr` and `R44VC0RP` may push to `dev`/`production` or dispatch these workflows. Hosted infrastructure is a separate [Pulumi project](infra/pulumi/README.md), with `dev` and `production` stacks.
+3. **Production:** push `dev` to `production` (fast-forward only), or dispatch `Deploy` from `production` with the desired branch, tag or SHA. It resolves the ref once and requires the commit to be reachable from `origin/production` and from `dev`, and to have passed the dev live E2E. Require the `build` and `acceptance` checks on protected `dev` and the `production` environment on the `production` branch. The production Worker must pass health checks on both domains; Pulumi runs first for that stage too. Only `thdxr` and `R44VC0RP` may push to `dev`/`production` or dispatch these workflows. Hosted infrastructure is a separate [Pulumi project](infra/pulumi/README.md), with `dev` and `production` stacks.
 4. **SDK release:** dispatch `Release SDK` from `dev` with `bump` (`patch`, `minor` or `major`). It publishes `@banemx/sdk` through npm trusted publishing (the `release` environment's OIDC token; there is no npm token), then tags the dispatched commit `v<version>` and creates the GitHub release. The version comes from the newest tag, or from `sdk/package.json` before the first tag, and is never committed back, so `dev` stays restricted and `production` stays fast-forward only. Only `dev` may deploy the `release` environment.
 
 Configure **environment-scoped** variables (not repository-wide). The deploy secrets
@@ -57,12 +57,11 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `infra-dev` | `DATABASE_URL`, `E2E_API_KEY` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
-| `infra-production` | `DATABASE_URL` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
+| `dev` | `DATABASE_URL`, `E2E_API_KEY` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
+| `production` | `DATABASE_URL` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
 
-**Both stages use the same key names.** The branch picks the stage (`dev` or
-`production`); each stage deploys through its own GitHub environment, `infra-dev` or
-`infra-production`, which selects that environment's variables. The `bane/<stage>/` folder
+**Both stages use the same key names.** The stage comes from the GitHub environment,
+which selects that environment's variables, and from the `bane/<stage>/` folder, which
 selects that stage's secrets. Never prefix a key with `DEV_` or `PROD_`; the deploy reads
 `bane/${stage}/DATABASE_URL` and `vars.AUTH_ALLOWED_DOMAINS` for either stage. Only dev
 runs a live E2E, so only `bane/dev/` holds an `E2E_API_KEY`. `PROD_DEPLOY_ENABLED` keeps
@@ -75,7 +74,7 @@ Worker, its custom-domain zones and the Pulumi resources (see the `cloudflare` e
 token to the IP that minted it, so a token only works on the job that asked for it. Live API
 keys need read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
 
-**Production is frozen until the AWS account switch.** The renamed Worker expects `bane-*` pool resources that do not exist in the old production account. Leave `PROD_DEPLOY_ENABLED` unset or `false` until cutover. Only the coordinator should set it to the exact lowercase string `true`, **only** on the `infra-production` GitHub Environment (not the repository or organization). The gate and deploy jobs both check the freeze. Both jobs use `infra-production`, so a required-reviewer rule prompts once per job.
+**Production is frozen until the AWS account switch.** The renamed Worker expects `bane-*` pool resources that do not exist in the old production account. Leave `PROD_DEPLOY_ENABLED` unset or `false` until cutover. Only the coordinator should set it to the exact lowercase string `true`, **only** on the `production` GitHub Environment (not the repository or organization). The gate and deploy jobs both check the freeze. No required reviewers are configured; adding a reviewer rule would prompt twice because both jobs use `production`.
 
 **Before the first deployment:** preserve the existing sign-in allowlists. For each non-confidential list, set the environment variable above; the deploy passes it explicitly to Wrangler. GitHub may show plain variables in step logs. For a private list, set `AUTH_ALLOWED_EMAILS` or `AUTH_ALLOWED_DOMAINS` as a **Worker secret** out of band instead, and leave its GitHub variable empty. An empty variable sends no override: it preserves a Worker secret but does **not** preserve a dashboard-only plaintext binding. With neither configured the list is empty.
 

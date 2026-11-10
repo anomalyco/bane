@@ -1,11 +1,10 @@
 name: Deploy
 
 # One workflow per stage. The branch picks the stage (dev or production), and
-# the stage picks the GitHub environment (`infra-dev` or `infra-production`),
-# the AWS role, the Pulumi stack and the Worker config. Infra is applied first,
-# then the Worker migrates and deploys, then health and the live dev E2E run —
-# in one run, so a Pulumi Worker-secret write can never race the E2E as it
-# could when pulumi.yml was separate.
+# the stage picks the environment, the AWS role, the Pulumi stack and the
+# Worker config. Infra is applied first, then the Worker migrates and deploys,
+# then health and the live dev E2E run — in one run, so a Pulumi Worker-secret
+# write can never race the E2E as it could when pulumi.yml was separate.
 run-name: Deploy ${{ github.ref_name }} ${{ github.event.workflow_run.head_sha || github.sha }}
 
 on:
@@ -199,7 +198,7 @@ jobs:
     if: needs.authorize.outputs.pulumi == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: infra-${{ github.ref_name }}
+    environment: ${{ github.ref_name }}
     permissions:
       contents: read
       id-token: write
@@ -344,7 +343,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    environment: infra-${{ github.ref_name }}
+    environment: ${{ github.ref_name }}
     env:
       STAGE: ${{ needs.authorize.outputs.stage }}
     steps:
@@ -377,10 +376,9 @@ jobs:
         if: needs.authorize.outputs.stage == 'production'
         run: echo 'current=true' >> "$GITHUB_OUTPUT"
 
-      # The GitHub environment (`infra-<stage>`) provides the stage's variables
-      # and the OIDC identity. No variable or secret name carries a stage
-      # prefix: both stages set AUTH_ALLOWED_*, and each reads the same keys
-      # from its own bane/<stage>/ folder below.
+      # The environment picks the stage and its variables. No variable or secret
+      # name carries a stage prefix: both stages set AUTH_ALLOWED_*, and each
+      # reads the same keys from its own bane/<stage>/ folder below.
       - name: Configure the stage
         env:
           AUTH_ALLOWED_DOMAINS: ${{ vars.AUTH_ALLOWED_DOMAINS }}
