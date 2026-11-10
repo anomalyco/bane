@@ -1,12 +1,13 @@
-// OpenSend MX (opensend.mx): a multi-tenant installation with its own data, queues, secrets and
-// AWS principal. Queues, the attachment bucket and Hyperdrive come from infra/ (tofu,
-// production.tfvars); deployed by .github/workflows/deploy-mx.yml.
+// Bane production (bane.mx): a multi-tenant installation with its own data, queues, secrets and
+// AWS principal. opensend.mx stays routed for API clients, old unsubscribe links and the SNS
+// feedback endpoint the existing AWS account still delivers to. Queues, the attachment bucket and
+// Hyperdrive come from infra/ (tofu, production.tfvars).
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "opensend-mx",
   "account_id": "15d29c8639fd3733b1b5486a2acfd968",
   "workers_dev": false,
-  "routes": [{ "pattern": "opensend.mx", "custom_domain": true }],
+  "routes": [{ "pattern": "bane.mx", "custom_domain": true }, { "pattern": "opensend.mx", "custom_domain": true }],
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
@@ -17,7 +18,7 @@
     "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/health", "/openapi.json", "/docs.md", "/docs/operations/*", "/llms.txt"]
   },
   "vars": {
-    "PUBLIC_URL": "https://opensend.mx",
+    "PUBLIC_URL": "https://bane.mx",
     "MULTI_TENANT": "true",
     "MX_PLATFORM_AWS_ACCOUNT": "438095551154",
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
