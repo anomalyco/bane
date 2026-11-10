@@ -3,6 +3,15 @@ import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
+// On Linux, Node gives a child a socket as stdin, which openssl cannot reopen through /dev/stdin, so pass a private temp file.
+async function selfSignedPem(key:import('node:crypto').KeyObject) {
+  const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bane-cert-'));
+  try {
+    const file=path.join(dir,'key.pem');fs.writeFileSync(file,key.export({format:'pem',type:'pkcs8'}),{mode:0o600});
+    return (await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key',file,'-days','1','-subj','/CN=fixture'],{encoding:'utf8'});
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+}
 
 // Run against the actual server and normal background-job runner with npm test.
 // Requires its BETTER_AUTH_SECRET and paired DATABASE_URL (localhost only) or
@@ -1480,7 +1489,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           identities.set(`${customer}:${reserved}`,{...verifiedIdentity,DkimAttributes:{Status:'PENDING',SigningEnabled:true}});
           await pool.query('INSERT INTO domain_claims(name,workspace_id) VALUES($1,$2)',[reserved,b.org.id]);
           const certUrl=host+`SimpleNotificationService-${unique('fixture')}.pem`;
-          const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:privateKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+          const pem=await selfSignedPem(privateKey);
           let confirms=0;const dns=new Map<string,string>();
           bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{
             if(String(input)===certUrl)return new Response(pem);
@@ -4763,7 +4772,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     }
     t.mock.method(SESv2Client.prototype,'send',aws);t.mock.method(SNSClient.prototype,'send',aws);
     const privateKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,certUrl=`https://sns.${r}.amazonaws.com/SimpleNotificationService-rehomefixture.pem`;
-    const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:privateKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+    const pem=await selfSignedPem(privateKey);
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.href===certUrl)return new Response(pem);
       if(u.hostname===bucket(dest)+`.s3.${r}.amazonaws.com`){assert.match(u.searchParams.get('X-Amz-Credential')!,/^fixture-rehome\//);return new Response(new Uint8Array(objects.get(decodeURIComponent(u.pathname.slice(1)))!));}
       assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name')!,type=u.searchParams.get('type'),n=names.indexOf(name.replace(/^_bane\./,''));
@@ -5051,7 +5060,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid,regions:[oh]});
     await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
     const api=async(method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
-    const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+    const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,pem=await selfSignedPem(signedKey);
     let confirmed=false,policy='',sub:Json|undefined,drift=false,failAssociation=true;const calls:string[]=[],sets=new Map<string,Json>(),members=new Set<string>();
     const missing=()=>Object.assign(new Error('not found'),{name:'NotFoundException'});
     const tags=(purpose:string)=>({'bane:owner':'bane','bane:installation-id':'bane:pool','bane:purpose':purpose});
@@ -5376,7 +5385,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid});
     const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey;
-    const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+    const pem=await selfSignedPem(signedKey);
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
     let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;

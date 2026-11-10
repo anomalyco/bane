@@ -100,8 +100,11 @@ jobs:
           cache: npm
           cache-dependency-path: |
             api/package-lock.json
+            mcp/package-lock.json
             .github/s3-fixture/package-lock.json
       - run: npm ci --prefix api --no-audit --no-fund
+      # The stdio MCP acceptance test starts ../mcp/src/server.ts, which needs the MCP package's dependencies.
+      - run: npm ci --prefix mcp --no-audit --no-fund
       - run: npm ci --prefix .github/s3-fixture --no-audit --no-fund
       - name: Run all acceptance tests with isolated database and object storage
         run: bash ../.github/scripts/acceptance.sh
