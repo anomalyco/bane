@@ -1,6 +1,6 @@
 # Hosted Bane infrastructure
 
-One project, two stacks: `dev` (AWS `905840579680`, Worker `bane-dev`) and `production` (AWS `009882681002`, Worker `opensend-mx`). Pulumi 3.274.1 runs the TypeScript directly with `runtime: bun`; use Bun 1.3.14 and `bun install --frozen-lockfile`. Type-check with `bun run tsc --noEmit`.
+One project, two stacks: `dev` (AWS `905840579680`, Worker `bane-dev`) and `production` (AWS `009882681002`, Worker `bane-production`). Pulumi 3.274.1 runs the TypeScript directly with `runtime: bun`; use Bun 1.3.14 and `bun install --frozen-lockfile`. Type-check with `bun run tsc --noEmit`.
 
 ## What each stack owns
 
@@ -13,7 +13,7 @@ Each stack adopts **10 existing resources** through the `import` options in [ind
 
 **Not managed: the Hyperdrive config.** Cloudflare never returns `origin.password`, and Pulumi rejects importing it because the read state lacks that required property (`Missing required property 'origin.password'`). The live config stays as created, with caching off and 15 dev / 30 production connections; `api/wrangler.<environment>.jsonc` binds it by ID. Adopt it here once the provider can import write-only required fields.
 
-Each stack **creates one access key**; AWS cannot return the old key's secret. `bane:writeWorkerSecrets` defaults to **true in dev, false in production**. When enabled, two named Worker-secret PUTs replace the bindings without importing the unreadable old values. `@pulumi/cloudflare` v5 `WorkersSecret` handles only these writes; v6 handles the other Cloudflare resources. The pair is written sequentially, **not atomically**; schedule rotation around sending and other Worker deployments. Turning the flag off leaves the last values in place; it does not restore the old key.
+Each stack **creates one access key**; AWS cannot return the old key's secret. `bane:writeWorkerSecrets` defaults to **true in dev, false in production**, and `Pulumi.production.yaml` turns it on explicitly for `bane-production`. When enabled, two named Worker-secret PUTs replace the bindings without importing the unreadable old values. `@pulumi/cloudflare` v5 `WorkersSecret` handles only these writes; v6 handles the other Cloudflare resources. The pair is written sequentially, **not atomically**; schedule rotation around sending and other Worker deployments. Turning the flag off leaves the last values in place; it does not restore the old key.
 
 `bane:publishDomainConnectKey` defaults to **false**. Only production may enable it, to **create** two public TXT records at `_dck1.domainconnect.bane.mx`. Verify the [public key in index.ts](index.ts) matches the signing key and the records are still absent first.
 
@@ -25,4 +25,4 @@ Each stack **creates one access key**; AWS cannot return the old key's secret. `
 
 Each stack settings file pins its KMS `secretsprovider`; a clean checkout needs it, or Pulumi falls back to the passphrase provider and refuses to run. `Pulumi.dev.yaml` also carries the existing stack's `encryptedkey`. After the first init of `production`, copy its generated `encryptedkey` from the stack settings into `Pulumi.production.yaml` so later runs from a clean checkout can decrypt state.
 
-For the first run, dispatch on `dev` with `init: true`, `preview: true`. Init creates the stack; expect **10 imports, one access-key create and two dev Worker-secret writes, with zero replacements or deletes**. Then run `init: true`, `preview: false` while no dev deploy or E2E is running. After the dev E2E passes on the new key, delete the old hand-made `bane-runtime` key; IAM allows only two keys per user, and a future key replacement needs the free slot. Leave production secret writes off until the coordinated AWS switch; creating its new key alone does not cut traffic over.
+For the first run, dispatch on `dev` with `init: true`, `preview: true`. Init creates the stack; expect **10 imports, one access-key create and two dev Worker-secret writes, with zero replacements or deletes**. Then run `init: true`, `preview: false` while no dev deploy or E2E is running. After the dev E2E passes on the new key, delete the old hand-made `bane-runtime` key; IAM allows only two keys per user, and a future key replacement needs the free slot. Production follows the same sequence and writes the new key to `bane-production` only; the old `opensend-mx` Worker, its secrets and its Hyperdrive are untouched.
