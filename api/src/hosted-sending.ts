@@ -27,7 +27,6 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
   if (incoming && (incoming + allowance.used > allowance.cap || reserved)) {
     const resetAt = allowance.resetAt ? new Date(allowance.resetAt).toISOString() : undefined;
     const retryable = incoming <= allowance.cap && marketing <= allowance.marketingCap;
-    const next = allowance.nextCap && allowance.nextCapAt ? `The limit rises to ${count(allowance.nextCap)} at ${new Date(allowance.nextCapAt).toISOString()}.` : '';
-    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted sending is limited to ${allowance.cap} recipients per rolling 24 hours; ${count(allowance.used)} are used.${reserved ? ` Marketing stops at ${allowance.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` The next capacity change is at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''}${next ? ` ${next}` : ''} Simulator addresses (@simulator.amazonses.com) don't count.`, undefined, retryable, resetAt);
+    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted sending is limited to ${allowance.cap} recipients per rolling 24 hours; ${count(allowance.used)} are used.${reserved ? ` Marketing stops at ${allowance.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''} Simulator addresses (@simulator.amazonses.com) don't count.`, undefined, retryable, resetAt);
   }
 }

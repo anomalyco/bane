@@ -98,7 +98,7 @@ export interface Runtime {
 }
 export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number }>;
 export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type ClaimedWebhook = { delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
@@ -243,14 +243,41 @@ export function publicFailureBucket(path: string, status: number, headers?: Head
   if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
   return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';
 }
-export async function publicFailureAllowed(runtime: Runtime, bucket: 'auth' | 'unsubscribe', peer: string): Promise<boolean> {
-  const keyId = `public:${bucket}:${peer}`;
-  const budget = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-    VALUES (${runtime.config.workspaceId}, ${keyId}, date_trunc('minute', now()), 1)
-    ON CONFLICT (workspace_id, key_id) DO UPDATE SET
-      used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, 41) ELSE 1 END,
-      window_start = excluded.window_start RETURNING used`);
-  return budget.rows[0]!.used <= 40;
+export function admissionPeer(address: string): string {
+  if (!address.includes(':')) return address;
+  try {
+    const canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+    const mapped = /^::ffff:([\da-f]+):([\da-f]+)$/.exec(canonical);
+    if (mapped) return mapped.slice(1).flatMap(v => [parseInt(v,16) >>> 8, parseInt(v,16) & 255]).join('.');
+    const [left, right] = canonical.split('::');
+    const a = left ? left.split(':') : [], b = right ? right.split(':') : [];
+    return [...a, ...Array(8-a.length-b.length).fill('0'), ...b].slice(0,4).join(':') + '::';
+  } catch { return 'unknown'; }
+}
+
+// Reserve before dispatch (including parallel requests); refund successful
+// authentication. Only numbers survive a request, never IPs, headers or I/O.
+const failureCounts = new Map<string, number>();
+let failureMinute = 0;
+export async function guardPublicRequest(path: string, headers: Headers, peer: string, work: () => Promise<Response>) {
+  const entry = /^\/(?:api\/auth|\.well-known)(?:\/|$)/.test(path);
+  const lane = entry ? 'identity-entry' : publicFailureBucket(path, 401, headers);
+  if (!lane) return work();
+  const minute = Math.floor(Date.now()/60000);
+  if (minute !== failureMinute) { failureCounts.clear(); failureMinute = minute; }
+  const k = `${lane}:${peer}`;
+  const key = failureCounts.has(k) || failureCounts.size < 4096 ? k : `${lane}:overflow`;
+  const count = failureCounts.get(key) ?? 0;
+  if (count >= 40) return publicFailureDenied();
+  failureCounts.set(key, count+1);
+  let response: Response | undefined;
+  try { response = await work(); return response; }
+  finally {
+    if (minute === failureMinute && !entry && (!response || !publicFailureBucket(path,response.status,headers))) {
+      const remaining = (failureCounts.get(key) ?? 1)-1;
+      if (remaining) failureCounts.set(key, remaining); else failureCounts.delete(key);
+    }
+  }
 }
 // All credentials and image-producing routes share one atomic workspace counter.
 export async function chargeRenderBudget(c: Ctx, workspaceId: string) {

@@ -231,10 +231,43 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
   return false;
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
-function withinLineLimit(raw: Uint8Array) {
-  let lines = raw.byteLength > 0 && raw[raw.byteLength - 1] !== 10 ? 1 : 0;
-  for (let i = 0; i < raw.byteLength; i++) if (raw[i] === 10 && ++lines > PARSE_LINE_LIMIT) return false;
-  return lines <= PARSE_LINE_LIMIT;
+const HEADER_LINES = 256, MIME_DEPTH = 12, MIME_PARSE_MS = 1000;
+function withinMimeLimits(raw: Uint8Array) {
+  let lines = 0, start = 0, headers = true, headerBytes = 0, headerLines = 0;
+  const boundaries: string[] = [];
+  const declared = new Set<string>();
+  while (start < raw.length) {
+    const lf = raw.indexOf(10, start), end = lf < 0 ? raw.length : lf;
+    if (++lines > PARSE_LINE_LIMIT) return false;
+    const length = end-start-(end>start && raw[end-1] === 13 ? 1 : 0);
+    // Conservative preflight of possible RFC 2046 delimiters, without decoding
+    // headers or bodies. Parser-side limits below remain authoritative for
+    // noncanonical syntax, attached messages and transfer encodings.
+    let matched = false;
+    if (declared.size && raw[start]===45 && raw[start+1]===45 && length>=3 && length<=76) {
+      const delimiter=String.fromCharCode(...raw.subarray(start+2,start+length)).trimEnd();
+      const closing=delimiter.endsWith('--'), key=closing?delimiter.slice(0,-2):delimiter;
+      const index=boundaries.lastIndexOf(key);
+      if (declared.has(key)) {
+        if (index>=0) boundaries.length=index+(closing?0:1);
+        else if (!closing && boundaries.push(key)>MIME_DEPTH) return false;
+        headers=!closing; matched=true;
+      }
+    }
+    if (!matched && headers) {
+      headers = length>0;
+      if (headers && (++headerLines>HEADER_LINES || (headerBytes+=end-start+1)>HEADER_LIMIT)) return false;
+      if (headers && length<=1024 && [32,9,67,99].includes(raw[start]!)) {
+        const field=String.fromCharCode(...raw.subarray(start,start+length));
+        if (/^(?:content-type:|[ \t])/i.test(field)) {
+          const boundary=/(?:;|^[ \t])\s*boundary\s*=\s*(?:"([^"\r\n]{1,70})"|([^;\s]{1,70}))/i.exec(field);
+          if (boundary) declared.add((boundary[1]??boundary[2])!);
+        }
+      }
+    }
+    start = end + 1;
+  }
+  return true;
 }
 function countEscaped(value: string | undefined, count: number) {
   if (!value) return count;
@@ -270,12 +303,15 @@ function countHeaderEscaped(msg: Email, count: number) {
 }
 type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
 type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
-const escapeBudgetStore = new AsyncLocalStorage<{ count: number }>();
+const mimeBudget = () => ({ count: 0, headerLines: 0, lines: 0, deadline: performance.now() + MIME_PARSE_MS });
+const escapeBudgetStore = new AsyncLocalStorage<ReturnType<typeof mimeBudget>>();
 const postalProto = PostalMime.prototype as unknown as {
   parse?: (this: unknown, buf: unknown) => Promise<Email>;
+  processLine?: (this: { currentNode: { state: string } }, line: Uint8Array, br: Uint8Array, final: boolean) => Promise<void>;
   renderTextContent?: (this: InternalParser) => void;
 };
 const origParse = postalProto.parse;
+const origLine = postalProto.processLine;
 const origRenderTextContent = postalProto.renderTextContent;
 let escapeGuardWarned = false;
 function warnMissingEscapeGuard() {
@@ -300,11 +336,22 @@ const guardedRenderTextContent = function (this: InternalParser) {
 };
 const escapeGuardInstalled = (() => {
   try {
-    if (typeof origParse !== 'function' || typeof origRenderTextContent !== 'function') return false;
+    if (typeof origParse !== 'function' || typeof origLine !== 'function' || typeof origRenderTextContent !== 'function') return false;
     const probe = new PostalMime() as unknown as Partial<InternalParser>;
     if (!(probe.textTypes instanceof Set) || !(probe.textMap instanceof Map)) return false;
     postalProto.parse = function (buf: unknown) {
-      return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run({ count: 0 }, () => origParse.call(this, buf));
+      return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run(mimeBudget(), () => origParse.call(this, buf));
+    };
+    // Use the parser's own boundary recognition, including decoded nested mail.
+    // Give workerd a scheduling point; its clock does not advance in pure JS.
+    postalProto.processLine = async function (line, br, final) {
+      const budget = escapeBudgetStore.getStore();
+      if (budget) {
+        if (this.currentNode.state === 'header' && line.length && ++budget.headerLines > HEADER_LINES) throw new RangeError('MIME header count');
+        if (++budget.lines % 512 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        if (performance.now() >= budget.deadline) throw new RangeError('MIME parse deadline');
+      }
+      return origLine.call(this, line, br, final);
     };
     postalProto.renderTextContent = guardedRenderTextContent;
     return true;
@@ -315,12 +362,19 @@ const escapeGuardInstalled = (() => {
 if (!escapeGuardInstalled) warnMissingEscapeGuard();
 export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
 export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
-  if (raw.byteLength > PARSE_LIMIT || !withinLineLimit(raw)) return null;
+  const budget = mimeBudget();
+  if (raw.byteLength > PARSE_LIMIT || !withinMimeLimits(raw)) return null;
   if (!isPostalMimeEscapeGuardInstalled()) {
     warnMissingEscapeGuard();
     if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;
   }
-  try { return await escapeBudgetStore.run({ count: 0 }, () => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' })); }
+  try {
+    const mail = await escapeBudgetStore.run(budget, () => PostalMime.parse(raw, {
+      attachmentEncoding: 'arraybuffer', maxHeadersSize: HEADER_LIMIT, maxNestingDepth: MIME_DEPTH,
+      maxRfc822NestingDepth: 4, maxPartCount: 200, maxForwardedAddresses: 256,
+    }));
+    return performance.now() < budget.deadline ? mail : null;
+  }
   catch { return null; }
 }
 
@@ -351,9 +405,10 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
       const reserved=await runtime.db.execute(sql`WITH r AS MATERIALIZED (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE),
-        debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=coalesce((SELECT byte_limit FROM mail_receive_limits WHERE workspace_id=${scope.workspaceId}),68719476736)
+        policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
+        debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=(SELECT bytes FROM policy)
           ON CONFLICT(workspace_id) DO UPDATE SET bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
-          WHERE (CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END)+excluded.bytes<=coalesce((SELECT byte_limit FROM mail_receive_limits WHERE workspace_id=${scope.workspaceId}),68719476736) RETURNING 1),
+          WHERE (CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END)+excluded.bytes<=(SELECT bytes FROM policy) RETURNING 1),
         charged AS (UPDATE mail_receipts SET reserved_bytes=${size} WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND EXISTS(SELECT FROM debit) RETURNING 1)
         SELECT FROM charged UNION ALL SELECT FROM r WHERE reserved_bytes=${size}`);
       if(!reserved.rowCount)throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');

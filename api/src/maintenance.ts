@@ -57,6 +57,12 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
   // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
+  for (const table of ['auth_verification','oauth_client_assertion','oauth_access_token','auth_session']) {
+    await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
+  }
+  // Do not cascade away an unexpired access token when its refresh token expires first.
+  await drain('oauth_refresh_token',batch(sql`oauth_refresh_token`,sql`expires_at <= now() AND NOT EXISTS
+    (SELECT FROM oauth_access_token a WHERE a.refresh_id=oauth_refresh_token.id AND a.expires_at>now())`));
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
   if (runtime.config.multiTenant) {

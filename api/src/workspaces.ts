@@ -48,7 +48,7 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
   const workspaceId = id('ws');
   const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
   const result = await db.execute<{ id: string; name: string; slug: string }>(sql`WITH created AS (
-    INSERT INTO workspaces(id, name, slug) SELECT ${workspaceId}, ${name}, ${slug}
+    INSERT INTO workspaces(id, name, slug, quota_sponsor) SELECT ${workspaceId}, ${name}, ${slug}, ${userId}
     ${limit === undefined ? sql`` : sql`WHERE (SELECT count(*) FROM workspace_members WHERE user_id = ${userId} AND role = 'owner') < ${limit.ownedBelow}
       AND EXISTS(SELECT 1 FROM workspace_members WHERE user_id = ${userId} AND workspace_id = ${limit.memberOf})`}
     RETURNING id, name, slug

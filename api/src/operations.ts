@@ -943,7 +943,7 @@ export function registerOperations(app: App) {
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const row = await c.env.db.transaction(async tx => {
       const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).for('update'); if (!locked) return notFound('Webhook');
-      const [updated] = await tx.update(webhooks).set({ ...body, encryptedHeaders: await encryptWebhookHeaders(c.env, headers, secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
+      const [updated] = await tx.update(webhooks).set({ ...body, encryptedHeaders: await encryptWebhookHeaders(c.env, headers ?? (body.url && body.url !== locked.url ? [] : undefined), secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
       if (locked.paused && body.paused === false) {
         const paused = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, current.id), eq(deliveries.status, 'paused'))).for('update');
         for (const delivery of paused) {
@@ -992,8 +992,7 @@ export function registerOperations(app: App) {
 
 const snsSchema = z.object({ Type: z.enum(['Notification', 'SubscriptionConfirmation', 'UnsubscribeConfirmation']), MessageId: z.string().min(1).max(200), TopicArn: z.string().min(1).max(300), Message: z.string().max(262144), Timestamp: z.string().datetime(), SignatureVersion: z.enum(['1', '2']), Signature: z.string().min(1).max(4096), SigningCertURL: z.string().url().max(2048), Subject: z.string().max(1000).optional(), SubscribeURL: z.string().url().max(4096).optional(), Token: z.string().max(4096).optional() }).openapi('SnsSignedEnvelope');
 type SnsEnvelope = z.infer<typeof snsSchema>;
-function snsHost(runtime: Runtime, envelope: SnsEnvelope) {
-  if (!runtime.config.snsTopicArns.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'The SNS topic is not configured for this deployment.');
+function snsHost(envelope: SnsEnvelope) {
   const match = /^arn:aws:sns:([a-z0-9-]+):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
   if (!match) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only registered standard AWS regional SNS topics are supported.');
   return { host: `sns.${match[1]}.amazonaws.com`, region: match[1]! };
@@ -1005,8 +1004,9 @@ function trustedSnsUrl(value: string, host: string, certificate: boolean) {
 }
 // Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
 const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
-async function verifySns(runtime: Runtime, envelope: SnsEnvelope, certificateTimeout=10000) {
-  const trusted = snsHost(runtime, envelope);
+async function verifySns(envelope: SnsEnvelope) {
+  const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
+  const trusted = snsHost(envelope);
   const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
   const signature = Buffer.from(envelope.Signature, 'base64');
   if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
@@ -1079,6 +1079,9 @@ function registerPublicEvents(app: App) {
     let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
     const envelope = parsed.data;
+    // Prove AWS signed this exact topic before looking up its tenant. A valid
+    // signature is NOT topic authorization: all binding checks below still apply.
+    const trusted = await verifySns(envelope);
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     let stack: Awaited<ReturnType<typeof import('./provider-connections.js').byoStackTopic>>;
     let binding:TopicBinding|undefined;
@@ -1087,8 +1090,11 @@ function registerPublicEvents(app: App) {
       binding=stack ? undefined : await sendingTopic(c.env,envelope.TopicArn,envelope.Type==='SubscriptionConfirmation');
       if (!stack && !binding) throw new ApiError(403,'SNS_TOPIC_NOT_ALLOWED','This SNS topic is not registered for the account and region.');
       c.env={...c.env,config:{...c.env.config,snsTopicArns:[envelope.TopicArn],inboundTopicArns:binding?.inbound?[envelope.TopicArn]:[]}};
-    } else if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
-    const trusted = await verifySns(c.env, envelope, stack ? 3000 : undefined);
+    } else {
+      c.env = await resolveRegionRuntime(c.env, { cacheMs: 30_000 });
+      if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
+      if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'The SNS topic is not configured for this deployment.');
+    }
     if (envelope.Type !== 'Notification') {
       if (envelope.Type === 'SubscriptionConfirmation') {
         const url = trustedSnsUrl(envelope.SubscribeURL!, trusted.host, false);

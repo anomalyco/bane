@@ -1,13 +1,13 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { MiddlewareHandler } from 'hono';
-import { bodyLimit } from 'hono/body-limit';
+import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
 import { ApiError, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
-import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
+import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 
 type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats';
@@ -107,9 +107,6 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
   });
-  const apiLimit = bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } });
-  const snsLimit = bodyLimit({ maxSize: 512 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'SNS envelope exceeds the 512 KiB limit.'); } });
-  app.use('*', (c, next) => (c.req.method === 'POST' && c.req.path === '/v1/events/ses' ? snsLimit : apiLimit)(c, next));
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (c.req.path.startsWith('/v1/inbound/')) return next();
@@ -121,12 +118,12 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Provider redirects cannot carry a workspace header. This route authenticates the Google
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
-    if (c.req.path === '/v1/events/ses') {
-      // Only SNS ingress needs trusted topic/account bindings; unknown topics are checked fresh in the handler.
-      if (c.req.method === 'POST' && !c.env.config.multiTenant) c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));
-      return next();
-    }
+    if (c.req.path === '/v1/events/ses') return next();
     return authenticate(c, next);
+  });
+  app.use('*', async (c, next) => {
+    if (!c.req.path.startsWith('/v1/inbound/')) await boundRequestBody(c);
+    await next();
   });
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.

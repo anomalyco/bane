@@ -242,7 +242,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     (${!!runtime.config.trustedPool} AND pc.pool_tier='trusted' AND NOT pc.legacy_names) AS trusted`:sql``}
     FROM queued_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
     ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
-      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap((SELECT created_at FROM provider_connections WHERE id=pc.id),w.send_cap_override) END AS cap) p`:sql``}
+      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap) p`:sql``}
     WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL` : sql`SELECT workspace_id FROM queued_owners`;
   // A single small, admitted transactional envelope needs no external preflight. For an idle
   // MX lane only, run the SAME durable claim on the locked fair selection. Both UPDATEs below

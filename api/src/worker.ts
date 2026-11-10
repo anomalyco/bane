@@ -154,12 +154,11 @@ export default {
       deps = await loadHttpDeps();
       const { app, core } = deps;
       const admissionStarted = performance.now();
-      const address = request.headers.get('CF-Connecting-IP') ?? '127.0.0.1';
+      const address = core.admissionPeer(request.headers.get('CF-Connecting-IP') ?? '127.0.0.1');
       const peer = await core.digest(address);
-      // SNS publishes from a small IP pool at the full send rate; its requests are authenticated by
-      // signature verification in the handler, so the per-address admission gate does not apply.
+      // Separate SNS traffic from normal traffic, but never exempt it from admission.
       const feedbackIngress = pathname === '/v1/events/ses' && request.method === 'POST';
-      const gate = feedbackIngress ? { success: true } : await env.ADMISSION.limit({ key: `bane:default:${peer}` });
+      const gate = await env.ADMISSION.limit({ key: `bane:${feedbackIngress ? 'sns' : 'default'}:${peer}` });
       if (!gate.success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
@@ -168,11 +167,8 @@ export default {
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
-        : await withRuntime(env, async runtime => {
-          const result = await app.fetch(new Request(request, { headers }), runtime);
-          const failureBucket = core.publicFailureBucket(pathname, result.status, request.headers);
-          return failureBucket && !await core.publicFailureAllowed(runtime, failureBucket, peer) ? core.publicFailureDenied() : result;
-        }, 1, ctx);
+        : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
+          app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');
