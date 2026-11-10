@@ -168,6 +168,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // The claim already charged the attempt before the isolate died. Retire exhausted
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
       const exhausted=sql`j.attempts >= CASE WHEN j.type IN ('operation.webhook','mailbox.webhook') THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
+      const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
       const slots=pool==='webhooks'?0:Math.min(claimBatchSize,ingestSlots-ingestReserved);
       // Only the head of each class enters the preference sort. The expression matches
       // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
