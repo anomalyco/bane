@@ -1,0 +1,2 @@
+config:
+  bane:writeWorkerSecrets: true

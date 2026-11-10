@@ -1,0 +1,4 @@
+config:
+  # opensend-mx is still sending from the old AWS account.
+  bane:writeWorkerSecrets: false
+  bane:publishDomainConnectKey: false

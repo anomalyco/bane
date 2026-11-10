@@ -42,7 +42,7 @@
   // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.
   "placement": { "region": "aws:us-east-2" },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
-  // From `tofu output hyperdrive_id` (infra/, production state).
+  // Existing production Hyperdrive, adopted by infra/pulumi.
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "556aba191add406eaa58a0e26eebb6b1" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "bane-prod-attachments" }],
