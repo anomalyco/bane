@@ -6,7 +6,7 @@ type ObjectValue = Record<string, any>;
 export interface McpStepResult { status: number; requestId: string | null; response: any; image?: { data: string; mimeType: string }; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
 export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue, allowWrites: boolean) => McpPlan; }
-const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
+const EXCLUDED = new Set(['applyRouting','createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
@@ -381,7 +381,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   inbound(custom('enableInboundDomain', 'Enable receiving for the confirmed domain ID. Checks SES verification and MX before queuing the receipt rule and related resources. Does not change DNS or override a conflicting mail provider. Read getInboundDomain after the 202 response to verify status=active.', {
     type: 'object', properties: { id: domainId, confirm }, required: ['id', 'confirm'], additionalProperties: false,
   }, true, args => ({ steps: [{ operation: enable, args: { id: args.id, confirm: args.confirm, body: { force: false } } }] }), enable.tool.outputSchema));
-  for (const name of ['listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents']) inbound(need(name));
+  for (const name of ['getRouting','testRouting','listRoutingVersions','listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents']) inbound(need(name));
   inbound(actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail.', { create: need('createInboundAddress'), update: need('updateInboundAddress') }));
   const threadSends: Record<string, McpOperation> = { start: need('createInboundThread') };
   if (combined.has('replyToInboundThread')) threadSends.reply = need('replyToInboundThread');
@@ -423,7 +423,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) invalid('Invalid OpenAPI operationId.');
       if (EXCLUDED.has(name) || (path === '/v1/api-keys' && method !== 'get')) continue;
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
-      const write = method !== 'get';
+      const write = method !== 'get' && name!=='testRouting';
       if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
       const queryParameters = toolParameters(spec, item as ObjectValue, operation).filter(p => p.in === 'query').map(p => p.name as string);
       const input = inputSchema(spec, item as ObjectValue, operation, write);

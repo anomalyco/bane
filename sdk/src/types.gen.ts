@@ -1587,6 +1587,43 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type RoutingConfig = {
+    routes: Array<MailRoute>;
+    version: number;
+};
+
+export type MailRoute = {
+    key?: string | null;
+    match: string;
+    to: 'drop' | Array<string>;
+    subaddresses?: boolean;
+    enabled?: boolean;
+    note?: string;
+    id: string;
+    createdAt: string;
+};
+
+export type RoutingConfigFile = {
+    routes: Array<{
+        key?: string | null;
+        match: string;
+        to: 'drop' | Array<string>;
+        subaddresses?: boolean;
+        enabled?: boolean;
+        note?: string;
+    }>;
+    version?: number;
+};
+
+export type CreateMailRoute = {
+    key?: string | null;
+    match: string;
+    to: 'drop' | Array<string>;
+    subaddresses?: boolean;
+    enabled?: boolean;
+    note?: string;
+};
+
 export type InboundScanPolicy = {
     spam: 'store' | 'quarantine';
 };
@@ -1748,6 +1785,7 @@ export type InboundAddressPage = {
 
 export type InboundAddress = {
     id: string;
+    key: string | null;
     address: string;
     displayName: string | null;
     domain: string;
@@ -1788,6 +1826,7 @@ export type InboundAddress = {
 };
 
 export type CreateInboundAddress = {
+    key?: string | null;
     address: string;
     displayName?: string | null;
     /**
@@ -1822,6 +1861,7 @@ export type CreateInboundAddress = {
 };
 
 export type UpdateInboundAddress = {
+    key?: string | null;
     displayName?: string | null;
     aliases?: Array<string>;
     rules?: Array<string>;
@@ -2128,7 +2168,7 @@ export type InboundEventPage = {
 export type InboundEvent = {
     id: string;
     cursor: string;
-    type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted';
+    type: 'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted';
     createdAt: string;
     threadId: string | null;
     messageId: string | null;
@@ -2173,13 +2213,14 @@ export type InboundKeyPage = {
 
 export type InboundWebhookSecret = InboundWebhook & {
     secret: string;
+    verificationToken?: string;
 };
 
 export type InboundWebhook = {
     id: string;
     url: string;
     description: string;
-    eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    eventTypes: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused: boolean;
     /**
      * Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.
@@ -2192,12 +2233,26 @@ export type InboundWebhook = {
     createdAt: string;
     updatedAt: string;
     addressIds: Array<string> | null;
+    key: string | null;
+    name: string | null;
+    format: 'bane' | 'inbound';
+    junk: 'skip' | 'include';
+    include: Array<'message' | 'raw'>;
+    timeoutSeconds: number;
+    retryAttempts: number;
 };
 
 export type CreateInboundWebhook = {
+    key?: string | null;
+    name?: string | null;
+    format?: 'bane' | 'inbound';
+    junk?: 'skip' | 'include';
+    include?: Array<'message' | 'raw'>;
+    timeoutSeconds?: number;
+    retryAttempts?: number;
     url: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
     /**
      * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
@@ -2217,9 +2272,16 @@ export type InboundWebhookList = {
 };
 
 export type UpdateInboundWebhook = {
+    key?: string | null;
+    name?: string | null;
+    format?: 'bane' | 'inbound';
+    junk?: 'skip' | 'include';
+    include?: Array<'message' | 'raw'>;
+    timeoutSeconds?: number;
+    retryAttempts?: number;
     url?: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
     /**
      * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
@@ -9912,6 +9974,838 @@ export type ConfigureRegionAutoValidationResponses = {
 
 export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];
 
+export type GetRoutingData = {
+    body?: never;
+    path?: never;
+    query?: {
+        format?: 'config';
+    };
+    url: '/v1/routing';
+};
+
+export type GetRoutingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRoutingError = GetRoutingErrors[keyof GetRoutingErrors];
+
+export type GetRoutingResponses = {
+    /**
+     * Success
+     */
+    200: RoutingConfig | RoutingConfigFile;
+};
+
+export type GetRoutingResponse = GetRoutingResponses[keyof GetRoutingResponses];
+
+export type ApplyRoutingData = {
+    body: RoutingConfigFile;
+    headers: {
+        'if-match': string;
+    };
+    path?: never;
+    query?: {
+        dryRun?: 'true' | 'false';
+    };
+    url: '/v1/routing';
+};
+
+export type ApplyRoutingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ApplyRoutingError = ApplyRoutingErrors[keyof ApplyRoutingErrors];
+
+export type ApplyRoutingResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        diff: Array<{
+            before: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+            after: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+        }>;
+    };
+};
+
+export type ApplyRoutingResponse = ApplyRoutingResponses[keyof ApplyRoutingResponses];
+
+export type ListRoutesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/routing/routes';
+};
+
+export type ListRoutesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRoutesError = ListRoutesErrors[keyof ListRoutesErrors];
+
+export type ListRoutesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<MailRoute>;
+    };
+};
+
+export type ListRoutesResponse = ListRoutesResponses[keyof ListRoutesResponses];
+
+export type CreateRouteData = {
+    body: CreateMailRoute;
+    path?: never;
+    query?: never;
+    url: '/v1/routing/routes';
+};
+
+export type CreateRouteErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateRouteError = CreateRouteErrors[keyof CreateRouteErrors];
+
+export type CreateRouteResponses = {
+    /**
+     * Success
+     */
+    201: MailRoute;
+};
+
+export type CreateRouteResponse = CreateRouteResponses[keyof CreateRouteResponses];
+
+export type DeleteRouteData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/routing/routes/{id}';
+};
+
+export type DeleteRouteErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteRouteError = DeleteRouteErrors[keyof DeleteRouteErrors];
+
+export type DeleteRouteResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        diff: Array<{
+            before: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+            after: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+        }>;
+    };
+};
+
+export type DeleteRouteResponse = DeleteRouteResponses[keyof DeleteRouteResponses];
+
+export type GetRouteData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/routing/routes/{id}';
+};
+
+export type GetRouteErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRouteError = GetRouteErrors[keyof GetRouteErrors];
+
+export type GetRouteResponses = {
+    /**
+     * Success
+     */
+    200: MailRoute;
+};
+
+export type GetRouteResponse = GetRouteResponses[keyof GetRouteResponses];
+
+export type UpdateRouteData = {
+    body: {
+        key?: string | null;
+        match?: string;
+        to?: 'drop' | Array<string>;
+        subaddresses?: boolean;
+        enabled?: boolean;
+        note?: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/routing/routes/{id}';
+};
+
+export type UpdateRouteErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateRouteError = UpdateRouteErrors[keyof UpdateRouteErrors];
+
+export type UpdateRouteResponses = {
+    /**
+     * Success
+     */
+    200: MailRoute;
+};
+
+export type UpdateRouteResponse = UpdateRouteResponses[keyof UpdateRouteResponses];
+
+export type GetRoutingAuditData = {
+    body?: never;
+    path?: never;
+    query?: {
+        resource?: string;
+        actor?: string;
+        since?: string;
+    };
+    url: '/v1/routing/audit';
+};
+
+export type GetRoutingAuditErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRoutingAuditError = GetRoutingAuditErrors[keyof GetRoutingAuditErrors];
+
+export type GetRoutingAuditResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            [key: string]: unknown;
+        }>;
+    };
+};
+
+export type GetRoutingAuditResponse = GetRoutingAuditResponses[keyof GetRoutingAuditResponses];
+
+export type ListRoutingVersionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/routing/versions';
+};
+
+export type ListRoutingVersionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRoutingVersionsError = ListRoutingVersionsErrors[keyof ListRoutingVersionsErrors];
+
+export type ListRoutingVersionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            [key: string]: unknown;
+        }>;
+    };
+};
+
+export type ListRoutingVersionsResponse = ListRoutingVersionsResponses[keyof ListRoutingVersionsResponses];
+
+export type GetRoutingVersionData = {
+    body?: never;
+    path?: {
+        v?: number | null;
+    };
+    query?: never;
+    url: '/v1/routing/versions/{v}';
+};
+
+export type GetRoutingVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRoutingVersionError = GetRoutingVersionErrors[keyof GetRoutingVersionErrors];
+
+export type GetRoutingVersionResponses = {
+    /**
+     * Success
+     */
+    200: RoutingConfig & {
+        diff: Array<{
+            before: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+            after: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+        }>;
+    };
+};
+
+export type GetRoutingVersionResponse = GetRoutingVersionResponses[keyof GetRoutingVersionResponses];
+
+export type RestoreRoutingVersionData = {
+    body?: never;
+    path?: {
+        v?: number | null;
+    };
+    query?: never;
+    url: '/v1/routing/versions/{v}/restore';
+};
+
+export type RestoreRoutingVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RestoreRoutingVersionError = RestoreRoutingVersionErrors[keyof RestoreRoutingVersionErrors];
+
+export type RestoreRoutingVersionResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        diff: Array<{
+            before: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+            after: MailRoute & ({
+                [key: string]: unknown;
+            } | null);
+        }>;
+    };
+};
+
+export type RestoreRoutingVersionResponse = RestoreRoutingVersionResponses[keyof RestoreRoutingVersionResponses];
+
+export type TestRoutingData = {
+    body: {
+        messageId?: string;
+        envelope?: {
+            from?: string;
+            to: Array<string>;
+        };
+        verdicts?: {
+            spam?: string;
+            dmarc?: string;
+        };
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/routing/test';
+};
+
+export type TestRoutingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type TestRoutingError = TestRoutingErrors[keyof TestRoutingErrors];
+
+export type TestRoutingResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        recipients: Array<{
+            address: string;
+            route: string | null;
+            tier: string;
+            default: string;
+            inboxes: Array<string>;
+            webhooks: Array<string>;
+            junk: boolean;
+            dropped: boolean;
+            warnings: Array<string>;
+        }>;
+    };
+};
+
+export type TestRoutingResponse = TestRoutingResponses[keyof TestRoutingResponses];
+
 export type GetInboundScanPolicyData = {
     body?: never;
     path?: never;
@@ -10868,7 +11762,9 @@ export type DeleteInboundAddressData = {
          */
         addressId: string;
     };
-    query?: never;
+    query?: {
+        detach?: 'true' | 'false';
+    };
     url: '/v1/inbound/addresses/{addressId}';
 };
 
@@ -12023,7 +12919,9 @@ export type DeleteInboundWebhookData = {
     path: {
         id: string;
     };
-    query?: never;
+    query?: {
+        detach?: 'true' | 'false';
+    };
     url: '/v1/inbound/webhooks/{id}';
 };
 
@@ -12206,6 +13104,141 @@ export type UpdateInboundWebhookResponses = {
 };
 
 export type UpdateInboundWebhookResponse = UpdateInboundWebhookResponses[keyof UpdateInboundWebhookResponses];
+
+export type TestInboundWebhookData = {
+    body: {
+        format?: 'bane' | 'inbound';
+        overrideUrl?: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}/test';
+};
+
+export type TestInboundWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type TestInboundWebhookError = TestInboundWebhookErrors[keyof TestInboundWebhookErrors];
+
+export type TestInboundWebhookResponses = {
+    /**
+     * Success
+     */
+    200: {
+        statusCode: number;
+    };
+};
+
+export type TestInboundWebhookResponse = TestInboundWebhookResponses[keyof TestInboundWebhookResponses];
+
+export type RedeliverInboundMessageData = {
+    body: {
+        destination?: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/messages/{id}/redeliver';
+};
+
+export type RedeliverInboundMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RedeliverInboundMessageError = RedeliverInboundMessageErrors[keyof RedeliverInboundMessageErrors];
+
+export type RedeliverInboundMessageResponses = {
+    /**
+     * Success
+     */
+    202: {
+        queued: number;
+    };
+};
+
+export type RedeliverInboundMessageResponse = RedeliverInboundMessageResponses[keyof RedeliverInboundMessageResponses];
 
 export type RotateInboundWebhookSecretData = {
     body?: never;

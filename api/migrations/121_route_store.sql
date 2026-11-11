@@ -73,7 +73,7 @@ BEGIN
     UNION ALL SELECT r.addr,ref.id FROM routes r LEFT JOIN LATERAL jsonb_array_elements_text(r.item->'inboxes') ref(id) ON true WHERE r.item->>'tier'<>'default'),
   unrouted AS (INSERT INTO mail_unrouted(workspace_id,message_id,address) SELECT x.workspace_id,x.id,r.addr FROM target x,resolved r WHERE r.box IS NULL ON CONFLICT DO NOTHING),
   added AS (INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,labels)
-    SELECT DISTINCT r.box,x.id,x.workspace_id,x.thread_id,'inbound',false,x.received_at,CASE WHEN b.require_dmarc THEN ARRAY['unverified'] ELSE ARRAY[]::text[] END
+    SELECT DISTINCT r.box,x.id,x.workspace_id,x.thread_id,'inbound',false,x.received_at,array_remove(ARRAY[CASE WHEN b.require_dmarc THEN 'unverified' END,CASE WHEN is_spam THEN 'spam' END],NULL)
     FROM target x CROSS JOIN resolved r LEFT JOIN mailboxes b ON b.id=r.box AND (dmarc IS DISTINCT FROM 'PASS') WHERE r.box IS NOT NULL ON CONFLICT DO NOTHING RETURNING *),
   summaries AS (INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
     SELECT a.mailbox_id,x.thread_id,x.workspace_id,1,1,x.received_at,x.received_at,x.spam,CASE WHEN x.spam THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM target x JOIN added a ON a.message_id=x.id ORDER BY a.mailbox_id

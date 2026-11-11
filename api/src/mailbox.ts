@@ -1,3 +1,4 @@
+import {registerRouting,detachDestination,RoutingKey} from './routing.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
@@ -10,7 +11,7 @@ import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, webhookSecretBinding } from './mailbox-events.js';
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
-import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
+import { hmac,encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -88,7 +89,7 @@ const InboundSubdomainSchema = z.object({
   dns: z.array(MxRecord).describe('The parent’s wildcard MX record, which receives this subdomain.'), mx: MxReportSchema.nullable(), addressCount: z.number().int(), createdAt: z.string(), updatedAt: z.string(),
 }).openapi('InboundSubdomain');
 const InboundAddressSchema = z.object({
-  id: z.string(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
+  id: z.string(), key:RoutingKey.nullable(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
   publicAddress: z.string().nullable().describe('Send-only address used as the default From. Null to send from the receiving address.'),
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
   expiresAt: z.string().datetime().nullable().describe('UTC lease expiry, or null for a permanent address. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes it.'),
@@ -99,7 +100,8 @@ const InboundAddressSchema = z.object({
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
 const KeySchema = z.object({ id: z.string(), name: z.string(), prefix: z.string(), addressIds: z.array(z.string()).nullable(), permissions: z.array(z.enum(['read', 'send', 'modify'])), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('InboundKey');
-const InboundWebhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).openapi('InboundWebhook');
+const hookOptions={key:RoutingKey.nullable(),name:z.string().max(120).nullable(),format:z.enum(['bane','inbound']),junk:z.enum(['skip','include']),include:z.array(z.enum(['message','raw'])).max(2),timeoutSeconds:z.number().int().min(1).max(30),retryAttempts:z.number().int().min(0).max(10)};
+const InboundWebhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).extend(hookOptions).openapi('InboundWebhook');
 const DeliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), status: z.enum(['pending', 'delivered', 'failed','paused']), attemptCount: z.number().int(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('InboundWebhookDelivery');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
@@ -118,7 +120,7 @@ async function domainViews(c: Ctx, rows: (typeof domains.$inferSelect)[]) {
     const host=state?.receivingHost ?? row.name;
     const region=state?.region ?? (shared?'us-east-2':row.region);
     return { id: row.id, name: host, region, status: state?.status ?? 'off' as const, dns: [expectedMx(host, region)], mx: state?.mx ?? null, lastError: state?.lastError ?? null,
-      enabledAt: iso(state?.enabledAt), checkedAt: iso(state?.checkedAt), catchAll: state?.catchAll ?? 'create_address' as const, addressCount: counts.find(item => item.domainId === state?.id)?.count ?? 0,
+      enabledAt: iso(state?.enabledAt), checkedAt: iso(state?.checkedAt), catchAll: state?.catchAll ?? 'store' as const, addressCount: counts.find(item => item.domainId === state?.id)?.count ?? 0,
       subdomains: { enabled: state?.acceptSubdomains ?? false, count: children.find(item => item.parentId === state?.id)?.count ?? 0, dns: [expectedMx(`*.${row.name}`, region)] } };
   });
 }
@@ -156,7 +158,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
   ]);
   return rows.map(row => {
     const stat = stats.find(item => item.mailboxId === row.id);
-    return { id: row.id, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
+    return { id: row.id,key:row.key, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
       publicAddress: addresses.find(item => item.mailboxId === row.id && item.kind === 'public')?.address ?? null,
       aliases: addresses.filter(item => item.mailboxId === row.id && item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
       createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc };
@@ -164,7 +166,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
 }
 type MessageRow = typeof mailMessages.$inferSelect;
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
-const webhookView = async (c: Ctx, row: typeof mailboxWebhooks.$inferSelect) => ({ id: row.id, url: row.url, description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), access(c).admin), createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
+const webhookView = async (c: Ctx, row: typeof mailboxWebhooks.$inferSelect) => ({key:row.key,name:row.name,format:row.format,junk:row.junk,include:row.include,timeoutSeconds:row.timeoutSeconds,retryAttempts:row.retryAttempts, id: row.id, url: row.url, description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), access(c).admin), createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
 async function refreshThread(tx: Runtime['db'] | Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], mailboxId: string, threadId: string) {
   await tx.execute(sql`UPDATE mailbox_threads SET unread_count = (SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound') WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId}`);
 }
@@ -352,7 +354,7 @@ function registerAddresses(app: App) {
   const params = z.object({ addressId: InboundAddressId });
   const meta = { tags: ['Inbound addresses'], security };
   const MailboxInput = z.object({
-    address: EmailAddressInput, displayName: z.string().trim().max(200).nullable().optional(),
+    key:RoutingKey.nullable().optional(),address: EmailAddressInput, displayName: z.string().trim().max(200).nullable().optional(),
     publicAddress: EmailAddressInput.optional().describe('Permanent addresses only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in the receiving region. Does not change routing or MX.'),
     ttlSeconds: z.number().int().min(60).max(30 * 24 * 60 * 60).optional().describe('Lease duration in seconds, 60–2592000 (30 days). Omit for a permanent address. Temporary addresses accept plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.'),
     aliases: z.array(z.string().trim().toLowerCase().max(254).regex(ADDRESS)).max(50).default([]), rules: z.array(z.string().max(254)).max(20).default([]).describe('Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.'),
@@ -400,7 +402,7 @@ function registerAddresses(app: App) {
         if (!(await tx.execute(sql`SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
           WHERE dc.workspace_id=${scope.workspaceId} AND dc.name=${host} AND ${claimSends()} AND pc.region=${domain.region} AND ${connectionReady()} FOR SHARE OF dc,pc`)).rowCount) throw new ApiError(409,'PUBLIC_DOMAIN_NOT_VERIFIED','The public sender domain must be verified and ready in this workspace and region.','publicAddress');
       }
-      const created = await createMailbox(tx, scope, { domainId: domain.id, domainName: host, address: input.address, displayName: input.displayName ?? null, aliases: input.aliases, rules: input.rules, metadata: input.metadata, origin: 'api', sendLimits: input.sendLimits, requireDmarc: input.requireDmarc, ttlSeconds: input.ttlSeconds });
+      const created = await createMailbox(tx, scope, { domainId: domain.id, domainName: host,key:input.key, address: input.address, displayName: input.displayName ?? null, aliases: input.aliases, rules: input.rules, metadata: input.metadata, origin: 'api', sendLimits: input.sendLimits, requireDmarc: input.requireDmarc, ttlSeconds: input.ttlSeconds });
       if (publicAddress) {
         const [claimed] = await tx.insert(mailboxAddresses).values({ ...scope, address: publicAddress, mailboxId: created.id, kind: 'public' }).onConflictDoNothing().returning({ address: mailboxAddresses.address });
         if (!claimed) throw new ApiError(409, 'ADDRESS_TAKEN', `${publicAddress} already belongs to a mailbox.`, 'publicAddress');
@@ -416,7 +418,7 @@ function registerAddresses(app: App) {
     return c.json((await mailboxViews(c.env, [mailbox]))[0]!, 200);
   });
   const fields = MailboxInput.shape;
-  const patch = z.object({ displayName: fields.displayName, aliases: fields.aliases.removeDefault().optional(), rules: fields.rules.removeDefault().optional(), metadata: fields.metadata.removeDefault().optional(), sendLimits: fields.sendLimits, requireDmarc: fields.requireDmarc.removeDefault().optional() }).strict().openapi('UpdateInboundAddress');
+  const patch = z.object({key:fields.key, displayName: fields.displayName, aliases: fields.aliases.removeDefault().optional(), rules: fields.rules.removeDefault().optional(), metadata: fields.metadata.removeDefault().optional(), sendLimits: fields.sendLimits, requireDmarc: fields.requireDmarc.removeDefault().optional() }).strict().openapi('UpdateInboundAddress');
   app.openapi(createRoute({ ...meta, method: 'patch', path: detail, operationId: 'updateInboundAddress', description: 'Admin only. Only supplied fields change. The address, public sender and expiry are immutable.',
     request: { params, body: json(patch) }, responses: { 200: response(InboundAddressSchema), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId); const input = c.req.valid('json');
@@ -426,7 +428,7 @@ function registerAddresses(app: App) {
       const rules = input.rules ? [...new Set(input.rules.map(rule => validateRule(rule, domain)))] : undefined;
       if(rules || input.aliases)await lockMailboxLane(tx,scope.workspaceId,'address');
       if(rules?.length)await checkRuleCapacity(tx,scope.workspaceId,mailbox.domainId,mailbox.id);
-      const [updated] = await tx.update(mailboxes).set({ ...(input.displayName !== undefined ? { displayName: input.displayName } : {}), ...(rules ? { rules } : {}), ...(input.metadata ? { metadata: input.metadata } : {}), ...(input.sendLimits ? { sendLimits: { ...mailbox.sendLimits, ...input.sendLimits } } : {}), ...(input.requireDmarc !== undefined ? { requireDmarc: input.requireDmarc } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxes.id, mailbox.id)).returning();
+      const [updated] = await tx.update(mailboxes).set({key:input.key, ...(input.displayName !== undefined ? { displayName: input.displayName } : {}), ...(rules ? { rules } : {}), ...(input.metadata ? { metadata: input.metadata } : {}), ...(input.sendLimits ? { sendLimits: { ...mailbox.sendLimits, ...input.sendLimits } } : {}), ...(input.requireDmarc !== undefined ? { requireDmarc: input.requireDmarc } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxes.id, mailbox.id)).returning();
       let added: string[] = [];
       if (input.aliases) {
         const aliases = [...new Set(input.aliases)].filter(alias => alias !== mailbox.address);
@@ -446,9 +448,10 @@ function registerAddresses(app: App) {
     const [row] = await c.env.db.select().from(mailboxes).where(eq(mailboxes.id, mailbox.id));
     return c.json((await mailboxViews(c.env, [row!]))[0]!, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'delete', path: detail, operationId: 'deleteInboundAddress', description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.', request: { params }, responses: { 200: response(Ok), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'delete', path: detail, operationId: 'deleteInboundAddress', description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.', request: { params,query:z.object({detach:z.enum(['true','false']).optional()}) }, responses: { 200: response(Ok), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
     const runnable = await c.env.db.transaction(async tx => {
+      await detachDestination(tx,c,scope.workspaceId,mailbox.id);
       await tx.delete(mailboxThreads).where(eq(mailboxThreads.mailboxId, mailbox.id));
       await tx.delete(mailboxes).where(eq(mailboxes.id, mailbox.id));
       return recordEvents(tx, scope.workspaceId, [{ type: 'address.deleted', mailboxId: mailbox.id, data: { address: mailbox.address } }]);
@@ -459,6 +462,7 @@ function registerAddresses(app: App) {
 }
 
 export function registerMailbox(app: App) {
+  registerRouting(app);
   app.use('/v1/inbound/*', mailboxAuth);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');
@@ -653,28 +657,30 @@ function registerInboundWebhooks(app: App) {
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
     return { value, row };
   };
-  const webhookFields = { url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).min(1).max(inboundEventTypes.length), paused: z.boolean(), headers: WebhookHeaders.optional() };
+  const webhookFields = { ...z.object(hookOptions).partial().shape,url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
   const patch = z.object({ ...webhookFields, addressIds: idFilter }).partial().strict();
-  const hookCapacity=async(tx:import('./core.js').DbExecutor,wid:string)=>{
+  const hookCapacity=async(tx:import('./core.js').DbExecutor,wid:string,routeOnly:boolean,except='')=>{
     await lockMailboxLane(tx,wid,'address');
-    if((await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${wid} AND NOT paused LIMIT 1 OFFSET 31`)).rowCount)throw new ApiError(409,'MAILBOX_HOOK_LIMIT','At most 32 inbound webhooks may be active in a workspace.');
+    if((await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${wid} AND NOT paused AND id<>${except} AND (event_types='[]')=${routeOnly} LIMIT 1 OFFSET ${routeOnly?499:31}`)).rowCount)throw new ApiError(409,'MAILBOX_HOOK_LIMIT','At most 32 subscribed and 500 route-only webhooks may be active.');
   };
   const redeliver=(wid:string,hook:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND webhook_id=${hook} AND ${condition} RETURNING *) INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
   const checkScope = (ids: string[] | null, types: string[]) => {
     if (ids !== null && types.includes('message.stored')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'message.stored requires a workspace webhook without an addressIds filter.', 'addressIds');
   };
 
-  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret is returned once.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string() }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret is returned once.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string(),verificationToken:z.string().optional() }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
     const value = admin(c), input = c.req.valid('json');
     const mailboxIds = input.addressIds;
     checkScope(mailboxIds, input.eventTypes);
     const webhookId = id('mwh'), secret = webhookSecret(), binding = webhookSecretBinding(value.workspaceId, webhookId);
-    const values={ id: webhookId, workspaceId: value.workspaceId, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, binding) };
-    const [row]=await c.env.db.transaction(async tx=>{if(!input.paused)await hookCapacity(tx,value.workspaceId);return tx.insert(mailboxWebhooks).values(values).returning();});
+    const format=input.format??'bane',junk=input.junk??(format==='inbound'?'include':'skip');
+    if(format==='inbound' && input.eventTypes.some(t=>!['message.received','message.junk'].includes(t)))throw new ApiError(422,'INVALID_EVENT_SCOPE','Inbound format supports received or junk mail only.');
+    const values={ key:input.key,name:input.name,format,junk,include:input.include,timeoutSeconds:input.timeoutSeconds,retryAttempts:input.retryAttempts??(format==='inbound'?3:10),id: webhookId, workspaceId: value.workspaceId, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, binding) };
+    const [row]=await c.env.db.transaction(async tx=>{if(!input.paused)await hookCapacity(tx,value.workspaceId,!input.eventTypes.length);if(junk==='include'||!input.eventTypes.length)await tx.execute(sql`INSERT INTO mail_routing_state(workspace_id) VALUES(${value.workspaceId}) ON CONFLICT DO NOTHING`);return tx.insert(mailboxWebhooks).values(values).returning();});
     c.header('Cache-Control', 'no-store');
-    return c.json({ ...await webhookView(c, row!), secret }, 201);
+    return c.json({ ...await webhookView(c, row!), secret,...(format==='inbound'?{verificationToken:await hmac(secret,'inbound-verification-token')}:{}) }, 201);
   });
   app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags, responses: { 200: response(z.object({ data: z.array(InboundWebhookSchema) }).openapi('InboundWebhookList')), ...errors } }), async c => {
     const value = readAccess(c);
@@ -690,21 +696,38 @@ function registerInboundWebhooks(app: App) {
       const { row } = await getWebhook(c, webhookId, admin(c), tx);
       checkScope(mailboxIds === undefined ? row.mailboxIds : mailboxIds, input.eventTypes ?? row.eventTypes);
       const eventTypes = input.eventTypes && [...new Set(input.eventTypes)];
+      const format=input.format??row.format,junk=input.junk??(input.format && input.format!==row.format?(format==='inbound'?'include':'skip'):row.junk);
+      if(format==='inbound' && (eventTypes??row.eventTypes).some(t=>!['message.received','message.junk'].includes(t)))throw new ApiError(422,'INVALID_EVENT_SCOPE','Inbound format supports received or junk mail only.');
+      if(!(input.paused??row.paused) && (row.paused || !!row.eventTypes.length!==!!(eventTypes??row.eventTypes).length))await hookCapacity(tx,row.workspaceId,!(eventTypes??row.eventTypes).length,row.id);
+      if(junk==='include' || !(eventTypes??row.eventTypes).length)await tx.execute(sql`INSERT INTO mail_routing_state(workspace_id) VALUES(${row.workspaceId}) ON CONFLICT DO NOTHING`);
       if(row.paused && input.paused===false){
-        await hookCapacity(tx,row.workspaceId);
         await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${row.workspaceId},jsonb_build_object('hook',${row.id}::text))`);
         c.get('actor').wakeJobs=1;
       }
       const url = input.url ? webhookUrl(c.env, input.url) : undefined;
-      const [result] = await tx.update(mailboxWebhooks).set({ mailboxIds, description: input.description, paused: input.paused, url, eventTypes, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
+      const [result] = await tx.update(mailboxWebhooks).set({ key:input.key,name:input.name,format,junk,include:input.include,timeoutSeconds:input.timeoutSeconds,retryAttempts:input.retryAttempts,mailboxIds, description: input.description, paused: input.paused, url, eventTypes, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });
     return c.json(await webhookView(c, updated), 200);
   });
-  app.openapi(createRoute({ method: 'delete', path: `${path}/{id}`, operationId: 'deleteInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(Ok), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'delete', path: `${path}/{id}`, operationId: 'deleteInboundWebhook', security, tags, request: { params: IdParam,query:z.object({detach:z.enum(['true','false']).optional()}) }, responses: { 200: response(Ok), ...errors } }), async c => {
     const { row } = await getWebhook(c, c.req.valid('param').id);
-    await c.env.db.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id, row.id));
+    await c.env.db.transaction(async tx=>{await detachDestination(tx,c,row.workspaceId,row.id);await tx.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id,row.id));});
     return c.json({ ok: true as const }, 200);
+  });
+  app.openapi(createRoute({method:'post',path:`${path}/{id}/test`,operationId:'testInboundWebhook',security,tags,request:{params:IdParam,body:json(z.object({format:hookOptions.format.optional(),overrideUrl:z.string().max(2048).optional()}).strict())},responses:{200:response(z.object({statusCode:z.number().int()})),...errors}}),async c=>{
+    const {row}=await getWebhook(c,c.req.valid('param').id),input=c.req.valid('json'),url=webhookUrl(c.env,input.overrideUrl??row.url),eid=id('mev');
+    const {sendInboundWebhook}=await import('./inbound-webhook.js');
+    // Never send this endpoint's credentials (including custom headers) to an override.
+    const alternate=url!==row.url,binding=webhookSecretBinding(row.workspaceId,row.id);
+    const res=await sendInboundWebhook(c.env,row.workspaceId,{url,name:row.name??row.id,format:input.format??row.format,include:row.include,timeout_seconds:row.timeoutSeconds,delivery_id:'test',event_id:eid,generation:0,synthetic:true,webhook_id:row.id,encrypted_secret:alternate?await encrypt(c.env,webhookSecret(),binding):row.encryptedSecret,encrypted_headers:alternate?null:row.encryptedHeaders,payload:{id:eid,type:'message.received',cursor:'0',createdAt:new Date().toISOString(),addressId:null,threadId:'thr_example',messageId:'msg_example',data:{test:true}}},true);
+    return c.json({statusCode:res.status},200);
+  });
+  app.openapi(createRoute({method:'post',path:'/v1/inbound/messages/{id}/redeliver',operationId:'redeliverInboundMessage',security,tags,request:{params:IdParam,body:json(z.object({destination:z.string().max(128).optional()}).strict())},responses:{202:response(z.object({queued:z.number().int()})),...errors}}),async c=>{
+    const {workspaceId:w}=admin(c),mid=c.req.valid('param').id,{destination}=c.req.valid('json');
+    const q=await c.env.db.execute(sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries d SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() FROM mailbox_webhooks h WHERE d.workspace_id=${w} AND d.routed AND h.workspace_id=d.workspace_id AND h.id=d.webhook_id AND NOT h.paused AND d.payload->>'messageId'=${mid} AND d.status<>'pending' ${destination?sql`AND d.webhook_id=${destination}`:sql``} RETURNING d.*)
+      INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`);
+    c.get('actor').wakeJobs=q.rowCount??0;return c.json({queued:q.rowCount??0},202);
   });
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/rotate-secret`, operationId: 'rotateInboundWebhookSecret', security, tags, request: { params: IdParam }, responses: { 200: response(z.object({ secret: z.string() }).openapi('InboundWebhookRotatedSecret')), ...errors } }), async c => {
     const { value, row } = await getWebhook(c, c.req.valid('param').id); const secret = webhookSecret();
