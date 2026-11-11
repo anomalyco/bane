@@ -4641,11 +4641,15 @@ describe('Operational configuration and public event boundaries', () => {
   });
 
   test('SNS charges only certificate misses against the trusted peer budget', async t => {
-    await simulatedSesFixture(t, async ({db, local}) => t.test('mocked certificate origin', async t => {
+    await simulatedSesFixture(t, async ({db, local, runtime}) => t.test('mocked certificate origin', async t => {
       const { admissionPeer } = await import('./src/core.js');
       const host=`https://sns.${REGION}.amazonaws.com/`, positive=snsCertName(), negative=snsCertName();
-      const pem=await selfSignedPem(generateKeyPairSync('rsa',{modulusLength:2048}).privateKey);
+      const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+      const pem=await selfSignedPem(privateKey);
+      let hold=false, active=0, started!:()=>void, release!:()=>void;
+      const allStarted=new Promise<void>(resolve=>{started=resolve;}), gate=new Promise<void>(resolve=>{release=resolve;});
       const transport=t.mock.method(globalThis,'fetch',async(input:URL)=>{
+        if(hold){ if(++active===4) started(); await gate; }
         assert.equal(input.origin+'/',host);return input.href===host+positive ? new Response(pem) : new Response(null,{status:404});
       });
       const wire=t.mock.method(db,'query');
@@ -4663,7 +4667,34 @@ describe('Operational configuration and public event boundaries', () => {
       error(await check(snsCertName(),'2001:db8:124::1'),403,'SNS_INVALID_CERTIFICATE');
       assert.equal(transport.mock.callCount(),61);assert.equal(wire.mock.callCount(),0);wire.mock.restore();
       t.diagnostic('SNS: 200 cold certificate paths in one /64, 60 mocked fetches, 0 SQL');
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,'111122223333','ready',$2)`,[REGION,envelope.TopicArn]);
+      hold=true;
+      const fresh=()=>check(snsCertName(),'2001:db8:124::1');
+      const pending=Array.from({length:4},fresh);
+      try {
+        await allStarted;
+        error(await fresh(),429,'SNS_CERTIFICATE_RATE_LIMITED');
+        const fields={Message:'fixture',MessageId:'cached',SubscribeURL:host,Timestamp:envelope.Timestamp,Token:'fixture',TopicArn:envelope.TopicArn,Type:'UnsubscribeConfirmation'};
+        const signature=Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(fields).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64');
+        ok(await local('POST','/v1/events/ses',{...fields,SignatureVersion:'2',Signature:signature,SigningCertURL:host+positive}),202);
+        error(await check(negative),403,'SNS_INVALID_CERTIFICATE');
+        assert.equal(transport.mock.callCount(),65,'Only four additional cold fetches; signed cache hit still succeeds');
+      } finally { release(); await Promise.all(pending); }
     }));
+  });
+
+  test('SNS isolate limits simultaneous and rolling cold lookups independently of peer budgets', async () => {
+    const { SnsCertMissBudget } = await import('./src/operations.js');
+    let now=0, calls=0, finish!:()=>void;
+    const gate=new Promise<void>(resolve=>{finish=resolve;}), budget=new SnsCertMissBudget(()=>now);
+    const pending=Array.from({length:4},()=>budget.run(async()=>{calls++; await gate;}));
+    const lookup=()=>budget.run(async()=>{calls++;});
+    await assert.rejects(lookup(),{code:'SNS_CERTIFICATE_RATE_LIMITED'});
+    finish(); await Promise.all(pending);
+    for(let i=4;i<96;i++) await lookup();
+    now=59_999; await assert.rejects(lookup(),{code:'SNS_CERTIFICATE_RATE_LIMITED'});
+    assert.equal(calls,96); now++; await lookup(); assert.equal(calls,97);
   });
 
   test('MOCK REDIRECT TRANSPORT: SNS certificates and webhook delivery refuse redirects and retain retryable failures', async t => {

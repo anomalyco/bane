@@ -1036,20 +1036,23 @@ function allowLocalCertMiss(peer: string) {
   certMissPeers.set(peer, { count: 1, until: now + 60_000 });
   return true;
 }
-async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
-  const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
-  const trusted = snsHost(envelope);
-  const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
-  const signature = Buffer.from(envelope.Signature, 'base64');
-  if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
-  const fields = envelope.Type === 'Notification' ? ['Message', 'MessageId', ...(envelope.Subject !== undefined ? ['Subject'] : []), 'Timestamp', 'TopicArn', 'Type'] : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
-  const values = envelope as Record<string, unknown>;
-  if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
-  const cached = snsCertificates.get(url.href);
-  let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
-  if (!cert) {
-    if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
-    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw new ApiError(429, 'SNS_CERTIFICATE_RATE_LIMITED', 'Too many SNS certificate lookups from this connection. Retry after one minute.', undefined, true);
+// Public certificates rotate infrequently. Reserve synchronously after the
+// prefix check and before fetch; never queue waiters or share request I/O.
+const certMissLimited = () => new ApiError(429, 'SNS_CERTIFICATE_RATE_LIMITED', 'Too many SNS certificate lookups. Retry after one minute.', undefined, true);
+export class SnsCertMissBudget {
+  private starts: number[] = [];
+  private active = 0;
+  constructor(private readonly clock = () => performance.now()) {}
+  async run<T>(lookup: () => Promise<T>) {
+    const now=this.clock();
+    while (this.starts.length && this.starts[0]! <= now - 60_000) this.starts.shift();
+    if (this.active >= 4 || this.starts.length >= 96) throw certMissLimited();
+    this.active++; this.starts.push(now);
+    try { return await lookup(); } finally { this.active--; }
+  }
+}
+const isolateCertMissBudget = new SnsCertMissBudget();
+async function fetchSnsCert(url: URL, certificateTimeout: number) {
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
@@ -1063,7 +1066,23 @@ async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) 
       log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true);
     }
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
-    try { cert = new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
+    try { return new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
+}
+async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
+  const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
+  const trusted = snsHost(envelope);
+  const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
+  const signature = Buffer.from(envelope.Signature, 'base64');
+  if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
+  const fields = envelope.Type === 'Notification' ? ['Message', 'MessageId', ...(envelope.Subject !== undefined ? ['Subject'] : []), 'Timestamp', 'TopicArn', 'Type'] : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
+  const values = envelope as Record<string, unknown>;
+  if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
+  const cached = snsCertificates.get(url.href);
+  let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
+  if (!cert) {
+    if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
+    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw certMissLimited();
+    cert=await isolateCertMissBudget.run(() => fetchSnsCert(url,certificateTimeout));
   }
   if (Date.now() < Date.parse(cert.validFrom) || Date.now() > Date.parse(cert.validTo) || cert.publicKey.asymmetricKeyType !== 'rsa') throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is expired or invalid.');
   if (!cached || cached.expiresAt <= Date.now()) {
