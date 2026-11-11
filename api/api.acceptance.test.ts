@@ -2430,6 +2430,13 @@ describe('Hosted MCP OAuth and tools', () => {
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
+      const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
+      for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
+      const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
+      error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
+      assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,url);ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+    });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
@@ -7789,6 +7796,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         );
       });
       const both = await route(box.address, ['inbox:support', 'webhook:support-hook'], 'support');
+      await t.test('routing H1: all twelve owned addresses receive the message, independent of the extra-destination limit',async()=>{
+        const owners=[];for(let i=0;i<12;i++)owners.push(await call('POST','/v1/inbound/addresses',{address:`owner${i}@receive.example`},201));
+        const recipients=owners.map(b=>b.address),msg=await ingest('many-owners',recipients);
+        assert.equal((await db.query('SELECT FROM mailbox_messages WHERE message_id=$1',[msg.id])).rowCount,12);
+        assert.equal((await db.query("SELECT FROM mailbox_events WHERE message_id=$1 AND type='message.received'",[msg.id])).rowCount,12);
+        await route('extra-a@receive.example',owners.slice(0,10).map(b=>b.id));await route('extra-b@receive.example',owners.slice(9).map(b=>b.id));
+        const cap=await ingest('extra-limit',['extra-a@receive.example','extra-b@receive.example']);assert.equal((await db.query("SELECT FROM mail_unrouted WHERE message_id=$1 AND address='extra-b@receive.example'",[cap.id])).rowCount,1);
+      });
       let received: Json;
       await t.test(
         'routing: support@ route delivers to the inbox and the webhook once, deduplicated with an addressIds subscription',

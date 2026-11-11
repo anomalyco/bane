@@ -102,6 +102,7 @@ const RoutedRecipient = z
     route: z.string().nullable().describe('Route ID; null for an address, an address wildcard rule or the domain default.'),
     inboxes: z.array(z.string()),
     webhooks: z.array(z.string()),
+    limited:z.literal(true).optional().describe('Fan-out was capped. The recipient is also recorded as unrouted.'),
     dropped: z.boolean(),
     junk: z.boolean(),
     domainDefault: z.enum(['store', 'create_address']).describe('The domain catch-all setting, used when tier is default.'),
@@ -292,6 +293,7 @@ export async function detachDestination(tx: DbExecutor, c: Ctx, w: string, desti
       'REFERENCED',
       `Routes for ${using.join(', ')}${using.length === 3 ? ' and more' : ''} deliver to ${destination}. Delete with ?detach=true to remove it from those routes too, or change the routes first.`,
     );
+  if (['agentToken','mcp'].includes(c.get('actor').credential??''))throw fail(403,'ADMIN_REQUIRED','Delegated credentials cannot detach route destinations.');
   const routes = await listRoutes(tx, w);
   await save(
     tx,

@@ -58,7 +58,7 @@ function resolve(input: RoutingInput, address: string): Resolved {
 }
 
 export function matchRouting(input: RoutingInput, addresses: string[], junk: boolean, dmarc: string, received: string, now = Date.now()) {
-  const inboxes = new Set<string>(),
+  const extraInboxes = new Set<string>(),
     webhooks = new Set<string>(),
     at = Date.parse(received);
   const receives = (box: NonNullable<RoutingInput['boxes']>[string]) =>
@@ -69,9 +69,12 @@ export function matchRouting(input: RoutingInput, addresses: string[], junk: boo
       mine = { inboxes: [] as string[], webhooks: [] as string[] },
       warnings: string[] = [];
     // Each message reaches a bounded number of destinations across all of its recipients.
+    let limited=false;
     const take = (kind: 'inboxes' | 'webhooks', id: string) => {
-      const [seen, limit] = kind === 'inboxes' ? [inboxes, MESSAGE_INBOX_LIMIT] : [webhooks, MESSAGE_WEBHOOK_LIMIT];
-      if (!seen.has(id) && seen.size >= limit) return warnings.push(`${id} skipped: a message reaches at most ${limit} ${kind}.`);
+      // An implicit address (including its aliases, wildcard rules and plus base) is not fan-out.
+      if(kind==='inboxes' && (!route?.id || id===owner?.id)){mine.inboxes.push(id);return;}
+      const [seen, limit] = kind === 'inboxes' ? [extraInboxes, MESSAGE_INBOX_LIMIT] : [webhooks, MESSAGE_WEBHOOK_LIMIT];
+      if (!seen.has(id) && seen.size >= limit) {limited=true;warnings.push(`${id} skipped: fan-out is limited to ${limit} extra ${kind}.`);return;}
       seen.add(id);
       mine[kind].push(id);
     };
@@ -92,6 +95,7 @@ export function matchRouting(input: RoutingInput, addresses: string[], junk: boo
       tier,
       route: route?.id ?? null,
       ...mine,
+      ...(limited?{limited:true as const}:{}),
       dropped: to === 'drop',
       junk,
       domainDefault: input.hosts?.[address.split('@')[1]!]?.default === 'create_mailbox' ? ('create_address' as const) : ('store' as const),
