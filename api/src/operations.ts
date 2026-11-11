@@ -111,7 +111,7 @@ export function webhookUrl(runtime: Pick<Runtime, 'config'>, value: string) {
 }
 const hookTimeouts=new Map<string,{count:number;until:number}>();
 /** The one outbound transport for sending and inbound webhooks: no redirects, five-second budget, response bodies discarded. */
-export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string) {
+export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string, timeoutSeconds=5) {
   const key=await digest(binding+'\n'+url),prior=hookTimeouts.get(key);
   if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString());
   const custom = await readWebhookHeaders(runtime, encryptedHeaders, binding);
@@ -119,16 +119,16 @@ export async function postWebhook(runtime: Runtime, url: string, headers: Record
   for (const { name, value } of custom.headers) if (!reservedHeader.test(name)) merged.set(name, value);
   for (const [name, value] of Object.entries(headers)) merged.set(name, value);
   merged.set('Content-Type', 'application/json');
-  const init = { method: 'POST' as const, headers: Object.fromEntries(merged), body, signal: AbortSignal.timeout(5000) };
+  const init = { method: 'POST' as const, headers: Object.fromEntries(merged), body, signal: AbortSignal.timeout(timeoutSeconds*1000) };
   try {
     const result=runtime.webhookFetch?await runtime.webhookFetch(url,init):await fetch(url,{...init,redirect:'manual'});
     if(result instanceof Response) await result.body?.cancel();
-    hookTimeouts.delete(key);return {status:result.status};
+    hookTimeouts.delete(key);return {status:result.status,retryAfter:result instanceof Response?result.headers.get('retry-after'):result.retryAfter};
   }catch(error){
     if(init.signal.aborted || error instanceof Error && error.name==='TimeoutError'){
       const last=hookTimeouts.get(key), count=1+(last && last.until>Date.now()?last.count:0);
       if(!last && hookTimeouts.size>=1024)hookTimeouts.delete(hookTimeouts.keys().next().value!);
-      hookTimeouts.set(key,{count,until:Date.now()+30000});
+      hookTimeouts.set(key,{count,until:Date.now()+30000+timeoutSeconds*1000});
     }
     throw error;
   }

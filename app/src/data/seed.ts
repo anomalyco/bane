@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, MailboxKey, InboundWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { MailRoute, AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, MailboxKey, InboundWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -28,6 +28,7 @@ export interface DemoState {
   mailboxThreads?: MailboxThreadDetail[]
   mailboxKeys?: MailboxKey[]
   mailboxWebhooks?: (InboundWebhook & { deliveries: MailboxWebhookDelivery[] })[]
+  mailRoutes?: { version: number; routes: MailRoute[] }
   /** Inbound message ID → every receiving address it is visible through. Unlisted messages belong to their own mailboxId. */
   inboundLinks?: Record<string, string[]>
   inboundIdempotency?: Record<string, { body: string; result: unknown }>
@@ -53,6 +54,11 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
   }
 }
 
+export function demoRoutes(now = Date.now()): NonNullable<DemoState['mailRoutes']> {
+  const at = new Date(now - 6 * 24 * 3_600_000).toISOString()
+  const route = (id: string, match: string, to: MailRoute['to']): MailRoute => ({ id, key: null, match, to, enabled: true, subaddresses: true, note: '', createdAt: at })
+  return { version: 3, routes: [route('rte_support', 'support@mail.acme.com', ['mbx_support', 'mwh_agent']), route('rte_replies', 'reply+*@mail.acme.com', ['mwh_agent']), route('rte_noreply', 'noreply@mail.acme.com', 'drop')] }
+}
 export function demoMailboxAccess(now = Date.now()) {
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
   const keys: MailboxKey[] = [
@@ -60,7 +66,7 @@ export function demoMailboxAccess(now = Date.now()) {
     { id: 'mbk_triage', name: 'Triage reader', prefix: 'bane_mbx_8c1d07', addressIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
   ]
   const delivery = (id: string, hours: number, status: MailboxWebhookDelivery['status'], code: number | null, attempts = 1): MailboxWebhookDelivery => ({ id, webhookId: 'mwh_agent', eventId: `mev_${id}`, status, attemptCount: attempts, lastStatusCode: code, lastError: status === 'failed' ? 'WEBHOOK_HTTP_ERROR' : null, createdAt: ago(hours), updatedAt: ago(hours) })
-  const webhooks = [
+  const webhooks: NonNullable<DemoState['mailboxWebhooks']> = [
     { id: 'mwh_agent', url: 'https://agents.acme.com/hooks/mail', description: 'Support agent runtime', eventTypes: ['message.received', 'message.bounced'] as InboundWebhook['eventTypes'], addressIds: ['mbx_support'], paused: false, headers: [{ name: 'Authorization', hint: '••••7f3a', updatedAt: ago(48) }, { name: 'X-Agent-Tenant', hint: '••••', updatedAt: ago(48) }], createdAt: ago(20 * 24), updatedAt: ago(48), deliveries: [delivery('d1', 0.2, 'delivered', 200), delivery('d2', 1.5, 'delivered', 200), delivery('d3', 5, 'failed', 503, 6), delivery('d4', 27, 'delivered', 204)] },
     { id: 'mwh_audit', url: 'https://audit.acme.com/mail-events', description: 'Audit log', eventTypes: ['message.received', 'message.sent', 'message.delivered', 'thread.updated'] as InboundWebhook['eventTypes'], addressIds: null, paused: true, headers: [], createdAt: ago(9 * 24), updatedAt: ago(9 * 24), deliveries: [] },
   ]

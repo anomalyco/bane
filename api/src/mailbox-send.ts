@@ -10,7 +10,8 @@ import { regionalSender, regionalSending, unverifiedSender, verifiedClaim } from
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
-import { assertMailboxKey,readableMailboxKey,sentAttachmentKey, mailboxS3 } from './mailbox-setup.js';
+import { hostedMailBucket, readMailBytes, sentMailKey, withMailObjects } from './mail-objects.js';
+import { readableMailboxKey } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
 import { decodeBase64 } from './outbound-content.js';
@@ -41,17 +42,20 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
       const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},decodeBase64(item.content,'attachments')));
     } else if(item.id.startsWith('matt_')){
-      const [{ GetObjectCommand }, { storeAttachmentBytes }] = await wrapModuleLoad(() => Promise.all([import('@aws-sdk/client-s3'), import('./sending.js')]));
+      const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
         .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`coalesce(${mailMessages.verdicts}->>'virus',CASE WHEN ${mailMessages.direction}='outbound' THEN 'PASS' END)='PASS'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
-      const s3=await mailboxS3(runtime,scope.workspaceId,file.region,file.file.bucket);
       let bytes:Uint8Array;
       try {
-        if(file.file.sourceId) await archiveMailboxFiles(runtime,scope.workspaceId,file.file.messageId,s3);
-        const key=await readableMailboxKey(runtime,scope.workspaceId,file.region,file.file.bucket,file.file.storageKey,'att',runtime.db,s3);
-        const object=await s3.send(new GetObjectCommand({Bucket:file.file.bucket,Key:key}));bytes=await object.Body!.transformToByteArray();
-      } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3.destroy();}
+        if(file.file.sizeBytes>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','The attachment is too large.');
+        bytes=await withMailObjects(runtime,scope.workspaceId,file.region,file.file.bucket,async(objects,s3)=>{
+          if(file.file.sourceId) await archiveMailboxFiles(runtime,scope.workspaceId,file.file.messageId,s3);
+          const key=s3 ? await readableMailboxKey(runtime,scope.workspaceId,file.region!,file.file.bucket,file.file.storageKey,'att',runtime.db,s3) : file.file.storageKey;
+          const object=await objects.get(key);if(!object)throw new Error('Missing attachment');
+          return readMailBytes(object,file.file.sizeBytes,MAX_TOTAL_ATTACHMENT_BYTES);
+        });
+      } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);}
       out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
     } else {
       const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.id,item.id)));
@@ -72,13 +76,12 @@ export async function archiveMailboxFiles(runtime:Runtime,wid:string,messageId:s
   if(!rows.length)return;
   const {region,file:first}=rows[0]!;
   if(!region || rows.some(r=>r.file.bucket!==first.bucket))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Inconsistent storage binding.');
-  const [{ PutObjectCommand }, { verifiedAttachment }, s3] = await Promise.all([wrapModuleLoad(() => import('@aws-sdk/client-s3')), wrapModuleLoad(() => import('./sending.js')), client ? Promise.resolve(client) : mailboxS3(runtime,wid,region,first.bucket)]);
-  try {for(const {file,source} of rows){
-    assertMailboxKey(wid,file.storageKey,'att');
+  const {verifiedAttachment}=await wrapModuleLoad(()=>import('./sending.js'));
+  await withMailObjects(runtime,wid,region,first.bucket,async objects=>{for(const {file,source} of rows){
     if(!ownsUpload(wid,source) || source.checksum!==file.sha256)throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Invalid archive source.');
     const bytes=await verifiedAttachment(runtime,source);
-    await s3.send(new PutObjectCommand({Bucket:file.bucket,Key:file.storageKey,ContentType:file.contentType,Body:bytes}));
-  }} finally{if(!client)s3.destroy();}
+    await objects.put(file.storageKey,bytes,file.contentType);
+  }},{client});
   await runtime.db.execute(sql`WITH copied AS (UPDATE mail_attachments SET source_attachment_id=NULL WHERE workspace_id=${wid} AND message_id=${messageId} AND source_attachment_id IS NOT NULL RETURNING id)
     DELETE FROM sending_attachment_links l USING copied c WHERE l.workspace_id=${wid} AND l.owner_type='mailbox' AND l.owner_id=c.id`);
 }
@@ -113,7 +116,11 @@ export type OutgoingMessage = {
   subject: string; text?: string; html?: string; attachments: ResolvedAttachment[];
   fromName?: string; region?: string; tracking?: boolean; screen?: boolean;
   threadId?: string; inReplyTo: string | null; references: string[]; autoSubmitted?: 'auto-generated' | 'auto-replied'; headers: { name: string; value: string }[];
+  /** Bane-authored mail carrying a single-use capability (fwd_…). Every workspace-visible copy withholds it; only the sent message has it. */
+  sealed?: boolean;
 };
+/** Withholds single-use capabilities from stored, workspace-visible copies of sealed mail. */
+export const sealCapabilities = (value: string) => value.replace(/fwd_[0-9a-f]{64}/g, '[link withheld: only the recipient can use it]');
 
 /** Enforces per-mailbox limits and loop guards. Caller holds the mailbox row lock. */
 async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
@@ -148,15 +155,22 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const [locked] = await tx.select({box:mailboxes,replyAuthors:message.threadId ? sql<string[]>`ARRAY(
     SELECT DISTINCT m.from_address FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=l.workspace_id
     WHERE l.workspace_id=${message.scope.workspaceId} AND l.mailbox_id=${message.mailbox.id} AND l.thread_id=${message.threadId}
-      AND l.direction='inbound' AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
+      AND l.direction='inbound' AND (mailboxes.kind<>'inbox' OR l.reply_author_verified) AND l.held_reason IS NULL AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
       AND m.from_address=ANY(${sql.param(recipients.map(r=>r.toLowerCase()))}::text[]))` : sql<null>`NULL`
   }).from(mailboxes).where(eq(mailboxes.id, message.mailbox.id)).for('no key update');
   const current = locked?.box;
   if (!current) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
   message = { ...message, mailbox: current };
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
+  if(current.kind==='inbox'){
+    if(!message.threadId)throw new ApiError(422,'EPHEMERAL_REPLY_ONLY','An ephemeral inbox cannot start a thread.');
+    if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
+    if(!recipients.every(r=>locked.replyAuthors?.includes(r.toLowerCase())))throw new ApiError(403,'RECIPIENT_NOT_ALLOWED','Replies may go only to authors in this inbox and thread.');
+  }
   await enforceLimits(tx, message);
-  const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN p.inbound_bucket ELSE r.bucket END FROM provider_connections c
+  // Shared-pool archives follow the hosted mail store; inbox archives use R2 whenever it is bound.
+  const hostedSentBucket=hostedMailBucket(runtime,current.kind==='inbox'?'ephemeral':'default');
+  const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN ${hostedSentBucket ? sql`${hostedSentBucket}::text` : sql`p.inbound_bucket`} ELSE r.bucket END FROM provider_connections c
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND ${connectionReady(sql`c`)})` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
@@ -169,7 +183,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
-    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
+    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentMailKey(message.scope.workspaceId,domain.bucket!,current.kind==='inbox'?current.id:null,messageRowId,attachmentId)};
   }));
   const references = referencesHeader(message.references);
   const headers = [
@@ -180,17 +194,18 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
   const { queueMailboxEmail } = await wrapModuleLoad(() => import('./sending.js'));
-  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen }, locked.replyAuthors);
+  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
   const now = new Date().toISOString();
   let threadId = message.threadId;
   if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
   await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${now}::timestamptz)` }).where(eq(mailThreads.id, threadId));
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
+    lifecycle:current.kind==='inbox'?'ephemeral':'default',
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
     inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,
-    sentAt: now, receivedAt: now, text: message.text ?? (message.html ? htmlToPlain(message.html) : null), html: message.html ?? null, snippet: snippetOf(message.text, message.html),
+    sentAt: now, receivedAt: now, ...(() => { const seal = (v: string) => message.sealed ? sealCapabilities(v) : v; const text = message.text ?? (message.html ? htmlToPlain(message.html) : null); return { text: text === null ? null : seal(text), html: message.html ? seal(message.html) : null, snippet: seal(snippetOf(message.text, message.html)) }; })(),
     headers: headers.map(header => ({ name: header.Name, value: header.Value })), attachmentCount: files.length, status: 'queued', automated: !!message.autoSubmitted,
   }).returning();
   if(files.length){

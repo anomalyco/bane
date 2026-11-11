@@ -6,6 +6,8 @@ One project, two stacks: `dev` (AWS `905840579680`, Worker `bane-dev`) and `prod
 
 The deploy role owns the Ohio mail bucket, public access block, bucket policy and lifecycle, the inbound and feedback topics, inbound HTTPS subscription/redrive, catch-all receipt rule, DLQ and alarm. It also manages the Virginia trusted feedback topic and its two-phase publish policy. [Receiving operations](../../docs/receiving-operations.md) covers required `bane:mailControlImports`, `bane:trustedFeedbackPublish` and `bane:receivingAlarmTopicArn` settings and the one-time role policy.
 
+It also **creates** the R2 bucket for hosted received mail, `bane-<stage>-mail` (ENAM, protected), and its lifecycle rules: `d/` raw mail expires after 90 days, `e/` agent-inbox objects after 45 days as a backstop to the app’s erasure, and incomplete multipart uploads after a day. The Worker binds it as `MAIL`; see [mail-store rollout](../../docs/receiving-operations.md#mail-store-rollout-and-rollback).
+
 In addition to existing mail resources identified by the adoption inventory, each stack adopts these **10 existing resources** through the `import` options in [index.ts](index.ts), all with `protect: true`:
 
 | Owner | Resources | Import ID |

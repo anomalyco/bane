@@ -101,7 +101,7 @@ async function body(snapshot: EmailSnapshot) {
   }
   return { bodies:completeBodies([rendered,plain,raw].filter(Boolean).join('\n'),links), textHtmlOverlap:overlap(plain,rendered) };
 }
-async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
+export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number):Promise<unknown> {
   // The deadline includes reading the response body. Never retry inside a send lease.
   let response: Response;
   try {
@@ -109,7 +109,7 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
       // Never follow a redirect: the key and the message body go only to the configured endpoint. Workers
       // reject redirect: 'error', so use 'manual'; a 3xx is not ok and counts as unavailable below.
       method: 'POST', redirect: 'manual', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, state, questions: QUESTIONS }), signal: AbortSignal.timeout(DEADLINE_MS),
+      body: JSON.stringify({ model, state, questions }), signal: AbortSignal.timeout(deadline),
     });
   } catch {
     throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
@@ -118,7 +118,12 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
     await response.body?.cancel().catch(() => undefined);
     throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', `The content classifier failed with HTTP ${response.status}.`, undefined, true);
   }
-  const parsed = await response.json().catch(() => null) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
+  const reader=response.body?.getReader(); if(!reader)return null;
+  const chunks:Uint8Array[]=[];let bytes=0;for(;;){const {value,done}=await reader.read();if(done)break;if((bytes+=value.length)>32768){await reader.cancel();return null}chunks.push(value)}
+  try{return JSON.parse(Buffer.concat(chunks).toString())}catch{return null}
+}
+async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
+  const parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
   const spam = parsed?.answers?.spam?.noul;
   if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true);
   return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };

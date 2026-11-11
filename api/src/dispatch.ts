@@ -24,7 +24,7 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
     if (type === 'mailbox.webhook' || type==='mailbox.fanout' || type==='mailbox.resumeDeliveries') return (await import('./mailbox-events.js')).mailboxEventJobs[type];
     if (type === 'mailbox.syncOutbound') return async runtime=>{await (await import('./mailbox-send.js')).syncOutboundMessages(runtime);};
     if (type === 'mailbox.reconcile' || type === 'maintenance.domainDns') return (await import('./mailbox-setup.js')).mailboxSetupJobs[type];
-    if (type.startsWith('mailbox.')) return (await import('./mailbox-ingest.js')).mailboxIngestJobs[type];
+    if (type.startsWith('mailbox.') || type==='mail.deleteObjects') return (await import('./mailbox-ingest.js')).mailboxIngestJobs[type];
     if (type === 'hosted.trusted') return (await import('./trusted-pool.js')).trustedProvision;
     if (type === 'byo.verify') return (await import('./provider-connections.js')).byoVerifyJob;
     if (type === 'tenant.provision') return (await import('./provider-connections.js')).tenantJob;

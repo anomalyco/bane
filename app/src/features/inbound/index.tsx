@@ -1,3 +1,4 @@
+export { RoutingPage } from './routing'
 import { Navigate, useLocation, useParams } from 'react-router'
 
 export { InboundPage } from './threads'
@@ -17,3 +18,5 @@ export const LegacyMailboxesRedirect = () => <LegacyRedirect to="/receiving" />
 export function LegacyMailboxRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to="/receiving/inbox" address={id} /> }
 export const LegacyMailboxWebhooksRedirect = () => <LegacyRedirect to="/receiving/webhooks" />
 export function LegacyMailboxWebhookRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to={`/receiving/webhooks/${encodeURIComponent(id)}`} /> }
+
+export { AgentInboxPage, AgentInboxesPage } from './inboxes'

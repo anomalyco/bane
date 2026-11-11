@@ -84,10 +84,10 @@ export interface MailboxDomain {
   lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; addressCount: number
   subdomains?: { enabled: boolean; count: number; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
 }
-export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null }
+export interface Mailbox { id: string; key?: string | null; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null }
 export interface MailAddress { name: string | null; address: string }
 export type MailboxPermission = 'read' | 'send' | 'modify'
-export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const
+export const inboundEventTypes = ['message.received', 'message.junk', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted', 'inbox.created', 'inbox.deleted', 'message.held', 'inbox.quota_exceeded'] as const
 export type MailboxEventType = typeof inboundEventTypes[number]
 export interface MailboxKey { id: string; name: string; prefix: string; addressIds: string[] | null; permissions: MailboxPermission[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 export interface MailboxKeyInput { name: string; addressIds: string[] | null; permissions: MailboxPermission[] }
@@ -106,6 +106,22 @@ export interface MailboxMessage {
   verdicts: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
 }
 export interface MailboxThreadDetail extends MailboxThread { messages: MailboxMessage[] }
+// Agent inboxes: expiring addresses for agents and tests (`/v1/inboxes`). The ID also works as an addressId.
+export type InboxStatus = 'active' | 'expired' | 'deleting'
+export interface Inbox {
+  id: string; kind: 'inbox'; type: 'ephemeral' | 'sandbox'; address: string; domain: string; name: string | null; metadata: Record<string, unknown>; clientId: string | null
+  status: InboxStatus; createdAt: ISODate; expiresAt: ISODate; deleteAfter: ISODate; limits: { messages: number; bytes: number }
+  send: { enabled: boolean; perDay: number; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
+}
+export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; credential?: { name: string; permissions: ('read' | 'modify')[] } }
+export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
+export interface InboxMessage {
+  id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
+  held: 'quota' | 'expired' | null; attachmentCount: number; auth: { spf?: string; dkim?: string; dmarc?: string }; simulated: boolean; hiddenContent: boolean
+  extract: { codes: string[]; links: { text: string; href: string; mismatch: boolean }[] }
+}
+export interface InboxMessageDetail extends InboxMessage { text: string; replyText: string; html: string | null; attachments: { id: string; filename: string; contentType: string; size: number; url: string | null; expiresAt: ISODate | null }[] }
+export interface InboxMessagePage { data: InboxMessage[]; cursor: string; hasMore: boolean }
 // Inbound is thread-first: a conversation can be visible through several receiving addresses.
 export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
@@ -132,8 +148,17 @@ export interface InboundThreadInput { addressId: string; to: string[]; subject: 
 export interface WebhookHeaderView { name: string; hint?: string; updatedAt?: ISODate }
 /** Omitted on update to keep the current headers; any list replaces them all, and [] removes them. */
 export interface WebhookHeaderInput { name: string; value: string }
-export interface InboundWebhook { id: string; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; createdAt: ISODate; updatedAt: ISODate }
-export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; headers?: WebhookHeaderInput[] }
+export type InboundWebhookFormat = 'bane' | 'inbound'
+export interface InboundWebhook { id: string; key?: string | null; name?: string | null; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include'; createdAt: ISODate; updatedAt: ISODate }
+/** eventTypes [] is a route-only webhook: it gets only the mail a route sends to it. */
+export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; headers?: WebhookHeaderInput[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include' }
+/** A recipient → destinations rule. to: [] keeps mail without an inbox; 'drop' discards it. */
+export interface MailRoute { id: string; key: string | null; match: string; to: string[] | 'drop'; enabled: boolean; subaddresses: boolean; note: string; createdAt: ISODate }
+export interface MailRouteInput { match: string; to: string[] | 'drop'; enabled?: boolean }
+export type RouteTier = 'exact' | 'address' | 'pattern' | 'subaddress' | 'catchall' | 'default'
+export interface RoutedRecipient { address: string; tier: RouteTier; route: string | null; inboxes: string[]; webhooks: string[]; dropped: boolean; junk: boolean; domainDefault: 'store' | 'create_address'; warnings: string[] }
+export interface RoutingTestResult { version: number; unsaved: boolean; message: { from: string | null; subject: string | null } | null; recipients: RoutedRecipient[] }
+export interface RoutingTestInput { to?: string[]; raw?: string; junk?: boolean }
 export interface ReceivedEmail {
   id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string
   receivedAt: ISODate; attachmentCount: number; spam: boolean; region: RegionId | null
@@ -168,6 +193,8 @@ export class ApiError extends Error {
   readonly text: string
   /** The code and request ID, for support and logs. */
   readonly reference: string
+  /** Every problem, when the API reports several (ritual diagnostics). */
+  details?: Record<string, unknown>[]
   constructor(message: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
     super(`${message} [${code}]${requestId ? ` · Request ${requestId}` : ''}`)
     this.name = 'ApiError'
@@ -206,8 +233,16 @@ export interface BaneApi {
     createKey(input: MailboxKeyInput, signal?: AbortSignal): Promise<{ key: MailboxKey; secret: string }>
     revokeKey(id: string, signal?: AbortSignal): Promise<void>
   }
+  inboxes: {
+    list(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<Inbox>>
+    get(id: string, signal?: AbortSignal): Promise<Inbox>
+    create(input: InboxInput, signal?: AbortSignal): Promise<CreatedInbox>
+    remove(id: string, signal?: AbortSignal): Promise<void>
+    messages(id: string, input: { after?: string }, signal?: AbortSignal): Promise<InboxMessagePage>
+    message(id: string, messageId: string, signal?: AbortSignal): Promise<InboxMessageDetail>
+  }
   inbound: {
-    addresses(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<InboundAddress>>
+    addresses(input: { search?: string; cursor?: string; kind?: 'address' | 'inbox' }, signal?: AbortSignal): Promise<CursorItems<InboundAddress>>
     address(id: string, signal?: AbortSignal): Promise<InboundAddress>
     createAddress(input: InboundAddressInput, signal?: AbortSignal): Promise<InboundAddress>
     updateAddress(id: string, patch: InboundAddressPatch, signal?: AbortSignal): Promise<InboundAddress>
@@ -226,6 +261,13 @@ export interface BaneApi {
     deleteWebhook(id: string, signal?: AbortSignal): Promise<void>
     rotateWebhookSecret(id: string, signal?: AbortSignal): Promise<{ secret: string }>
     webhookDeliveries(id: string, cursor?: string, signal?: AbortSignal): Promise<CursorItems<MailboxWebhookDelivery>>
+  }
+  routing: {
+    routes(signal?: AbortSignal): Promise<{ version: number; routes: MailRoute[] }>
+    createRoute(input: MailRouteInput, signal?: AbortSignal): Promise<MailRoute>
+    updateRoute(id: string, patch: Partial<MailRouteInput>, signal?: AbortSignal): Promise<MailRoute>
+    deleteRoute(id: string, signal?: AbortSignal): Promise<void>
+    test(input: RoutingTestInput, signal?: AbortSignal): Promise<RoutingTestResult>
   }
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }

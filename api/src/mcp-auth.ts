@@ -24,15 +24,19 @@ const issuerOf = (runtime: Runtime) => `${originOf(runtime)}/api/auth`;
 // Consent references persist unchanged through code exchange and refresh. A
 // two-field reference was issued in default; it must never follow a user elsewhere.
 const workspaceTag = (workspaceId: string) => workspaceId === 'default' ? '' : encodeURIComponent(workspaceId);
-const consentInWorkspace = (workspaceId: string) => eq(sql<string>`split_part(${oauthConsent.referenceId}, '|', 3)`, workspaceTag(workspaceId));
+const consentInWorkspace = (workspaceId: string) => eq(sql<string>`split_part(split_part(split_part(${oauthConsent.referenceId},'|boxes:',1),'|receiving',1), '|', 3)`, workspaceTag(workspaceId));
 function originalGrant(reference: string | null) {
+  const receiving=reference?.endsWith('|receiving')??false;if(receiving)reference=reference!.slice(0,-10);
+  const [base,boxList,...extra]=reference?.split('|boxes:')??[];
+  if(extra.length||boxList!==undefined&&!/^[A-Za-z0-9_-]{1,120}(?:,[A-Za-z0-9_-]{1,120}){0,19}$/.test(boxList))return null;
+  reference=base??null;
   const match = reference?.match(/^mcp_(v2_)?[0-9a-f-]{36}\|([^|]+)(?:\|([^|]*)(\|member)?)?$/);
   if (!match) return null;
   const legacy = !match[1];
   if (legacy && !scopeList(match[2]!).includes('bane:live')) return null;
   const values = stripLegacyScope(match[2]!).split(' ').filter(Boolean);
   if (!values.length || !values.every(value => scopes.includes(value))) return null;
-  try { return { scopes: values, legacy, workspaceId: match[3] ? decodeURIComponent(match[3]) : 'default', memberCeiling: !!match[4] }; }
+  try { return { receiving,inboxIds:boxList?boxList.split(','):null,scopes: values, legacy, workspaceId: match[3] ? decodeURIComponent(match[3]) : 'default', memberCeiling: !!match[4] }; }
   catch { return null; }
 }
 function grantPermissions(values: readonly string[]): Permission[] {
@@ -46,7 +50,7 @@ function invalidGrant(): never {
 // consent endpoint internally resumes authorize, then persists through refresh.
 // It also captures the original scope ceiling: later consent edits can only
 // reduce an existing identity, never elevate an already queued job.
-export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
+export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string,consentInboxes?:string[],receiving=false) {
   const authorizationId = crypto.randomUUID();
   const resource = resourceOf(runtime);
   return mcp({
@@ -66,7 +70,9 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
         const member = await membershipForApprovedUser(runtime.db, user.id, { multiTenant: runtime.config.multiTenant, workspaceId: consentWorkspace, bootstrapDefaultOwner: false });
         if (!member || (member.role === 'member' && requested.includes('bane:manage'))) invalidGrant();
         const tag = workspaceTag(member.workspaceId);
-        return `mcp_v2_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}`;
+        if(consentInboxes){if(member.role==='member'||!consentInboxes.length||consentInboxes.length>20||new Set(consentInboxes).size!==consentInboxes.length||consentInboxes.some(id=>!/^[A-Za-z0-9_-]{1,120}$/.test(id)))invalidGrant();
+          const found=await runtime.db.execute(sql`SELECT id FROM mailboxes WHERE workspace_id=${member.workspaceId} AND kind='inbox' AND delete_after>now() AND id=ANY(${sql.param(consentInboxes)}::text[])`);if(found.rowCount!==consentInboxes.length)invalidGrant();}
+        return `mcp_v2_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}${consentInboxes?'|boxes:'+consentInboxes.join(','):receiving?'|receiving':''}`;
       },
     },
     extensions: [{ claims: { accessToken: async ({ user, client, referenceId, scopes: requested, resources }) => {
@@ -111,12 +117,12 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'bane:manage') && policies.every(list => (list ?? scopes).includes(scope)));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const actor: Actor = { keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
-  return { actor, legacy: original.legacy, scopes: allowed, userId: row.userId, clientId: row.clientId };
+  const actor: Actor = { grantId:row.id, receivingConsent:original.receiving,keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
+  return { actor,inboxIds:original.inboxIds, legacy: original.legacy, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 
 export async function getMcpGrantActor(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
-  return (await loadGrant(runtime, keyId, db))?.actor ?? null;
+  const g=await loadGrant(runtime,keyId,db);return g&&!g.inboxIds?g.actor:null;
 }
 function deniedToken(runtime: Runtime) {
   return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bane authorization is required.' }, id: null }, {
@@ -146,7 +152,7 @@ async function verificationKey(runtime: Runtime, kid: string) {
   if (entry.expires <= now) throw new Error('No current MCP verification keys');
   return entry.keys.get(kid);
 }
-export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor) => Promise<Response>): Promise<Response> {
+export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor|import('./core.js').MailboxAccess) => Promise<Response>): Promise<Response> {
   const authorization = parseAccessTokenAuthorization(request.headers.get('authorization'));
   if (!authorization?.token || authorization.scheme === 'Unknown' || authorization.token.length > 16 * 1024) return deniedToken(runtime);
   const parts=/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{86})$/.exec(authorization.token);
@@ -159,7 +165,7 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
   } catch {return deniedToken(runtime);}
   const fingerprint=await digest(issuerOf(runtime)+'\n'+authorization.token);
   if((invalidJws.get(fingerprint)??0)>Date.now())return deniedToken(runtime);
-  let actor: Actor;
+  let actor: Actor|import('./core.js').MailboxAccess;
   try {
     const key = await verificationKey(runtime, kid);
     if (!key) return deniedToken(runtime);
@@ -191,7 +197,10 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
     const tokenScopes = stripLegacyScope(claims.scope).split(' ').filter(scope => grant.scopes.includes(scope));
     const granted = grantPermissions(tokenScopes);
     if (!granted.length) return deniedToken(runtime);
-    actor = { ...grant.actor, permissions: granted };
+    if(grant.inboxIds && await (await import('./auth.js')).chargeGrantBudget(runtime,grant.actor.workspaceId,grant.actor.keyId)>runtime.config.apiRateLimitPerMinute){
+      const limited=oauthError(429,'slow_down','The inbox approval exceeded its minute request budget.');limited.headers.set('Retry-After','60');return limited;
+    }
+    actor = grant.inboxIds?{workspaceId:grant.actor.workspaceId,keyId:grant.actor.keyId,admin:false,mailboxIds:grant.inboxIds,permissions:['read',...(granted.includes('send')||granted.includes('manage')?['send' as const]:[])]}:{ ...grant.actor, permissions: granted };
   } catch {
     log('warn', { operation: 'mcp-authorization', code: 'AUTH_UNAVAILABLE' });
     return oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.');
@@ -380,7 +389,8 @@ async function consentPage(runtime: Runtime, request: Request) {
     const params = new URLSearchParams(query); const clientId = params.get('client_id');
     if (!clientId) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
     const consentWorkspace = runtime.config.multiTenant ? form?.get('workspace') ?? undefined : undefined;
-    const auth = createAuth(runtime, { mcp: true, consentWorkspace });
+    const consentInboxes=form?.get('access')==='inboxes'?form.getAll('inbox'):undefined;
+    const auth = createAuth(runtime, { mcp: true, consentWorkspace,consentInboxes,receiving:form?.get('receiving')==='yes' });
     // This server-only call verifies Better Auth's signed/expiring OAuth query
     // before any client name, scope, redirect, or approval is displayed or used.
     await auth.api.getOAuthClientPublicPrelogin({ body: { client_id: clientId, oauth_query: query } });
@@ -419,8 +429,10 @@ async function consentPage(runtime: Runtime, request: Request) {
     const hostname = host.replace(/:\d+$/, '');
     const destination = ['localhost', '127.0.0.1', '[::1]'].includes(hostname) ? `an app on this computer (${escapeHtml(host)})` : `<strong>${escapeHtml(host)}</strong>`;
     const warning = `<p class="warn"><strong>Self-registered client.</strong> Bane has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
+    const choices=(member?.role==='member'?[]:(await runtime.db.execute<{id:string;address:string}>(sql`SELECT id,address FROM mailboxes WHERE workspace_id=${member?.workspaceId??runtime.config.workspaceId} AND kind='inbox' AND delete_after>now() ORDER BY address LIMIT 100`)).rows);
+    const inboxScope=choices.length?`<fieldset><legend>Connection scope</legend><label><input type="radio" name="access" value="workspace" checked> Workspace permissions above</label><label><input type="radio" name="access" value="inboxes"> Only selected inboxes (read, wait and permitted replies; no workspace tools)</label>${choices.map(b=>`<label><input type="checkbox" name="inbox" value="${escapeHtml(b.id)}">${escapeHtml(b.address)}</label>`).join('')}</fieldset>`:'';
     const labels = requested.filter(scope => !(requested.includes('bane:manage') && ['bane:read', 'bane:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
-    return page(`Allow ${name} to access Bane?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
+    return page(`Allow ${name} to access Bane?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}${inboxScope}<label><input name="receiving" value="yes" type="checkbox"> Include workspace receiving tools. Manage permits live handler and destination changes. Revoking this connection disables its destinations, inbox keys and ritual plan. Queued calls tied to this grant stop.</label><div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
   } catch (error) {
     if (error instanceof ApiError) return oauthError(error.status, 'access_denied', error.message);
     return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');

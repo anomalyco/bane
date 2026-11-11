@@ -36,7 +36,7 @@ const guardedLookup: LookupFunction = (hostname, options, callback) => {
 export const nodeWebhookFetch: WebhookFetch = (url, init) => new Promise((resolve, reject) => {
   const target = new URL(url);
   const req = request(target, { method: init.method, headers: init.headers, lookup: guardedLookup, signal: init.signal }, response => {
-    response.resume(); resolve({ status: response.statusCode ?? 0 });
+    response.resume(); resolve({ status: response.statusCode ?? 0,retryAfter:response.headers['retry-after'] });
   });
   req.on('error', reject);
   req.end(init.body);

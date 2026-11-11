@@ -1,6 +1,11 @@
 import { bigint, bigserial, boolean, customType, index, integer, smallint,jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
+/** Workspace-wide readers may see durable mail, but not an ended inbox's mail while GC drains. */
+export const retainedMail = () => sql`(${mailMessages.lifecycle}<>'ephemeral' OR EXISTS(
+  SELECT FROM mailbox_messages l JOIN mailboxes b ON b.id=l.mailbox_id WHERE l.message_id=${mailMessages.id}
+    AND (b.delete_after IS NULL OR b.delete_after>statement_timestamp())))`;
+
 export type MailAddress = { name: string | null; address: string };
 export type MailHeader = { name: string; value: string };
 export type MxReport = {
@@ -20,9 +25,9 @@ export type MailboxDomainStatus = 'provisioning' | 'waiting_for_mx' | 'active' |
 const catchAll = customType<{data:'create_address'|'store';driverData:'create_mailbox'|'store'}>({
   dataType: () => 'text', toDriver: v => v === 'store' ? v : 'create_mailbox', fromDriver: v => v === 'store' ? v : 'create_address',
 });
-export type MailboxPermission = 'read' | 'send' | 'modify';
+export type MailboxPermission = 'read' | 'send' | 'modify' | 'create';
 export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
-export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
+export type Verdicts = { simulated?:boolean; spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
 
 const scope = () => ({ workspaceId: text('workspace_id').notNull() });
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });
@@ -38,7 +43,7 @@ export const mailboxRegions = pgTable('mailbox_regions', {
 
 export const mailboxDomains = pgTable('mailbox_domains', {
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), name: text('name').notNull(), receivingHost:text('receiving_host'), region: text('region').notNull(),
-  status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: catchAll('catch_all').notNull().default(sql`'create_mailbox'`),
+  status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: catchAll('catch_all').notNull().default(sql`'store'`),
   mx: jsonb('mx').$type<MxReport | null>(), mxMisses:smallint('mx_misses').notNull().default(0),lastError: text('last_error'), enabledAt: ts('enabled_at'), checkedAt: ts('checked_at'),
   // Subdomains (acme.example.com) point at their receiving parent and share its SES domain.
   parentId: text('parent_id'), acceptSubdomains: boolean('accept_subdomains').notNull().default(false),
@@ -47,12 +52,13 @@ export const mailboxDomains = pgTable('mailbox_domains', {
 }, t => [unique('mailbox_domains_name').on(t.workspaceId, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.domainId).where(sql`${t.parentId} IS NULL`),uniqueIndex('mailbox_domains_receiving_host').on(t.workspaceId,t.receivingHost).where(sql`${t.receivingHost} IS NOT NULL AND ${t.status} IN ('active','provisioning')`), index('mailbox_domains_region').on(t.workspaceId, t.region, t.status)]);
 
 export const mailboxes = pgTable('mailboxes', {
-  id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),
+  id: text('id').primaryKey(), ...scope(), key:text('key'), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),
   rules: jsonb('rules').$type<string[]>().notNull().default([]), metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   origin: text('origin').$type<'api' | 'auto'>().notNull().default('api'),
   sendLimits: jsonb('send_limits').$type<Partial<SendLimits>>().notNull().default({}),
   requireDmarc: boolean('require_dmarc').notNull().default(false),
   expiresAt: ts('expires_at'),
+  kind: text('kind').$type<'inbox' | 'address'>().notNull().default('address'), deleteAfter: ts('delete_after'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 }, t => [index('mailboxes_page').on(t.workspaceId, t.id), index('mailboxes_domain').on(t.workspaceId, t.domainId)]);
 
@@ -67,6 +73,7 @@ export const mailThreads = pgTable('mail_threads', {
 });
 
 export const mailMessages = pgTable('mail_messages', {
+  lifecycle:text('lifecycle').notNull().default('default'),
   id: text('id').primaryKey(), ...scope(), direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), threadId: text('thread_id').notNull(),
   region: text('region'), domainId: text('domain_id'), sesMessageId: text('ses_message_id'), sendingEmailId: text('sending_email_id'),
   messageId: text('message_id'), inReplyTo: text('in_reply_to'), references: jsonb('references').$type<string[]>().notNull().default([]),
@@ -92,6 +99,7 @@ export const mailUnrouted = pgTable('mail_unrouted', {
 }, t => [primaryKey({ columns: [t.workspaceId, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId)]);
 
 export const mailboxMessages = pgTable('mailbox_messages', {
+  heldReason:text('held_reason'),
   mailboxId: text('mailbox_id').notNull(), messageId: text('message_id').notNull(), ...scope(), threadId: text('thread_id').notNull(),
   direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), read: boolean('read').notNull().default(false), receivedAt: ts('received_at').notNull(),
   labels: text('labels').array().notNull().default([]),
@@ -132,6 +140,7 @@ export const mailIngestTurns=pgTable('mail_ingest_turns',{workspaceId:text('work
 export const mailboxKeys = pgTable('mailbox_keys', {
   id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), hash: text('hash').notNull().unique(), prefix: text('prefix').notNull(),
   mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), permissions: jsonb('permissions').$type<MailboxPermission[]>().notNull(),
+  expiresAt: ts('expires_at'),
   createdAt: ts('created_at').notNull().defaultNow(), lastUsedAt: ts('last_used_at'), revokedAt: ts('revoked_at'),
 });
 
@@ -143,11 +152,12 @@ export const mailboxEvents = pgTable('mailbox_events', {
 export const mailboxWebhooks = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(), url: text('url').notNull(), description: text('description').notNull().default(''),
   eventTypes: jsonb('event_types').$type<string[]>().notNull(), mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), paused: boolean('paused').notNull().default(false),
+  key:text('key'),name:text('name'),format:text('format').$type<'bane'|'inbound'>().notNull().default('bane'),junk:text('junk').$type<'skip'|'include'>().notNull().default('skip'),include:jsonb('include').$type<('message'|'raw')[]>().notNull().default([]),timeoutSeconds:smallint('timeout_seconds').notNull().default(5),retryAttempts:smallint('retry_attempts').notNull().default(9),
   encryptedSecret: text('encrypted_secret').notNull(), encryptedHeaders: text('encrypted_headers'), createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
 export const mailboxWebhookDeliveries = pgTable('mailbox_webhook_deliveries', {
-  id: text('id').primaryKey(), ...scope(), webhookId: text('webhook_id').notNull(), eventSeq: bigint('event_seq', { mode: 'number' }).notNull(),
+  id: text('id').primaryKey(), ...scope(), webhookId: text('webhook_id').notNull(), eventSeq: bigint('event_seq', { mode: 'number' }),
   generation:integer('generation').notNull().default(0),payload: jsonb('payload').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'delivered' | 'failed' | 'paused'>().notNull().default('pending'),
   attemptCount: integer('attempt_count').notNull().default(0), lastStatusCode: integer('last_status_code'), lastError: text('last_error'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),

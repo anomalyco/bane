@@ -1,15 +1,17 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { receivedMailStore, withMailObjects } from './mail-objects.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
+import { matchRouting, plusBase } from './routing-match.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 import { platformHost } from './domain-claims.js';
-import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
+import { receivingPolicy,ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
-import { mailboxS3, receivedAttachmentKey, STAGING_PREFIX, workspacePrefix, refreshMailboxDns } from './mailbox-setup.js';
+import { mailboxS3, STAGING_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
@@ -23,14 +25,10 @@ const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
 
-const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
+export const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
   .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
 const verdict = (value: { status?: string } | undefined) => typeof value?.status === 'string' ? value.status : undefined;
-function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
-  const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
-  if (!dmarcPass && !(noDmarc && verdicts.dkim === 'PASS')) return false;
-  // DKIM signs the bottommost occurrence; the MIME parser reads the first Date. Reject ambiguity.
-  if (!email || !ADDRESS.test(address) || email.headers.filter(h => h.key === 'date').length !== 1) return false;
+function singleFrom(email:Email,address:string,mail:ReceivedNotification['mail']) {
   const from = email.headers.filter(h => h.key === 'from');
   const sesFrom = mail?.commonHeaders?.from;
   const matches = (value: string) => {
@@ -43,7 +41,27 @@ function authenticatedFrom(email: Email | null, address: string, mail: ReceivedN
     const display = field.slice(0,-angle.length).trim();
     return !/[()<>@,;:\\"\[\]\x00-\x1f]/.test(display) || /^"(?:[^"\\\r\n]|\\[^\r\n])*"$/.test(display);
   };
-  if (from.length !== 1 || !matches(from[0]!.value) || (sesFrom && (sesFrom.length !== 1 || !matches(sesFrom[0]!)))) return false;
+  return from.length===1 && matches(from[0]!.value) && (!sesFrom || (sesFrom.length===1 && matches(sesFrom[0]!)));
+}
+// SES authenticates domains, not display names or Reply-To. An aggregate DKIM
+// PASS cannot identify which of several differently aligned signatures passed.
+function replyAuthorVerified(email:Email|null,address:string,mail:ReceivedNotification['mail'],v:Verdicts){
+  if(!email || !ADDRESS.test(address) || !singleFrom(email,address,mail))return false;
+  if(v.dmarc==='PASS')return true;
+  const domain=address.split('@')[1],source=mail?.source?.toLowerCase();
+  if(v.spf==='PASS' && source && ADDRESS.test(source) && source.split('@')[1]===domain)return true;
+  const signatures=email.headers.filter(h=>h.key==='dkim-signature');
+  return v.dkim==='PASS' && signatures.length===1 && withinFieldLimit(signatures[0].value) && (()=>{
+    const tags=signatures[0].value.split(';').map(t=>t.trim()).filter(t=>/^d\s*=/i.test(t));
+    return tags.length===1 && /^d[ \t]*=[ \t]*([^\s]+)$/i.exec(tags[0])?.[1]?.toLowerCase()===domain;
+  })();
+}
+function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
+  const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
+  if (!dmarcPass && !(noDmarc && verdicts.dkim === 'PASS')) return false;
+  // DKIM signs the bottommost occurrence; the MIME parser reads the first Date. Reject ambiguity.
+  if (!email || !ADDRESS.test(address) || email.headers.filter(h => h.key === 'date').length !== 1) return false;
+  if(!singleFrom(email,address,mail))return false;
   const signatures = email.headers.filter(h => h.key === 'dkim-signature');
   const domain = address.split('@')[1];
   // DMARC through SPF authenticates this delivery. If it could instead be a replay of a
@@ -66,7 +84,7 @@ function authenticatedFrom(email: Email | null, address: string, mail: ReceivedN
   });
 }
 const cap = (value: string | undefined | null) => value && value.length > BODY_LIMIT ? { value: value.slice(0, BODY_LIMIT), truncated: true } : { value: value ?? null, truncated: false };
-function headersOf(email: Email | null): MailHeader[] {
+export function headersOf(email: Email | null): MailHeader[] {
   const out: MailHeader[] = []; let size = 0;
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }
   return out;
@@ -382,12 +400,13 @@ export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
 const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
-  const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config.multiTenant,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
+  const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
   if(!receipt)return;
+  if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
-  const rawKey=workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
+  const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
   const quarantine=verdicts.virus!=='PASS'?'MAILBOX_VIRUS_QUARANTINED':spam && receipt.spamPolicy==='quarantine'?'MAILBOX_SPAM_QUARANTINED':null;
@@ -400,10 +419,28 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       return;
     } finally {s3.destroy();}
   }
+  const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
+  const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
+  let plan=receipt.routing && matchRouting(receipt.routing,receipt.recipients,spam,verdicts.dmarc??'',receivedAt);
+  // Every recipient dropped by route: settle with the job and its trace, without reading S3 or storing anything.
+  if(plan?.recipients.length && !plan.grants?.length && plan.recipients.every(r=>r.dropped)){
+    s3.destroy();
+    const recorded=sql`recorded AS (UPDATE mail_receipts SET status='processed',processed_at=now(),routing=mail_routing_trace(${JSON.stringify(plan)}::jsonb) FROM settled WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
+    if(job.recordWithSettlement)job.recordWithSettlement(recorded);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${recorded} SELECT 1`);return;
+  }
+  // An address-owned envelope can nevertheless route to another inbox or just a webhook.
+  // Only retain it under e/ if every kept recipient actually delivers to its own inbox alone.
+  const owners=receipt.routing?.owners;
+  const needsDefault=plan?.recipients.some(r=>{
+    const owner=owners?.[r.address]??owners?.[plusBase(r.address)];
+    const p=receipt.routing?.programs,possible=p && [...p.attachments.filter(b=>b.target===r.address||b.target===owner?.id||r.inboxes.includes(b.target)).map(b=>p.rituals[b.ritual])].some(ir=>ir.refs.some(ref=>ref.startsWith('inbox:')&&p.refs[ref]!==owner?.id));
+    return !r.dropped && (possible || r.limited || r.inboxes.length!==1 || r.inboxes[0]!==owner?.id);
+  });
+  const store=receivedMailStore(runtime,scope.workspaceId,needsDefault?{...receipt,delivery:undefined}:receipt,s3,{messageId:messageRowId,sesMessageId});
   const readStarted=performance.now();
   let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;
   try {
-    copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
+    copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,store.rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
       const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE),
         policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
@@ -416,7 +453,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         if(reserved.rows[0]?.fits) throw new JobDeferred(new Date((Math.floor(Date.now()/3600000)+1)*3600000).toISOString());
         throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
       }
-    });
+    }, store.r2 ? store.objects : undefined);
   } catch (error) {
     s3.destroy();
     if (error instanceof JobDeferred || error instanceof ModuleLoadError || error instanceof ApiError) throw error;
@@ -428,7 +465,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const email = copied.large ? null : await parseInboundMime(raw);
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
-  const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
+
   const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
@@ -436,8 +473,6 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const references = messageIdList(email?.references);
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
-  const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
-  const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
   const verifiedFrom = !!sesTimestamp && authenticatedFrom(email, from.address, notification.mail, verdicts);
   const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
 
@@ -448,17 +483,16 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   try {
     // Stable on retry. Reopening a processed receipt strictly grows its envelope, so a
     // cleanup already tagging the old batch can never touch the newly published keys.
-    const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients])) : null;
-    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`)));
-    if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${receipt.bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
+    const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients,...(store.r2?[store.bucket]:[])])) : null;
+    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>{const id=`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`;return store.fileKey(batch!,id)}));
+    if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${store.bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
     for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);
       const attachmentId = `matt_${(await digest(`${messageRowId}:${index}`)).slice(0, 32)}`;
       const key = keys[index]!;
       const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(part.mimeType) ? part.mimeType : 'application/octet-stream';
-      const { PutObjectCommand } = await loadIngestS3();
-      await s3.send(new PutObjectCommand({ Bucket: receipt.bucket, Key: key, Body: new Uint8Array(bytes), ContentType: contentType }));
-      attachments.push({ id: attachmentId, ...scope, messageId: messageRowId, filename: (part.filename ?? `attachment-${index + 1}`).slice(0, 255), contentType, sizeBytes: bytes.byteLength, contentId: normalizeMessageId(part.contentId), disposition: part.disposition === 'inline' || part.related ? 'inline' as const : 'attachment' as const, sha256: hex(await crypto.subtle.digest('SHA-256', bytes)), bucket: receipt.bucket, storageKey: key });
+      await store.objects.put(key, new Uint8Array(bytes), contentType);
+      attachments.push({ id: attachmentId, ...scope, messageId: messageRowId, filename: (part.filename ?? `attachment-${index + 1}`).slice(0, 255), contentType, sizeBytes: bytes.byteLength, contentId: normalizeMessageId(part.contentId), disposition: part.disposition === 'inline' || part.related ? 'inline' as const : 'attachment' as const, sha256: hex(await crypto.subtle.digest('SHA-256', bytes)), bucket: store.bucket, storageKey: key });
     }
   } catch (error) {
     if (error instanceof ModuleLoadError) throw error;
@@ -466,14 +500,17 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
   } finally { s3.destroy(); }
 
-  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,{
+  const message:Parameters<typeof storeIncoming>[1]={
         id: messageRowId, ...scope, direction: 'inbound', region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
          fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
-        headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: receipt.bucket, rawKey,
+        headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: store.bucket, rawKey: store.rawKey, lifecycle: store.lifecycle,
         verdicts, spam, automated: automated(email, raw, from.address), status,
-      },attachments,verifiedFrom,!receipt.notification.stagingEtag,runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null);
+      };
+  const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
+  if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualVerified:verifiedAuthor,ritualScores:evaluated.answers,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});}
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
@@ -508,7 +545,24 @@ export async function mailboxHourly(runtime: Runtime) {
 // copies need the whole budget for the multipart Bcc scrub. Never wait on another request.
 let mimeBytes=0;
 const inProgress=new Set<string>();
-export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
+/** Every recipient is a deleted inbox's reserved address: settle with a count, without reading S3 or storing. */
+async function settleRetiredReceipt(runtime:Runtime,job:Parameters<JobHandler>[2],sesMessageId:string,recipients:string[]){
+  const update=sql`retired AS (UPDATE mail_receipts SET status='processed',error='EPHEMERAL_RETIRED',processed_at=now(),dropped_recipients=jsonb_array_length(recipients) WHERE workspace_id=${job.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(recipients)}::jsonb ${job.recordWithSettlement?sql`AND EXISTS(SELECT FROM settled)`:sql``})`;
+  if(job.recordWithSettlement)job.recordWithSettlement(update);else await runtime.db.execute(sql`WITH ${update} SELECT 1`);
+}
+/** Queued by `mail_gc_batch` after the rows commit, so a retry never resurrects a row. Missing keys are fine. */
+const deleteMailObjects:JobHandler=async(runtime,payload,job)=>{
+  const keys=payload.keys;
+  if(!Array.isArray(keys)||keys.length>1000||!keys.every(k=>typeof k==='string'))throw new ApiError(422,'JOB_PAYLOAD_INVALID','Invalid mail object list.');
+  try{await withMailObjects(runtime,job.workspaceId,String(payload.region),String(payload.bucket),objects=>objects.delete(keys),{binding:job.deleteBinding});}
+  catch(e){
+    if(e instanceof ApiError || e instanceof ModuleLoadError)throw e;
+    // The SES pool and BYO roles cannot delete; the job stays failed with its keys for the operator.
+    if(e instanceof Error && e.name==='AccessDenied')throw new ApiError(403,'MAIL_DELETE_DENIED','This storage role cannot delete mail objects.');
+    throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);
+  }
+};
+export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
   const key=JSON.stringify([job.workspaceId,payload.sesMessageId]);
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());

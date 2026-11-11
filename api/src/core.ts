@@ -13,7 +13,7 @@ export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
   workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
-  role?: string;
+  role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
   dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };
@@ -81,6 +81,7 @@ export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
 export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared' };
 export interface Runtime {
+  mailR2?: { bucket: R2Bucket; name: string; write: boolean };
   db: Database; storage: Storage; config: Config;
   // Workers' public egress guards connect-time DNS; Node instead pins the checked IP in TLS.
   placementEdge?: { probesPerJob:number };
@@ -102,17 +103,19 @@ export interface Runtime {
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
   webhookFetch?: WebhookFetch;
 }
-export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number }>;
-export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
+export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number;retryAfter?:string|null }>;
+export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
-export type ClaimedWebhook = { delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
+export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   ingest?:import('./mailbox-ingest-input.js').IngestInput|null;
-  webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
+  deleteBinding?:ReadyConnection|null; webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
 
 export class ApiError extends Error {
+  /** Structured detail for errors that have several parts, such as ritual compile diagnostics. */
+  details?: Record<string, unknown>[];
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 export class ModuleLoadError extends ApiError {
@@ -133,7 +136,7 @@ export function lazyModule<T>(load: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
   return () => pending ??= wrapModuleLoad(load).catch(error => { pending = undefined; throw error; });
 }
-export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.') }) }).openapi('ApiError');
+export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.'), details: z.array(z.record(z.string(), z.unknown())).optional().describe('Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint.') }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
@@ -247,7 +250,7 @@ export function hasSessionCookie(headers: Headers): boolean {
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.
   if (status < 400 || status >= 500 || path === '/v1/events/ses') return null;
-  if (/^\/unsubscribe(?:\/|$)/.test(path)) return 'unsubscribe';
+  if (/^\/unsubscribe(?:\/|$)/.test(path) || /^\/v1\/forwarding\//.test(path)) return 'unsubscribe';
   if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
   return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';
 }

@@ -92,37 +92,43 @@ function RoutesSection({ onOpenDomain }: { onOpenDomain: (id: string) => void })
   const domains = useApiDef(queries.inboundDomains(), { enabled: canAdminister })
   const addresses = useApiDef(queries.inboundAddressOptions())
   const webhooks = useApiDef(queries.inboundWebhooks(), { enabled: canAdminister })
-  const loading = addresses.isPending || (canAdminister && ((domains.isPending && !domains.error) || (webhooks.isPending && !webhooks.error)))
-  const partial = canAdminister ? domains.error ?? webhooks.error : null
+  const routing = useApiDef(queries.routing(), { enabled: canAdminister })
   const byId = new Map((addresses.data ?? []).map(address => [address.id, address]))
+  const loading = addresses.isPending || (canAdminister && ((domains.isPending && !domains.error) || (webhooks.isPending && !webhooks.error) || (routing.isPending && !routing.error)))
+  const partial = canAdminister ? domains.error ?? webhooks.error ?? routing.error : null
+  const routes = canAdminister ? routing.data?.routes ?? [] : []
+  const routed = new Set(routes.map(route => route.match))
+  const named = (id: string) => byId.get(id)?.address ?? webhooks.data?.find(h => h.id === id)?.description ?? id
   const target = (address: InboundAddress) => <Link to={`/receiving/addresses/${address.id}`}>{address.address}</Link>
   const rows: Route[] = [
     ...(addresses.data ?? []).flatMap(address => [
       ...address.rules.map(rule => ({ key: `rule:${address.id}:${rule}`, match: rule, to: target(address), kind: 'Wildcard rule', open: () => navigate(`/receiving/addresses/${address.id}`) })),
       ...address.aliases.map(alias => ({ key: `alias:${address.id}:${alias}`, match: alias, to: target(address), kind: 'Alias', open: () => navigate(`/receiving/addresses/${address.id}`) })),
     ]),
-    // A catch-all only routes mail once the domain receives.
-    ...(canAdminister ? domains.data ?? [] : []).filter(domain => domain.status === 'active').sort((a, b) => a.name.localeCompare(b.name)).map(domain => ({
+    ...routes.map(route => ({ key: `route:${route.id}`, match: route.match, kind: route.enabled ? 'Route' : 'Route · off', open: () => navigate('/receiving/routing'),
+      to: route.to === 'drop' ? <span className="muted">Dropped</span> : route.to.length ? <span className="receiving-clip">{route.to.map(named).join(', ')}</span> : <span className="muted">Stored as unrouted</span> })),
+    // A catch-all only routes mail once the domain receives, and a *@domain route replaces it.
+    ...(canAdminister ? domains.data ?? [] : []).filter(domain => domain.status === 'active' && !routed.has(`*@${domain.name}`)).sort((a, b) => a.name.localeCompare(b.name)).map(domain => ({
       key: `catch-all:${domain.id}`, match: `*@${domain.name}`, kind: 'Catch-all', open: () => onOpenDomain(domain.id),
       to: domain.catchAll === 'create_address' ? 'A new address per recipient' : <span className="muted">Stored as unrouted</span>,
     })),
-    ...(canAdminister ? webhooks.data ?? [] : []).map(webhook => ({
+    ...(canAdminister ? webhooks.data ?? [] : []).filter(h=>h.eventTypes.length>0).map(webhook => ({
       key: `webhook:${webhook.id}`, kind: webhook.paused ? 'Webhook · paused' : 'Webhook', open: () => navigate(`/receiving/webhooks/${webhook.id}`),
       match: <div className="settings-cell-stack"><span className="receiving-clip">{webhook.addressIds ? webhook.addressIds.map(id => byId.get(id)?.address ?? id).join(', ') : 'Every address'}</span><span className="muted receiving-clip">{webhook.eventTypes.length === 1 ? webhook.eventTypes[0] : plural(webhook.eventTypes.length, 'event')}</span></div>,
       to: <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${webhook.id}`}>{webhook.description || new URL(webhook.url).host}</Link>{webhook.description && <span className="muted receiving-clip">{new URL(webhook.url).host}</span>}</div>,
     })),
   ]
   return <section className="section stack" aria-labelledby="receiving-routes">
-    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/webhooks">Webhooks</Link>} />
+    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/endpoints">Endpoints</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rituals">Rituals</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/routing">Manage routing</Link></>} />
     {addresses.error ? <ErrorState error={addresses.error} onRetry={() => void addresses.refetch()} /> : <>
       <DataTable loading={loading} skeletonRows={3} rows={rows} rowKey={row => row.key} onRowClick={row => row.open?.()}
-        empty={<EmptyState title="No routes yet" description="Aliases, wildcard rules, catch-alls and webhooks show here." />}
+        empty={<EmptyState title="No routes yet" description="Routes, aliases, wildcard rules, catch-alls and webhooks show here." />}
         columns={[
           { key: 'match', label: 'Mail to', width: '40%', render: row => row.match },
           { key: 'to', label: 'Goes to', width: '40%', render: row => row.to },
           { key: 'kind', label: 'Type', render: row => <span className="muted">{row.kind}</span> },
         ]} />
-      {!loading && partial && <Alert tone="warning">{domains.error ? 'Catch-alls' : 'Webhooks'} could not be loaded. <Button variant="ghost" size="sm" onClick={() => { if (domains.error) void domains.refetch(); if (webhooks.error) void webhooks.refetch() }}>Retry</Button></Alert>}
+      {!loading && partial && <Alert tone="warning">{domains.error ? 'Catch-alls' : webhooks.error ? 'Webhooks' : 'Routes'} could not be loaded. <Button variant="ghost" size="sm" onClick={() => { if (domains.error) void domains.refetch(); if (webhooks.error) void webhooks.refetch(); if (routing.error) void routing.refetch() }}>Retry</Button></Alert>}
       {!loading && addresses.data?.nextCursor && <p className="muted receiving-foot">Rules and aliases of the first 100 addresses.</p>}
     </>}
   </section>
@@ -138,6 +144,7 @@ export function ReceivingPage() {
     <PageHeader title="Receiving" actions={<Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox" {...intent('/receiving/inbox')}>Inbox</Link>} />
     <div className="receiving-sections">
       {canAdminister && <DomainsSection onOpen={setOpenDomain} />}
+      <section className="section stack" aria-labelledby="receiving-inboxes"><SectionHeader title={<span id="receiving-inboxes">Agent inboxes</span>} actions={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/inboxes" {...intent('/receiving/inboxes')}>View inboxes</Link>} /><p className="muted">Expiring addresses that agents and end-to-end tests create, wait on and read through the API or MCP.</p></section>
       <RoutesSection onOpenDomain={setOpenDomain} />
       <AddressesSection domains={domains.data} />
     </div>

@@ -1,0 +1,84 @@
+import { and, eq, sql } from 'drizzle-orm';
+import { ApiError, digest, type Ctx } from './core.js';
+import { sendingIdempotency } from './db/sending.js';
+
+/**
+ * Every create accepts Idempotency-Key. Sends, uploads, thread starts and replies, campaign drafts and
+ * launches and domain creation implement it in their own handlers; this middleware covers the
+ * rest with the same table and the same rules: the same key and body return the original result
+ * (with Idempotent-Replayed: true), a different body is 409 IDEMPOTENCY_CONFLICT, and a
+ * concurrent duplicate gets a retryable conflict. A committed reservation prevents a second
+ * create if the worker loses the result after the handler commits. No pool slot spans the handler.
+ *
+ * A result that carries a secret (API key, token, webhook secret, inbox key) is never stored.
+ * Replaying it returns 409 IDEMPOTENT_SECRET_WITHHELD naming what was created, so the caller can
+ * revoke it and create another instead of getting a duplicate.
+ */
+const AUTHENTICATED_CREATES = [
+  /^\/v1\/(?:contacts|lists|segments|contact-imports|templates|template-assets|webhooks|api-keys|agent-tokens|endpoints|inbox-connections)$/,
+  /^\/v1\/template-assets\/import$/,
+  /^\/v1\/routing\/routes$/,
+];
+const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|keys|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
+// Field names that hold credentials at any depth (createInbox nests its key under credential.secret).
+// "key" is not one: addresses and webhooks use it for their routing key.
+const SECRET_FIELDS = new Set(['secret', 'token', 'verificationToken', 'password']);
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
+  return JSON.stringify(value) ?? 'null';
+}
+function carriesSecret(value: unknown, depth = 0): boolean {
+  if (depth > 16) return true;
+  if (typeof value === 'string') return /^(?:Bearer |bane_|whsec_)/.test(value);
+  if (Array.isArray(value)) return value.some(item => carriesSecret(item, depth + 1));
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([k, v]) => (SECRET_FIELDS.has(k) && typeof v === 'string' && v.length > 0) || carriesSecret(v, depth + 1));
+}
+
+function idempotentCreates(paths: RegExp[]) {
+  return async (c: Ctx, next: () => Promise<void>) => {
+    const key = c.req.header('Idempotency-Key');
+    const principal = c.get('actor') ?? c.get('mailboxAccess');
+    if (key === undefined || c.req.method !== 'POST' || !principal || !paths.some(p => p.test(c.req.path))) return next();
+    if (key.length > 200 || !/^[\x21-\x7e]+$/.test(key)) throw new ApiError(422, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must contain 1–200 printable ASCII characters.');
+    const text = await c.req.text();
+    let parsed: unknown = text;
+    try { parsed = text ? JSON.parse(text) : null; } catch { /* hash the raw body */ }
+    const requestHash = await digest(canonical([parsed,principal.permissions,c.get('actor')?.domains??c.get('mailboxAccess')?.mailboxIds,'receivingConsent' in principal?principal.receivingConsent??false:false]));
+    const identity = { workspaceId: principal.workspaceId, actorKeyId: c.get('actor')?.tokenId??principal.keyId, path: c.req.path, requestKey: key };
+    const where = and(eq(sendingIdempotency.workspaceId, identity.workspaceId), eq(sendingIdempotency.actorKeyId, identity.actorKeyId), eq(sendingIdempotency.path, identity.path), eq(sendingIdempotency.requestKey, identity.requestKey));
+    const db=c.env.db;
+    const claimed = await db.insert(sendingIdempotency).values({ ...identity, requestHash }).onConflictDoNothing().returning({ claimed: sql`1` });
+    if (!claimed.length) {
+      const [previous] = await db.select().from(sendingIdempotency).where(where);
+      if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
+      const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; id?: string | null } | null;
+      if (!stored?.status) {
+        if (Date.now()-Date.parse(previous.createdAt)>=600_000) throw new ApiError(409,'IDEMPOTENCY_OUTCOME_UNKNOWN','No result was recorded within ten minutes. Check whether the resource was created before starting another request.');
+        c.header('Retry-After','1');throw new ApiError(409,'IDEMPOTENCY_IN_PROGRESS','The original request has not recorded a result. Retry with the same key; do not repeat the create with a new key.',undefined,true);
+      }
+      if (stored.withheld) throw new ApiError(409, 'IDEMPOTENT_SECRET_WITHHELD', `This Idempotency-Key already created ${stored.id ?? 'the resource'}. Its secret was shown once and is not stored; revoke it and create another if it was lost.`);
+      c.header('Idempotent-Replayed', 'true');
+      return c.json(stored.body as object, stored.status as 200);
+    }
+    // Release only the winning request's reservation on handler failure. Once the
+    // handler succeeds, a failure recording its result must not permit another create.
+    try { await next(); }
+    catch (error) { await db.delete(sendingIdempotency).where(where); throw error; }
+    const status = c.res.status;
+    if (status < 200 || status >= 300) {
+      if(status>=400)await db.delete(sendingIdempotency).where(where);
+      return c.res;
+    }
+    let body: unknown = null;
+    try { body = await c.res.clone().json(); } catch { body = null; }
+    const withheld = carriesSecret(body);
+    const id = body && typeof body === 'object' && typeof (body as { id?: unknown }).id === 'string' ? (body as { id: string }).id : null;
+    await db.update(sendingIdempotency).set({ result: withheld ? { status, withheld: true, id } : { status, body } }).where(where);
+    return c.res;
+  };
+}
+export const authenticatedCreates = idempotentCreates(AUTHENTICATED_CREATES);
+export const mailboxCreates = idempotentCreates(MAILBOX_CREATES);

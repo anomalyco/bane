@@ -112,3 +112,60 @@ All tests below live in `api/api.acceptance.test.ts`.
 | Orphan storage and bounded maintenance | `api/src/mailbox-ingest.ts:388`; `api/src/mailbox-staging.ts:90`; `api/src/mailbox-events.ts:85`; `api/src/inbound-threads.ts:132` | `deduplicated uploads are reclaimed without expiring the owned attachment`; `inbound migration is repeatable and retention drains only terminal receipts and holds past 30 days` |
 
 Limits are deliberate: 600k messages / 64 GiB per UTC hour and 50k pending/running ingest jobs per workspace by default. A rejected new receipt leaves a private terminal reason, no workspace copy or normal hook. The oversize check, MIME limits, original-owner hold fence, staged object checks, signature and topic pinning remain. Only an authorized production canary can verify the deployed end-to-end path.
+
+## Inboxes phase 1: isolated acceptance evidence
+
+The `agent inbox contracts and storage budgets` tests count actual pg driver calls, excluding fixture setup. Both hosted R2 and S3 write paths were exercised without making any network calls to a storage provider.
+
+| Path | Wire statements |
+|---|---:|
+| SNS admission | 1 |
+| Claimed ingest, no files / files | 2 / 3, excluding claim and settlement |
+| Create (including replay), list, detail, immediate message page, read message, mark read, delete | 2 including credential |
+| Long poll, first poll finds a result | 3 including credential and wait debit; one more per empty retry |
+| MCP list tools / read message | 1 / 2 including credential |
+| Object download / R2 delete job handler | 0; download performs one bucket GET |
+| Retention / GC | 1 per ≤25 inboxes (≤5,000 memberships) / 1 per ≤1,000 candidates |
+
+The `BANE_BENCH=1` 10,000-due-inbox fixture ran 400 batches in 707 ms on local Postgres. That fixture measures inbox/retired-address bookkeeping, not 10,000 remote deletes. The cursor test uses independent database sessions and overlapping transactions. The membership retains its event sequence beyond the 30-day event-log window, so the final days of a long lease do not lose their pagination history. These tests do not certify live SES, Hyperdrive, R2, or production IAM.
+
+The opt-in `inbox ingest benchmark: compare v1 and v2 on a 100k-address receiving host` ran the original and new store routines interleaved against identical rows (one warm-up, three timed executions each, savepoint rollback). A plain-address delivery with no files took **1.38–1.45 ms** inside v1 versus **1.74–1.84 ms** inside v2. Both take **one wire statement** for the store. This isolates the store, not the S3/R2 transfer or end-to-end latency.
+
+### Combined inbox and routing ingest (migration 125)
+
+The Worker calls the seven-argument `mail_store_incoming` for both paths: a SQL NULL plan preserves legacy owner/rule/default resolution; a routing plan is rechecked under the ingest lane. The resulting destinations share one set of membership, quota, cursor, event and fan-out writes. A held recipient cannot borrow another recipient’s event to fire its routed webhook. An owner plus a webhook alone does not change the mail’s retention class; an additional mailbox destination uses the durable class. The previous six-argument functions remain for old callers during rollout, not as alternative paths in this Worker.
+
+`combined ingest: routed R2 delivery, recipient-specific holds and release at the 2/3 statement budget` exercises the real claim input, store, outbox and webhook renderer on synthetic mail. It asserts two pg statements for claimed ingest (byte reservation and store), three with files (candidate-upload registration), plus one claim and one settlement. The inbound-format webhook reads the scrubbed raw object with one R2 GET. The routing-only fixture still checks all-drop at two statements including claim and settlement, no object I/O; 12 address owners receive 12 memberships despite the cap of 10 *additional* inboxes. These are wire counts, not end-to-end production latency. See [the rollout gates](receiving-operations.md#mail-store-rollout-and-rollback) before activation.
+
+### Review erasure benchmark
+
+With both GC foreign keys indexed before rollout, `mail_gc_batch(1000)` removed 1,000 messages, message-ID rows and empty threads in **26.9 ms** beside 50,000 unrelated messages/thread summaries, and **31.6 ms** beside 200,000. Same local synthetic harness, one wire statement per batch. The populated fixture is gated behind `BANE_BENCH=1`. This is database time, not a claim about R2 deletion latency.
+
+## Route-enabled receiving (phase 1)
+
+The acceptance fixture runs the real queue claim and settlement against PostgreSQL, with synthetic SES envelopes and a mocked S3 transport. An exact route to an inbox and a webhook that is also subscribed to that address produces **one** membership and **one** delivery. A dry run of a stored message uses the same matcher, and the test compares its result with `mail_receipts.routing`.
+
+| Stage | Plain message | With files | Every recipient dropped |
+|---|---:|---:|---:|
+| Admission | 1 | 1 | 1 |
+| Claim, including route input | 1 | 1 | 1 |
+| Claimed handler (byte debit, optional attachment journal, store) | **2** | **3** | **0** |
+| Fenced job settlement (carries the receipt trace when dropped) | 1 | 1 | 1 |
+| Claim through settlement | **4** | **5** | **2** |
+| S3 calls | unchanged | unchanged | **0** |
+
+All four columns are asserted (`routing: claimed ingest still uses two DB trips with routing on, three with files` and `routing: an all-drop message settles in the claim and settlement statements, without S3`). No subscriptions are expanded and no webhook bodies are rendered in the ingest lane; the webhook job renders them from the immutable message row (one indexed read, plus one S3 GET when raw MIME is included). `mail_route_input` returns NULL for a workspace without routing state, which keeps the six-argument store. Migration 120 checks for possible legacy plus-base dependencies at explicit opt-in without reading stored message content. The existing domain catch-all column is **not** backfilled.
+
+Dry runs (`POST /v1/routing/test`) with unsaved routes or an earlier version apply them through the real save path in a transaction that is always rolled back, then read the same claim input. They take the workspace's address lane for the length of that transaction, as any routing change does.
+
+**Not measured yet:** the design's latency targets on a 100k-ingest queue (claim ≤ +0.05 ms with routing on, store hold ≤ +10%, a 300-domain routing write). They need the 100k audit fixture, so they are not part of the acceptance suite or `BANE_BENCH=1`.
+
+**Not versioned yet:** webhook delivery settings (format, junk, include, timeout, retries) and domain catch-all settings. Restoring a version restores routes only; the restore description says so.
+
+Review follow-up, warm local PostgreSQL: median single `SELECT mail_route_input(...)` round trip (one unmeasured warmup, eight observations, one host and recipient) was **0.039 ms off**, **0.476 ms on**, versus **0.035 ms** for `SELECT NULL::jsonb`. The cached PL/pgSQL early return makes unconfigured lookup negligible in this fixture. **Configured lookup is still over the +0.05 ms target.** These are isolated lookup timings, not whole-claim measurements on the 100k queue.
+
+## Rituals MVP · local acceptance
+
+The isolated `pgdata-mvp` foreground harness ran 301 tests: **295 passed, zero failed, six skipped**, 44.51 s Node duration / **46.16 s wall**. The Omen provider and external transports were synthetic. The route-enabled budget fixture saves an attached ritual, asserts **one DB call for admission**, then **two ingest calls without files or three with files** (four/five including outer job claim and settlement). Stored dry-run output matches the receipt. No additional handler-source fetch at ingest.
+
+Warm-IR Node CPU measurements, 2,000 warmups and 30,000 iterations per case (`BANE_BENCH=1`, `rituals: microbenchmarks`): subject predicate **3.71 µs / 10 steps**; reshaped webhook **5.94 µs / 45 steps**; RE2 predicate on 720 characters **3.06 µs / 369 steps**. This is isolated interpreter CPU, not database latency, parsing, inference or cold Worker startup. Per-run / per-message step ceilings: 50,000 / 250,000. The default manager MCP catalog test measured 14 tools including discovery, about 50,000 serialized characters.

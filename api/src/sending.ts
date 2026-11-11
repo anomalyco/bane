@@ -6,6 +6,7 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNul
 import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
+import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, SuppressionEventData } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
@@ -394,6 +395,8 @@ async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.
   // App-owned capabilities only, not a general sanitizer for transactional bearer links.
   // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
   const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
+  // Sealed Bane notices (forward confirmations) carry a capability meant only for the recipient: withheld from every reader.
+  if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
   return EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
 }
 function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
@@ -944,7 +947,7 @@ export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'work
   const upload=attachmentUpload(runtime,a,validateAttachment(parsed.data,bytes),bytes,await bytesDigest(bytes));
   try {await upload.put();return await runtime.db.transaction(upload.finish);}finally{await upload.refund();}
 }
-export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; headers: { Name: string; Value: string }[] };
+export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   sesHeaders(request.headers.length);
@@ -955,6 +958,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   const snapshot = await prepare(runtime, db, a, parsed.data,false,undefined,false,false,undefined,undefined,bulk);
   snapshot.headers = [...snapshot.headers, ...request.headers];
   if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;
+  if (request.sealed) snapshot.sealed = true;
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }
@@ -1678,7 +1682,7 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
   }
   if (mail.actorKeyId.startsWith('mbk_')) {
     // Mailbox keys may send only as an address of a mailbox they are scoped to.
-    const [key] = await db.select().from(mailboxKeys).where(and(eq(mailboxKeys.id, mail.actorKeyId), eq(mailboxKeys.workspaceId, mail.workspaceId))).for('share');
+    const [key] = await db.select().from(mailboxKeys).where(and(eq(mailboxKeys.id, mail.actorKeyId), eq(mailboxKeys.workspaceId, mail.workspaceId),sql`mail_key_grant_allows(${mailboxKeys.workspaceId},${mailboxKeys.id},'key',${receivingPolicy(runtime.config)}::jsonb)`)).for('share');
     if (!key || key.revokedAt || !key.permissions.includes('send')) return false;
     const [owner] = await db.select({ mailboxId: mailboxAddresses.mailboxId }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, mail.workspaceId), eq(mailboxAddresses.address, mail.snapshot.from.toLowerCase())));
     return !!owner && (!key.mailboxIds || key.mailboxIds.includes(owner.mailboxId));
@@ -1690,7 +1694,7 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
       senderDomainAllowed(grant.domains, mail.snapshot.from.split('@')[1]!);
   }
   // Removed bootstrap origins fail closed; only durable API keys are accepted below.
-  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId))).for('share');
+  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId),sql`mail_key_grant_allows(${apiKeys.workspaceId},${apiKeys.id},'api_key',${receivingPolicy(runtime.config)}::jsonb)`)).for('share');
   // Shared readers allow parallel sends but conflict with revocation/permission updates through the durable attempt claim,
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
   return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && senderDomainAllowed(key.domains, mail.snapshot.from.split('@')[1]!);

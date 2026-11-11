@@ -1,4 +1,5 @@
-.mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; }
+.mailbox-address > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Inbound reader: conversations on the left, the open conversation on the right. */
 .mailbox-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
@@ -163,3 +164,54 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .receiving-record dd { min-width: 0; min-height: 28px; display: flex; align-items: center; margin: 0; }
 .receiving-record dd.settings-copy-cell { justify-content: space-between; }
 @media (max-width: 720px) { .receiving-search { width: 100%; } }
+/* Routing: destination lists read as one sentence, and test results as label/value pairs. */
+.routing-destinations { display: inline-flex; flex-wrap: wrap; min-width: 0; }
+.routing-destinations > span:not(:last-child)::after { content: ', '; white-space: pre; }
+.routing-choices { display: grid; gap: var(--space-8); min-width: 0; margin: 0; padding: 0; border: 0; }
+.routing-choices > .settings-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-12) var(--space-24); }
+@media (max-width: 640px) { .routing-choices > .settings-choices { grid-template-columns: minmax(0, 1fr); } }
+.routing-explain { margin: 0; font-size: var(--text-sm); }
+.routing-delete { margin-inline-end: auto; color: var(--color-danger); }
+.routing-results { gap: 0; }
+.routing-result { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-4) var(--space-16); margin: 0; padding: var(--space-12) 0; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.routing-result dt { color: var(--color-muted); }
+.routing-result dd { margin: 0; overflow-wrap: anywhere; }
+.routing-warning { display: block; }
+
+.ritual-editor { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; background: var(--color-surface); }
+.ritual-editor .cm-editor { font-size: var(--text-sm); }
+.ritual-editor .cm-content { min-height: 14rem; font-family: var(--font-mono); }
+.ritual-editor .cm-gutters { background: var(--color-surface); border-right: 1px solid var(--color-border-muted); color: var(--color-muted); }
+.ritual-editor .cm-editor.cm-focused { outline: none; }
+.ritual-editor:focus-within { border-color: var(--color-focus); }
+.ritual-editor .cm-activeLine, .ritual-editor .cm-activeLineGutter { background: var(--color-hover); }
+.ritual-editor .cm-selectionBackground, .ritual-editor .cm-focused .cm-selectionBackground { background: var(--color-active-bg) !important; }
+.ritual-editor .cm-cursor { border-left-color: var(--color-text); }
+.ritual-editor .cm-matchingBracket { background: var(--color-active-bg); outline: none; }
+.cm-tooltip { border: 1px solid var(--color-border) !important; border-radius: var(--radius-sm); background: var(--color-surface) !important; color: var(--color-text); box-shadow: var(--shadow-popover); font-size: var(--text-sm); }
+.cm-tooltip-lint .cm-diagnostic { padding: var(--space-6) var(--space-8); }
+.cm-tooltip-lint .cm-diagnostic-error { border-left: 0; }
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--color-active-bg); color: var(--color-text); }
+.cm-completionDetail { color: var(--color-muted); }
+.cm-tooltip.cm-completionInfo { max-width: 28rem; padding: var(--space-8); }
+.ritual-pickers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-16); }
+.ritual-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
+.ritual-settings textarea { font-family: var(--font-mono); font-size: var(--text-sm); }
+@media (max-width: 760px) { .ritual-pickers, .ritual-settings { grid-template-columns: minmax(0, 1fr); } }
+.ritual-status { margin: calc(-1 * var(--space-8)) 0 0; font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ritual-problems { display: grid; gap: var(--space-4); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
+.ritual-problems code { margin-inline-end: var(--space-8); color: var(--color-danger); }
+.ritual-attach { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--space-16); }
+.ritual-attach > :first-child { flex: 1 1 18rem; min-width: 0; }
+.ritual-attach .ui-check-field { min-height: var(--control-height); }
+.ritual-row-actions { display: inline-flex; gap: var(--space-4); }
+.ritual-error { color: var(--color-danger); }
+.ritual-answers { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: var(--space-16); }
+.ritual-actions { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-xs); }
+.ritual-outcomes { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
+.ritual-outcomes li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
+.endpoint-call { font-size: var(--text-sm); overflow-wrap: anywhere; }
+.endpoint-target { color: var(--color-muted); overflow-wrap: anywhere; }
+.endpoint-config { margin: 0; padding: var(--space-12); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-layer-1); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+.endpoint-steps { display: grid; gap: var(--space-4); }
+.endpoint-steps p { margin: 0; font-size: var(--text-sm); }

@@ -16,6 +16,11 @@ function rememberFingerprint(hash:string) {
   verifiedFingerprints.delete(hash);verifiedFingerprints.set(hash,Date.now()+60_000);
   if(verifiedFingerprints.size>1024)verifiedFingerprints.delete(verifiedFingerprints.keys().next().value!);
 }
+const delegatedMailbox=Symbol('mcpInbox');
+export const delegatedInbox=(runtime:Runtime)=>(runtime as Runtime & {[delegatedMailbox]?:import('./core.js').MailboxAccess})[delegatedMailbox];
+export function dispatchAsMailboxAccess(app:Pick<App,'fetch'>,request:Request,runtime:Runtime,access:import('./core.js').MailboxAccess){
+  const delegated={...runtime,[delegatedMailbox]:access}; return app.fetch(request,delegated);
+}
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
 export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
   if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
@@ -50,18 +55,25 @@ export function checkBudget(c: Ctx, used: number, maxRequests: number) {
   throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
 }
 
+export async function chargeGrantBudget(runtime:Runtime,w:string,id:string){
+  const max=runtime.config.apiRateLimitPerMinute;
+  return (await runtime.db.execute<{used:number}>(sql`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES(${w},${id},date_trunc('minute',now()),1)
+    ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN api_request_budgets.window_start=excluded.window_start THEN least(api_request_budgets.used+1,${max+1}) ELSE 1 END,window_start=excluded.window_start RETURNING used`)).rows[0]!.used;
+}
+// Run after authentication and before idempotent replay or any configuration handler.
+export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next) => {
+  const a=c.get('actor');
+  if (a?.grantId && !a.receivingConsent) throw new ApiError(403,'ADMIN_REQUIRED','Reconnect with explicit receiving consent to access receiving configuration.');
+  await next();
+};
+
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const delegated = (c.env as DelegatedRuntime)[delegatedActor];
   const authorization = c.req.header('authorization');
   if (delegated) {
     c.set('actor', delegated);
     const maxRequests = c.env.config.apiRateLimitPerMinute;
-    const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-      VALUES (${delegated.workspaceId}, ${delegated.keyId}, date_trunc('minute', now()), 1)
-      ON CONFLICT (workspace_id, key_id) DO UPDATE SET
-        used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${maxRequests + 1}) ELSE 1 END,
-        window_start = excluded.window_start RETURNING used`));
-    checkBudget(c, budget.rows[0]!.used, maxRequests);
+    checkBudget(c,await timed(c,'budget-db',()=>chargeGrantBudget(c.env,delegated.workspaceId,delegated.keyId)),maxRequests);
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
@@ -78,24 +90,30 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
           AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
           AND permissions = ${JSON.stringify(temporary.permissions)}::jsonb AND domains = ${JSON.stringify(temporary.domains)}::jsonb`));
       if (!tracked) throw invalid();
-      c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
+      c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken',tokenId:temporary.id });
     } else {
       if (!/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
       const limit = c.env.config.apiRateLimitPerMinute;
       const credential = sql`
-        SELECT id, workspace_id, id AS key_id, permissions, domains,
+        SELECT k.id, k.workspace_id, k.id AS key_id, k.permissions, k.domains, g.grant_id,
           ${limit}::int AS max_requests
-        FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`;
+        FROM api_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='api_key' AND g.resource=k.id
+        WHERE k.hash = ${hash} AND k.revoked_at IS NULL`;
       if((verifiedFingerprints.get(hash)??0)>Date.now() && c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,credential));
+        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,sql`${credential} AND g.grant_id IS NULL`));
         if(response){rememberFingerprint(hash);return response;}
       }
-      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys,credential));
+      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null }>(c, apiKeys,credential));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
-      rememberFingerprint(hash);
-      c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
+      let grant:Actor|null=null;
+      if (key.grant_id) {
+        const {getMcpGrantActor}=await wrapModuleLoad(()=>import('./mcp-auth.js'));
+        grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id);
+        if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
+      } else rememberFingerprint(hash);
+      c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
     if (!Boolean(c.env.config.googleClientId && c.env.config.googleClientSecret && c.env.config.authSecret)) {
@@ -154,7 +172,12 @@ export function registerAuth(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security, request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json');
     const secret = randomSecret('bane_');
-    const [key] = await c.env.db.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+    const [key] = await c.env.db.transaction(async tx => {
+      const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+      // A key created by an MCP agent lives only as long as the approval that created it.
+      if (auth.grantId) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.grantId},${auth.workspaceId},'api_key',${rows[0]!.id})`);
+      return rows;
+    });
     return c.json({ ...keyView(key!), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {

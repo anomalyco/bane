@@ -8,9 +8,10 @@ import { getPath } from 'hono/utils/url';
 import { ApiError, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
-import { authenticate, registerAuth } from './auth.js';
+import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
+import { authenticatedCreates } from './idempotency.js';
 
 type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats';
 function routeGroupFor(pathname: string): RouteGroup | null {
@@ -26,8 +27,9 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
+  if (/^\/v1\/(?:rituals|endpoints|forwarding|inbox-connections|inboxes|objects)(?:\/|$)/.test(pathname)) return 'mailbox';
   if (pathname === '/v1/regions' || pathname.startsWith('/v1/regions/')) return 'ses-regions';
-  if (pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
+  if (pathname === '/v1/routing' || pathname.startsWith('/v1/routing/') || pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
   if (pathname === '/v1/connection' || pathname.startsWith('/v1/connection/')) return 'provider-connections';
   return null;
@@ -90,7 +92,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
-    c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
+    c.header('x-request-id', requestId); if (!c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
@@ -111,9 +113,11 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   });
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
-    if (c.req.path.startsWith('/v1/inbound/')) return next();
+    if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
     if (c.req.path === '/v1/public/stats') return next();
+    // Forward recipients answer with the emailed link alone; the routes check the token themselves.
+    if (['GET','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
@@ -128,12 +132,15 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.use('*', async (c, next) => {
     // MCP has its own streaming reader after OAuth; inbound authenticates its
     // own scoped keys. Unknown routes and public forms are not upload routes.
-    if (c.req.path!=='/mcp' && !c.req.path.startsWith('/v1/inbound/')) {
+    if (c.req.path!=='/mcp' && !/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) && !c.req.path.startsWith('/v1/inbound/')) {
       const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
       await boundRequestBody(c,c.req.path==='/v1/events/ses'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     await next();
   });
+  // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
+  for (const path of ['/v1/routing/*','/v1/rituals/*','/v1/endpoints/*','/v1/inbox-connections','/v1/domains/:id/receiving-host']) app.use(path,requireReceivingConsent);
+  app.use('/v1/*', (c, next) => /^\/v1\/(?:inboxes|inbound)(?:\/|$)/.test(c.req.path) ? next() : authenticatedCreates(c, next));
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.
   const notMember = async (c: Ctx, next: () => Promise<void>) => {
@@ -161,7 +168,12 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const requestId = c.get('requestId');
     const known = error instanceof ApiError;
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
-    let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.') : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
+    const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
+    const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
+      : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
+      : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
+      : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
     if(invalidJson && c.req.path==='/v1/events/ses') {
       const peer=c.req.header('x-bane-client-ip')??'unknown';
       if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
@@ -173,7 +185,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       errorType: unexpected ? error.name : undefined, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined,
       stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
-    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
+    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));

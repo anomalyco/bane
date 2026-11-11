@@ -168,6 +168,8 @@ Attachments belong in a **private** S3/R2 bucket. Set the bucket, region, endpoi
 
 On upgrade, dashboard users sign in again and theme/workspace preferences reset once. Existing API keys, scoped OAuth grants, signed webhook secrets, and published domain-ownership proofs continue to work. New proof records use `_bane`; do not replace an existing `_opensend` record just to rename it.
 
+Hosted received mail can use private Cloudflare R2 storage: `MAIL` is distinct from sending uploads. `BANE_MAIL_STORE=r2` switches new shared-pool writes (and enables agent inboxes); unset it to resume S3 writes. Agent inbox mail stays in R2 while `MAIL` is bound. Keep the binding for existing downloads. SES staging (3 days) and quarantine (30 days) remain in S3. Non-inbox raw mail still expires after 90 days; extracted attachments do not expire. BYO and self-hosted mail stays in its configured S3 bucket.
+
 ## Cloudflare
 
 Hosted `BANE_*` configuration variables accept the corresponding `MX_*` names as fallbacks. Set the new names for all new deployments.
@@ -419,3 +421,13 @@ Useful checks, from their respective packages:
 - `mcp/`: `bun run check` and `bun run build`; exercise the stdio client against the local API with a scoped key on a simulated deployment.
 
 Live acceptance is opt-in with `LIVE_SES_TEST=1`, `SES_TEST_RECIPIENT`, and `SES_TEST_FROM` for explicitly authorized real sending. The commands above describe checks, not a claim that they have passed on your installation. Docker/Workers builds, local simulation, Google mocks, and source review do not replace the [external release gates](#ses-and-production-release-gates).
+
+## Agent inboxes
+
+`POST /v1/inboxes` creates an expiring inbox with a random address on one of the workspace’s active receiving hosts. It needs a workspace administrator or a provisioning key: an inbound key with `permissions: ["create","read"]` and `addressIds: []`, which then reads only the inboxes it created. The default lifetime and grace period are 24 hours each. A `clientId` replays a create without revealing its key again. Each workspace can create 60 inboxes per minute and keep 1,000 retained, counting grace and pending erasure. Provisioning keys and MCP must omit `localPart`; generated names cannot override an existing wildcard or auto-create catch-all. Keys created with an inbox expire when it is deleted. Reply sending is opt-in, limited to authenticated authors in the same inbox and thread and to 20 messages a day.
+
+`GET /v1/inboxes/{id}/messages?wait=30` returns the oldest message after `after`, starting with the first delivery even if it arrived before the call; pass the returned `cursor` to advance in commit order. Junk, unverified and held mail never wake a waiter; list them with `include=held` (without `wait`). Mail past 200 messages or 25 MiB (or a lower configured cap), and mail during the grace period, is held: stored, readable and announced by `message.held`, never dropped. `inbox.created`, `inbox.deleted`, `message.held` and `inbox.quota_exceeded` are additive event types; consumers should ignore types they don’t know. The hourly sweep erases due inboxes and their unreferenced messages and objects, and releases real addresses to normal domain routing. An admin can release an old reservation with `DELETE /v1/inbound/retired/{address}`. Erasure does not shorten database backup retention or remove copies another address still holds.
+
+Without a receiving domain, create `type: "sandbox"` and POST `{ from, subject, text, html? }` to `/v1/inboxes/{id}/simulate`. Its generated `.invalid` host is permanently disabled for external mail and has no SES resources. Simulated mail uses the same store and cursor as received mail, is marked `simulated: true` and has no sender authentication. The limits are 50 per inbox and 1,000 per workspace per UTC day; sandbox inboxes never send.
+
+**Storage.** On hosted Bane, agent inboxes are available once `BANE_MAIL_STORE=r2` (see the [rollout steps](../docs/receiving-operations.md#mail-store-rollout-and-rollback)), and shared-pool inbox mail always goes to R2, so erasing it needs no S3 delete grant. Mail kept in S3 (self-hosted installs and BYO connections) is erased only if the storage role has `s3:DeleteObject` on `workspaces/*/raw/*` and `workspaces/*/att/*`; the BYO template does not grant it. A denied delete leaves a failed `mail.deleteObjects` job holding its keys, and raw MIME still expires through the bucket’s 90-day rule.
