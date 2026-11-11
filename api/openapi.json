@@ -7407,6 +7407,13 @@
               "type": "string"
             }
           },
+          "questions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Omen name → its question. testRituals takes scores keyed by question."
+          },
           "lists": {
             "type": "array",
             "items": {
@@ -7419,6 +7426,7 @@
           "diagnostics",
           "calls",
           "omens",
+          "questions",
           "lists"
         ]
       },

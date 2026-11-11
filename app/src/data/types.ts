@@ -193,6 +193,8 @@ export class ApiError extends Error {
   readonly text: string
   /** The code and request ID, for support and logs. */
   readonly reference: string
+  /** Every problem, when the API reports several (ritual diagnostics). */
+  details?: Record<string, unknown>[]
   constructor(message: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
     super(`${message} [${code}]${requestId ? ` · Request ${requestId}` : ''}`)
     this.name = 'ApiError'

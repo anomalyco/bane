@@ -153,14 +153,14 @@ export function registerRituals(app: App) {
     summary: 'Compile one ritual source against this workspace without saving',
     description: 'Returns every problem with its line, column and a hint, and what the ritual calls. Use it while editing; nothing is saved, delivered or sent to Jev.',
     request: { body: json(z.object({ source: z.string().max(65536), key: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).default('draft'), senderLists: RitualConfig.shape.senderLists.optional().describe('Lists to check against. Defaults to the saved sender lists.') }).strict()) },
-    responses: { 200: response(z.object({ ok: z.boolean(), diagnostics: z.array(DiagnosticSchema), calls: z.array(z.string()).describe('Endpoints and inboxes the ritual calls.'), omens: z.array(z.string()), lists: z.array(z.string()) }).openapi('RitualCheck')), ...errors },
+    responses: { 200: response(z.object({ ok: z.boolean(), diagnostics: z.array(DiagnosticSchema), calls: z.array(z.string()).describe('Endpoints and inboxes the ritual calls.'), omens: z.array(z.string()), questions: z.record(z.string(), z.string()).describe('Omen name → its question. testRituals takes scores keyed by question.'), lists: z.array(z.string()) }).openapi('RitualCheck')), ...errors },
   }), async c => {
     const w = ritualAdmin(c).workspaceId, q = c.req.valid('json'), saved = await current(c.env.db, w);
     const config = RitualConfig.parse({ rituals: [{ key: q.key, source: q.source }], senderLists: q.senderLists ?? saved.config.senderLists });
     const { programs, diagnostics } = await analyze(c.env.db, w, config);
     let ir = programs?.rituals[q.key];
     if (!ir) try { ir = compileRitual(q.source); } catch { /* reported in diagnostics */ }
-    return c.json({ ok: !diagnostics.length, diagnostics, calls: ir?.refs.map(r => r.startsWith('inbox:') ? `inbox.deliver("${r.slice(6)}")` : endpointCall(r.slice(9))) ?? [], omens: Object.keys(ir?.omens ?? {}), lists: [...new Set(ir?.lists?.map(l => l.name) ?? [])] }, 200);
+    return c.json({ ok: !diagnostics.length, diagnostics, calls: ir?.refs.map(r => r.startsWith('inbox:') ? `inbox.deliver("${r.slice(6)}")` : endpointCall(r.slice(9))) ?? [], omens: Object.keys(ir?.omens ?? {}), questions: Object.fromEntries(Object.entries(ir?.omens ?? {}).map(([name, omen]) => [name, omen.prompt])), lists: [...new Set(ir?.lists?.map(l => l.name) ?? [])] }, 200);
   });
   const workspaceSymbols = async (c: Ctx) => {
     const w = ritualAdmin(c).workspaceId;

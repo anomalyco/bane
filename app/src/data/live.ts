@@ -57,7 +57,9 @@ export async function request<T = Json>(path: string, options: { method?: string
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
     const message = typeof error?.message === 'string' ? error.message : 'The request could not be completed.'
     if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('bane:unauthorized'))
-    throw new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
+    const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
+    if (Array.isArray(error?.details)) failure.details = error.details
+    throw failure
   }
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
   return data as T

@@ -1990,6 +1990,12 @@ export type RitualCheck = {
      */
     calls: Array<string>;
     omens: Array<string>;
+    /**
+     * Omen name → its question. testRituals takes scores keyed by question.
+     */
+    questions: {
+        [key: string]: string;
+    };
     lists: Array<string>;
 };
 

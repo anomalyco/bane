@@ -119,7 +119,7 @@ function RoutesSection({ onOpenDomain }: { onOpenDomain: (id: string) => void })
     })),
   ]
   return <section className="section stack" aria-labelledby="receiving-routes">
-    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/routing">Manage routing</Link>} />
+    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/endpoints">Endpoints</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rituals">Rituals</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/routing">Manage routing</Link></>} />
     {addresses.error ? <ErrorState error={addresses.error} onRetry={() => void addresses.refetch()} /> : <>
       <DataTable loading={loading} skeletonRows={3} rows={rows} rowKey={row => row.key} onRowClick={row => row.open?.()}
         empty={<EmptyState title="No routes yet" description="Routes, aliases, wildcard rules, catch-alls and webhooks show here." />}
