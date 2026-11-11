@@ -28,7 +28,7 @@ function WorkspaceNameForm({ name: initial, canEdit }: { name: string; canEdit: 
   </form>
 }
 
-function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
+export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
   const session = useSession()
   const members = useApiDef(queries.workspaceMembers())
   const update = useApiMutation((_api, input: { id: string; role: WorkspaceRole }) => workspaceApi.updateMember(input.id, input.role), 'Role updated')
@@ -51,7 +51,7 @@ function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) 
   </section>
 }
 
-function Invitations({ owner }: { owner: boolean }) {
+export function Invitations({ owner }: { owner: boolean }) {
   const invitations = useApiDef(queries.workspaceInvitations())
   const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
@@ -67,7 +67,7 @@ function Invitations({ owner }: { owner: boolean }) {
   </section>
 }
 
-function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boolean; onOpenChange: (open: boolean) => void }) {
+export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boolean; onOpenChange: (open: boolean) => void }) {
   const create = useApiMutation((_api, input: { email: string; role: WorkspaceRole }) => workspaceApi.invite(input), 'Invitation created')
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<WorkspaceRole>('member')

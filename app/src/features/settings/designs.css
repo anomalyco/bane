@@ -1,0 +1,55 @@
+/* Pitch Settings layouts (?design=a|b|c). Rows: label on the left, control on the right, split by hairlines. */
+.set-rows { display: flex; flex-direction: column; border-top: 1px solid var(--color-border-muted); }
+.set-row { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr); align-items: center; gap: var(--space-24); min-height: 53px; padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); }
+.set-row__label { display: flex; flex-direction: column; min-width: 0; }
+.set-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.set-row__control { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-8); min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.set-inline { flex-wrap: nowrap; }
+.set-name { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-8); width: 100%; }
+.set-name .ui-input { width: min(320px, 100%); }
+.set-name .ui-alert { flex-basis: 100%; }
+.set-score { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--color-text); text-decoration: none; font-variant-numeric: tabular-nums; }
+.set-score:hover > span { text-decoration: underline; text-underline-offset: 4px; }
+.set-score svg { color: var(--color-muted); }
+.set-danger { margin-top: var(--space-24); }
+.set-danger .set-row__label > span:first-child { color: var(--color-danger); }
+
+/* Reused sections (members, invitations, webhooks) lose today's top rules inside the pitch layouts. */
+:is(.set-a, .set-b, .set-c) .settings-rule { border-top: 0; padding-top: 0; }
+:is(.set-a, .set-b, .set-c) .section { margin-block: 0; }
+:is(.set-a, .set-b, .set-c) .ui-table-scroll { --table-row-height: 53px; }
+
+/* A: rail. The rail carries the page title, like Console's settings. */
+.set-a { display: grid; flex: 1; grid-template-columns: 196px minmax(0, 760px); gap: var(--space-40); align-items: start; }
+.set-rail { position: sticky; top: 0; display: flex; flex-direction: column; gap: var(--space-20); }
+.set-rail__title { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); letter-spacing: -.18px; margin-bottom: var(--space-4); }
+.set-rail__group { display: flex; flex-direction: column; gap: 2px; }
+.set-rail__group-title { padding: 0 var(--space-8) var(--space-4); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.set-rail a { display: flex; align-items: center; min-height: 28px; padding-inline: var(--space-8); border-radius: 4px; color: var(--color-muted); text-decoration: none; }
+.set-rail a:hover { color: var(--color-text); background: var(--color-hover); }
+.set-rail a[aria-current='page'] { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.set-a__content { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; padding-top: 52px; }
+.set-a__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-12)); }
+
+/* B: tabs. */
+.set-b { display: flex; flex-direction: column; flex: 1; }
+.set-b > .ui-tabs { margin-bottom: var(--space-28); }
+.set-b__content { display: flex; flex-direction: column; gap: var(--space-40); max-width: 760px; }
+
+/* C: one page; each section is a two-column row. */
+.set-c { display: flex; flex-direction: column; flex: 1; }
+.set-c__section { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: var(--space-40); padding-block: var(--space-28); border-top: 1px solid var(--color-border-muted); scroll-margin-top: var(--space-24); }
+.set-c__section:first-of-type { border-top: 0; padding-top: var(--space-8); }
+.set-c__intro { display: flex; flex-direction: column; gap: var(--space-4); }
+.set-c__intro h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.set-c__intro p { font-size: var(--text-xs); line-height: var(--leading-xs); max-width: 220px; }
+.set-c__body { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; max-width: 820px; }
+/* The left column names the section, so reused sections keep only their actions. */
+.set-c__section:is(#members, #webhooks) .set-c__body > section:first-child > .ui-section-header h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.set-c__section:is(#members, #webhooks) .set-c__body > section:first-child > .ui-section-header { justify-content: flex-end; margin-bottom: var(--space-8); }
+.set-c__body .set-danger { margin-top: 0; }
+
+@media (max-width: 1100px) {
+  .set-a { grid-template-columns: 168px minmax(0, 1fr); gap: var(--space-28); }
+  .set-c__section { grid-template-columns: minmax(0, 1fr); gap: var(--space-16); }
+}

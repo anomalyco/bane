@@ -10,6 +10,8 @@ import { SendingConnection } from './sending'
 import { useWebhooks, WebhooksSection } from './webhooks'
 import { WorkspaceSections } from './workspace-members'
 import { roleLabel } from '../../data/workspaces'
+import { useDesign } from '../../lib/design'
+import { PitchSettings } from './designs'
 
 function WorkspaceForm({workspace, ruled}: {workspace: Workspace; ruled: boolean}) {
   const [name, setName] = useState(workspace.name)
@@ -23,8 +25,14 @@ function SignedInSection() {
   if (!session?.identity) return null
   return <section className="section stack settings-group settings-rule"><SectionHeader title="Signed in" actions={<Button onClick={() => session.logout()}>Sign out</Button>} /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>{access.multiTenant ? 'Role' : 'Access'}</dt><dd>{access.role ? roleLabel[access.role] : session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl></section>
 }
-// Sending, webhooks and the workspace live on one page; old tab links arrive as #webhooks or #workspace.
+// `?design=a|b|c` (dev and pitch builds only) renders a proposed hosted layout; see ./designs.tsx.
 export function SettingsPage() {
+  const design = useDesign()
+  const { multiTenant } = useWorkspaceAccess()
+  return design !== 'current' && multiTenant ? <PitchSettings design={design} /> : <CurrentSettings />
+}
+// Sending, webhooks and the workspace live on one page; old tab links arrive as #webhooks or #workspace.
+function CurrentSettings() {
   const access = useWorkspaceAccess()
   const { hash } = useLocation()
   useEffect(() => {
