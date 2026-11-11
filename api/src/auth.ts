@@ -60,6 +60,13 @@ export async function chargeGrantBudget(runtime:Runtime,w:string,id:string){
   return (await runtime.db.execute<{used:number}>(sql`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES(${w},${id},date_trunc('minute',now()),1)
     ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN api_request_budgets.window_start=excluded.window_start THEN least(api_request_budgets.used+1,${max+1}) ELSE 1 END,window_start=excluded.window_start RETURNING used`)).rows[0]!.used;
 }
+// Run after authentication and before idempotent replay or any configuration handler.
+export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next) => {
+  const a=c.get('actor');
+  if (a?.grantId && !a.receivingConsent) throw new ApiError(403,'ADMIN_REQUIRED','Reconnect with explicit receiving consent to access receiving configuration.');
+  await next();
+};
+
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const delegated = (c.env as DelegatedRuntime)[delegatedActor];
   const authorization = c.req.header('authorization');

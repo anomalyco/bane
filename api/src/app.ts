@@ -8,7 +8,7 @@ import { getPath } from 'hono/utils/url';
 import { ApiError, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
-import { authenticate, registerAuth } from './auth.js';
+import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
@@ -139,6 +139,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     await next();
   });
   // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
+  for (const path of ['/v1/routing/*','/v1/rituals/*','/v1/endpoints/*','/v1/inbox-connections','/v1/domains/:id/receiving-host']) app.use(path,requireReceivingConsent);
   app.use('/v1/*', (c, next) => /^\/v1\/(?:inboxes|inbound)(?:\/|$)/.test(c.req.path) ? next() : authenticatedCreates(c, next));
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.

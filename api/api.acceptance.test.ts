@@ -2307,10 +2307,10 @@ describe('Hosted MCP OAuth and tools', () => {
     const chars=JSON.stringify(defaults).length;t.diagnostic(`Default MCP catalog: ${defaults.length} tools, ${chars} characters; all: ${catalog.tools.length} tools, ${JSON.stringify(catalog.tools).length} characters`);
     assert.ok(defaults.length<=17&&coreCatalog.size<=15);assert.ok(chars<=CORE_CATALOG_BUDGET,`${chars} > ${CORE_CATALOG_BUDGET}`);assert.deepEqual(defaults.slice(-2).map((x:Json)=>x.name),['search_tools','describe_tool']);assert.ok(defaults.every((x:Json)=>x.outputSchema===undefined));
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
-    for (const name of ['archiveCampaign', 'audienceQuery', 'createAgentToken', 'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'getContext', 'saveDomain', 'sendEmail', 'listInboxes', 'createInbox', 'waitForMessage', 'readInboxMessage', 'listInboundThreads', 'sendInboundThread', 'enableInboundDomain', 'search_tools', 'describe_tool'])
+    for (const name of ['archiveCampaign', 'audienceQuery', 'createAgentToken', 'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'getContext', 'saveDomain', 'sendEmail', 'listInboxes', 'createInbox', 'waitForMessage', 'readInboxMessage', 'listInboundThreads', 'sendInboundThread', 'search_tools', 'describe_tool'])
       assert.ok(tools.has(name), name);
     // Without receiving consent, routing, ritual and endpoint management stays out of the catalog and out of discovery.
-    for (const name of ['applyRituals', 'createEndpoint', 'createRoute', 'applyRouting']) assert.ok(!tools.has(name), name);
+    for (const name of ['applyRituals', 'createEndpoint', 'createRoute', 'applyRouting','enableInboundDomain','saveInboundAddress','listInboundAddresses','getInboundScanPolicy']) assert.ok(!tools.has(name), name);
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
@@ -2514,6 +2514,15 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
       await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
       assert.equal(await live(),false);
+      const derived=ok(await http('POST','/v1/api-keys',parent.secret,{name:'N-M1 fixture',permissions:['manage']}),201);secrets.add(derived.secret);
+      const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
+      for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/inbound/domains','/v1/inbound/keys','/v1/inbound/webhooks','/v1/routing/routes','/v1/rituals','/v1/endpoints'])error(await http('GET',path,derived.secret),403,'ADMIN_REQUIRED');
+      error(await http('PATCH','/v1/inbound/policy',derived.secret,{spam:'quarantine'}),403,'ADMIN_REQUIRED');
+      error(await http('POST','/v1/inbound/addresses',derived.secret,{address:'fixture@example.invalid'}),403,'ADMIN_REQUIRED');
+      error(await http('DELETE','/v1/inbound/addresses/fixture',derived.secret),403,'ADMIN_REQUIRED');
+      error(await http('POST','/v1/inbound/domains/fixture/disable',derived.secret),403,'ADMIN_REQUIRED');
+      error(await http('POST','/v1/domains/fixture/receiving-host',derived.secret,{host:null}),403,'ADMIN_REQUIRED');
+      assert.deepEqual(ok(await http('GET','/v1/inbound/policy',MANAGER)),policy);
       error(await http('POST','/v1/inbound/keys',parent.secret,{name:'receiving fixture'}),403,'ADMIN_REQUIRED');
       error(await http('POST','/v1/inboxes',parent.secret,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     });
@@ -2632,6 +2641,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[manager.consentId]);
       const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
@@ -2687,7 +2697,8 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const { token } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      const { token,consentId } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -2721,7 +2732,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(denied.status,403);assert.equal((await denied.json() as Json).error.code,'ADMIN_REQUIRED');
       }
       for (const name of ['saveInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','sendInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
-      for (const admin of ['createInboundKey','rotateInboundWebhookSecret','disableInboundDomain','applyRouting','createEndpoint']) assert.ok(!tools.includes(admin),admin);assert.ok(tools.includes('provisionRegion'));
+      for (const admin of ['createInboundKey','rotateInboundWebhookSecret','disableInboundDomain','applyRouting','createEndpoint']) assert.ok(tools.includes(admin),admin);assert.ok(tools.includes('provisionRegion'));
       const canonicalHook = ok(await post('/webhooks',{url:'https://example.com/addresses',eventTypes:['address.created','address.deleted']}),201);
       const a=await success('saveInboundAddress',{action:'create',body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});
       const b=ok(await post('/addresses',{address:'billing@example.com'}),201);

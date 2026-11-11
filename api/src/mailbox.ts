@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { authenticate, chargeCredential, checkBudget, delegatedInbox } from './auth.js';
+import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
@@ -487,6 +487,7 @@ export function registerMailbox(app: App) {
   registerRouting(app);
   registerRituals(app);
   app.use('/v1/inbound/*', mailboxAuth);
+  for (const path of ['policy','retired/*','domains/*','addresses/*','keys/*','webhooks/*','messages/:messageId/redeliver']) app.use('/v1/inbound/'+path,requireReceivingConsent);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
 
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.

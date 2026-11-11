@@ -462,7 +462,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   waitInput.required = (waitInput.required ?? []).filter((k: string) => !['wait', 'limit', 'include'].includes(k));
   add({ ...custom('waitForMessage', `Wait up to 25 seconds for the next message in an inbox, oldest first, including mail that arrived before the call. Returns {data:[message], cursor}; if data is empty, call again with the same after. To get the message after this one, pass its cursor as after. Each message carries extract.codes (one-time codes) and extract.links from its visible text, plus SPF, DKIM and DMARC verdicts. Narrow with from or subjectContains. ${UNTRUSTED}`,
     waitInput as Tool['inputSchema'], false, args => ({ steps: [{ operation: listInbox, args: { ...args, extract: args.extract ?? 'codes,links', wait: 25, limit: 1 } }] }), listInbox.tool.outputSchema), inbound: true, inbox: 'read', untrustedContent: true });
-  add({ ...actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail. Give it a key to deliver to it from rituals (inbox.deliver("key")) and routes (inbox:key).', { create: need('createInboundAddress'), update: need('updateInboundAddress') }), inbound: true });
+  add({ ...actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail. Give it a key to deliver to it from rituals (inbox.deliver("key")) and routes (inbox:key).', { create: need('createInboundAddress'), update: need('updateInboundAddress') }), inbound: true, receiving:true });
   const threadSends: Record<string, McpOperation> = { start: need('createInboundThread') };
   if (combined.has('replyToInboundThread')) threadSends.reply = need('replyToInboundThread');
   add({ ...actionTool('sendInboundThread', `Queue real mail now from a receiving address. For replies, read the thread first. Pin body.addressId, body.replyToMessageId and body.expectedRecipients to the reviewed address, message and exact To/Cc/Bcc; do not guess recipients from participants. Never split a send across threads to bypass the 50-person limit. Reuse the same idempotencyKey only for a retry of the same confirmed send. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, threadSends, 'mode'), inbound: true, inbox: 'send' });
@@ -471,7 +471,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   const { id: domainId, confirm } = enable.tool.inputSchema.properties!;
   add({ ...custom('enableInboundDomain', 'Enable receiving for the confirmed domain ID. Checks SES verification and MX before queuing the receipt rule and related resources. Does not change DNS or override a conflicting mail provider. Read getInboundDomain after the 202 response to verify status=active.', {
     type: 'object', properties: { id: domainId, confirm }, required: ['id', 'confirm'], additionalProperties: false,
-  }, true, args => ({ steps: [{ operation: enable, args: { id: args.id, confirm: args.confirm, body: { force: false } } }] }), enable.tool.outputSchema), inbound: true });
+  }, true, args => ({ steps: [{ operation: enable, args: { id: args.id, confirm: args.confirm, body: { force: false } } }] }), enable.tool.outputSchema), inbound: true, receiving:true });
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
   direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token, set it as BANE_TOKEN and run npx @banemx/sdk upload <file> --api <https-origin> so file bytes bypass model context.', 'uploadAttachment');
@@ -504,9 +504,9 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     const toolset = TAG_TOOLSET[tags.get(name) ?? ''] ?? invalid(`No toolset for operation ${name} (tag ${tags.get(name)}).`);
     const receiving = toolset === 'routing' || toolset === 'rituals' || toolset === 'endpoints';
     const description = DESCRIPTIONS[name] ? `${DESCRIPTIONS[name]}${op.write ? ' Write: confirm=true required.' : ''}` : op.tool.description!;
-    // Inbound administration (domains, keys, scan policy) reads with manage; changing it also needs receiving consent.
+    // Receiving configuration requires the checkbox on both reads and writes.
     const inboundAdmin = toolset === 'admin' && /^Inbound /.test(tags.get(name) ?? '');
-    add({ ...alias(op, name, description), ...(receiving || (inboundAdmin && op.write) ? { receiving: true, inbound: true } : toolset === 'inboxes' || inboundAdmin ? { inbound: true } : {}), ...(UNTRUSTED_READS.has(name) ? { untrustedContent: true } : {}) }, toolset);
+    add({ ...alias(op, name, description), ...(receiving || inboundAdmin || tags.get(name)==='Inbound addresses' || name==='createInboxConnection' || name==='redeliverInboundMessage' ? { receiving: true, inbound: true } : toolset === 'inboxes' ? { inbound: true } : {}), ...(UNTRUSTED_READS.has(name) ? { untrustedContent: true } : {}) }, toolset);
   }
   return result;
 }
