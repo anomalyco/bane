@@ -55,15 +55,21 @@ function idempotentCreates(paths: RegExp[]) {
       const [previous] = await db.select().from(sendingIdempotency).where(where);
       if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
       const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; id?: string | null } | null;
-      if (!stored?.status) { c.header('Retry-After','1');throw new ApiError(409,'IDEMPOTENCY_IN_PROGRESS','The original request has not recorded a result. Retry with the same key; do not repeat the create with a new key.',undefined,true); }
+      if (!stored?.status) {
+        if (Date.now()-Date.parse(previous.createdAt)>=600_000) throw new ApiError(409,'IDEMPOTENCY_OUTCOME_UNKNOWN','No result was recorded within ten minutes. Check whether the resource was created before starting another request.');
+        c.header('Retry-After','1');throw new ApiError(409,'IDEMPOTENCY_IN_PROGRESS','The original request has not recorded a result. Retry with the same key; do not repeat the create with a new key.',undefined,true);
+      }
       if (stored.withheld) throw new ApiError(409, 'IDEMPOTENT_SECRET_WITHHELD', `This Idempotency-Key already created ${stored.id ?? 'the resource'}. Its secret was shown once and is not stored; revoke it and create another if it was lost.`);
       c.header('Idempotent-Replayed', 'true');
       return c.json(stored.body as object, stored.status as 200);
     }
-    await next();
+    // Release only the winning request's reservation on handler failure. Once the
+    // handler succeeds, a failure recording its result must not permit another create.
+    try { await next(); }
+    catch (error) { await db.delete(sendingIdempotency).where(where); throw error; }
     const status = c.res.status;
     if (status < 200 || status >= 300) {
-      if(status>=400&&status<500)await db.delete(sendingIdempotency).where(where);
+      if(status>=400)await db.delete(sendingIdempotency).where(where);
       return c.res;
     }
     let body: unknown = null;

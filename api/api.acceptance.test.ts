@@ -8563,10 +8563,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
+        const importer=runtime.importPublicImage;let imports=0;
+        runtime.importPublicImage=async()=>{if(++imports===1)throw Error('Synthetic importer failure');return {data:Uint8Array.of(2),contentType:'image/png'};};
+        try {
+          const attempt=()=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},'import-after-500');
+          assert.equal((await attempt()).status,500);const created=ok(await attempt(),201);
+          assert.equal(ok(await attempt(),201).id,created.id);assert.equal(imports,2);
+        } finally {runtime.importPublicImage=importer;}
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
         await db.query("UPDATE sending_idempotency SET result=NULL WHERE request_key='addr-1'");
         error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_IN_PROGRESS');
+        await db.query("UPDATE sending_idempotency SET created_at=now()-interval '11 minutes' WHERE request_key='addr-1'");
+        error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN');
         const route=await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1');assert.equal(route.status,201);assert.equal((await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1')).body.id,route.body.id);
         error(await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'not a url'},'ep-1'),422);
         const made=await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'https://hooks.example.org/replay'},'ep-1');assert.equal(made.status,201,JSON.stringify(made.body));assert.match(made.body.secret,/^whsec_/);
