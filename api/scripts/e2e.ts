@@ -54,6 +54,58 @@ const SKIP: Partial<Record<Op,string>> = destructive ? {
 } : safeModeSkips;
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
+// The receiving MVP (routing, rituals, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
+// suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
+// listed here by ID so the report shows it as skipped, never silently covered.
+const receivingMvp = 'Receiving MVP: covered by isolated acceptance; live steps follow the dev R2 mail-store rollout.';
+Object.assign(SKIP, {
+  getRouting: receivingMvp,
+  applyRouting: receivingMvp,
+  listRoutes: receivingMvp,
+  createRoute: receivingMvp,
+  getRoute: receivingMvp,
+  updateRoute: receivingMvp,
+  deleteRoute: receivingMvp,
+  getRoutingAudit: receivingMvp,
+  listRoutingVersions: receivingMvp,
+  getRoutingVersion: receivingMvp,
+  restoreRoutingVersion: receivingMvp,
+  testRouting: receivingMvp,
+  listRitualVersions: receivingMvp,
+  restoreRitualVersion: receivingMvp,
+  setOmenOptIns: receivingMvp,
+  listEndpoints: receivingMvp,
+  createEndpoint: receivingMvp,
+  getEndpoint: receivingMvp,
+  updateEndpoint: receivingMvp,
+  deleteEndpoint: receivingMvp,
+  sendEndpointVerification: receivingMvp,
+  testEndpoint: receivingMvp,
+  createInboxConnection: receivingMvp,
+  checkRitual: receivingMvp,
+  getRitualTypings: receivingMvp,
+  listRitualTemplates: receivingMvp,
+  getRitual: receivingMvp,
+  saveRitual: receivingMvp,
+  deleteRitual: receivingMvp,
+  attachRituals: receivingMvp,
+  getRituals: receivingMvp,
+  applyRituals: receivingMvp,
+  testRituals: receivingMvp,
+  createInbox: receivingMvp,
+  listInboxes: receivingMvp,
+  getInbox: receivingMvp,
+  updateInbox: receivingMvp,
+  deleteInbox: receivingMvp,
+  simulateInboxMessage: receivingMvp,
+  listInboxMessages: receivingMvp,
+  getInboxMessage: receivingMvp,
+  updateInboxMessage: receivingMvp,
+  getInboxAttachment: receivingMvp,
+  releaseRetiredAddress: receivingMvp,
+  testInboundWebhook: receivingMvp,
+  redeliverInboundMessage: receivingMvp,
+} satisfies Partial<Record<Op, string>>);
 
 const started = Date.now();
 const prefix = `e2e-${started}-${randomUUID().slice(0, 12)}`;
