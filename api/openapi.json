@@ -6362,8 +6362,8 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1,
                   "maxLength": 128,
+                  "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
                   "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                 },
                 "maxItems": 10
@@ -6436,8 +6436,8 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "minLength": 1,
                         "maxLength": 128,
+                        "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
                         "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                       },
                       "maxItems": 10
@@ -6562,8 +6562,8 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1,
                   "maxLength": 128,
+                  "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
                   "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                 },
                 "maxItems": 10
@@ -6618,8 +6618,8 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1,
                   "maxLength": 128,
+                  "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
                   "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                 },
                 "maxItems": 10
@@ -6774,10 +6774,17 @@
                 "items": {
                   "$ref": "#/components/schemas/RoutingDiff"
                 }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
-              "diff"
+              "diff",
+              "nextCursor"
             ]
           }
         ]
@@ -6882,6 +6889,20 @@
             "items": {
               "type": "string"
             }
+          },
+          "skipBase": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "A base route explicitly disables plus-address fallback."
+          },
+          "limited": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Fan-out was capped. The recipient is also recorded as unrouted."
           },
           "dropped": {
             "type": "boolean"
@@ -9227,7 +9248,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events."
+            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -9306,7 +9327,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events."
+            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -9466,7 +9487,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events."
+            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -31650,7 +31671,7 @@
         ],
         "operationId": "getRoutingVersion",
         "summary": "Read a routing version",
-        "description": "The routes as they were at version v, and what that version changed.",
+        "description": "One page of routes as they were at v and that version’s changes. Pass nextCursor for the next page. History retains the latest 256 versions for up to one year.",
         "parameters": [
           {
             "schema": {
@@ -31663,6 +31684,26 @@
             "required": false,
             "name": "v",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,5}$"
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
           }
         ],
         "responses": {
@@ -38253,7 +38294,7 @@
           "Inbound webhooks"
         ],
         "summary": "Redeliver a message to its route webhooks",
-        "description": "Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none exist, they are still pending or their webhook is paused. Receivers deduplicate by Webhook-Id.",
+        "description": "Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 60 manual posts per hour. Receivers deduplicate by Webhook-Id.",
         "parameters": [
           {
             "schema": {

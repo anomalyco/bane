@@ -1742,6 +1742,7 @@ export type RoutingVersion = {
 
 export type RoutingVersionDetail = RoutingConfig & {
     diff: Array<RoutingDiff>;
+    nextCursor: string | null;
 };
 
 export type RoutingTestResult = {
@@ -1773,6 +1774,14 @@ export type RoutedRecipient = {
     route: string | null;
     inboxes: Array<string>;
     webhooks: Array<string>;
+    /**
+     * A base route explicitly disables plus-address fallback.
+     */
+    skipBase?: true;
+    /**
+     * Fan-out was capped. The recipient is also recorded as unrouted.
+     */
+    limited?: true;
     dropped: boolean;
     junk: boolean;
     /**
@@ -2452,7 +2461,7 @@ export type InboundWebhook = {
      */
     junk: 'skip' | 'include';
     /**
-     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events.
+     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
      */
     include: Array<'message' | 'raw'>;
     /**
@@ -2483,7 +2492,7 @@ export type CreateInboundWebhook = {
      */
     junk?: 'skip' | 'include';
     /**
-     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events.
+     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
      */
     include?: Array<'message' | 'raw'>;
     /**
@@ -2536,7 +2545,7 @@ export type UpdateInboundWebhook = {
      */
     junk?: 'skip' | 'include';
     /**
-     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events.
+     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
      */
     include?: Array<'message' | 'raw'>;
     /**
@@ -10892,7 +10901,10 @@ export type GetRoutingVersionData = {
     path?: {
         v?: number | null;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/v1/routing/versions/{v}';
 };
 

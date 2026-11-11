@@ -184,3 +184,5 @@ export async function POST(request: Request) {
 ```
 
 It takes the raw body as a string or bytes, Fetch `Headers` or a Node `req.headers` object, and the `whsec_…` secret from creation or rotation, and checks the signature and a five-minute timestamp window. Deduplicate by `Webhook-Id` across retries. The `inbound` format also sends inbound.new's `X-Webhook-Verification-Token` (returned as `verificationToken`) so existing receivers keep working; it is a static token, so prefer the signature.
+
+Routing version details are paginated (`nextCursor`). The latest 256 versions are retained for up to one year. Manual tests and redeliveries share a 60-post/workspace/hour budget. A successfully redelivered message cannot be redelivered to the same webhook again for ten minutes. Webhook JSON never exceeds 512 KiB; raw and body content may be omitted with a URL back to the stored message. Inbound-format `envelopeRecipients` are workspace-scoped delivery details, not just visible To/Cc; choose trusted receiving endpoints.

@@ -7828,6 +7828,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         error(await local('POST','/v1/routing/test',{envelope:{to:[box.address]},config:{routes:[{match:box.address,to:['unknown:type']}]}}),422,'VALIDATION_FAILED');
         error(await local('GET','/v1/routing/audit?cursor=bad'),422,'INVALID_CURSOR');
       });
+      await t.test('routing: warm claim input cost (local PostgreSQL, one host)',async it=>{
+        const elapsed=async(stmt:string,params:unknown[])=>{const times:number[]=[];for(let i=0;i<9;i++){const start=performance.now();await db.query(stmt,params);if(i)times.push(performance.now()-start);}return times.sort((a,b)=>a-b)[3]!.toFixed(3);};
+        const read='SELECT mail_route_input($1,$2::jsonb)';it.diagnostic(`Warm route input median, ms: baseline=${await elapsed('SELECT NULL::jsonb',[])} off=${await elapsed(read,['never-enrolled','["support@receive.example"]'])} on=${await elapsed(read,[wid,'["support@receive.example"]'])}`);
+      });
       let received: Json;
       await t.test(
         'routing: support@ route delivers to the inbox and the webhook once, deduplicated with an addressIds subscription',

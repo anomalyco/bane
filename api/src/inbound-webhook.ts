@@ -158,7 +158,7 @@ function banePayload(event: Event, m: RenderMessage, parts: Part[], raw: string 
     data: { ...event.data, ...(include.includes('message') ? { message } : {}), ...(include.includes('raw') ? { raw, rawUrl: root + '/raw' } : {}) },
   };
 }
-/** The immutable message row, its attachments and (up to 2 MiB, virus-clean only) its raw MIME. One indexed read plus at most one GET. */
+/** The immutable message row, its attachments and (bounded by the POST cap, virus-clean only) its raw MIME. One indexed read plus at most one GET. */
 async function loadMessage(runtime: Runtime, w: string, messageId: string, withRaw: boolean) {
   const [row] = await runtime.db
     .select({

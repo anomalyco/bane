@@ -96,6 +96,7 @@ export function matchRouting(input: RoutingInput, addresses: string[], junk: boo
       route: route?.id ?? null,
       ...mine,
       ...(limited?{limited:true as const}:{}),
+      ...(tier==='default' && input.exact?.[plusBase(address)]?.subaddresses===false ? {skipBase:true as const}:{}),
       dropped: to === 'drop',
       junk,
       domainDefault: input.hosts?.[address.split('@')[1]!]?.default === 'create_mailbox' ? ('create_address' as const) : ('store' as const),

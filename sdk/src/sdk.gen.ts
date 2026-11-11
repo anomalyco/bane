@@ -2538,7 +2538,7 @@ export const listRoutingVersions = <ThrowOnError extends boolean = false>(option
 /**
  * Read a routing version
  *
- * The routes as they were at version v, and what that version changed.
+ * One page of routes as they were at v and that version’s changes. Pass nextCursor for the next page. History retains the latest 256 versions for up to one year.
  */
 export const getRoutingVersion = <ThrowOnError extends boolean = false>(options?: Options<GetRoutingVersionData, ThrowOnError>): RequestResult<GetRoutingVersionResponses, GetRoutingVersionErrors, ThrowOnError> => (options?.client ?? client).get<GetRoutingVersionResponses, GetRoutingVersionErrors, ThrowOnError>({
     security: [
@@ -3423,7 +3423,7 @@ export const testInboundWebhook = <ThrowOnError extends boolean = false>(options
 /**
  * Redeliver a message to its route webhooks
  *
- * Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none exist, they are still pending or their webhook is paused. Receivers deduplicate by Webhook-Id.
+ * Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 60 manual posts per hour. Receivers deduplicate by Webhook-Id.
  */
 export const redeliverInboundMessage = <ThrowOnError extends boolean = false>(options: Options<RedeliverInboundMessageData, ThrowOnError>): RequestResult<RedeliverInboundMessageResponses, RedeliverInboundMessageErrors, ThrowOnError> => (options.client ?? client).post<RedeliverInboundMessageResponses, RedeliverInboundMessageErrors, ThrowOnError>({
     security: [

@@ -64,7 +64,7 @@ BEGIN
     JOIN jsonb_array_elements(plan->'recipients') pr(item) ON pr.item->>'address'=addr AND NOT (pr.item->>'dropped')::boolean
     CROSS JOIN LATERAL (SELECT regexp_replace(addr,'[+][^@]*@','@') AS base) plus
     LEFT JOIN LATERAL (SELECT b.id AS owner,a.kind<>'public' AND (b.expires_at IS NULL OR (b.created_at<=least(x.received_at,received::timestamptz) AND b.expires_at>greatest(statement_timestamp(),least(x.received_at,received::timestamptz)))) AS receives
-      FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND a.address IN (addr,base) AND pr.item->>'tier'='default' ORDER BY (a.address=addr) DESC LIMIT 1) o ON true
+      FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND (a.address=addr OR (a.address=base AND NOT coalesce((pr.item->>'skipBase')::boolean,false))) AND pr.item->>'tier'='default' ORDER BY (a.address=addr) DESC LIMIT 1) o ON true
   ), misses AS (SELECT * FROM routes WHERE owner IS NULL AND item->>'tier'='default' AND valid AND catch_all='create_mailbox' AND can_create),
   domain_budget AS MATERIALIZED (SELECT domain,least(500-count(created_at),50-count(*) FILTER (WHERE created_at>now()-interval '1 hour')) AS slots
     FROM (SELECT DISTINCT domain FROM misses) d LEFT JOIN LATERAL (SELECT created_at FROM mailboxes b WHERE b.workspace_id=wid AND b.domain_id=d.domain AND b.origin='auto' LIMIT 500) b ON true GROUP BY domain),
@@ -94,8 +94,8 @@ BEGIN
   ), events AS (INSERT INTO mailbox_events(workspace_id,type,mailbox_id,thread_id,message_id,data)
     SELECT workspace_id,type,mailbox_id,thread_id,message_id,data FROM items JOIN lanes USING(workspace_id) ORDER BY workspace_id,ord RETURNING *
   ), subscribed AS (SELECT e.workspace_id,e.seq,e.type,h.id FROM events e
-    CROSS JOIN LATERAL (SELECT id,event_types,mailbox_ids,junk FROM mailbox_webhooks WHERE workspace_id=e.workspace_id AND NOT paused AND event_types<>'[]' ORDER BY id LIMIT 32) h
-    WHERE (e.mailbox_id IS NOT NULL OR e.type NOT IN ('message.received','message.junk')) AND (h.event_types ? e.type OR e.type='message.junk' AND h.event_types ? 'message.received') AND (e.type<>'message.junk' OR h.junk='include') AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id))),
+    CROSS JOIN LATERAL (SELECT id,event_types,mailbox_ids,junk,format,include FROM mailbox_webhooks WHERE workspace_id=e.workspace_id AND NOT paused AND event_types<>'[]' ORDER BY id LIMIT 32) h
+    WHERE (e.mailbox_id IS NOT NULL OR e.type NOT IN ('message.received','message.junk')) AND (h.event_types ? e.type OR e.type='message.junk' AND h.event_types ? 'message.received') AND (NOT is_spam OR h.junk='include' OR (e.type='message.stored' AND h.format='bane' AND h.include='[]')) AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id))),
   routed AS (SELECT DISTINCT ON (ref.id) ref.id,e.seq,e.workspace_id,r.addr,r.item->>'route' AS route FROM routes r CROSS JOIN jsonb_array_elements_text(r.item->'webhooks') ref(id)
     JOIN events e ON e.type IN ('message.received','message.junk') ORDER BY ref.id,EXISTS(SELECT FROM subscribed s WHERE s.id=ref.id AND s.seq=e.seq) DESC,(r.item->'inboxes' ? e.mailbox_id) DESC NULLS LAST,e.seq,r.n),
   subscriptions AS (SELECT workspace_id,seq,jsonb_agg(hook) AS hooks FROM (
