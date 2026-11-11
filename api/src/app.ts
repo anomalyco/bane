@@ -1,5 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { MiddlewareHandler } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
@@ -91,8 +93,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
-    if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
-    log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
+    if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
+    if (!(c.req.path==='/v1/events/ses' && [400,429].includes(c.res.status))) log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
@@ -155,15 +157,19 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.on('POST', ['/v1/campaigns', ...['test', 'reviews', 'send', 'schedule', 'cancel', 'pause', 'resume', 'pacing'].map(action => `/v1/campaigns/:id/${action}`)], regions);
   app.on('PATCH', ['/v1/campaigns/:id', '/v1/campaigns/:id/archive'], regions);
   app.on('DELETE', '/v1/campaigns/:id', regions);
-  app.onError((error, c) => {
+  app.onError(async (error, c) => {
     const requestId = c.get('requestId');
     const known = error instanceof ApiError;
-    const invalidJson = error instanceof SyntaxError;
-    const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.') : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
+    const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
+    let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.') : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
+    if(invalidJson && c.req.path==='/v1/events/ses') {
+      const peer=c.req.header('x-bane-client-ip')??'unknown';
+      if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
+    }
     // Messages and even record-key validation paths can contain caller-supplied addresses.
     const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
     const unexpected = !known && responseError.status >= 500;
-    log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
+    if (!invalidJson) log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
       errorType: unexpected ? error.name : undefined, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined,
       stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());

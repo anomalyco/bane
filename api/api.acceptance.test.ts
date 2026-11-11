@@ -4640,6 +4640,18 @@ describe('Operational configuration and public event boundaries', () => {
     error(await http('POST', '/v1/events/ses', undefined, { ...envelope, SigningCertURL:`https://sns.${REGION}.amazonaws.com/${snsCertName()}`, Signature: '!!!' }), 403, 'SNS_INVALID_SIGNATURE');
   });
 
+  test('malformed SNS JSON is a quiet limited client error; anonymous database timing is private', async t=>{
+    await simulatedSesFixture(t,async({runtime})=>{
+      const {createApp}=await import('./src/app.js'),app=createApp(); let malformed=0;
+      runtime.allowMalformedSns=async()=>++malformed===1;
+      const logs=t.mock.method(console,'error',()=>{});
+      const send=()=>app.fetch(new Request(PUBLIC_ORIGIN+'/v1/events/ses',{method:'POST',headers:{'content-type':'application/json'},body:'{'}),runtime);
+      assert.equal((await send()).status,400);assert.equal((await send()).status,429);assert.equal(logs.mock.callCount(),0);
+      const res=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me',{headers:{authorization:'Bearer bane_'+'c'.repeat(64)}}),runtime);
+      assert.equal(res.status,401);assert.equal(res.headers.get('server-timing'),null);
+    });
+  });
+
   test('SNS charges only certificate misses against the trusted peer budget', async t => {
     await simulatedSesFixture(t, async ({db, local, runtime}) => t.test('mocked certificate origin', async t => {
       const { admissionPeer } = await import('./src/core.js');
