@@ -69,6 +69,8 @@ test('ritual compile limits: maximum-size comments remain valid; identifiers, to
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
+  // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
+  for(const name of ['listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
@@ -4333,6 +4335,120 @@ describe('Dashboard API capabilities', () => {
       assert.equal(error(await request('GET', '/v1/sender-score', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
       const dashboard = await local('GET', '/v1/sender-score'), again = await local('GET', '/v1/sender-score');
       assert.deepEqual([dashboard.status, dashboard.headers.get('x-bane-sender-score-cache'), again.headers.get('x-bane-sender-score-cache')], [200, 'miss', 'hit']);
+    });
+  });
+
+  test('unified logs: sent and received mail in one cursor, with each credential seeing only the received mail it may read', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, at = (seconds: number) => new Date(Date.parse('2026-01-05T10:00:00Z') + seconds * 1000).toISOString();
+      const sent = async (id: string, seconds: number, from: string, to: string, subject: string, kind: string, status: string) => db.query(
+        `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
+      const [s1, s2, r1, r2, out, box, thread] = ['s1', 's2', 'r1', 'r2', 'out', 'box', 'thread'].map(name => unique(`logs-${name}-`));
+      await sent(s1, 1, 'hello@logs.example', 'ada@example.net', 'Logs one', 'transactional', 'delivered');
+      await sent(s2, 3, 'hello@other.example', 'grace@example.net', 'Logs two', 'marketing', 'bounced');
+      await db.query("INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)", [thread, wid]);
+      const mdom = unique('logs-mdom-');
+      await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, 'in.example', $3, 'active')", [mdom, wid, REGION]);
+      await db.query("INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, 'support@in.example')", [box, wid, mdom]);
+      // r1 reached an address; r2 was stored unrouted and flagged as spam at the same instant as s2; an outbound copy never lists as received.
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, "to", envelope_to, spam, received_at) VALUES
+        ($1, $4, 'inbound', $5, $6, 'Logs reply', 'linus@example.org', '[{"name":null,"address":"support@in.example"}]', '["support@in.example"]', false, $7),
+        ($2, $4, 'inbound', $5, $6, 'Logs unrouted', 'spam@example.org', '[{"name":null,"address":"nobody@in.example"}]', '["nobody@in.example"]', true, $8),
+        ($3, $4, 'outbound', $5, $6, 'Logs outbound copy', 'support@in.example', '[]', '[]', false, $9)`, [r1, r2, out, wid, thread, REGION, at(2), at(3), at(4)]);
+      await db.query("INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at) VALUES ($1, $2, $3, $4, 'inbound', $5)", [box, r1, wid, thread, at(2)]);
+      const ids = (page: Json) => page.data.map((row: Json) => row.id);
+      const walk = async (read: (cursor?: string) => Promise<Json>) => { const rows: Json[] = []; let cursor: string | undefined; do { const page = await read(cursor); rows.push(...page.data); cursor = page.nextCursor ?? undefined; } while (cursor); return rows; };
+
+      // An administrator pages through everything one row at a time; at the shared instant the sent row comes first.
+      const all = await walk(async cursor => ok(await local('GET', `/v1/logs?limit=1${cursor ? `&cursor=${cursor}` : ''}`)));
+      assert.deepEqual(all.map(row => [row.id, row.direction]), [[s2, 'sent'], [r2, 'received'], [r1, 'received'], [s1, 'sent']]);
+      const byId = Object.fromEntries(all.map(row => [row.id, row]));
+      assert.deepEqual([byId[s1].to, byId[s1].stream, byId[s1].status, byId[s1].at], [['ada@example.net'], 'transactional', 'delivered', at(1)]);
+      assert.deepEqual([byId[r2].status, byId[r2].envelopeTo, byId[r2].region, byId[r2].addresses], ['spam', ['nobody@in.example'], REGION, []]);
+      assert.deepEqual([byId[r1].status, byId[r1].to, byId[r1].addresses, byId[r1].threadId], ['received', ['support@in.example'], [{ id: box, address: 'support@in.example' }], thread]);
+      // Filters: direction, sent-only filters (which leave received mail out), and each side's own search.
+      const list = async (query: string) => ok(await local('GET', `/v1/logs?${query}`));
+      assert.deepEqual(ids(await list('direction=sent')), [s2, s1]); assert.equal((await list('direction=sent')).received, false);
+      assert.deepEqual(ids(await list('direction=received')), [r2, r1]);
+      const bounced = await list('status=bounced'); assert.deepEqual([ids(bounced), bounced.received], [[s2], false]);
+      assert.equal(error(await local('GET', '/v1/logs?direction=received&status=bounced'), 422).code, 'VALIDATION_FAILED');
+      assert.deepEqual(ids(await list('search=reply')), [r1]); assert.deepEqual(ids(await list('search=Logs')), [s2, r2, r1, s1]);
+      const first = await list('limit=1');
+      assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
+      // A dashboard member (hosted workspaces have members) reads mail on live addresses only, without delivery details or the spam verdict.
+      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
+      const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
+      await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
+      const member = await list('limit=10');
+      await db.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId, role]);
+      assert.deepEqual([ids(member), member.received], [[s2, r1, s1], true]);
+      const memberReceived = member.data.find((row: Json) => row.id === r1);
+      assert.deepEqual([memberReceived.envelopeTo, memberReceived.region, memberReceived.status], [null, null, 'received']);
+      // Keys: domain-restricted keys see their own sent mail; unrestricted read keys see all sent mail; neither sees received mail.
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Logs scoped reader', permissions: ['read'], domains: ['logs.example'] }), 201); secrets.add(scoped.secret);
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Logs reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
+      const manager_ = ok(await local('POST', '/v1/api-keys', { name: 'Logs manager', permissions: ['manage'] }), 201); secrets.add(manager_.secret);
+      const scopedPage = ok(await request('GET', '/v1/logs', scoped.secret)); assert.deepEqual([ids(scopedPage), scopedPage.received], [[s1], false]);
+      assert.equal(error(await request('GET', '/v1/logs?direction=received', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
+      const readerPage = ok(await request('GET', '/v1/logs', reader.secret)); assert.deepEqual([ids(readerPage), readerPage.received], [[s2, s1], false]);
+      assert.equal(error(await request('GET', '/v1/logs?direction=received', reader.secret), 403).code, 'ADMIN_REQUIRED');
+      assert.deepEqual(ids(ok(await request('GET', '/v1/logs', manager_.secret))), [s2, r2, r1, s1]);
+      // Lists redact unsubscribe capability tokens from subjects for non-manage callers, like getEmailDetail does.
+      const token = `u_${'ab'.repeat(32)}`;
+      await db.query('UPDATE sending_emails SET subject = $2 WHERE id = $1', [s1, `Logs one ${token}`]);
+      const subjectOf = (page: Json) => page.data.find((row: Json) => row.id === s1).subject;
+      assert.equal(subjectOf(ok(await request('GET', '/v1/logs', reader.secret))), 'Logs one [redacted]');
+      assert.equal(subjectOf(ok(await request('GET', '/v1/emails', reader.secret))), 'Logs one [redacted]');
+      assert.equal(ok(await request('GET', `/v1/emails/${s1}`, reader.secret)).subject, 'Logs one [redacted]');
+      assert.equal(subjectOf(ok(await request('GET', '/v1/logs', manager_.secret))), `Logs one ${token}`);
+      // Delivery details of received mail: owner/admin sessions and manage API keys only, never MCP grants or agent tokens.
+      const { readsDelivery } = await import('./src/inbound-threads.js');
+      const admin = { keyId: 'k', workspaceId: wid, admin: true, mailboxIds: null, permissions: ['read' as const] };
+      const as = (credential: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken', role?: string) => readsDelivery({ workspaceId: wid, keyId: 'k', permissions: ['manage'], domains: [], credential, role }, admin);
+      assert.deepEqual([as('dashboard', 'owner'), as('dashboard', 'member'), as('apiKey'), as('mcp', 'owner'), as('agentToken')], [true, false, true, false, false]);
+    });
+  });
+
+  // Dev E2E, 2026-11-11: Postgres refused Hyperdrive's connections during a burst. Requests failed with 500
+  // INTERNAL_ERROR at authentication and a campaign.run job failed for good, stranding its campaign in preparing.
+  test('database connection refusals: a retryable 503 for requests and a retried job, with the SQLSTATE logged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      // Drizzle wraps driver errors; Hyperdrive reports its own as SQLSTATE 58000 and passes Postgres errors through.
+      const wrapped = (code: string | undefined, message: string) => Object.assign(new Error('Failed query: select 1\nparams: '), { cause: Object.assign(new Error(message), code ? { code } : {}) });
+      const logs: Json[] = [];
+      for (const level of ['error', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Refusal reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
+      const execute = runtime.db.execute.bind(runtime.db);
+      let fault: unknown = null;
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault; fault = null; throw thrown; } return execute(...args); }) as typeof execute);
+      const refused = async (failure: unknown) => { fault = failure; logs.length = 0; return request('GET', '/v1/emails', reader.secret); };
+      for (const failure of [wrapped('58000', 'Failed to acquire a connection from the pool.'), wrapped('58000', 'Server connection attempt failed: connection_refused'), wrapped('53300', 'sorry, too many clients already'), wrapped('08006', 'connection failure'), new Error('Connection terminated unexpectedly')]) {
+        const reply = await refused(failure);
+        const body = error(reply, 503, 'DATABASE_UNAVAILABLE');
+        assert.deepEqual([body.retryable, reply.headers.get('retry-after')], [true, '1']);
+        const entry = logs.find(line => line.code === 'DATABASE_UNAVAILABLE');
+        assert.ok(entry && entry.status === 503 && entry.stack, 'the refusal is logged with its stack');
+        assert.equal(entry.databaseCode, (failure as { cause?: { code?: string } }).cause?.code);
+      }
+      // Anything else stays an internal error, now with the wrapped SQLSTATE in the log.
+      const broken = await refused(wrapped('42703', 'column "missing" does not exist'));
+      error(broken, 500, 'INTERNAL_ERROR');
+      assert.equal(logs.find(line => line.code === 'INTERNAL_ERROR')?.databaseCode, '42703');
+      assert.equal(ok(await request('GET', '/v1/emails', reader.secret)).data.length >= 0, true, 'the next request succeeds');
+      t.mock.restoreAll();
+      for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      // Jobs: a refusal is retried with backoff (attempt charged); a real bug still fails the job.
+      const { processJobs } = await import('./src/jobs.js');
+      const job = async (id: string, failure: unknown) => {
+        await db.query("INSERT INTO jobs(id, workspace_id, type, payload, available_at) VALUES ($1, $2, 'campaign.run', '{}'::jsonb, now() - interval '1 second')", [id, wid]);
+        assert.equal(await processJobs(runtime, { 'campaign.run': async () => { throw failure; } }, 1, 1), 1);
+        return (await db.query('SELECT status, attempts, last_error, available_at > now() AS later FROM jobs WHERE id = $1', [id])).rows[0];
+      };
+      assert.deepEqual(await job(unique('refused-job-'), wrapped('58000', 'Failed to acquire a connection from the pool.')), { status: 'pending', attempts: 1, last_error: 'DATABASE_UNAVAILABLE', later: true });
+      assert.equal(logs.find(line => line.code === 'DATABASE_UNAVAILABLE' && line.operation === 'campaign.run')?.databaseCode, '58000');
+      assert.deepEqual(await job(unique('broken-job-'), wrapped('42703', 'column "missing" does not exist')), { status: 'failed', attempts: 1, last_error: 'JOB_INTERNAL_ERROR', later: true });
     });
   });
 });

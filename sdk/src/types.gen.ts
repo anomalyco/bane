@@ -2753,6 +2753,72 @@ export type InboundAttachmentDownload = {
     expiresAt: string;
 };
 
+export type LogPage = {
+    data: Array<LogEntry>;
+    nextCursor: string | null;
+    /**
+     * Whether received mail is included: false for direction=sent, with a sent-only filter, or when the credential cannot read inbound mail.
+     */
+    received: boolean;
+};
+
+export type LogEntry = {
+    /**
+     * Email ID for sent mail (getEmail); message ID for received mail (getInboundMessage).
+     */
+    id: string;
+    direction: 'sent' | 'received';
+    /**
+     * When the email was created (sent) or received.
+     */
+    at: string;
+    /**
+     * Sent: the email status. Received: received, or spam when flagged (spam is shown to administrators only).
+     */
+    status: string;
+    from: {
+        name: string | null;
+        address: string;
+    };
+    /**
+     * Sent: the To recipients. Received: the addresses in the To header.
+     */
+    to: Array<string>;
+    subject: string;
+    /**
+     * Sent mail only.
+     */
+    stream: 'transactional' | 'marketing' | null;
+    campaignId: string | null;
+    /**
+     * Sent through the SES mailbox simulator. Always false for received mail.
+     */
+    simulated: boolean;
+    /**
+     * Received mail only.
+     */
+    attachmentCount: number | null;
+    /**
+     * Received mail only.
+     */
+    threadId: string | null;
+    /**
+     * Received mail only: the receiving addresses it was delivered to that the caller can read. Empty for unrouted mail.
+     */
+    addresses: Array<{
+        id: string;
+        address: string;
+    }> | null;
+    /**
+     * Null for received mail unless the caller is an administrator.
+     */
+    region: string | null;
+    /**
+     * Received mail, administrators only: the SMTP envelope recipients.
+     */
+    envelopeTo: Array<string> | null;
+};
+
 export type UpdateInboundThread = {
     /**
      * Opaque inbound address ID (mbx_…).
@@ -16751,6 +16817,88 @@ export type GetInboundAttachmentResponses = {
 };
 
 export type GetInboundAttachmentResponse = GetInboundAttachmentResponses[keyof GetInboundAttachmentResponses];
+
+export type ListLogsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        direction?: 'all' | 'sent' | 'received';
+        /**
+         * Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.
+         */
+        search?: string;
+        /**
+         * Sent mail only; received mail is left out when set.
+         */
+        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+        /**
+         * Sent mail only; received mail is left out when set.
+         */
+        kind?: 'transactional' | 'marketing';
+        /**
+         * Sent mail only; received mail is left out when set.
+         */
+        campaignId?: string;
+        region?: string;
+    };
+    url: '/v1/logs';
+};
+
+export type ListLogsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListLogsError = ListLogsErrors[keyof ListLogsErrors];
+
+export type ListLogsResponses = {
+    /**
+     * Success
+     */
+    200: LogPage;
+};
+
+export type ListLogsResponse = ListLogsResponses[keyof ListLogsResponses];
 
 export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;

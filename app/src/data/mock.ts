@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
@@ -637,6 +637,19 @@ export function createMockApi(): BaneApi {
         return { periodStart: new Date(start).toISOString(), periodEnd: new Date(end).toISOString(), sent: emails.length, delivered: count('delivered'), bounced: count('bounced'), complaints: count('complaint'), deferred: count('deferred'), previousSent: all.filter(e => Date.parse(e.sentAt) >= start - duration && Date.parse(e.sentAt) < start).length, points, streams: (['transactional', 'marketing'] as const).map(name => ({ name, sent: emails.filter(e => e.stream === name).length })), recentCampaigns: s.campaigns.filter(c => c.regionId === input.regionId && c.archivedAt == null).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 4).map(c => campaignTotals(s, c)) }
       }),
     },
+    // Demo logs follow GET /v1/logs: sent and received together, newest first; sent-only filters leave received mail out.
+    logs: {
+      list: (input, signal) => run(signal, false, s => {
+        filterRegion(s, input.regionId)
+        const direction = input.direction ?? 'all', sentOnly = Boolean(input.status || input.stream || input.campaignId)
+        const sent: LogEntry[] = direction === 'received' ? [] : s.emails.filter(e => (!input.regionId || e.regionId === input.regionId) && (!input.campaignId || e.campaignId === input.campaignId) && (!input.status || e.status === input.status) && (!input.stream || e.stream === input.stream))
+          .map(e => ({ id: e.id, direction: 'sent', at: e.sentAt, status: e.status, from: { name: e.fromName ?? null, address: e.from }, to: e.to.split(', '), subject: e.subject, stream: e.stream, campaignId: e.campaignId ?? null, simulated: e.simulated ?? false, attachmentCount: null, threadId: null, addresses: null, regionId: e.regionId, envelopeTo: null }))
+        const received: LogEntry[] = direction === 'sent' || sentOnly ? [] : demoReceived().filter(row => !input.regionId || row.region === input.regionId)
+          .map(row => ({ id: row.id, direction: 'received', at: row.receivedAt, status: row.spam ? 'spam' : 'received', from: row.from, to: row.to.map(to => to.address), subject: row.subject, stream: null, campaignId: null, simulated: false, attachmentCount: row.attachmentCount, threadId: row.threadId, addresses: row.addresses ?? null, regionId: row.region ?? null, envelopeTo: row.envelopeTo ?? null }))
+        const rows = [...sent, ...received].sort((a, b) => b.at.localeCompare(a.at) || (a.direction === b.direction ? b.id.localeCompare(a.id) : a.direction === 'sent' ? -1 : 1))
+        return page(rows, input, row => `${row.id} ${row.from.address} ${row.from.name ?? ''} ${row.to.join(' ')} ${row.subject} ${row.status} ${row.stream ?? ''}`)
+      }),
+    },
     emails: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); const rows = s.emails.filter(e => (!input.regionId || e.regionId === input.regionId) && (!input.campaignId || e.campaignId === input.campaignId) && (!input.status || e.status === input.status) && (!input.stream || e.stream === input.stream)).sort((a, b) => b.sentAt.localeCompare(a.sentAt)); return page(rows, input, e => `${e.id} ${e.to} ${e.from} ${e.fromName ?? ''} ${e.subject} ${e.status} ${e.stream} ${e.regionId} ${e.sentAt} ${e.simulated ? 'simulated test' : 'live'}`) }),
       get: (emailId, signal) => run(signal, false, s => {
@@ -907,11 +920,6 @@ export function createMockApi(): BaneApi {
         return row
       }),
       checkDomain: (domainId, signal) => run(signal, false, s => mailboxDomains(s).find(row => row.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')),
-      received: (input, signal) => run(signal, false, () => {
-        const search = input.search?.trim().toLowerCase()
-        const rows = demoReceived().filter(row => (!input.regionId || row.region === input.regionId) && (!search || `${row.subject} ${row.from.address} ${row.from.name} ${row.text}`.toLowerCase().includes(search)))
-        return Object.assign(rows.map(({ text: _t, replyText: _r, html: _h, headers: _hd, attachments: _a, verdicts: _v, cc: _c, replyTo: _rt, sentAt: _sent, messageId: _m, inReplyTo: _i, references: _rf, bodyTruncated: _bt, sizeBytes: _sz, rawUrl: _raw, ...summary }) => summary), { nextCursor: null })
-      }),
       receivedEmail: (messageId, signal) => run(signal, false, () => find(demoReceived(), messageId, 'Message')),
       keys: (includeRevoked, signal) => run(signal, false, s => (s.mailboxKeys ??= demoMailboxAccess().keys).filter(key => includeRevoked || !key.revokedAt)),
       createKey: (input, signal) => run(signal, true, s => {

@@ -9945,6 +9945,176 @@
           "expiresAt"
         ]
       },
+      "LogPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogEntry"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "received": {
+            "type": "boolean",
+            "description": "Whether received mail is included: false for direction=sent, with a sent-only filter, or when the credential cannot read inbound mail."
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor",
+          "received"
+        ]
+      },
+      "LogEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Email ID for sent mail (getEmail); message ID for received mail (getInboundMessage)."
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "received"
+            ]
+          },
+          "at": {
+            "type": "string",
+            "description": "When the email was created (sent) or received."
+          },
+          "status": {
+            "type": "string",
+            "description": "Sent: the email status. Received: received, or spam when flagged (spam is shown to administrators only)."
+          },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ]
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Sent: the To recipients. Received: the addresses in the To header."
+          },
+          "subject": {
+            "type": "string"
+          },
+          "stream": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "transactional",
+              "marketing",
+              null
+            ],
+            "description": "Sent mail only."
+          },
+          "campaignId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "simulated": {
+            "type": "boolean",
+            "description": "Sent through the SES mailbox simulator. Always false for received mail."
+          },
+          "attachmentCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Received mail only."
+          },
+          "threadId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Received mail only."
+          },
+          "addresses": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "address"
+              ]
+            },
+            "description": "Received mail only: the receiving addresses it was delivered to that the caller can read. Empty for unrouted mail."
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null for received mail unless the caller is an administrator."
+          },
+          "envelopeTo": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Received mail, administrators only: the SMTP envelope recipients."
+          }
+        },
+        "required": [
+          "id",
+          "direction",
+          "at",
+          "status",
+          "from",
+          "to",
+          "subject",
+          "stream",
+          "campaignId",
+          "simulated",
+          "attachmentCount",
+          "threadId",
+          "addresses",
+          "region",
+          "envelopeTo"
+        ]
+      },
       "UpdateInboundThread": {
         "type": "object",
         "properties": {
@@ -47655,6 +47825,260 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inbound/messages/message_123/attachments/attachment_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/logs": {
+      "get": {
+        "operationId": "listLogs",
+        "tags": [
+          "Emails"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "List sent and received mail together",
+        "description": "Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. status, kind and campaignId filter sent mail and leave received mail out.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "sent",
+                "received"
+              ],
+              "default": "all"
+            },
+            "required": false,
+            "name": "direction",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body."
+            },
+            "required": false,
+            "description": "Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.",
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "attempting",
+                "accepted",
+                "sent",
+                "delivered",
+                "bounced",
+                "complained",
+                "rejected",
+                "rendering_failed",
+                "delayed",
+                "suppressed",
+                "canceled",
+                "acceptance_unknown",
+                "simulated"
+              ],
+              "description": "Sent mail only; received mail is left out when set."
+            },
+            "required": false,
+            "description": "Sent mail only; received mail is left out when set.",
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "transactional",
+                "marketing"
+              ],
+              "description": "Sent mail only; received mail is left out when set."
+            },
+            "required": false,
+            "description": "Sent mail only; received mail is left out when set.",
+            "name": "kind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 120,
+              "description": "Sent mail only; received mail is left out when set."
+            },
+            "required": false,
+            "description": "Sent mail only; received mail is left out when set.",
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            },
+            "required": false,
+            "name": "region",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listLogs } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listLogs({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/logs' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }

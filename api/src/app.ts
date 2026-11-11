@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { ApiError, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
+import { ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -28,7 +28,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
-  if (/^\/v1\/(?:rituals|endpoints|forwarding|inbox-connections|inboxes|objects)(?:\/|$)/.test(pathname)) return 'mailbox';
+  if (/^\/v1\/(?:rituals|endpoints|forwarding|inbox-connections|inboxes|objects|logs)(?:\/|$)/.test(pathname)) return 'mailbox';
   if (pathname === '/v1/regions' || pathname.startsWith('/v1/regions/')) return 'ses-regions';
   if (pathname === '/v1/routing' || pathname.startsWith('/v1/routing/') || pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
@@ -157,7 +157,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     await next();
   };
   // Discovery, provisioning and the catalog load persisted settings themselves.
-  app.on('GET', ['/v1/emails', '/v1/campaigns'], (c, next) => c.req.query('region') ? regions(c, next) : next());
+  app.on('GET', ['/v1/emails', '/v1/campaigns', '/v1/logs'], (c, next) => c.req.query('region') ? regions(c, next) : next());
   const selfHostedRegions = (c: Ctx, next: () => Promise<void>) => c.env.config.multiTenant ? next() : regions(c, next);
   app.on('GET', ['/v1/settings/ses', '/v1/domains/:id'], selfHostedRegions);
   app.on('GET', '/v1/domains', (c, next) => c.req.query('region') !== undefined ? regions(c, next) : selfHostedRegions(c, next));
@@ -171,7 +171,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
+    const transient = !known && !invalidJson && transientDatabaseError(error);
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
+      : transient ? databaseUnavailable()
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
@@ -183,9 +186,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
     const unexpected = !known && responseError.status >= 500;
     if (!invalidJson) log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
-      errorType: unexpected ? error.name : undefined, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined,
+      errorType: unexpected ? error.name : undefined, databaseCode: databaseCodeOf(error),
       stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
+    else if (transient) c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));

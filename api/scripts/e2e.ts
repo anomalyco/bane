@@ -732,6 +732,9 @@ async function inbound() {
   });
   check(hasId(await api('listInboundThreads', { query: { addressId, q: prefix } }), path.threadId), 'arrived thread not listed');
   check(hasId(await api('listInboundMessages', { query: { addressId, direction: 'inbound', q: prefix } }), msg.id), 'arrived message not listed');
+  // The unified logs list received mail next to sent mail for the same credential.
+  const unified = await api('listLogs', { query: { direction: 'received', search: prefix, limit: 100 } });
+  check(unified.received && unified.data.some(row => row.id === msg.id && row.direction === 'received' && row.threadId === msg.threadId), 'arrived message missing from the unified logs');
   check((await api('getInboundThread', { path, query: { addressId } })).messages.some(m => m.id === msg.id), 'message absent from thread');
   check((await api('updateInboundThread', { path, body: { addressId, starred: true } })).starred, 'thread edit failed');
   await step('Scoped inbound webhook, rotation and thread metadata delivery', () => inboundWebhook(addressId, path.threadId));

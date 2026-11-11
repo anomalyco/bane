@@ -163,17 +163,26 @@ export type RouteTier = 'exact' | 'address' | 'pattern' | 'subaddress' | 'catcha
 export interface RoutedRecipient { address: string; tier: RouteTier; route: string | null; inboxes: string[]; webhooks: string[]; dropped: boolean; junk: boolean; domainDefault: 'store' | 'create_address'; warnings: string[] }
 export interface RoutingTestResult { version: number; unsaved: boolean; message: { from: string | null; subject: string | null } | null; recipients: RoutedRecipient[] }
 export interface RoutingTestInput { to?: string[]; raw?: string; junk?: boolean }
+// One row of the unified logs (GET /v1/logs): sent or received mail, newest first. Delivery details of received mail
+// (envelopeTo, regionId, the spam status) reach administrators only.
+export type LogDirection = 'all' | 'sent' | 'received'
+export interface LogEntry {
+  id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; subject: string
+  stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null
+  addresses: { id: string; address: string }[] | null; regionId: RegionId | null; envelopeTo: string[] | null
+}
 export interface ReceivedEmail {
   id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string
-  receivedAt: ISODate; attachmentCount: number; spam: boolean; region: RegionId | null
-  envelopeTo: string[]; addresses: { id: string; address: string }[]
+  receivedAt: ISODate; attachmentCount: number
+  // Delivery details: present for owners and admins only.
+  spam?: boolean; region?: RegionId | null; envelopeTo?: string[]; addresses?: { id: string; address: string }[]
 }
 export interface ReceivedEmailDetail extends ReceivedEmail {
   sentAt: ISODate | null; cc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
   text: string; replyText: string; html: string | null; bodyTruncated: boolean; headers?: { name: string; value: string }[]
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
-  verdicts: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
-  sizeBytes: number | null; rawUrl: string | null
+  verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
+  sizeBytes?: number | null; rawUrl?: string | null
 }
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null }
@@ -225,6 +234,7 @@ export interface BaneApi {
   overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview> }
   senderScore: { get(signal?: AbortSignal): Promise<SenderScore> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email> }
+  logs: { list(input: PageRequest & { direction?: LogDirection }, signal?: AbortSignal): Promise<PageResult<LogEntry>> }
   campaigns: { list(input: PageRequest & { archived?: boolean }, signal?: AbortSignal): Promise<PageResult<Campaign>>; get(id: string, signal?: AbortSignal): Promise<Campaign>; state(id: string, signal?: AbortSignal): Promise<CampaignState>; preview(id: string, signal?: AbortSignal): Promise<CampaignPreview>; setArchived(input: { id: string; archived: boolean }, signal?: AbortSignal): Promise<Campaign>; save(input: CampaignInput, signal?: AbortSignal): Promise<Campaign>; audience(input: { id: string; listId: string; segmentId: string | null }, signal?: AbortSignal): Promise<AudiencePreview>; send(input: SendCampaignInput, signal?: AbortSignal): Promise<Campaign | CampaignSendReceipt>; pause(id: string, signal?: AbortSignal): Promise<Campaign>; resume(id: string, signal?: AbortSignal): Promise<Campaign>; setPacing(id: string, input: CampaignPacingInput, signal?: AbortSignal): Promise<Campaign>; test(input: { id: string; to: string }, signal?: AbortSignal): Promise<{ accepted: boolean; id?: string; status?: string; simulated?: boolean }> }
   templates: { list(input?: PageRequest & { archived?: boolean; publishedOnly?: boolean }, signal?: AbortSignal): Promise<PageResult<CampaignTemplateSummary>>; get(id: string, signal?: AbortSignal): Promise<CampaignTemplate>; create(input: {name: string; description?: string}, signal?: AbortSignal): Promise<CampaignTemplate>; update(id: string, revision: number, draft: CampaignTemplateDraft, signal?: AbortSignal): Promise<CampaignTemplate>; publish(id: string, revision: number, signal?: AbortSignal): Promise<CampaignTemplate>; archive(id: string, archived: boolean, signal?: AbortSignal): Promise<CampaignTemplate>; remove(id: string, signal?: AbortSignal): Promise<void>; preview(id: string, published?: boolean, signal?: AbortSignal): Promise<CampaignPreview> }
   contacts: { list(input: PageRequest & { email?: string }, signal?: AbortSignal): Promise<PageResult<Contact>>; get(id: string, signal?: AbortSignal): Promise<Contact>; save(input: ContactInput, signal?: AbortSignal): Promise<Contact>; import(input: { listId: string; rows: ImportRow[] }, signal?: AbortSignal): Promise<ImportResult> }
@@ -233,7 +243,7 @@ export interface BaneApi {
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
   credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void> }
   domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost?(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
-  mailboxes: { domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; received(input: { regionId?: string; search?: string; cursor?: string; pageSize?: number }, signal?: AbortSignal): Promise<CursorItems<ReceivedEmail>>; receivedEmail(id: string, signal?: AbortSignal): Promise<ReceivedEmailDetail>
+  mailboxes: { domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; receivedEmail(id: string, signal?: AbortSignal, delivery?: boolean): Promise<ReceivedEmailDetail>
     keys(includeRevoked: boolean, signal?: AbortSignal): Promise<MailboxKey[]>
     createKey(input: MailboxKeyInput, signal?: AbortSignal): Promise<{ key: MailboxKey; secret: string }>
     revokeKey(id: string, signal?: AbortSignal): Promise<void>
