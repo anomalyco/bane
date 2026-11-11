@@ -20,7 +20,7 @@ export type MailboxDomainStatus = 'provisioning' | 'waiting_for_mx' | 'active' |
 const catchAll = customType<{data:'create_address'|'store';driverData:'create_mailbox'|'store'}>({
   dataType: () => 'text', toDriver: v => v === 'store' ? v : 'create_mailbox', fromDriver: v => v === 'store' ? v : 'create_address',
 });
-export type MailboxPermission = 'read' | 'send' | 'modify';
+export type MailboxPermission = 'read' | 'send' | 'modify' | 'create';
 export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
 export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
 
@@ -47,6 +47,7 @@ export const mailboxDomains = pgTable('mailbox_domains', {
 }, t => [unique('mailbox_domains_name').on(t.workspaceId, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.domainId).where(sql`${t.parentId} IS NULL`),uniqueIndex('mailbox_domains_receiving_host').on(t.workspaceId,t.receivingHost).where(sql`${t.receivingHost} IS NOT NULL AND ${t.status} IN ('active','provisioning')`), index('mailbox_domains_region').on(t.workspaceId, t.region, t.status)]);
 
 export const mailboxes = pgTable('mailboxes', {
+  kind:text('kind').$type<'inbox'|'address'>().notNull().default('address'), deleteAfter:ts('delete_after'),
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),
   rules: jsonb('rules').$type<string[]>().notNull().default([]), metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   origin: text('origin').$type<'api' | 'auto'>().notNull().default('api'),
@@ -67,6 +68,7 @@ export const mailThreads = pgTable('mail_threads', {
 });
 
 export const mailMessages = pgTable('mail_messages', {
+  lifecycle:text('lifecycle').notNull().default('default'),
   id: text('id').primaryKey(), ...scope(), direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), threadId: text('thread_id').notNull(),
   region: text('region'), domainId: text('domain_id'), sesMessageId: text('ses_message_id'), sendingEmailId: text('sending_email_id'),
   messageId: text('message_id'), inReplyTo: text('in_reply_to'), references: jsonb('references').$type<string[]>().notNull().default([]),
@@ -92,6 +94,7 @@ export const mailUnrouted = pgTable('mail_unrouted', {
 }, t => [primaryKey({ columns: [t.workspaceId, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId)]);
 
 export const mailboxMessages = pgTable('mailbox_messages', {
+  heldReason:text('held_reason'),
   mailboxId: text('mailbox_id').notNull(), messageId: text('message_id').notNull(), ...scope(), threadId: text('thread_id').notNull(),
   direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), read: boolean('read').notNull().default(false), receivedAt: ts('received_at').notNull(),
   labels: text('labels').array().notNull().default([]),

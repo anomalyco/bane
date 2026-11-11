@@ -139,5 +139,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   });
   await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type = 'maintenance.deleteAttachment' AND created_at < ${cutoff}`));
   const complete = Date.now() < deadline;
+  while(Date.now()<deadline && (await runtime.db.execute<{n:number}>(sql`SELECT inbox_retention_batch(25) AS n`)).rows[0].n>0){}
+  while(Date.now()<deadline && (await runtime.db.execute<{n:number}>(sql`SELECT mail_gc_batch(1000) AS n`)).rows[0].n===1000){}
+  await runtime.db.execute(sql`DELETE FROM mail_retired_addresses WHERE (workspace_id,address) IN (SELECT workspace_id,address FROM mail_retired_addresses WHERE until<=now() ORDER BY until LIMIT 5000)`);
   log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
 }

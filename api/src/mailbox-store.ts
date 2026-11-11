@@ -99,6 +99,7 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   const rules = [...new Set((input.rules ?? []).map(rule => validateRule(rule, input.domainName)))];
   if(rules.length)await checkRuleCapacity(tx,scope.workspaceId,input.domainId);
   const all = [address, ...aliases];
+  if((await tx.execute(sql`SELECT 1 FROM mail_retired_addresses WHERE workspace_id=${scope.workspaceId} AND address=ANY(${sql.param(all)}::text[]) AND until>now() LIMIT 1`)).rowCount)throw new ApiError(409,'ADDRESS_RETIRED','This address was recently retired.');
   const taken = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), inArray(mailboxAddresses.address, all)));
   if (taken.length) throw new ApiError(409, 'ADDRESS_TAKEN', `${taken[0]!.address} already belongs to a mailbox.`, 'address');
   const mailboxId = id('mbx');

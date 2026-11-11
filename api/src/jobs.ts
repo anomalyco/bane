@@ -5,7 +5,7 @@ import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js'
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 import { failCampaign } from './states.js';
-import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
+import { storageBinding, ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
 const LOAD_ERROR_THRESHOLD = 6;
@@ -100,7 +100,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const regionalRuntime = workspaceRuntimes(runtime);
-  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null;ingest:IngestInput|null };
+  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null;ingest:IngestInput|null;delete_binding:import('./provider-credentials.js').ReadyConnection|null };
   const handle = async (job: Claimed, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
@@ -123,7 +123,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
       await handler(ownerRuntime, handlerPayload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id,
-        webhook: job.webhook,ingest:job.ingest, recordWithSettlement: ctes => { records = ctes; } });
+        webhook: job.webhook,ingest:job.ingest,deleteBinding:job.delete_binding, recordWithSettlement: ctes => { records = ctes; } });
       await settle(runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null, ...(handlerPayload !== job.payload ? { payload: handlerPayload } : {}) }).where(fence));
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
@@ -226,7 +226,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest'
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
-        SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,${pool==='work'?sql`NULL`:sql`(SELECT wid FROM owners WHERE step=${claimBatchSize*4})`} AS hook_cursor,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config.multiTenant,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
+        SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,${pool==='work'?sql`NULL`:sql`(SELECT wid FROM owners WHERE step=${claimBatchSize*4})`} AS hook_cursor,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config.multiTenant,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest,${runtime.config.multiTenant ? sql`CASE WHEN j.type='mail.deleteObjects' AND j.payload->>'bucket' NOT LIKE 'r2:%' THEN ${storageBinding(sql`j.workspace_id`,sql`j.payload->>'region'`,sql`j.payload->>'bucket'`)} END` : sql`NULL`} AS delete_binding FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
       finally { ingestReserved-=slots-(claimed?.rows.filter(j=>j.type==='mailbox.ingest').length??0); }
       claimRequests++;
       if(pool!=='work')hookCursor=claimed.rows[0]?.hook_cursor??'';

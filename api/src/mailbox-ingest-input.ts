@@ -9,6 +9,6 @@ export function storageBinding(wid:string|SQLWrapper,region:string|SQLWrapper,bu
       ON mr.workspace_id=c.workspace_id AND mr.region=c.region AND mr.account_id=c.aws_account_id
       WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND c.template_version<>'v5' AND c.state='ready' AND mr.bucket=${bucket}) matched)`;
 }
-export type IngestInput={region:string;bucket:string;objectKey:string;recipients:string[];notification:Record<string,unknown>;createdAt:string;spamPolicy:string;binding:ReadyConnection|null};
+export type IngestInput={region:string;bucket:string;objectKey:string;recipients:string[];notification:Record<string,unknown>;createdAt:string;spamPolicy:string;delivery?:{lifecycle:string;prefixInbox:string|null;drop:boolean;owners:(string|null)[]};binding:ReadyConnection|null};
 export const ingestInput=(hosted:boolean,wid:SQLWrapper|string,mid:SQLWrapper|string)=>sql<IngestInput|null>`(SELECT to_jsonb(input) FROM (SELECT r.region,r.bucket,r.object_key AS "objectKey",r.recipients,r.notification,r.created_at AS "createdAt",coalesce(p.spam_policy,'store') AS "spamPolicy",
-  ${hosted?storageBinding(sql`r.workspace_id`,sql`r.region`,sql`r.bucket`):sql`NULL`} AS binding FROM mail_receipts r LEFT JOIN mail_receive_limits p USING(workspace_id) WHERE r.workspace_id=${wid} AND r.ses_message_id=${mid} AND r.status='pending') input)`;
+  ${hosted?storageBinding(sql`r.workspace_id`,sql`r.region`,sql`r.bucket`):sql`NULL`} AS binding,public.inbox_delivery(r.workspace_id,r.recipients) AS delivery FROM mail_receipts r LEFT JOIN mail_receive_limits p USING(workspace_id) WHERE r.workspace_id=${wid} AND r.ses_message_id=${mid} AND r.status='pending') input)`;

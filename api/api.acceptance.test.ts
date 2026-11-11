@@ -2259,13 +2259,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 56);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 25);
+    assert.equal(catalog.tools.length, 65);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 31);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
       'importContacts', 'importTemplateImage', 'previewCampaign', 'previewCampaignAudience', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'listInboxes','getInbox','createInbox','deleteInbox','waitForMessage','listInboxMessages','readInboxMessage','getInboxAttachment','updateInboxMessage',
       'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
@@ -7609,6 +7610,93 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       drift='';await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).receiving,'ready');assert.ok(redriven);assert.deepEqual((await db.query('SELECT sending_state,receiving_state FROM provider_pool_regions')).rows,[{sending_state:'pending',receiving_state:'ready'}]);
     });
   });
+  test('agent inbox contracts and storage budgets',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
+      const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
+      const {mailObjectUrl}=await import('./src/mail-object-route.js'),{assertMailKey}=await import('./src/mail-objects.js'),{app}=await import('./src/app.js');
+      const wid=runtime.config.workspaceId,domain=unique('mdom'),bucket='fixture-mail',host='inbox.example',topic=`arn:aws:sns:${REGION}:111122223333:inbound`;
+      const stored=new Map<string,Buffer>(),s3mail=new Map<string,Buffer>(),raw=new Map<string,Buffer>();let reads=0,gets=0;
+      runtime.mailR2={write:true,name:'fixture-r2',bucket:{put:async(k:string,body:Uint8Array)=>{stored.set(k,Buffer.from(body))},get:async(k:string)=>{gets++;return stored.has(k)?{body:new Response(new Uint8Array(stored.get(k)!)).body}:null},delete:async(keys:string[])=>keys.forEach(k=>stored.delete(k))} as unknown as R2Bucket};
+      runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
+      t.mock.method(S3Client.prototype,'send',async(cmd:any)=>{const k=cmd.input.Key as string,bytes=raw.get(k?.slice('staging/'.length))??s3mail.get(k);switch(cmd.constructor.name){
+        case 'HeadObjectCommand':return {ContentLength:bytes!.length,ETag:'"pin"'};
+        case 'GetObjectCommand':reads++;return {Body:{transformToByteArray:async()=>bytes!,transformToWebStream:()=>new Response(new Uint8Array(bytes!)).body}};
+        case 'PutObjectCommand':s3mail.set(k,Buffer.from(cmd.input.Body));return {};
+        case 'DeleteObjectsCommand':cmd.input.Delete.Objects.forEach((o:Json)=>s3mail.delete(o.Key));return {};
+        case 'CopyObjectCommand':s3mail.set(k,raw.get(cmd.input.CopySource.split('/').at(-1))!);return {};
+        default:throw Error(cmd.constructor.name);
+      }});
+      const trips=t.mock.method(pg.Client.prototype,'query');
+      const charged=async<T>(n:number,call:()=>Promise<T>)=>{const before=trips.mock.callCount(),res=await call();assert.equal(trips.mock.callCount()-before,n,'wire statements');return res;};
+      const root='/v1/inboxes', provision=ok(await local('POST','/v1/inbound/keys',{name:'Provision',addressIds:[],permissions:['create','read','modify','send']}),201).secret;
+      const create=(body:Json)=>request('POST',root,provision,body);
+      await t.test('ephemeral inbox: missing and inactive receiving hosts give actionable DNS errors',async()=>{
+        error(await charged(2,()=>create({})),409,'RECEIVING_DOMAIN_REQUIRED');
+        await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'waiting_for_mx','store')",[domain,wid,host,REGION]);
+        assert.match(error(await create({}),409,'RECEIVING_NOT_ACTIVE').message,/MX 10 inbound-smtp/);
+        await db.query("UPDATE mailbox_domains SET status='active' WHERE id=$1",[domain]);
+        await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
+      });
+      const input={clientId:'stable',limits:{messages:2},credential:{name:'reader',permissions:['read','modify']}};
+      const box=ok(await charged(2,()=>create(input)),201),key=box.credential.secret,path=`${root}/${box.id}`,url=path+'/messages';
+      const other=ok(await local('POST',root,{localPart:'neighbor'}),201);
+      await t.test('ephemeral inbox: one-statement create is idempotent, rate-limited and workspace-capped',async()=>{
+        const replay=ok(await charged(2,()=>create(input)));assert.equal(replay.id,box.id);assert.equal(replay.credential,undefined);error(await create({...input,name:'different'}),409,'IDEMPOTENCY_CONFLICT');
+        await db.query("UPDATE api_request_budgets SET used=60 WHERE workspace_id=$1 AND key_id='inbox-create:'||$1",[wid]);error(await create({}),429,'INBOX_CREATE_RATE');await db.query("UPDATE api_request_budgets SET used=0 WHERE workspace_id=$1 AND key_id='inbox-create:'||$1",[wid]);
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) SELECT 'cap'||i,$1,$2,'cap'||i||'@inbox.example','inbox','ephemeral',now()+interval '1 day',now()+interval '1 day' FROM generate_series(1,998)i",[wid,domain]);error(await create({}),409,'EPHEMERAL_INBOX_LIMIT');await db.query("DELETE FROM mailboxes WHERE workspace_id=$1 AND id LIKE 'cap%'",[wid]);
+      });
+      await t.test('ephemeral inbox: a create key reads only its own creations, not other addresses, threads or events',async()=>{
+        const list=ok(await charged(2,()=>request('GET',root,provision)));assert.deepEqual(list.data.map((r:Json)=>r.id),[box.id]);error(await charged(2,()=>request('GET',`${root}/${other.id}`,key)),404,'NOT_FOUND');
+        assert.deepEqual(ok(await request('GET','/v1/inbound/addresses',provision)).data.map((r:Json)=>r.id),[box.id]);assert.deepEqual(ok(await request('GET','/v1/inbound/threads',provision)).data,[]);assert.ok(ok(await request('GET','/v1/inbound/events?after=0',provision)).data.every((e:Json)=>e.addressId===box.id));
+      });
+      const fileMime='Content-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: text/plain\r\n\r\nVerification code 123456\r\n--p\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=test.txt\r\n\r\nfixture\r\n--p--';
+      const deliver=async(mid:string,to:string[],file=false,hosted=true,wireId=mid)=>{
+        const body=Buffer.from(`Bcc: private@else.example\r\nFrom: fixture@example.net\r\nMessage-ID: <${wireId}@fixture.example>\r\nSubject: Test\r\n${file?fileMime:'\r\n'+mid}`);raw.set(mid,body);
+        const notification={notificationType:'Received',mail:{messageId:mid},receipt:{...cleanScans,timestamp:new Date().toISOString(),recipients:to,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}};
+        assert.equal(await charged(1,()=>acceptInboundNotification(runtime,{message:notification,region:REGION,topicArn:topic})),1);
+        const ingest=(await runtime.db.execute<{i:import('./src/mailbox-ingest-input.js').IngestInput}>(sql`SELECT ${ingestInput(false,wid,mid)} i`)).rows[0].i;
+        const shared={kind:'shared' as const,id:'fixture',aws_account_id:'111122223333',role_arn:'',external_id:''};
+        const before=reads;await charged(ingest.delivery?.drop?1:file?3:2,()=>mailboxIngestJobs['mailbox.ingest']({...runtime,config:{...runtime.config,multiTenant:hosted}},{sesMessageId:mid},{id:'synthetic',workspaceId:wid,attempts:1,ingest:{...ingest,binding:hosted?shared:null}}));
+        if(ingest.delivery?.drop)assert.equal(reads,before);return (await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
+      };
+      const first=await deliver('r2-first',[box.address],true),defaultMsg=await deliver('r2-mixed',[other.address,'ordinary@'+host],true);
+      await t.test('R2 mail store: hosted ingest writes scrubbed raw and attachments with unchanged DB trips',async()=>{
+        assert.equal(first.raw_bucket,'r2:fixture-r2');assert.equal(first.raw_key,`e/${wid}/${box.id}/${first.id}.eml`);assert.deepEqual(stored.get(first.raw_key),Buffer.from(raw.get('r2-first')!.toString().split('\r\n').slice(1).join('\r\n')));assert.equal(defaultMsg.raw_key,`d/${wid}/${defaultMsg.id}.eml`);assert.ok([...stored.keys()].some(k=>k.startsWith(`a/${wid}/${defaultMsg.id}/`)));assert.equal(s3mail.size,0);
+      });
+      await t.test('R2 mail store: self-hosted mail stays in S3 even with a Mail binding',async()=>{const m=await deliver('node-mail',['other@'+host],false,false);assert.equal(m.raw_bucket,bucket);assert.ok(s3mail.has(m.raw_key));});
+      await t.test('R2 mail store: deduplicated candidate uploads are deleted without touching the owned attachment',async()=>{
+        await deliver('r2-duplicate',[box.address],true,true,'r2-first');const row=(await db.query("UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1 AND ses_message_id='r2-duplicate' RETURNING keys",[wid])).rows[0];assert.ok(stored.has(row.keys[0]));await assert.rejects(mailboxIngestJobs['mailbox.cleanUploads'](runtime,{},{id:'clean',workspaceId:wid,attempts:1}),(await import('./src/jobs.js')).JobDeferred);assert.ok(!stored.has(row.keys[0]));assert.ok([...stored.keys()].some(k=>k.startsWith(`e/${wid}/${box.id}/${first.id}/`)));
+      });
+      await t.test('R2 mail store: expiring tenant-bound PASS-only attachment downloads use zero DB trips',async()=>{
+        const m=ok(await charged(2,()=>request('GET',`${url}/${first.id}`,key))),link=m.attachments[0].url;
+        const before=gets,res=await charged(0,()=>Promise.resolve(app.fetch(new Request(link),runtime)));assert.equal(gets-before,1);assert.equal(await res.text(),'fixture');assert.match(res.headers.get('content-disposition')!,/^attachment/);assert.equal(res.headers.get('content-security-policy'),"sandbox; default-src 'none'");assert.equal(res.headers.get('cache-control'),'private, no-store');assert.equal(res.headers.get('x-content-type-options'),'nosniff');
+        assert.equal((await app.fetch(new Request(link+'x'),runtime)).status,404);assert.throws(()=>assertMailKey('other',first.raw_key));assert.throws(()=>assertMailKey(wid,`e/${wid}/../secret`));
+        const real=Date.now,clock=t.mock.method(Date,'now',()=>real()-310000);const old=mailObjectUrl(runtime,wid,first.raw_key,'a.eml','message/rfc822');clock.mock.restore();assert.equal((await app.fetch(new Request(old.url),runtime)).status,404);
+        await db.query("UPDATE mail_messages SET verdicts=verdicts||'{\"virus\":\"GRAY\"}' WHERE id=$1",[first.id]);assert.equal(ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url,null);await db.query("UPDATE mail_messages SET verdicts=verdicts||'{\"virus\":\"PASS\"}' WHERE id=$1",[first.id]);
+      });
+      await t.test('ephemeral inbox: wait starts before the call and advances only through returned deliveries',async()=>{
+        const second=await deliver('next',[box.address]);const page=ok(await charged(3,()=>request('GET',`${url}?wait=1&limit=1`,key)));assert.equal(page.data[0].id,first.id);assert.equal(page.hasMore,true);const next=ok(await charged(2,()=>request('GET',`${url}?after=${page.cursor}`,key)));assert.deepEqual(next.data.map((m:Json)=>m.id),[second.id]);ok(await charged(2,()=>request('PATCH',`${url}/${first.id}`,key,{read:true})));assert.equal(ok(await charged(2,()=>request('GET',path,key))).usage.unread,1);
+      });
+      await t.test('ephemeral inbox: over-cap mail is held, readable and announced once',async()=>{
+        for(const id of ['over1','over2'])await deliver(id,[box.address]);const rows=ok(await request('GET',url+'?include=held',key)).data;assert.deepEqual(rows.map((r:Json)=>r.held),[null,null,'quota','quota']);assert.equal(ok(await request('GET',url,key)).data.length,2);assert.equal((await db.query("SELECT FROM mailbox_events WHERE mailbox_id=$1 AND type='inbox.quota_exceeded'",[box.id])).rowCount,1);
+      });
+      await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
+        const rpc=(method:string,params:Json)=>request('POST','/mcp',key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','readInboxMessage','updateInboxMessage','waitForMessage'].sort());
+        const read=ok(await charged(2,()=>rpc('tools/call',{name:'readInboxMessage',arguments:{id:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
+        const denied=ok(await rpc('tools/call',{name:'deleteInbox',arguments:{id:box.id}}));assert.ok(denied.error||denied.result?.isError);
+      });
+      await t.test('ephemeral inbox: during grace mail is held; after deletion the retired recipient is dropped and counted',async()=>{
+        await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);await db.query('SELECT inbox_retention_batch(25)');assert.equal(await deliver('late',[box.address]),undefined);assert.deepEqual((await db.query("SELECT error,dropped_recipients FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='late'",[wid])).rows,[{error:'EPHEMERAL_RETIRED',dropped_recipients:1}]);error(await create({localPart:box.address.split('@')[0]}),409,'ADDRESS_RETIRED');
+      });
+      await t.test('ephemeral inbox: expired keys stop authenticating at deleteAfter',async()=>{error(await charged(1,()=>request('GET',root,key)),401,'AUTH_INVALID');});
+      await t.test('ephemeral inbox: retention removes unreferenced rows, threads and R2 objects, not default mail',async()=>{
+        await charged(1,()=>db.query('SELECT mail_gc_batch(1000)'));for(const j of await jobs('mail.deleteObjects'))await charged(0,()=>mailboxIngestJobs[j.type](runtime,j.payload,{id:j.id,workspaceId:wid,attempts:1}));assert.equal(stored.has(first.raw_key),false);for(const [table,id] of [['mail_messages',first.id],['mail_threads',first.thread_id],['mailboxes',box.id]])assert.equal((await db.query(`SELECT FROM ${table} WHERE id=$1`,[id])).rowCount,0);
+        await db.query('INSERT INTO mail_gc_candidates(workspace_id,message_id) VALUES($1,$2)',[wid,defaultMsg.id]);await db.query('SELECT mail_gc_batch(1000)');assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[defaultMsg.id])).rowCount,1);assert.ok(stored.has(defaultMsg.raw_key));
+      });
+    });
+  });
+  test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');

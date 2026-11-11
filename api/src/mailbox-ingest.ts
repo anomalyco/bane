@@ -384,6 +384,11 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const sesMessageId = String(payload.sesMessageId ?? '');
   const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config.multiTenant,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
   if(!receipt)return;
+  if(receipt.delivery?.drop){
+    const update=sql`retired AS (UPDATE mail_receipts SET status='processed',error='EPHEMERAL_RETIRED',processed_at=now(),dropped_recipients=jsonb_array_length(recipients) WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
+    if(job.recordWithSettlement)job.recordWithSettlement(update);else await runtime.db.execute(sql`WITH ${update} SELECT 1`);
+    return;
+  }
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
@@ -391,7 +396,9 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const r2 = runtime.config.multiTenant && receipt.binding?.kind==='shared' && runtime.mailR2?.write;
   const bucket = r2 ? `r2:${runtime.mailR2!.name}` : receipt.bucket;
   const objects=mailObjectsFor(runtime,scope.workspaceId,bucket,s3);
-  const rawKey=r2 ? `d/${scope.workspaceId}/${messageRowId}.eml` : workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
+  const ephemeral=receipt.delivery?.lifecycle==='ephemeral';
+  const prefix=ephemeral ? `e/${scope.workspaceId}/${receipt.delivery!.prefixInbox}` : null;
+  const rawKey=r2 ? `${prefix??'d/'+scope.workspaceId}/${messageRowId}.eml` : workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
   const quarantine=verdicts.virus!=='PASS'?'MAILBOX_VIRUS_QUARANTINED':spam && receipt.spamPolicy==='quarantine'?'MAILBOX_SPAM_QUARANTINED':null;
@@ -453,7 +460,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     // Stable on retry. Reopening a processed receipt strictly grows its envelope, so a
     // cleanup already tagging the old batch can never touch the newly published keys.
     const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients,...(r2?[bucket]:[])])) : null;
-    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>{const id=`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`;return r2 ? `a/${scope.workspaceId}/${messageRowId}/${batch}/${id}` : receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,id)}));
+    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>{const id=`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`;return r2 ? `${prefix??'a/'+scope.workspaceId}/${messageRowId}/${batch}/${id}` : receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,id)}));
     if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
     for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);
@@ -474,7 +481,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
          fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
-        headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: bucket, rawKey,
+        headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: bucket, rawKey,lifecycle:ephemeral?'ephemeral':'default',
         verdicts, spam, automated: automated(email, raw, from.address), status,
       },attachments,verifiedFrom,!receipt.notification.stagingEtag);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
@@ -511,7 +518,12 @@ export async function mailboxHourly(runtime: Runtime) {
 // copies need the whole budget for the multipart Bcc scrub. Never wait on another request.
 let mimeBytes=0;
 const inProgress=new Set<string>();
-export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
+export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.deleteObjects':async(runtime,payload,job)=>{
+  const bucket=String(payload.bucket), keys=payload.keys;
+  if(!Array.isArray(keys)||keys.length>1000||!keys.every(k=>typeof k==='string'))throw new ApiError(422,'JOB_PAYLOAD_INVALID','Invalid mail object list.');
+  const s3=bucket.startsWith('r2:')?undefined:await mailboxS3(runtime,job.workspaceId,String(payload.region),bucket,runtime.db,job.deleteBinding);
+  try{await mailObjectsFor(runtime,job.workspaceId,bucket,s3).delete(keys);}catch(e){if(e instanceof ApiError)throw e;throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);}finally{s3?.destroy();}
+},[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
   const key=JSON.stringify([job.workspaceId,payload.sesMessageId]);
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());

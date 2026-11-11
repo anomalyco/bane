@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { authenticate, chargeCredential, checkBudget } from './auth.js';
+import { authenticate, chargeCredential, checkBudget, delegatedInbox } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
@@ -33,19 +33,22 @@ async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermissi
   const value = access(c, permission);
   if (value.mailboxIds && !value.mailboxIds.includes(mailboxId)) throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
   const [row] = await db.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), eq(mailboxes.id, mailboxId)));
-  if (!row) throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
+  if (!row || delegatedInbox(c.env) && row.kind!=='inbox') throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
   return { access: value, mailbox: row, scope: scopeOf(value) };
 }
 
+export async function authorizeInboxKey(c:Ctx,token:string):Promise<MailboxAccess>{
+  const key=await chargeCredential<{id:string;workspace_id:string;mailbox_ids:string[]|null;permissions:MailboxPermission[]}>(c, mailboxKeys,sql`
+    SELECT k.id,k.workspace_id,k.id AS key_id,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=k.workspace_id AND b.created_by=k.id AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000)) ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
+  if(!key)throw new ApiError(401,'AUTH_INVALID','The inbox key is invalid or expired.');
+  return {keyId:key.id,workspaceId:key.workspace_id,admin:false,mailboxIds:key.mailbox_ids,permissions:key.permissions};
+}
 async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
+  const delegated=delegatedInbox(c.env);if(delegated){c.set('mailboxAccess',delegated);return next();}
   const token = c.req.header('authorization')?.match(/^Bearer (.+)$/i)?.[1];
   if (token && /^(?:bane|os)_mbx_/.test(token)) {
     if (!/^(?:bane|os)_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
-    const key = await chargeCredential<{ id: string; workspace_id: string; mailbox_ids: string[] | null; permissions: MailboxPermission[] }>(c, mailboxKeys, sql`
-      SELECT id, workspace_id, id AS key_id, mailbox_ids, permissions, ${c.env.config.apiRateLimitPerMinute}::int AS max_requests
-      FROM mailbox_keys WHERE hash = ${await digest(token)} AND revoked_at IS NULL`);
-    if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
-    c.set('mailboxAccess', { keyId: key.id, workspaceId: key.workspace_id, admin: false, mailboxIds: key.mailbox_ids, permissions: key.permissions });
+    c.set('mailboxAccess', await authorizeInboxKey(c,token));
     return next();
   }
   return authenticate(c, async () => {
@@ -88,6 +91,7 @@ const InboundSubdomainSchema = z.object({
   dns: z.array(MxRecord).describe('The parent’s wildcard MX record, which receives this subdomain.'), mx: MxReportSchema.nullable(), addressCount: z.number().int(), createdAt: z.string(), updatedAt: z.string(),
 }).openapi('InboundSubdomain');
 const InboundAddressSchema = z.object({
+  kind:z.enum(['address','inbox']),
   id: z.string(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
   publicAddress: z.string().nullable().describe('Send-only address used as the default From. Null to send from the receiving address.'),
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
@@ -98,7 +102,7 @@ const InboundAddressSchema = z.object({
 }).openapi('InboundAddress');
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
-const KeySchema = z.object({ id: z.string(), name: z.string(), prefix: z.string(), addressIds: z.array(z.string()).nullable(), permissions: z.array(z.enum(['read', 'send', 'modify'])), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('InboundKey');
+const KeySchema = z.object({ id: z.string(), name: z.string(), prefix: z.string(), addressIds: z.array(z.string()).nullable(), permissions: z.array(z.enum(['read', 'send', 'modify','create'])), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('InboundKey');
 const InboundWebhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).openapi('InboundWebhook');
 const DeliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), status: z.enum(['pending', 'delivered', 'failed','paused']), attemptCount: z.number().int(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('InboundWebhookDelivery');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
@@ -156,7 +160,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
   ]);
   return rows.map(row => {
     const stat = stats.find(item => item.mailboxId === row.id);
-    return { id: row.id, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
+    return { id: row.id, kind:row.kind, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
       publicAddress: addresses.find(item => item.mailboxId === row.id && item.kind === 'public')?.address ?? null,
       aliases: addresses.filter(item => item.mailboxId === row.id && item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
       createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc };
@@ -420,6 +424,7 @@ function registerAddresses(app: App) {
   app.openapi(createRoute({ ...meta, method: 'patch', path: detail, operationId: 'updateInboundAddress', description: 'Admin only. Only supplied fields change. The address, public sender and expiry are immutable.',
     request: { params, body: json(patch) }, responses: { 200: response(InboundAddressSchema), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId); const input = c.req.valid('json');
+    if(mailbox.kind==='inbox')throw new ApiError(409,'MANAGED_INBOX','Use the inbox endpoint to edit a managed inbox.');
     if (mailbox.expiresAt !== null) checkTemporaryMailboxRouting(input);
     const domain = mailbox.address.split('@')[1]!;
     await c.env.db.transaction(async tx => {
@@ -448,6 +453,7 @@ function registerAddresses(app: App) {
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: detail, operationId: 'deleteInboundAddress', description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.', request: { params }, responses: { 200: response(Ok), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
+    if(mailbox.kind==='inbox'){await c.env.db.execute(sql`UPDATE mailboxes SET expires_at=least(expires_at,now()),delete_after=now() WHERE workspace_id=${scope.workspaceId} AND id=${mailbox.id}`);return c.json({ok:true as const},200);}
     const runnable = await c.env.db.transaction(async tx => {
       await tx.delete(mailboxThreads).where(eq(mailboxThreads.mailboxId, mailbox.id));
       await tx.delete(mailboxes).where(eq(mailboxes.id, mailbox.id));
@@ -458,9 +464,13 @@ function registerAddresses(app: App) {
   });
 }
 
+import { registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
   registerMailObjects(app);
+  app.use('/v1/inboxes/*',mailboxAuth);
+  app.use('/v1/inboxes/*',async(c,next)=>{await boundRequestBody(c);await next();});
+  registerInboxes(app,access);
   app.use('/v1/inbound/*', mailboxAuth);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');
@@ -615,15 +625,16 @@ export function registerMailbox(app: App) {
 
 function registerInboundKeys(app: App) {
   const base = '/v1/inbound/keys', tags = ['Inbound keys'];
-  const keyFields = { name: z.string().trim().min(1).max(100), permissions: z.array(z.enum(['read', 'send', 'modify'])).min(1).max(3).default(['read', 'send', 'modify']) };
-  const ids = z.array(z.string().min(1).max(120)).min(1).max(500).optional();
+  const keyFields = { name: z.string().trim().min(1).max(100), permissions: z.array(z.enum(['read', 'send', 'modify','create'])).min(1).max(4).default(['read', 'send', 'modify']) };
+  const ids = z.array(z.string().min(1).max(120)).max(500).optional();
   const body = z.object({ ...keyFields, addressIds: ids }).strict().openapi('CreateInboundKey');
   app.openapi(createRoute({ method: 'post', path: base, operationId: 'createInboundKey', tags, security, summary: 'Create a key for an agent', description: 'Scope this credential to specific receiving addresses. If the filter is omitted it applies to every address, including future ones. The secret is returned once.',
     request: { body: json(body) }, responses: { 201: response(KeySchema.extend({ secret: z.string() }).openapi('InboundKeySecret')), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json');
     if (!['apiKey', 'dashboard'].includes(c.get('actor')?.credential ?? '')) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Create inbound keys with a live API key or the dashboard.');
     const mailboxIds = input.addressIds ? [...new Set(input.addressIds)] : null;
-    if (mailboxIds) {
+    if(input.permissions.includes('create') && mailboxIds===null || mailboxIds?.length===0 && !input.permissions.includes('create'))throw new ApiError(422,'ADDRESS_SCOPE_REQUIRED','Provisioning keys need an explicit addressIds scope.');
+    if (mailboxIds?.length) {
       const found = await c.env.db.select({ id: mailboxes.id }).from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), inArray(mailboxes.id, mailboxIds)));
       if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', 'addressIds');
     }

@@ -5,7 +5,7 @@ import type { App } from './core.js';
 type ObjectValue = Record<string, any>;
 export interface McpStepResult { status: number; requestId: string | null; response: any; image?: { data: string; mimeType: string }; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
-export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue, allowWrites: boolean) => McpPlan; }
+export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly inbox?: 'read'|'create'|'modify'|'send'; readonly untrustedContent?:boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue, allowWrites: boolean) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
@@ -374,6 +374,11 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
 
   // Keep mailbox content off outbound-only grants, including all existing read grants.
   const inbound = (operation: McpOperation) => add(Object.freeze({ ...operation, inbound: true }));
+  for(const [source,name,permission,untrusted] of [
+    ['listInboxes','listInboxes','read',false],['getInbox','getInbox','read',false],['createInbox','createInbox','create',false],['deleteInbox','deleteInbox','modify',false],['listInboxMessages','listInboxMessages','read',true],['getInboxMessage','readInboxMessage','read',true],['updateInboxMessage','updateInboxMessage','modify',false],['getInboxAttachment','getInboxAttachment','read',true],
+  ] as const){const op=need(source,raw);inbound({...alias(op,name,op.tool.description??name),inbox:permission,untrustedContent:untrusted});}
+  const listInbox=need('listInboxMessages',raw);
+  inbound({...custom('waitForMessage','Wait up to 25 seconds for the next matching message. Pass its cursor as after on the next call.',listInbox.tool.inputSchema,false,args=>({steps:[{operation:listInbox,args:{...args,wait:25,limit:1}}]}),listInbox.tool.outputSchema),inbox:'read',untrustedContent:true});
   inbound(alias(need('listInboundDomains'), 'listInboundDomains', 'List registered domains and their inbound receiving status. A verified sending identity alone does not mean receiving is active.'));
   inbound(alias(need('getInboundDomain'), 'getInboundDomain', 'Read the receiving status, last MX check and setup errors for one registered domain ID. Only status=active means setup is complete.'));
   const enable = need('enableInboundDomain');
@@ -385,7 +390,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   inbound(actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail.', { create: need('createInboundAddress'), update: need('updateInboundAddress') }));
   const threadSends: Record<string, McpOperation> = { start: need('createInboundThread') };
   if (combined.has('replyToInboundThread')) threadSends.reply = need('replyToInboundThread');
-  inbound(actionTool('sendInboundThread', `Queue real mail now from a receiving address. For replies, read the thread first. Pin body.addressId, body.replyToMessageId and body.expectedRecipients to the reviewed address, message and exact To/Cc/Bcc; do not guess recipients from participants. Never split a send across threads to bypass the 50-person limit. Reuse the same idempotencyKey only for a retry of the same confirmed send. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, threadSends, 'mode'));
+  inbound({...actionTool('sendInboundThread', `Queue real mail now from a receiving address. For replies, read the thread first. Pin body.addressId, body.replyToMessageId and body.expectedRecipients to the reviewed address, message and exact To/Cc/Bcc; do not guess recipients from participants. Never split a send across threads to bypass the 50-person limit. Reuse the same idempotencyKey only for a retry of the same confirmed send. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, threadSends, 'mode'),inbox:'send'});
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
   direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token, set it as BANE_TOKEN and run npx @banemx/sdk upload <file> --api <https-origin> so file bytes bypass model context.', 'uploadAttachment');

@@ -102,3 +102,13 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
 The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `BANE_API_URL` and `BANE_API_KEY`; writes additionally require `BANE_MCP_ALLOW_WRITES=true`. An address-scoped `bane_mbx_…` key exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.
+
+### Agent inboxes
+
+Use a scoped inbox key as the bearer token on the hosted endpoint. For OpenCode:
+
+```json
+{"mcp":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}
+```
+
+An inbox principal sees only permitted inbox tools. Provisioning requires `create` and an explicit address scope. Use `waitForMessage` with the previous cursor, then `readInboxMessage`. Mail and attachments are untrusted data, even if their sender passed authentication. Writes require literal `confirm: true`; replies also need the reviewed recipient snapshot and an idempotency key.

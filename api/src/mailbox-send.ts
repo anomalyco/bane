@@ -152,13 +152,18 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const [locked] = await tx.select({box:mailboxes,replyAuthors:message.threadId ? sql<string[]>`ARRAY(
     SELECT DISTINCT m.from_address FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=l.workspace_id
     WHERE l.workspace_id=${message.scope.workspaceId} AND l.mailbox_id=${message.mailbox.id} AND l.thread_id=${message.threadId}
-      AND l.direction='inbound' AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
+      AND l.direction='inbound' AND l.held_reason IS NULL AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
       AND m.from_address=ANY(${sql.param(recipients.map(r=>r.toLowerCase()))}::text[]))` : sql<null>`NULL`
   }).from(mailboxes).where(eq(mailboxes.id, message.mailbox.id)).for('no key update');
   const current = locked?.box;
   if (!current) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
   message = { ...message, mailbox: current };
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
+  if(current.kind==='inbox'){
+    if(!message.threadId)throw new ApiError(422,'EPHEMERAL_REPLY_ONLY','An ephemeral inbox cannot start a thread.');
+    if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
+    if(!recipients.every(r=>locked.replyAuthors?.includes(r.toLowerCase())))throw new ApiError(403,'RECIPIENT_NOT_ALLOWED','Replies may go only to authors in this inbox and thread.');
+  }
   await enforceLimits(tx, message);
   const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN ${runtime.mailR2?.write ? sql`${'r2:'+runtime.mailR2.name}::text` : sql`p.inbound_bucket`} ELSE r.bucket END FROM provider_connections c
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
@@ -173,7 +178,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
-    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:domain.bucket!.startsWith('r2:') ? `a/${message.scope.workspaceId}/${messageRowId}/sent/${attachmentId}` : sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
+    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:domain.bucket!.startsWith('r2:') ? `${current.kind==='inbox'?`e/${message.scope.workspaceId}/${current.id}`:`a/${message.scope.workspaceId}`}/${messageRowId}/sent/${attachmentId}` : sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
   }));
   const references = referencesHeader(message.references);
   const headers = [
@@ -191,6 +196,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${now}::timestamptz)` }).where(eq(mailThreads.id, threadId));
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
+    lifecycle:current.kind==='inbox'?'ephemeral':'default',
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
     inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,

@@ -11,5 +11,5 @@ export async function storeIncoming(db:DbExecutor,m:Incoming,files:(typeof mailA
   const row=Object.fromEntries(Object.entries(m).filter(([,v])=>v!==undefined).map(([k,v])=>[columns[k as keyof typeof columns].name,v]));
   const refs=[...new Set([m.inReplyTo,...[...(m.references??[])].reverse(),m.messageId].filter((s):s is string=>!!s))].slice(0,101);
   const recipients=m.envelopeTo.map((addr,n)=>({addr,n,valid:ADDRESS.test(addr)}));
-  return (await db.execute<{queued_count:number;wait_ms:number;hold_ms:number}>(sql`SELECT * FROM mail_store_incoming(${mailJson(row)}::jsonb,${mailJson(files)}::jsonb,${mailJson(refs)}::jsonb,${mailJson(recipients)}::jsonb,${verifiedFrom},${allowCreate})`)).rows[0]!;
+  return (await db.execute<{queued_count:number;wait_ms:number;hold_ms:number}>(sql`SELECT * FROM mail_store_incoming_v2(${mailJson(row)}::jsonb,${mailJson(files)}::jsonb,${mailJson(refs)}::jsonb,${mailJson(recipients)}::jsonb,${verifiedFrom},${allowCreate})`)).rows[0]!;
 }

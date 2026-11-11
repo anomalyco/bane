@@ -138,6 +138,7 @@ export function ReceivingPage() {
     <PageHeader title="Receiving" actions={<Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox" {...intent('/receiving/inbox')}>Inbox</Link>} />
     <div className="receiving-sections">
       {canAdminister && <DomainsSection onOpen={setOpenDomain} />}
+      <section className="section stack"><SectionHeader title="Agent inboxes" actions={<Link to="/receiving/inboxes">View inboxes</Link>}/><p className="muted">Temporary addresses for sign-up tests and agent tasks.</p></section>
       <RoutesSection onOpenDomain={setOpenDomain} />
       <AddressesSection domains={domains.data} />
     </div>

@@ -415,3 +415,9 @@ Useful checks, from their respective packages:
 - `mcp/`: `bun run check` and `bun run build`; exercise the stdio client against the local API with a scoped key on a simulated deployment.
 
 Live acceptance is opt-in with `LIVE_SES_TEST=1`, `SES_TEST_RECIPIENT`, and `SES_TEST_FROM` for explicitly authorized real sending. The commands above describe checks, not a claim that they have passed on your installation. Docker/Workers builds, local simulation, Google mocks, and source review do not replace the [external release gates](#ses-and-production-release-gates).
+
+## Ephemeral inboxes
+
+`POST /v1/inboxes` needs a workspace administrator or a provisioning key (create an inbound key with `permissions: ["create","read"]` and `addressIds: []`). Choose an active receiving host; the default lease and grace are each 24 hours. A `clientId` replays a create without revealing its key again. Each workspace can create 60 inboxes/minute and have 1,000 active. Keys expire at deletion. Reply sending is opt-in, limited to inbound authors and at most 20 messages/day.
+
+A waiter starts at the first delivery, even if it arrived before the call. Pass the returned cursor to advance in commit order. Junk, unverified and held mail do not wake a waiter. List with `include=held` without waiting to audit those messages. Mail over 200 messages or 25 MiB (or a lower configured cap) and mail during grace stays readable. `inbox.created`, `inbox.deleted`, `message.held` and `inbox.quota_exceeded` are additive event types; consumers should ignore unrecognized events. The hourly sweep removes due inboxes, queues deletion of unreferenced ephemeral objects and reserves deleted addresses for 30 days. Deletion does not shorten backup retention or remove copies other recipients keep.

@@ -3,7 +3,7 @@ import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHa
 import { mailboxEvents } from './db/mailbox.js';
 import { inboundHookClaim,JobDeferred,WEBHOOK_ATTEMPTS,retryDatabaseFailures } from './jobs.js';
 
-export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const;
+export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted','inbox.created','inbox.updated','inbox.deleted','message.held','inbox.quota_exceeded'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
 export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | null; threadId?: string | null; messageId?: string | null; data?: Record<string, unknown> };
 

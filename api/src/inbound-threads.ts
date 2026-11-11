@@ -49,7 +49,7 @@ const encodeCursor = (time: string, id: string) => Buffer.from(JSON.stringify([t
 type Filter = { addressId?: string; threadId?: string; messageId?: string };
 function visibleLinks(value: MailboxAccess, filter: Filter) {
   if (filter.addressId && value.mailboxIds && !value.mailboxIds.includes(filter.addressId)) throw new ApiError(404, 'NOT_FOUND', 'Address was not found.');
-  return and(eq(links.workspaceId, value.workspaceId),
+  return and(sql`${links.heldReason} IS NULL`,eq(links.workspaceId, value.workspaceId),
     filter.addressId ? eq(links.mailboxId, filter.addressId) : value.mailboxIds ? inArray(links.mailboxId, value.mailboxIds) : undefined,
     filter.threadId ? eq(links.threadId, filter.threadId) : undefined, filter.messageId ? eq(links.messageId, filter.messageId) : undefined);
 }

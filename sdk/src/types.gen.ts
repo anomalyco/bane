@@ -1587,6 +1587,88 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type Inbox = {
+    id: string;
+    kind: 'inbox';
+    type: 'ephemeral';
+    address: string;
+    domain: string;
+    name: string | null;
+    metadata: {
+        [key: string]: unknown;
+    };
+    clientId: string | null;
+    status: 'active' | 'expired' | 'deleting';
+    createdAt: string;
+    expiresAt: string;
+    deleteAfter: string;
+    limits: {
+        messages?: number;
+        bytes?: number;
+    };
+    send: {
+        enabled: boolean;
+        perDay: number;
+        replyOnly: true;
+    };
+    usage: {
+        messages: number;
+        bytes: number;
+        held: number;
+        unread: number;
+        lastMessageAt: string | null;
+    };
+};
+
+export type InboxMessage = {
+    id: string;
+    threadId: string;
+    cursor: string;
+    from: {
+        name: string | null;
+        address: string;
+    };
+    to: Array<{
+        name: string | null;
+        address: string;
+    }>;
+    subject: string;
+    snippet: string;
+    receivedAt: string;
+    read: boolean;
+    junk: boolean;
+    held: 'quota' | 'expired' | null;
+    attachmentCount: number;
+    auth: {
+        spf?: string;
+        dkim?: string;
+        dmarc?: string;
+    };
+    hiddenContent: boolean;
+    extract: {
+        codes: Array<string>;
+        links: Array<{
+            text: string;
+            href: string;
+            mismatch: boolean;
+        }>;
+    };
+};
+
+export type InboxMessageDetail = InboxMessage & {
+    text: string;
+    replyText: string;
+    html: string | null;
+    attachments: Array<{
+        id: string;
+        filename: string;
+        contentType: string;
+        size: number;
+        url: string | null;
+        expiresAt: string | null;
+    }>;
+};
+
 export type InboundScanPolicy = {
     spam: 'store' | 'quarantine';
 };
@@ -1747,6 +1829,7 @@ export type InboundAddressPage = {
 };
 
 export type InboundAddress = {
+    kind: 'address' | 'inbox';
     id: string;
     address: string;
     displayName: string | null;
@@ -2128,7 +2211,7 @@ export type InboundEventPage = {
 export type InboundEvent = {
     id: string;
     cursor: string;
-    type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted';
+    type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.updated' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded';
     createdAt: string;
     threadId: string | null;
     messageId: string | null;
@@ -2154,7 +2237,7 @@ export type InboundKey = {
     name: string;
     prefix: string;
     addressIds: Array<string> | null;
-    permissions: Array<'read' | 'send' | 'modify'>;
+    permissions: Array<'read' | 'send' | 'modify' | 'create'>;
     createdAt: string;
     lastUsedAt: string | null;
     revokedAt: string | null;
@@ -2162,7 +2245,7 @@ export type InboundKey = {
 
 export type CreateInboundKey = {
     name: string;
-    permissions?: Array<'read' | 'send' | 'modify'>;
+    permissions?: Array<'read' | 'send' | 'modify' | 'create'>;
     addressIds?: Array<string>;
 };
 
@@ -2179,7 +2262,7 @@ export type InboundWebhook = {
     id: string;
     url: string;
     description: string;
-    eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.updated' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded'>;
     paused: boolean;
     /**
      * Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.
@@ -2197,7 +2280,7 @@ export type InboundWebhook = {
 export type CreateInboundWebhook = {
     url: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.updated' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded'>;
     paused?: boolean;
     /**
      * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
@@ -2219,7 +2302,7 @@ export type InboundWebhookList = {
 export type UpdateInboundWebhook = {
     url?: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.updated' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded'>;
     paused?: boolean;
     /**
      * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
@@ -9911,6 +9994,654 @@ export type ConfigureRegionAutoValidationResponses = {
 };
 
 export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];
+
+export type ListInboxesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        type?: 'ephemeral';
+        status?: 'active' | 'expired' | 'deleting';
+        q?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inboxes';
+};
+
+export type ListInboxesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboxesError = ListInboxesErrors[keyof ListInboxesErrors];
+
+export type ListInboxesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<Inbox>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListInboxesResponse = ListInboxesResponses[keyof ListInboxesResponses];
+
+export type CreateInboxData = {
+    body: {
+        type?: 'ephemeral';
+        ttlSeconds?: number;
+        graceHours?: number;
+        domain?: string;
+        localPart?: string | null;
+        name?: string;
+        metadata?: {
+            [key: string]: unknown;
+        };
+        clientId?: string;
+        limits?: {
+            messages?: number;
+            bytes?: number;
+        };
+        send?: {
+            enabled?: boolean;
+            perDay?: number;
+        };
+        credential?: {
+            name: string;
+            permissions: Array<'read' | 'modify' | 'send'>;
+        };
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/inboxes';
+};
+
+export type CreateInboxErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboxError = CreateInboxErrors[keyof CreateInboxErrors];
+
+export type CreateInboxResponses = {
+    /**
+     * Success
+     */
+    200: Inbox;
+    /**
+     * Success
+     */
+    201: Inbox & {
+        credential?: {
+            id: string;
+            secret: string;
+            permissions: Array<'read' | 'modify' | 'send'>;
+            expiresAt: string;
+        };
+    };
+};
+
+export type CreateInboxResponse = CreateInboxResponses[keyof CreateInboxResponses];
+
+export type DeleteInboxData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}';
+};
+
+export type DeleteInboxErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteInboxError = DeleteInboxErrors[keyof DeleteInboxErrors];
+
+export type DeleteInboxResponses = {
+    /**
+     * Success
+     */
+    202: {
+        id: string;
+        status: 'deleting';
+        deleteAfter: string;
+    };
+};
+
+export type DeleteInboxResponse = DeleteInboxResponses[keyof DeleteInboxResponses];
+
+export type GetInboxData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}';
+};
+
+export type GetInboxErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboxError = GetInboxErrors[keyof GetInboxErrors];
+
+export type GetInboxResponses = {
+    /**
+     * Success
+     */
+    200: Inbox;
+};
+
+export type GetInboxResponse = GetInboxResponses[keyof GetInboxResponses];
+
+export type UpdateInboxData = {
+    body: {
+        name?: string;
+        metadata?: {
+            [key: string]: unknown;
+        };
+        expiresAt?: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}';
+};
+
+export type UpdateInboxErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboxError = UpdateInboxErrors[keyof UpdateInboxErrors];
+
+export type UpdateInboxResponses = {
+    /**
+     * Success
+     */
+    200: Inbox;
+};
+
+export type UpdateInboxResponse = UpdateInboxResponses[keyof UpdateInboxResponses];
+
+export type ListInboxMessagesData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        after?: string;
+        wait?: number | null;
+        limit?: number;
+        from?: string;
+        subjectContains?: string;
+        unread?: 'true' | 'false';
+        include?: 'held';
+        extract?: 'codes' | 'links' | 'codes,links' | 'links,codes';
+    };
+    url: '/v1/inboxes/{id}/messages';
+};
+
+export type ListInboxMessagesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboxMessagesError = ListInboxMessagesErrors[keyof ListInboxMessagesErrors];
+
+export type ListInboxMessagesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<InboxMessage>;
+        cursor: string;
+        hasMore: boolean;
+    };
+};
+
+export type ListInboxMessagesResponse = ListInboxMessagesResponses[keyof ListInboxMessagesResponses];
+
+export type GetInboxMessageData = {
+    body?: never;
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: {
+        includeHtml?: 'true' | 'false';
+        extract?: 'codes' | 'links' | 'codes,links' | 'links,codes';
+    };
+    url: '/v1/inboxes/{id}/messages/{messageId}';
+};
+
+export type GetInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboxMessageError = GetInboxMessageErrors[keyof GetInboxMessageErrors];
+
+export type GetInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: InboxMessageDetail;
+};
+
+export type GetInboxMessageResponse = GetInboxMessageResponses[keyof GetInboxMessageResponses];
+
+export type UpdateInboxMessageData = {
+    body: {
+        read: boolean;
+    };
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/messages/{messageId}';
+};
+
+export type UpdateInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboxMessageError = UpdateInboxMessageErrors[keyof UpdateInboxMessageErrors];
+
+export type UpdateInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        read: boolean;
+    };
+};
+
+export type UpdateInboxMessageResponse = UpdateInboxMessageResponses[keyof UpdateInboxMessageResponses];
+
+export type GetInboxAttachmentData = {
+    body?: never;
+    path: {
+        id: string;
+        messageId: string;
+        attachmentId: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/messages/{messageId}/attachments/{attachmentId}';
+};
+
+export type GetInboxAttachmentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboxAttachmentError = GetInboxAttachmentErrors[keyof GetInboxAttachmentErrors];
+
+export type GetInboxAttachmentResponses = {
+    /**
+     * Success
+     */
+    200: {
+        filename: string;
+        contentType: string;
+        url: string;
+        expiresAt: string;
+        text?: string;
+        image?: string;
+    };
+};
+
+export type GetInboxAttachmentResponse = GetInboxAttachmentResponses[keyof GetInboxAttachmentResponses];
 
 export type GetInboundScanPolicyData = {
     body?: never;
