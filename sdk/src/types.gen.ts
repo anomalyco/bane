@@ -1726,7 +1726,7 @@ export type InboxMessage = {
      */
     simulated: boolean;
     /**
-     * Hidden HTML (display:none, zero-size text, zero-width characters) was removed from text and snippet.
+     * Best-effort detection of hidden, styled or invisible content. False does not guarantee visibility.
      */
     hiddenContent: boolean;
     /**
@@ -1734,7 +1734,7 @@ export type InboxMessage = {
      */
     extract: {
         /**
-         * Up to 5 one-time codes near words like code, verify or OTP, in visible text only.
+         * Up to 5 one-time codes near words like code, verify or OTP, in the best-effort text projection.
          */
         codes: Array<string>;
         /**
@@ -1784,6 +1784,10 @@ export type InboxAttachment = {
     expiresAt: string;
     text?: string;
     image?: string;
+};
+
+export type InboundOk = {
+    ok: true;
 };
 
 export type InboundScanPolicy = {
@@ -2041,10 +2045,6 @@ export type UpdateInboundAddress = {
         perThreadPer10Minutes?: number;
     };
     requireDmarc?: boolean;
-};
-
-export type InboundOk = {
-    ok: true;
 };
 
 export type InboundThreadPage = {
@@ -10211,7 +10211,7 @@ export type CreateInboxData = {
          */
         domain?: string;
         /**
-         * Fixed part before the @. Default: 10 random characters, which nobody can guess.
+         * Admin REST only; provisioning keys and MCP must omit this. Default: 10 random characters, which nobody can guess.
          */
         localPart?: string | null;
         /**
@@ -10894,6 +10894,69 @@ export type GetInboxAttachmentResponses = {
 };
 
 export type GetInboxAttachmentResponse = GetInboxAttachmentResponses[keyof GetInboxAttachmentResponses];
+
+export type ReleaseRetiredAddressData = {
+    body?: never;
+    path: {
+        address: string;
+    };
+    query?: never;
+    url: '/v1/inbound/retired/{address}';
+};
+
+export type ReleaseRetiredAddressErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ReleaseRetiredAddressError = ReleaseRetiredAddressErrors[keyof ReleaseRetiredAddressErrors];
+
+export type ReleaseRetiredAddressResponses = {
+    /**
+     * Success
+     */
+    200: InboundOk;
+};
+
+export type ReleaseRetiredAddressResponse = ReleaseRetiredAddressResponses[keyof ReleaseRetiredAddressResponses];
 
 export type GetInboundScanPolicyData = {
     body?: never;

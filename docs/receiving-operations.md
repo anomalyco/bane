@@ -172,7 +172,7 @@ Inboxes phase 1 moves new hosted received mail (raw MIME and extracted files) fr
 ### Dev
 
 1. Before merging, preview the `dev` stack (`pulumi preview --stack dev` from `infra/pulumi` with the deploy role, or a `Deploy` dispatch with `preview: true`) and check the plan is exactly two creates in the Cloudflare account: `cf:R2Bucket mail` (`bane-dev-mail`, ENAM, protected) and `cf:R2BucketLifecycle mail-lifecycle` (`default-raw-90d` on `d/`, `ephemeral-safety-45d` on `e/`, `abort-multipart-1d`), with no replacements or deletes. The minted Cloudflare token must be allowed to create R2 buckets and write their lifecycle (Workers R2 Storage: Edit); if it isn't, create `bane-dev-mail` once by hand in ENAM and adopt it with an `import` option like the attachments bucket.
-2. Merge to `dev`. The deploy applies Pulumi first (`infra/pulumi` changed), then migrations 104–107, then the Worker with the `MAIL` binding. A Worker deploy that binds a missing bucket fails, so Pulumi must succeed first.
+2. Verify Hyperdrive query caching is disabled. Merge to `dev`. The deploy applies Pulumi first (`infra/pulumi` changed), then migrations 104–107, then the Worker with the `MAIL` binding. A Worker deploy that binds a missing bucket fails, so Pulumi must succeed first.
 3. Verify on `dev.bane.mx`:
    - The receiving canary passes. Its `mail_messages` row has `raw_bucket = 'r2:bane-dev-mail'` and `raw_key = 'd/<workspace>/<message>.eml'`; the only new S3 object is under `staging/`.
    - An inbox on the dev receiving host (`POST /v1/inboxes`) receives a real message, `waitForMessage` returns it within 5 seconds of the SES receipt, and its attachment downloads through `/v1/objects/…`.
@@ -189,9 +189,13 @@ Inboxes phase 1 moves new hosted received mail (raw MIME and extracted files) fr
 
 Set `BANE_MAIL_STORE` back to `"s3"` and deploy. **Keep the `MAIL` binding and the bucket:** `r2:` rows and outstanding download links read through it. New default mail goes back to S3, new inboxes are refused with `503`, and existing inboxes keep working: their mail and erasure stay in R2 while `MAIL` is bound. Legacy S3 rows stay readable throughout.
 
+**Do not roll back to pre-inbox Worker code after activation.** It cannot read R2 rows, enforce inbox holds, assign cursors or drain erasure. Prefer flag rollback or a forward fix. If a binary rollback is unavoidable, stop new creates and pause receipt processing, end all inboxes, drain GC and object jobs (including failures), and verify there are no inbox rows, GC candidates or outstanding erasures. Additionally, all remaining `r2:` content must stay readable: backport the dual reader or migrate and verify it before considering an S3-only binary. Reconcile pending receipts/jobs before resuming. Do not revert migrations or delete the bucket.
+
 ### IAM and erasure
 
 - **Hosted shared pool: no change.** Inbox mail always goes to R2, and R2 deletes go through the binding, so the runtime needs no `s3:DeleteObject`. Default-class raw MIME in R2 expires after 90 days by the `d/` rule, as in S3; extracted attachments do not expire, as today.
 - **BYO connections:** inbox mail stays in the customer’s bucket, and the BYO template (v4) grants no delete. Erasing such an inbox removes its rows; its objects stay (raw MIME expires at 90 days through the bucket rule) and the `mail.deleteObjects` job fails with `MAIL_DELETE_DENIED`, keeping its keys. A future template version can grant `s3:DeleteObject` on `workspaces/*/raw/*` and `workspaces/*/att/*`.
 - **Self-hosted:** the operator’s S3 credentials need `s3:DeleteObject` on the same two prefixes.
 - Watch `SELECT workspace_id,last_error,count(*) FROM jobs WHERE type='mail.deleteObjects' AND status='failed' GROUP BY 1,2` and `RETENTION_PARTIAL` logs. Don’t advertise completed erasure while deletes are failing.
+
+Deletion closes inbox reads and releases real addresses immediately. Previously issued signed links can remain usable for up to five minutes. Receipt and outbound logs (including quoted replies) retain their usual 30 days; shared/default mail, independent copies and backups retain their own policies. Orphan `e/` objects can survive until the 45-day backstop. `INBOX_RETENTION_PARTIAL` and `INBOX_RETENTION_FAILED` identify incomplete phases; an error does not stop other hourly jobs.

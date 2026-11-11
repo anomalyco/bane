@@ -6670,7 +6670,7 @@
           },
           "hiddenContent": {
             "type": "boolean",
-            "description": "Hidden HTML (display:none, zero-size text, zero-width characters) was removed from text and snippet."
+            "description": "Best-effort detection of hidden, styled or invisible content. False does not guarantee visibility."
           },
           "extract": {
             "type": "object",
@@ -6680,7 +6680,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "Up to 5 one-time codes near words like code, verify or OTP, in visible text only."
+                "description": "Up to 5 one-time codes near words like code, verify or OTP, in the best-effort text projection."
               },
               "links": {
                 "type": "array",
@@ -6834,6 +6834,20 @@
           "contentType",
           "url",
           "expiresAt"
+        ]
+      },
+      "InboundOk": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "ok"
         ]
       },
       "InboundScanPolicy": {
@@ -7625,20 +7639,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "InboundOk": {
-        "type": "object",
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "enum": [
-              true
-            ]
-          }
-        },
-        "required": [
-          "ok"
-        ]
       },
       "InboundThreadPage": {
         "type": "object",
@@ -29700,7 +29700,7 @@
         ],
         "operationId": "createInbox",
         "summary": "Create an agent inbox",
-        "description": "Creates an expiring inbox with a fresh address on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 active inboxes per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.",
+        "description": "Creates an expiring inbox with a fresh address on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.",
         "requestBody": {
           "required": true,
           "content": {
@@ -29743,7 +29743,7 @@
                     ],
                     "maxLength": 64,
                     "pattern": "^[a-z0-9](?:[a-z0-9_-]|\\.(?!\\.|$))*$",
-                    "description": "Fixed part before the @. Default: 10 random characters, which nobody can guess."
+                    "description": "Admin REST only; provisioning keys and MCP must omit this. Default: 10 random characters, which nobody can guess."
                   },
                   "name": {
                     "type": "string",
@@ -30542,7 +30542,7 @@
         ],
         "operationId": "deleteInbox",
         "summary": "Delete an inbox now",
-        "description": "The address stops receiving immediately and stays reserved for 30 days, so later mail to it is dropped and counted. Keys created with the inbox stop working now; its messages and objects are erased at the next hourly sweep.",
+        "description": "The address stops receiving immediately and real addresses return to domain routing. Keys created with the inbox stop working now; its messages and objects are erased at the next hourly sweep.",
         "parameters": [
           {
             "schema": {
@@ -31735,6 +31735,162 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/messages/message_123/attachments/attachment_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inbound/retired/{address}": {
+      "delete": {
+        "operationId": "releaseRetiredAddress",
+        "tags": [
+          "Inbound addresses"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Release a retired address for reuse (workspace admin)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 254,
+              "format": "email"
+            },
+            "required": true,
+            "name": "address",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundOk"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { releaseRetiredAddress } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await releaseRetiredAddress({\n  client,\n  path: {\n    \"address\": \"recipient@example.com\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request DELETE \\\n  --url 'https://bane.mx/v1/inbound/retired/recipient%40example.com' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
