@@ -70,3 +70,7 @@
 .dns-wait a:hover { color: var(--color-text); }
 .dns-issue { margin-top: var(--space-12); max-width: 72ch; }
 .domain-group > .dns-issue { margin-top: 0; }
+/* Pitch: the domain page's Receiving facts keep one height while they load (the Select is a control, not a line). */
+.domain-receiving-facts dd { display: flex; align-items: center; min-height: var(--control-height); }
+.domain-receiving-facts .ui-skeleton { width: 72px; }
+.domain-group-title p > .ui-skeleton { display: inline-block; width: 280px; vertical-align: middle; }

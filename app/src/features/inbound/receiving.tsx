@@ -9,8 +9,13 @@ import { number } from '../../lib/format'
 import { MutationError } from '../settings/shared'
 import { AddressesSection } from './addresses'
 import { catchAllLabel, mxTone, receivingStatus } from './status'
+import { useReceivingPitch } from './pitch/flag'
+import { FlowDirection } from './pitch/flow-view'
+import { AddressesDirection } from './pitch/addresses-view'
+import { InboxesDirection } from './pitch/inboxes-view'
 import '../settings/settings.css'
 import './inbound.css'
+import './pitch/pitch.css'
 
 // Receiving domains first, then the ones still being set up; domains that only send are left out.
 const order: Record<MailboxDomainStatus, number> = { active: 0, failed: 1, provisioning: 2, disabling: 3, waiting_for_mx: 4, off: 5, disabled: 5 }
@@ -134,7 +139,13 @@ function RoutesSection({ onOpenDomain }: { onOpenDomain: (id: string) => void })
   </section>
 }
 
+// Pitch only (?receiving=1|2|3): three ways to organize Receiving, side by side with today's page.
 export function ReceivingPage() {
+  const pitch = useReceivingPitch()
+  return pitch === 1 ? <FlowDirection /> : pitch === 2 ? <AddressesDirection /> : pitch === 3 ? <InboxesDirection /> : <ReceivingToday />
+}
+
+function ReceivingToday() {
   const { canAdminister } = useWorkspaceAccess()
   const intent = useRouteIntent()
   const domains = useApiDef(queries.inboundDomains(), { enabled: canAdminister })

@@ -8,8 +8,11 @@ import { useCursorPagination } from '../../lib/pagination'
 import type { InboundAddress, InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
+import { useReceivingPitch } from './pitch/flag'
+import { AddressPath } from './pitch/addresses-view'
 import '../settings/settings.css'
 import './inbound.css'
+import './pitch/pitch.css'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -103,6 +106,7 @@ const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].s
 export function InboundAddressDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
+  const pitch = useReceivingPitch()
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
   const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved')
   const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted')
@@ -139,6 +143,7 @@ export function InboundAddressDetailPage() {
         <div><dt>Last message</dt><dd>{current.stats.lastMessageAt ? date(current.stats.lastMessageAt) : 'None yet'}</dd></div>
         {current.expiresAt && <div><dt>Expires</dt><dd>{date(current.expiresAt)}</dd></div>}
       </dl>
+      {pitch > 0 && <AddressPath id={current.id} />}
       {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address has expired. It no longer receives or sends mail; its history stays readable until you delete it.</Alert>}
       <section className="section section--bordered stack">
         <SectionHeader title="Settings" />
