@@ -1920,9 +1920,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const allowance = buffer!.hosted;
     let hostedUntil: string | null = null;
     if (allowance && allowance.marketingCap !== null && !campaign.simulated) {
-      let left = allowance.marketingCap - allowance.used;
-      const blocked = recipients.findIndex(r => hostedCost(r.recipient.email) > 0 && --left < 0);
-      if (blocked >= 0) {
+      const blocked = Math.max(0, allowance.marketingCap - allowance.used);
+      if (blocked < recipients.length) {
         hostedUntil = allowance.nextChangeAt;
         if (blocked === 0) {
           await db.execute(holdCampaign(ref, 'hosted_daily_quota', hostedUntil));

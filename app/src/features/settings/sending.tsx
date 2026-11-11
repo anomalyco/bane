@@ -19,7 +19,7 @@ export function SendingConnection() {
   return <section id="sending" className="section stack settings-group">
     <SectionHeader title="Sending" actions={current ? <Button variant="danger" onClick={() => setConfirming(true)}>Disconnect</Button> : connection.isPending && summary ? <Button variant="danger" disabled>Disconnect</Button> : null} />
     {connection.error ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> : connection.isPending ? summary ? <ConnectionFacts kind={summary.kind} /> : <FieldSkeleton /> : !current ? <p className="muted settings-section-note">Not connected.</p> : <ConnectionFacts kind={current.kind} values={[connectionKindLabel[current.kind], <StatusBadge status={current.state} />, current.kind === 'shared' ? <StatusBadge status={current.tenant} /> : current.awsAccountId ?? '—']} />}
-    {limit && <p className="muted settings-section-note">Sending limit: {limitSummary(limit)} New hosted workspaces start low and rise after their first and second weeks; simulator addresses don’t count.</p>}
+    {limit && <p className="muted settings-section-note">Sending limit: {limitSummary(limit)} Simulator addresses count toward this limit.</p>}
     <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={current?.kind === 'byo' ? 'Sending stops until you connect again. AWS resources stay in your account; delete the Bane stack in AWS to revoke access.' : 'Sending stops until you connect again.'} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
   </section>
 }

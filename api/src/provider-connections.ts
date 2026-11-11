@@ -25,7 +25,7 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   sendingPause: z.object({ at: z.iso.datetime(), reason: z.string() }).nullable().describe('Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.'),
   sendingLimit: z.object({
     cap: z.number().int().nullable().describe('Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit.'),
-    used: z.number().int().describe('Recipients charged in the current rolling 24 hours. Simulator addresses are free.'),
+    used: z.number().int().describe('Recipients charged in the current rolling 24 hours, including SES simulator addresses.'),
     resetAt: z.iso.datetime().nullable().describe('When capacity next frees up or the limit changes.'),
     nextCap: z.number().int().nullable().describe('The next limit for a new workspace, or null once it has the mature limit.'),
     nextCapAt: z.iso.datetime().nullable().describe('When nextCap applies.'),

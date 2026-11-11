@@ -1,12 +1,12 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, type Config } from './core.js';
 
-// SES counts destinations, not API calls. Only the exact AWS simulator domain is exempt;
-// a real address mixed into To/Cc/Bcc still consumes a slot.
+// Simulator feedback is not reputation evidence. Admission and dispatch,
+// however, consume capacity for every destination, including the simulator.
 const simulatorSuffix = '@simulator.amazonses.com';
 export const realDestination = (address: string) => !address.toLowerCase().endsWith(simulatorSuffix);
 export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string[] = []) =>
-  [to].flat().concat(cc, bcc).filter(realDestination).length;
+  (Array.isArray(to) ? to.length : 1) + cc.length + bcc.length;
 
 export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null };
 // The current UTC hour plus the preceding 23 buckets. The same statement as admission,
@@ -27,6 +27,6 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
   if (incoming && (incoming + allowance.used > allowance.cap || reserved)) {
     const resetAt = allowance.resetAt ? new Date(allowance.resetAt).toISOString() : undefined;
     const retryable = incoming <= allowance.cap && marketing <= allowance.marketingCap;
-    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted sending is limited to ${allowance.cap} recipients per rolling 24 hours; ${count(allowance.used)} are used.${reserved ? ` Marketing stops at ${allowance.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''} Simulator addresses (@simulator.amazonses.com) don't count.`, undefined, retryable, resetAt);
+    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted sending is limited to ${allowance.cap} recipients per rolling 24 hours; ${count(allowance.used)} are used.${reserved ? ` Marketing stops at ${allowance.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''}`, undefined, retryable, resetAt);
   }
 }

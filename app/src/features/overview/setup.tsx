@@ -30,7 +30,7 @@ export function SendingLimitBar() {
   if (!limit || limit.cap === null) return null
   const share = Math.min(1, limit.used / Math.max(1, limit.cap))
   return <section className="sending-limit" aria-label="Sending limit">
-    <div className="sending-limit-text"><span>Sending limit</span><span className="muted">{limitSummary(limit)} Simulator addresses are free.</span></div>
+    <div className="sending-limit-text"><span>Sending limit</span><span className="muted">{limitSummary(limit)} Includes simulator addresses.</span></div>
     <div className={`stream-track sending-limit-track${share >= 0.9 ? ' sending-limit-track--full' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={limit.cap} aria-valuenow={limit.used} aria-label="Recipients used in the last 24 hours"><span style={{ width: `${share * 100}%` }} /></div>
   </section>
 }

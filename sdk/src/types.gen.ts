@@ -58,7 +58,7 @@ export type ConnectionSummary = {
          */
         cap: number | null;
         /**
-         * Recipients charged in the current rolling 24 hours. Simulator addresses are free.
+         * Recipients charged in the current rolling 24 hours, including SES simulator addresses.
          */
         used: number;
         /**

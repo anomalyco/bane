@@ -213,7 +213,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
   const mx=runtime.config.multiTenant, liveMx=mx && !isSimulatedSes(runtime);
-  const cost=sql`hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)`;
+  const cost=sql`jsonb_array_length(e.to_addresses||e.cc_addresses||e.bcc_addresses)`;
   const domain=sql`lower(split_part(e.from_address,'@',2))`;
   const tick=sql`date_trunc('minute',statement_timestamp())`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
@@ -552,7 +552,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
           WHERE d.email_id=x.id AND cause.reason IS NOT NULL ORDER BY d.n LIMIT 1) AS suppression_reason
       FROM input x
     ), budget AS MATERIALIZED (SELECT x.id,${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`CASE WHEN x.hosted AND el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.suppression_reason IS NULL
-        THEN hosted_burst_ok(x.workspace_id,split_part(x.sender,'@',2),hosted_real_cost(x.destinations)) ELSE true END` : sql`true`} AS allowed
+        THEN hosted_burst_ok(x.workspace_id,split_part(x.sender,'@',2),jsonb_array_length(x.destinations)) ELSE true END` : sql`true`} AS allowed
       FROM input x JOIN eligibility el USING(id) ORDER BY x.workspace_id,x.sender,x.id), claimed AS (
       UPDATE sending_emails e SET simulated = ${isSimulatedSes(runtime)},
         status = CASE WHEN NOT b.allowed THEN 'queued' WHEN NOT el.origin_ok OR NOT el.binding_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.suppression_reason IS NULL THEN 'attempting' ELSE 'suppressed' END,

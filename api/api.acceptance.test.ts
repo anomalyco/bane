@@ -5699,7 +5699,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual((await frozen(mixed[1].id)).binding,{account:acct,topic:trusted,connection:wid,domain:'va-domain',generation});
       await drain(oh);await drain(va);assert.deepEqual(attempts.slice(1),[[oh,'bane-transactional',`bane-${wid}`],[va,'bane-trusted-transactional',`bane-trusted-${wid}`]]);
       runtime.config.trustedPool=false;error(await send(child),409,'TRUSTED_POOL_DISABLED');runtime.config.trustedPool=true;
-      await db.query(`UPDATE workspaces SET send_cap_override=2 WHERE id=$1`,[wid]);
+      await db.query(`UPDATE workspaces SET send_cap_override=5 WHERE id=$1`,[wid]); // Three simulator recipients already charged across both regions.
       const pair=[parent,child].map(m=>({...m,to:'real-counted@fixture.test'}));
       const charged=ok(await batch(...pair),202).data.map((m:Json)=>m.id);
       for (const m of pair) error(await send(m),429,'SEND_LIMIT_REACHED'); // Two regional envelopes consumed the same two slots.
@@ -6409,7 +6409,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // The same limit is visible before a send hits it.
       const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
       assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
-      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
+      error(await send(simulator),429,'SEND_LIMIT_REACHED');
       await limits('11001','10001');
       error(await request('POST','/v1/connection',key,{kind:'shared',sendCapOverride:99999,pendingCapOverride:99999}),422,'VALIDATION_FAILED');
       error(await request('POST','/v1/connection',key,{kind:'shared'}),403,'PERMISSION_DENIED');
@@ -6417,10 +6417,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const capped = error(await send(),429,'SEND_LIMIT_REACHED');
       assert.match(capped.message, /11001 recipients/);
       assert.ok(Date.parse(capped.resetAt) > Date.now()+23*3600000, 'Crossing into week two in an hour cannot reset a fixed override.');
-      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10001/);
+      error(await send(simulator),429,'SEND_LIMIT_REACHED');
       await limits('default','default');
       assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
-      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
+      error(await send(simulator),429,'SEND_LIMIT_REACHED');
       assert.deepEqual(changes.map(({workspaceId,old,new:next}) => [workspaceId,old,next]), [
         [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
       ]);
@@ -6430,10 +6430,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const extra=ok(await send(),202); // Already above both ordinary defaults.
       await limits('100','10000');
       error(await send(),429,'SEND_LIMIT_REACHED');
-      error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED');
+      error(await send(simulator),429,'SEND_LIMIT_REACHED');
       await db.query("UPDATE sending_emails SET status='canceled' WHERE id=$1",[extra.id]);
       await limits('default','default');
       await setWorkspaceExemption(db,[wid,'off','--reason','Restore ordinary limits']);
+
+      await limits('20000','10000'); // Isolate pending admission from the separate daily limit.
+      error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED');
 
       await db.query(`UPDATE sending_emails SET snapshot='{"kind":"marketing"}' WHERE workspace_id=$1 AND actor_key_id='fixture'`,[wid]);
       if(prefix){await seedDepth(false,-prefix);await seedDepth(true,prefix);}
@@ -6488,26 +6491,26 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const batch = (n:number) => local('POST','/v1/emails/batch',{emails:Array.from({length:n},()=>mail)});
       const thread = () => local('POST','/v1/inbound/threads',{addressId:box.id,to:[mail.to],subject:mail.subject,text:mail.text});
       const pause = async () => ok(await local('GET','/v1/me')).connection.sendingPause;
-      const keyed = (to:string) => local('POST','/v1/emails/send',{...mail,to},'live',{'Idempotency-Key':'hosted-zero-charge'});
-      const free = ok(await keyed(simulator),202);
-      assert.deepEqual(ok(await keyed(simulator),202),free);
+      const keyed = (to:string) => local('POST','/v1/emails/send',{...mail,to},'live',{'Idempotency-Key':'hosted-one-charge'});
+      const sim = ok(await keyed(simulator),202);
+      assert.deepEqual(ok(await keyed(simulator),202),sim);
       error(await keyed('different@example.net'),409,'IDEMPOTENCY_CONFLICT');
-      assert.equal((await db.query('SELECT 1 FROM hosted_usage_hourly WHERE workspace_id=$1',[wid])).rowCount,0);
-      const recipients = ok(await batch(98),202).data;
-      error(await batch(3),429,'SEND_LIMIT_REACHED'); // All or nothing: leave two slots.
+      assert.equal((await db.query('SELECT sum(recipients)::int AS n FROM hosted_usage_hourly WHERE workspace_id=$1',[wid])).rows[0].n,1);
+      const recipients = ok(await batch(96),202).data;
+      error(await batch(4),429,'SEND_LIMIT_REACHED'); // All or nothing: leave three slots.
       const mixed = ok(await send({to:simulator, cc:['cc@example.net'], bcc:['bcc@example.net']}),202);
       const limited = await send(); const limitError = error(limited,429,'SEND_LIMIT_REACHED');
       assert.ok(Date.parse(limitError.resetAt) > Date.now()+23*3600000); assert.ok(limited.headers.get('retry-after'));
       error(await thread(),429,'SEND_LIMIT_REACHED');
       const hourTuple = async () => (await db.query('SELECT ctid::text,recipients FROM hosted_usage_hourly WHERE workspace_id=$1 ORDER BY hour',[wid])).rows;
       const charged = await hourTuple();
-      const sim = ok(await send({to:simulator}),202); // A deploy test cannot consume tenant capacity.
-      assert.deepEqual(await hourTuple(), charged, 'Even an existing hourly counter must not get a new +0 tuple.');
+      error(await send({to:simulator}),429,'SEND_LIMIT_REACHED');
+      assert.deepEqual(await hourTuple(), charged, 'A refused simulator envelope is not charged.');
       error(await send({to:'fake@x.simulator.amazonses.com'}),429,'SEND_LIMIT_REACHED');
       runtime.config.liveEnabled=false;
       try { assert.equal(ok(await send(),202).simulated,true); } finally { runtime.config.liveEnabled=true; }
       await db.query(`UPDATE sending_emails SET status='suppressed' WHERE id=$1`,[mixed.id]);
-      ok(await thread(),202); // Suppression released both real slots (not the SES simulator destination).
+      ok(await thread(),202); ok(await send(),202); // Suppression refunded all three slots; two now reused.
 
       const list = ok(await local('POST','/v1/lists',{name:unique('guard')}),201);
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'guard-'||n||'@example.net','subscribed' FROM generate_series(1,3)n`,[wid]);
@@ -6935,12 +6938,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for(const [name,n] of [['attachment',24],['burst',48],['outage',96]] as const){
         if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50)`,[wid]);}
         if(name==='outage'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);outage=true;}
-        const mail=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`r${i}@example.invalid`,subject:name+i,text:'Private fixture',attachments:[asset.id]}));
+        const mail=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`success+${i}@simulator.amazonses.com`,subject:name+i,text:'Private fixture',attachments:[asset.id]}));
         const ids=ok(await local('POST','/v1/emails/batch',{emails:mail},'live',{authorization:`Bearer ${key.secret}`}),202).data.map((x:Json)=>x.id);
         const q=t.mock.method(db,'query');screens=peak=0;const start=Date.now(),report=await run();if(outage)await run();q.mock.restore();
         const rewritten=(await db.query('SELECT count(*)::int n FROM sending_emails WHERE id=ANY($1) AND (scheduled_at IS NOT NULL OR lease_until IS NOT NULL)',[ids])).rows[0].n;
         t.diagnostic(`REVIEW ${name}: ${Date.now()-start}ms, ${screens} screen calls, peak ${peak}, ${q.mock.callCount()} SQL, ${rewritten} rows deferred, ${report.sent} accepted`);
-        if(name==='attachment'){assert.equal(report.sent,n);assert.ok(peak>1 && peak<=6);}
+        if(name==='attachment'){
+          assert.equal(report.sent,n);assert.ok(peak>1 && peak<=6);
+          assert.equal((await db.query("SELECT sum(used)::int AS n FROM hosted_burst_windows WHERE workspace_id=$1 AND scope=''",[wid])).rows[0].n,n);
+        }
         if(name==='burst'){
           assert.deepEqual([report.sent,screens,rewritten],[0,0,0]);
           await db.query('SAVEPOINT backlog_benchmark');

@@ -15,7 +15,7 @@
       },
       {
         "title": "Send",
-        "text": "202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator addresses don’t count against hosted sending limits.",
+        "text": "202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). These addresses count against hosted sending limits.",
         "code": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --header 'Idempotency-Key: first-email' \\\n  --data '{\"from\":\"hello@acme.com\",\"to\":\"you@acme.com\",\"subject\":\"Hello from Bane\",\"text\":\"It works.\"}'"
       },
       {
@@ -202,7 +202,7 @@
               },
               "used": {
                 "type": "integer",
-                "description": "Recipients charged in the current rolling 24 hours. Simulator addresses are free."
+                "description": "Recipients charged in the current rolling 24 hours, including SES simulator addresses."
               },
               "resetAt": {
                 "type": [
