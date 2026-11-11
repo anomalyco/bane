@@ -7950,6 +7950,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await call('POST', `/v1/inbound/messages/${compatMail.id}/redeliver`, { destination: inbound.id }, 202)).queued, 1);
         assert.equal((await call('POST', `/v1/inbound/messages/${compatMail.id}/redeliver`, {}, 202)).queued, 0);
       });
+      await t.test('routing M5/M7: bounded signed payload, HTTP-safe message ID, cooldown and shared manual budget',async it=>{
+        const mid=compatMail.id,delivery=(await db.query("SELECT id,generation FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>'messageId'=$3",[wid,inbound.id,mid])).rows[0];
+        const original='wide-雪'+String.fromCharCode(1)+'@example.org';await db.query("UPDATE mail_messages SET message_id=$2,text=repeat('abc',90000),size_bytes=700000 WHERE id=$1",[mid,original]);
+        let posted=false;runtime.webhookFetch=async(_url,init)=>{const h=new Headers(init.headers),b=String(init.body),p=JSON.parse(b);assert.equal(h.get('x-message-id'),null);assert.equal(p.email.messageId,`<${original}>`);assert.ok(Buffer.byteLength(b)<=512*1024);assert.ok(p.email.bodyTruncated);posted=true;return {status:204};};
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:delivery.id,generation:delivery.generation},{id:'bounded',workspaceId:wid,attempts:1});assert.ok(posted);
+        const path=`/v1/inbound/messages/${mid}/redeliver`;assert.equal((await call('POST',path,{},202)).queued,0);
+        await db.query("UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now()-interval '11 minutes' WHERE id=$1",[delivery.id]);
+        await db.query('UPDATE mailbox_manual_delivery_budget SET used=60 WHERE workspace_id=$1',[wid]);error(await local('POST',path,{}),429,'WEBHOOK_REDELIVERY_LIMIT');assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery.id])).rows[0].status,'delivered');
+      });
       await t.test('routing: junk reaches only webhooks with junk include, as message.junk', async () => {
         await call('PATCH', '/v1/inbound/policy', { spam: 'store' });
         await call('PATCH', '/v1/routing/routes/support', { to: [box.id, hook.id, inbound.id] });

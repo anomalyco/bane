@@ -7,7 +7,7 @@ import { mailboxS3, readableMailboxKey } from './mailbox-setup.js';
 import { decrypt, hmac, postWebhook, webhookSecret, webhookUrl } from './operations.js';
 
 const s3commands = lazyModule(() => import('@aws-sdk/client-s3'));
-const RAW_INLINE_LIMIT = 2 * 1024 * 1024,
+const POST_LIMIT=512*1024, RAW_INLINE_LIMIT = POST_LIMIT,
   BODY_INLINE_LIMIT = 256 * 1024;
 
 /** The static inbound-format token, derived from the signing secret so rotating the secret rotates it too. */
@@ -90,7 +90,7 @@ function inboundPayload(m: RenderMessage, parts: Part[], raw: string | null, roo
     to = group(m.to),
     receivedAt = new Date(m.receivedAt).toISOString(),
     messageId = m.messageId ? bracketed(m.messageId) : m.id;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = Object.create(null);
   for (const h of m.headers) headers[h.name.toLowerCase()] ??= h.value;
   const attachments = parts.map(({ id, ...part }) => ({ ...part, downloadUrl: `${root}/parts/${encodeURIComponent(id)}` }));
   // inbound strips scripts, handlers and javascript: URLs; Bane's quote sanitizer is an allow-list, so it is at least as strict.
@@ -195,10 +195,22 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
       : await loadMessage(runtime, w, event.messageId, format === 'inbound' || include.includes('raw'));
     const root = `${runtime.config.publicUrl.replace(/\/$/, '')}/v1/inbound/messages/${encodeURIComponent(message.id)}`;
     if (format === 'inbound') {
-      const body = inboundPayload(message, parts, raw, root, event.data.recipients?.[0] ?? message.envelopeTo[0] ?? message.to[0]?.address ?? '', {
+      const text=Buffer.from(message.text??'').subarray(0,BODY_INLINE_LIMIT), html=Buffer.from(message.html??'').subarray(0,BODY_INLINE_LIMIT-text.length);
+      const truncated=text.length+html.length<Buffer.byteLength(message.text??'')+Buffer.byteLength(message.html??'');
+      const compact={...message,text:message.text===null?null:text.toString(),html:message.html===null?null:html.toString()};
+      const body = inboundPayload(compact, parts, raw, root, event.data.recipients?.[0] ?? message.envelopeTo[0] ?? message.to[0]?.address ?? '', {
         id: h.webhook_id,
         name: h.name ?? h.webhook_id,
       });
+      if(truncated)Object.assign(body.email,{bodyTruncated:true,messageUrl:root});
+      if(Buffer.byteLength(JSON.stringify(body))>POST_LIMIT){
+        Object.assign(body.email.parsedData,{raw:null,rawUrl:root+'/raw'});
+        if(Buffer.byteLength(JSON.stringify(body))>POST_LIMIT){
+          Object.assign(body.email.parsedData,{textBody:null,htmlBody:null,headers:{}});
+          Object.assign(body.email.cleanedContent,{text:null,html:null,hasText:false,hasHtml:false,headers:{}});
+          Object.assign(body.email,{bodyTruncated:true,messageUrl:root});
+        }
+      }
       payload = body;
       Object.assign(headers, {
         'X-Webhook-Verification-Token': await verificationToken(secret),
@@ -206,12 +218,13 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
         'X-Webhook-Event': body.event,
         'X-Webhook-Timestamp': body.timestamp,
         'X-Email-ID': message.id,
-        'X-Message-ID': body.email.messageId,
+        ...(/^[\x21-\x7e]+$/.test(body.email.messageId)?{'X-Message-ID':body.email.messageId}:{}),
       });
-    } else payload = banePayload(event, message, parts, raw, root, include);
+    } else {const body=banePayload(event,message,parts,raw,root,include);if(Buffer.byteLength(JSON.stringify(body))>POST_LIMIT){if(body.data.raw)body.data.raw=null;if(body.data.message && Buffer.byteLength(JSON.stringify(body))>POST_LIMIT)Object.assign(body.data.message,{text:'',html:'',bodyTruncated:true});}payload=body;}
   }
   const body = JSON.stringify(payload),
     timestamp = String(Math.floor(Date.now() / 1000));
+  if(Buffer.byteLength(body)>POST_LIMIT)throw new ApiError(413,'WEBHOOK_BODY_TOO_LARGE','Webhook metadata exceeds 512 KiB. Read the stored message instead.');
   Object.assign(headers, {
     'Webhook-Id': event.id,
     'Webhook-Timestamp': timestamp,

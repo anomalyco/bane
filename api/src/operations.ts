@@ -128,7 +128,7 @@ export async function postWebhook(runtime: Runtime, url: string, headers: Record
     if(init.signal.aborted || error instanceof Error && error.name==='TimeoutError'){
       const last=hookTimeouts.get(key), count=1+(last && last.until>Date.now()?last.count:0);
       if(!last && hookTimeouts.size>=1024)hookTimeouts.delete(hookTimeouts.keys().next().value!);
-      hookTimeouts.set(key,{count,until:Date.now()+30000});
+      hookTimeouts.set(key,{count,until:Date.now()+30000+timeoutSeconds*1000});
     }
     throw error;
   }
