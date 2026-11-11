@@ -1,103 +1,75 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { ArrowUpRight, ChevronRight, Download, Paperclip, Search, X } from 'lucide-react'
+import { ArrowUpRight, Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiDef, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Email, ReceivedEmail, ReceivedEmailDetail } from '../../data/types'
+import type { Email, LogDirection, LogEntry, ReceivedEmailDetail } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { EmailPreview, ReceivedEmailPreview, htmlToText } from '../../components/EmailPreview'
 import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
-import { EmailDetailSkeleton, logColumns } from './skeletons'
-import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
+import { EmailDetailSkeleton } from './skeletons'
+import { isReceivedId, logColumns, logCsvRows, logHref } from './rows'
+import { useAdaptivePageSize } from '../../lib/pagination'
 
-function RecipientEmail({ email }: { email: string }) {
-  return <span className="log-recipient" title="Recipients stay blurred for privacy. Hover to read."><span aria-hidden="true">{email.slice(0, 2)}</span><span className="log-recipient__private" aria-hidden="true">{email.slice(2)}</span><span className="sr-only">{email}</span></span>
-}
+const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
+const statuses = ['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))
+const streams = [{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]
+export const logDirection = (view: string | null, campaignId?: string): LogDirection => campaignId ? 'sent' : view === 'sent' || view === 'received' ? view : 'all'
 
-function logTimestamp(value: string) {
-  return date(value, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' })
-}
-
+// Logs: sent and received mail in one list, newest first (GET /v1/logs). Received mail follows the API's rules: owners
+// and admins see every received message, including unrouted mail; members see mail on receiving addresses.
 export function LogsPage() {
   const { regionId } = useRegion()
   const [params] = useSearchParams()
   const campaignId = params.get('campaign') || undefined
-  // Received logs show the whole workspace, including unrouted mail: owners and admins only. Members read their addresses in Receiving.
-  const { canAdminister } = useWorkspaceAccess()
-  return canAdminister && params.get('view') === 'received' ? <ReceivedLogs key={regionId} regionId={regionId} /> : <RegionalLogs key={`${regionId}:${campaignId ?? ''}`} regionId={regionId} campaignId={campaignId} />
+  return <Logs key={`${regionId}:${campaignId ?? ''}`} regionId={regionId} campaignId={campaignId} />
 }
-function LogsHeader({ regionId, view }: { regionId: string; view: 'sent' | 'received' }) {
-  const [params, setParams] = useSearchParams()
+// The sidebar's region selector already names the region; repeat it only when it is hidden or a campaign filter shows another region.
+// Hosted logs span every region and name none.
+export function LogsHeader({ regionId, direction, onDirection, locked }: { regionId: string; direction: LogDirection; onDirection: (value: LogDirection) => void; locked?: boolean }) {
   const selected = useRegion().regionId
   const { canAdminister, multiTenant } = useWorkspaceAccess()
-  // The sidebar's region selector already names the region; repeat it only when it is hidden or a campaign filter shows another region.
-  // Hosted logs span every region and name none.
-  return <><PageHeader title="Logs" actions={!multiTenant && (!canAdminister || regionId !== selected) ? <span className="muted">{regionId}</span> : undefined} />
-    {canAdminister && <Tabs label="Log type" value={view} onValueChange={value => { const next = new URLSearchParams(params); if (value === 'received') next.set('view', 'received'); else next.delete('view'); setParams(next) }} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} />}</>
+  return <PageHeader title="Logs" actions={<div className="cluster logs-controls">{!multiTenant && (!canAdminister || regionId !== selected) && <span className="muted">{regionId}</span>}
+    <Tabs label="Direction" value={direction} onValueChange={value => onDirection(value as LogDirection)} disabled={locked} items={directions} /></div>} />
 }
-function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
+function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
   const [searchParams, setSearchParams] = useSearchParams()
-  // A campaign sends from one region, so its filter replaces the region selector.
+  // A campaign sends from one region, so its filter replaces the region selector; it lists sent mail only.
   const campaign = useApiQuery(['campaign', campaignId ?? null], (api, signal) => campaignId ? api.campaigns.get(campaignId, signal) : Promise.resolve(null))
   const clearCampaign = () => { const next = new URLSearchParams(searchParams); next.delete('campaign'); setSearchParams(next) }
+  const direction = logDirection(searchParams.get('view'), campaignId)
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('all')
   const [stream, setStream] = useState('all')
   const [page, setPage] = useState(1)
   const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
   useEffect(() => setPage(1), [pageSize])
+  const setDirection = (value: LogDirection) => { const next = new URLSearchParams(searchParams); if (value === 'all') next.delete('view'); else next.set('view', value); setSearchParams(next, { replace: true }); setPage(1) }
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
-  const params = { ...(campaignId ? { campaignId } : { regionId }), search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
-  const query = useApiDef(queries.emails(params), { interval: 30_000, enabled: measured, keepPrevious: true })
-  return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} view="sent" />
-    <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search email logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
-      <Select aria-label="Email status" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))} />
-      <Select aria-label="Email stream filter" value={stream} onValueChange={value => { setStream(value); setPage(1) }} options={[{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div>
-      <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Created at', ...multiTenant ? [] : ['Region']], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, ...multiTenant ? [] : [email.regionId]])])}><Download size={16} />Export page</Button>
+  // Status and stream describe sent mail; with Received selected they stay in place, disabled.
+  const received = direction === 'received'
+  const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search, status: received || status === 'all' ? undefined : status, stream: received || stream === 'all' ? undefined : stream, page, pageSize }
+  const query = useApiDef(queries.logs(params), { interval: 30_000, enabled: measured, keepPrevious: true })
+  return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
+    <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
+      <Select aria-label="Email status" value={received ? 'all' : status} disabled={received} onValueChange={value => { setStatus(value); setPage(1) }} options={statuses} />
+      <Select aria-label="Email stream filter" value={received ? 'all' : stream} disabled={received} onValueChange={value => { setStream(value); setPage(1) }} options={streams} /></div>
+      <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<Email> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
-        { ...logColumns[0], render: row => <span className="muted" title={row.sentAt}>{logTimestamp(row.sentAt)}</span> },
-        { ...logColumns[1], render: row => <StatusBadge status={row.status} /> },
-        { ...logColumns[2], render: row => <RecipientEmail email={row.to} /> },
-        { ...logColumns[3], render: row => <span title={row.from}>{row.from}</span> },
-        { ...logColumns[4], render: row => <span title={row.subject}>{row.subject}</span> },
-        { ...logColumns[5], render: row => <span className="muted">{label(row.stream)}</span> },
-        { ...logColumns[6], render: () => <ChevronRight size={14} aria-hidden /> },
-      ]} empty={<EmptyState title="No emails found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign() }}>Clear filters</Button>} />} />
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} columns={logColumns}
+        empty={<EmptyState title="No mail found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
   </div>
 }
-const receivedColumns = [{ key: 'time', label: 'Received · UTC', width: 150 }, { key: 'status', label: 'Status', width: 112 }, { key: 'from', label: 'Sender', width: '20%' }, { key: 'to', label: 'Recipient', width: '18%' }, { key: 'mailbox', label: 'Address', width: '18%' }, { key: 'subject', label: 'Subject' }, { key: 'open', label: '', width: 28 }]
-const mailboxLabel = (row: ReceivedEmail) => row.addresses.map(mailbox => mailbox.address).join(', ') || 'Unrouted'
-function ReceivedLogs({ regionId }: { regionId: string }) {
-  const navigate = useNavigate()
-  const { multiTenant } = useWorkspaceAccess()
-  const [search, setSearch] = useState('')
-  const pagination = useCursorPagination()
-  const { pageSize, tableRef, measured } = useAdaptivePageSize(5, 100)
-  const cursor = pagination.cursor
-  const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal), { interval: 30_000, enabled: measured })
-  return <div className="logs-page"><LogsHeader regionId={regionId} view="received" />
-    <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search received email" placeholder="Search received mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div></div>
-      <Button disabled={!query.data?.length} onClick={() => downloadCsv('bane-received-page.csv', [['Received at', 'From', 'To', 'Address', 'Subject', 'Spam', ...multiTenant ? [] : ['Region']], ...(query.data ?? []).map(row => [row.receivedAt, row.from.address, row.envelopeTo.join(' '), mailboxLabel(row), row.subject, row.spam ? 'yes' : 'no', ...multiTenant ? [] : [row.region ?? '']])])}><Download size={16} />Export page</Button>
-    </div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<ReceivedEmail> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/received/${row.id}`)} columns={[
-        { ...receivedColumns[0]!, render: row => <span className="muted" title={row.receivedAt}>{logTimestamp(row.receivedAt)}</span> },
-        { ...receivedColumns[1]!, render: row => row.spam ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
-        { ...receivedColumns[2]!, render: row => <span title={row.from.name ? `${row.from.name} <${row.from.address}>` : row.from.address}>{row.from.address}</span> },
-        { ...receivedColumns[3]!, render: row => <RecipientEmail email={row.envelopeTo[0] ?? row.to[0]?.address ?? ''} /> },
-        { ...receivedColumns[4]!, render: row => row.addresses.length ? <span title={mailboxLabel(row)}>{mailboxLabel(row)}</span> : <span className="muted">Unrouted</span> },
-        { ...receivedColumns[5]!, render: row => <span className="received-subject" title={row.subject}>{row.attachmentCount > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}{row.subject || <span className="muted">(no subject)</span>}</span> },
-        { ...receivedColumns[6]!, render: () => <ChevronRight size={14} aria-hidden /> },
-      ]} empty={<EmptyState title={search ? 'No received mail matches' : 'No received mail yet'} description={search ? undefined : 'Enable receiving on a domain to start.'} action={search ? <Button onClick={() => { setSearch(''); pagination.reset() }}>Clear search</Button> : <Link to="/receiving">Open Receiving</Link>} />} />
-      {query.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={pageSize} nextCursor={query.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, query.data?.nextCursor)} />}
-    </>}
-  </div>
+
+// One detail route for both directions: received message IDs start with msg_.
+export function LogDetailPage() {
+  const { id = '' } = useParams()
+  return isReceivedId(id) ? <ReceivedEmailDetailPage /> : <EmailDetailPage />
 }
 
 const addressText = (value: { name: string | null; address: string }) => value.name ? `${value.name} <${value.address}>` : value.address
@@ -105,9 +77,11 @@ const checkTone = (value?: string) => value === 'PASS' ? 'success' as const : va
 const fileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1_048_576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`
 export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
-  const query = useApiQuery(['received-email', id], (api, signal) => api.mailboxes.receivedEmail(id, signal))
+  // Delivery details (envelope, region, verdicts, headers, the raw .eml) are for owners and admins; members read the message.
+  const { canAdminister } = useWorkspaceAccess()
+  const query = useApiQuery(['received-email', id, canAdminister], (api, signal) => api.mailboxes.receivedEmail(id, signal, canAdminister))
   if (query.isPending) return <EmailDetailSkeleton />
-  if (query.isError) return <><PageHeader title="Received email" backTo="/logs?view=received" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
+  if (query.isError) return <><PageHeader title="Received email" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return <ReceivedEmailDetailView email={query.data} />
 }
 function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
@@ -118,9 +92,10 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const html = email.html ?? ''
   const inlineImages = Object.fromEntries(email.attachments.flatMap(file => file.contentId && file.url ? [[file.contentId, file.url]] : []))
   const hasHtml = html.trim().length > 0
-  const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => email.verdicts[key])
-  return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs?view=received" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
-    <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo.join(', ') || email.to.map(addressText).join(', ')}</dd></div><div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}>{mailbox.address}</Link></Fragment>) : 'Unrouted'}</dd></div></dl>
+  const verdicts = email.verdicts ?? {}
+  const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => verdicts[key])
+  return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
+    <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo?.join(', ') || email.to.map(addressText).join(', ')}</dd></div>{email.addresses && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}>{mailbox.address}</Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full. Download the original for the complete content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
@@ -133,10 +108,10 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
         {email.sentAt && <div><dt>Sent</dt><dd>{date(email.sentAt)} · {time(email.sentAt)} UTC</dd></div>}
-        {checks.length > 0 && <div><dt>Checks</dt><dd className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(email.verdicts[key]!.toLowerCase())}`} tone={checkTone(email.verdicts[key])} />)}</dd></div>}
+        {checks.length > 0 && <div><dt>Checks</dt><dd className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(String(verdicts[key]).toLowerCase())}`} tone={checkTone(String(verdicts[key]))} />)}</dd></div>}
         {email.cc.length > 0 && <div><dt>Cc</dt><dd>{email.cc.map(addressText).join(', ')}</dd></div>}
         {email.replyTo.length > 0 && <div><dt>Reply-To</dt><dd>{email.replyTo.map(addressText).join(', ')}</dd></div>}
-        {email.sizeBytes !== null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}
+        {email.sizeBytes != null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}
       </dl>
       {email.attachments.length > 0 && <div className="received-group"><h3 className="received-heading">Attachments</h3><ul className="received-attachments">{email.attachments.map(file => <li key={file.id}>
         <Paperclip size={14} aria-hidden />{file.url ? <a href={file.url} target="_blank" rel="noreferrer">{file.filename}</a> : <span>{file.filename}</span>}<span className="muted">{fileSize(file.size)}{file.disposition === 'inline' ? ' · inline' : ''}</span>

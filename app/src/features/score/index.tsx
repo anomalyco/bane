@@ -6,7 +6,7 @@ import { queries } from '../../data/queries'
 import type { Domain, SenderScore, SenderScoreFactor } from '../../data/types'
 import { number } from '../../lib/format'
 import { useTween } from '../../components/motion'
-import { Dial } from './gauge'
+import { Dial, Strip } from './gauge'
 import './score.css'
 
 // The sender score, from GET /v1/sender-score: a 56px sidebar card on every page, and the report card with its
@@ -22,7 +22,7 @@ export function SidebarScore() {
   const label = graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Sender score: ${report.emails.firstEmails} of ${report.needed} emails before the first grade`
   return <Link to="/#sender-score" className="gauge-card gauge-card--compact" aria-label={label}>
     <Texture />
-    <Dial report={report} size="compact" />
+    <Dial report={report} />
     <span className="gauge-stack">
       <span className="gauge-eyebrow">{graded ? 'Sender score' : 'Calibrating'}</span>
       <span className="gauge-readout"><b>{whole(shown)}</b>{graded ? <span className="gauge-grade">{report.grade}</span> : <small>/{report.needed}</small>}</span>
@@ -30,18 +30,21 @@ export function SidebarScore() {
   </Link>
 }
 // Faint film grain and a tick ruler: texture, never content.
-function Texture() { return <><span className="gauge-grain" aria-hidden="true" /><span className="gauge-ruler" aria-hidden="true" /></> }
+function Texture({ ruler = true }: { ruler?: boolean }) { return <><span className="gauge-grain" aria-hidden="true" />{ruler && <span className="gauge-ruler" aria-hidden="true" />}</> }
 
-function ScoreGauge({ report }: { report: SenderScore }) {
+// Overview's score: one line with the number, the grade and the band strip, then where it goes next. 96px tall.
+function ScoreCard({ report }: { report: SenderScore }) {
   const graded = report.state === 'graded'
   const shown = useTween(graded ? report.score ?? 0 : report.emails.firstEmails)
   const moved = graded && report.history.length ? whole(report.score! - report.history[0].score) : 0
-  return <article className="gauge-card gauge-card--full" aria-label={graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Calibrating: ${report.emails.firstEmails} of ${report.needed} emails`}>
-    <Texture />
+  return <article className="gauge-card score-card" aria-label={graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Calibrating: ${report.emails.firstEmails} of ${report.needed} emails`}>
+    <Texture ruler={false} />
     <div className="gauge-head"><span>Sender score</span><span>{graded ? '30 days' : 'Calibrating'}</span></div>
-    <Dial report={report} size="full" />
-    <div className="gauge-center"><b>{whole(shown)}</b>{graded ? <span className="gauge-grade">Grade {report.grade}</span> : <small>/{report.needed} emails</small>}</div>
-    <div className="gauge-foot">{graded
+    <div className="score-card__main">
+      <span className="score-card__value"><b>{whole(shown)}</b>{graded ? <span className="gauge-grade">{report.grade}</span> : <small>/{report.needed}</small>}</span>
+      <Strip report={report} />
+    </div>
+    <div className="score-card__foot">{graded
       ? <><span>{report.next ? `${Math.ceil(report.next.at - report.score!)} to ${report.next.grade}` : 'Top grade'}</span><span>{moved > 0 ? '+' : moved < 0 ? '−' : '±'}{Math.abs(moved)} in 14 days</span></>
       : <><span>Graded after {report.needed} emails</span><span /></>}</div>
   </article>
@@ -51,13 +54,13 @@ const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(
 const formats: Record<SenderScoreFactor['key'], (value: number) => string> = { complaints: percent(2), bounces: percent(1), content: percent(1), auth: value => `${Math.round(value * 100)}%`, hygiene: percent(1), consistency: value => `${value.toFixed(1)}×` }
 const share = (value: number) => ({ '--share': `${Math.round(Math.min(1, Math.max(0, value)) * 1000) / 10}%` }) as CSSProperties
 
-// Overview's detail column: the gauge, then the 14-day trend and the six factors. Fixed heights in every state.
+// Overview's detail column: the score card, then the 14-day trend and the six factors as compact rows. Fixed heights in every state.
 export function ReportCard({ report }: { report: SenderScore | undefined }) {
-  if (!report) return <section id="sender-score" className="score-report" aria-busy="true"><div className="gauge-card gauge-card--full"><span className="gauge-skeleton" /></div><div className="score-breakdown score-breakdown--loading" /></section>
+  if (!report) return <section id="sender-score" className="score-report" aria-busy="true"><div className="gauge-card score-card"><span className="gauge-skeleton" /></div><div className="score-breakdown score-breakdown--loading" /></section>
   const graded = report.state === 'graded'
   const low = graded ? Math.min(...report.history.map(day => day.score)) - 4 : 0, high = graded ? Math.max(...report.history.map(day => day.score)) : 1
   return <section id="sender-score" className="score-report" aria-label="Sender score">
-    <ScoreGauge report={report} />
+    <ScoreCard report={report} />
     <div className="score-breakdown">
       <div className="score-breakdown__head"><h2>Breakdown</h2><span className="muted">{graded ? '14 days' : 'After 100 emails'}</span></div>
       <div className="score-history" role="img" aria-label={graded ? `Daily score over 14 days, from ${whole(report.history[0].score)} to ${whole(report.score!)}.` : 'No history yet.'}>

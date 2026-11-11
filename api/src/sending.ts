@@ -125,7 +125,7 @@ const SendInput = z.object({
 const ReplyAddressId = z.string().min(1).max(120).optional();
 const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
-const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
+export const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
 const Email = z.object({ id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), simulated: z.boolean() }).openapi('EmailQueued');
 const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
@@ -195,6 +195,8 @@ const emailColumns = {
   errorCode: emails.errorCode, suppressionReason: emails.suppressionReason, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
 };
 function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
+// Subjects can carry unsubscribe capability tokens; like getEmailDetail and getEmailContent, only manage callers read them.
+export function listedSubject<T extends { subject: string }>(a: Pick<Actor, 'permissions'>, row: T): T { return a.permissions.includes('manage') ? row : { ...row, subject: redactCapabilityText(row.subject) }; }
 // Draft sync polling reads only state columns, without materializing drafts or aggregating email counts.
 const campaignStateColumns = {
   id: campaigns.id, revision: campaigns.revision, updatedAt: campaigns.updatedAt,
@@ -227,7 +229,7 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
     return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row as typeof campaigns.$inferSelect) };
   });
 }
-async function pageBinding(a: Actor, resource: string, query: Record<string, unknown>) {
+export async function pageBinding(a: Actor, resource: string, query: Record<string, unknown>) {
   const { cursor: _cursor, limit: _limit, ...filters } = query;
   // This fixed field is part of the hash in already-issued email and campaign cursors.
   return (await digest(canonical({ workspaceId: a.workspaceId, environment: 'live', resource, filters }))).slice(0, 24);
@@ -244,7 +246,7 @@ function nextCursor(rows: { id: string; createdAt: string }[], limit: number, bi
   const last = rows[limit - 1];
   return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
 }
-function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
+export function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
 export const scope = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
 // A key restricted to sender domains reads only mail sent from those domains or their subdomains (L2).
 export function senderDomainWhere(column: AnyPgColumn, allowed: readonly string[]) {
@@ -1044,11 +1046,11 @@ export function registerSending(app: App) {
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
     )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(emailView), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(row => emailView(listedSubject(a, row))), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => {
-    const [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(actor(c), c.req.valid('param').id)).limit(1);
-    return c.json(emailView(row ?? notFound('Email')), 200);
+    const a = actor(c), [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(a, c.req.valid('param').id)).limit(1);
+    return c.json(emailView(listedSubject(a, row ?? notFound('Email'))), 200);
   });
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',

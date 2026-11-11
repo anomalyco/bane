@@ -5,12 +5,13 @@ import { useApi, useApiDef, useApiQuery, useRegion, useWorkspaceAccess } from '.
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
-import { campaignEditable, type ChartPoint, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
+import { campaignEditable, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { useTween } from '../../components/motion'
 import { date, label, number, percent, time } from '../../lib/format'
 import { NextSteps, ReportCard, useNextSteps, useSenderScore } from '../score'
-import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns, recentCampaignColumns, RegionStatus } from './skeletons'
+import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
+import { logColumns, logHref } from '../logs/rows'
 import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
 
 // Overview: four facts with their own series, the activity chart and the latest emails on the left; a detail column
@@ -96,17 +97,13 @@ function Chart({ data, range, live }: { data: Overview; range: TimeRange; live: 
   </section>
 }
 
-// The latest emails always reserve seven 53px rows: loading, short and full lists are the same height.
+// The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact, seven rows
+// always reserved so loading, short and full lists are the same height.
 function LatestEmails() {
   const navigate = useNavigate()
-  const emails = useApiQuery(['emails', 'overview-latest'], (api, signal) => api.emails.list({ page: 1, pageSize: 7 }, signal), { interval: 60_000, keepPrevious: true })
+  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {emails.isError && !emails.data ? <ErrorState error={emails.error} onRetry={() => emails.refetch()} /> : <DataTable className="ov-table" loading={emails.isPending} skeletonRows={7} minRows={7} rows={emails.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${encodeURIComponent(row.id)}`)} empty={<EmptyState title="No emails yet" />} columns={[
-      { ...latestColumns[0], render: row => <StatusBadge status={row.status} /> },
-      { ...latestColumns[1], render: row => <span className="ov-latest__subject">{row.subject}<span className="muted"> · {row.to}</span></span> },
-      { ...latestColumns[2], render: row => <span className="muted">{label(row.stream)}</span> },
-      { ...latestColumns[3], render: row => <span className="muted">{time(row.sentAt)}</span> },
-    ]} />}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
   </section>
 }
 function Campaigns({ data }: { data: Overview }) {

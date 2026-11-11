@@ -59,6 +59,17 @@ function visibleLinks(value: MailboxAccess, filter: Filter) {
     filter.threadId ? eq(links.threadId, filter.threadId) : undefined, filter.messageId ? eq(links.messageId, filter.messageId) : undefined);
 }
 
+// Delivery details (SMTP envelope, region, spam verdict, headers, raw message) go to owner and admin dashboard sessions and
+// unrestricted manage API keys only; MCP grants and agent tokens read mail without them. Shared with logs.ts.
+export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && v.admin);
+// Which stored messages a reader can see, and the receiving addresses each was delivered to. Shared with the unified
+// logs (logs.ts), so both lists apply the same rule.
+export const accessibleMessages = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
+  v.admin && !f.addressId ? retainedMail() : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
+export const visibleAddresses = (v:MailboxAccess,q:Filter={}) => sql<{id:string;address:string}[]>`coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id,'address',a.address) ORDER BY a.id)
+    FROM mailbox_messages JOIN mailboxes a ON a.id=mailbox_messages.mailbox_id
+    WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id), '[]'::jsonb)`;
+
 export function visibleThreadAddresses(value: MailboxAccess, threadId: string, addressId?: string) {
   if (addressId && value.mailboxIds && !value.mailboxIds.includes(addressId)) throw new ApiError(404,'NOT_FOUND','Address was not found.');
   return and(liveBox(mailboxThreads.mailboxId),eq(mailboxThreads.threadId,threadId),eq(mailboxThreads.workspaceId,value.workspaceId),
@@ -172,23 +183,19 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     return c.json(result, 200);
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
-  const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
-    v.admin && !f.addressId ? retainedMail() : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
+  const accessible = accessibleMessages;
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
   // Never grant this projection to an address key, even a key that can read every address.
   const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (dashboard or unrestricted live manage access only).');
   function messageScope(c: Ctx, delivery?: string) {
     const v=access(c,'read');
     if (delivery!=='true') return v;
-    const actor=c.get('actor'),credential=actor?.credential;
     // A dashboard member reads only addressed mail, like a non-admin key (L1).
-    if (!(credential==='dashboard' && actor?.role!=='member') && !(credential==='apiKey' && v.admin)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
+    if (!readsDelivery(c.get('actor'),v)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
     return {...v,admin:true};
   }
   const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});
-  const deliveryAddresses = (v:MailboxAccess,q:Filter) => sql<{id:string;address:string}[]>`coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id,'address',a.address) ORDER BY a.id)
-      FROM mailbox_messages JOIN mailboxes a ON a.id=mailbox_messages.mailbox_id
-      WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id), '[]'::jsonb)`;
+  const deliveryAddresses = visibleAddresses;
   const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, suppressionReason:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true }).extend(deliverySchema.partial().shape);
   app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.',
     request:{query:PageQuery.extend({ includeDelivery,region:z.string().max(40).optional(),threadId:Id.optional(),direction:z.enum(['inbound','outbound']).default('inbound'),q:z.string().trim().min(1).max(200).optional() })},responses:{200:response(page(MessageListItem).openapi('InboundMessagePage')),...errors} }), async c=>{
