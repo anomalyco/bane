@@ -74,7 +74,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   logs: { label: 'Outbound mail records', actions: {
     list: 'listEmails', get: 'getEmail', detail: 'getEmailDetail', content: 'getEmailContent', events: 'listEmailEvents',
   } },
-  usage: { label: 'Sending and engagement metrics', actions: { metrics: 'getMetrics' } },
+  usage: { label: 'Sending and engagement metrics', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore' } },
   settings: { label: 'Workspace settings', actions: {
     identity: 'getCurrentIdentity', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },

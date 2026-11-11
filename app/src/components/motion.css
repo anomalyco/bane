@@ -1,8 +1,3 @@
-:root {
-  --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
-  --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
-}
-
 /* CopyAction: the icon morphs Copy → Check and only the changed letters roll (Cop|y → Cop|ied). */
 .ui-button.copy-action { transition: background var(--motion-duration), color 200ms ease, box-shadow 200ms ease, transform 160ms var(--ease-out-strong); }
 .ui-button.copy-action:active:not(:disabled) { transform: scale(.97); }

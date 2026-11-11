@@ -215,3 +215,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .endpoint-config { margin: 0; padding: var(--space-12); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-layer-1); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
 .endpoint-steps { display: grid; gap: var(--space-4); }
 .endpoint-steps p { margin: 0; font-size: var(--text-sm); }
+
+/* Receiving holds one placeholder until its sections' reads settle, then shows them together. */
+.receiving-skeleton { display: flex; flex-direction: column; gap: var(--space-24); }
+.receiving-skeleton > span { display: block; height: 160px; border-radius: var(--radius-sm); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
+.receiving-skeleton > span:nth-child(2) { height: 64px; }

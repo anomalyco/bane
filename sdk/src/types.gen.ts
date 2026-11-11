@@ -1475,6 +1475,89 @@ export type Metrics = {
     };
 };
 
+export type SenderScore = {
+    /**
+     * warmup until the workspace has sent its first 100 non-simulated emails.
+     */
+    state: 'warmup' | 'graded';
+    emails: {
+        /**
+         * Non-simulated emails ever created, counted up to 100.
+         */
+        firstEmails: number;
+        last30Days: number;
+    };
+    /**
+     * Emails before the first grade (100).
+     */
+    needed: number;
+    /**
+     * 0–100, one decimal; null while warming up.
+     */
+    score: number | null;
+    grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F' | null;
+    /**
+     * Where the score is heading: the 30-day result shrunk towards 75 by volume.
+     */
+    target: number;
+    /**
+     * The 30-day weighted factor result before shrinkage.
+     */
+    raw: number;
+    /**
+     * The current grade band.
+     */
+    band: {
+        min: number;
+        max: number;
+    } | null;
+    /**
+     * The next grade up and the score it starts at.
+     */
+    next: {
+        grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+        at: number;
+    } | null;
+    factors: Array<SenderScoreFactor>;
+    /**
+     * The replayed daily score, oldest first; the last entry is today.
+     */
+    history: Array<{
+        /**
+         * UTC day, YYYY-MM-DD.
+         */
+        date: string;
+        score: number;
+    }>;
+    computedAt: string;
+};
+
+export type SenderScoreFactor = {
+    key: 'complaints' | 'bounces' | 'content' | 'auth' | 'hygiene' | 'consistency';
+    label: string;
+    /**
+     * Share of the score, out of 100, when every factor is measured.
+     */
+    weight: number;
+    /**
+     * The measured rate or ratio for the 30 days to today; null when neutral.
+     */
+    value: number | null;
+    /**
+     * 0–100 for this factor; null when neutral.
+     */
+    score: number | null;
+    /**
+     * weight × score ÷ 100; null when neutral.
+     */
+    points: number | null;
+    /**
+     * Neutral factors are left out and the measured ones re-weighted.
+     */
+    source: 'measured' | 'neutral';
+    basis: string;
+};
+
 export type RegionCatalog = {
     defaultRegion: string;
     data: Array<{
@@ -10384,6 +10467,67 @@ export type GetMetricsResponses = {
 };
 
 export type GetMetricsResponse = GetMetricsResponses[keyof GetMetricsResponses];
+
+export type GetSenderScoreData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/sender-score';
+};
+
+export type GetSenderScoreErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSenderScoreError = GetSenderScoreErrors[keyof GetSenderScoreErrors];
+
+export type GetSenderScoreResponses = {
+    /**
+     * Success
+     */
+    200: SenderScore;
+};
+
+export type GetSenderScoreResponse = GetSenderScoreResponses[keyof GetSenderScoreResponses];
 
 export type ListRegionsData = {
     body?: never;

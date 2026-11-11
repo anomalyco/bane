@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
@@ -605,6 +605,16 @@ export function createMockApi(): BaneApi {
     workspace: {
       get: signal => run(signal, false, s => s.workspace),
       update: (input, signal) => run(signal, true, s => { s.workspace.name = text(input.name, 'name', 100); return s.workspace }),
+    },
+    // The demo has no scoring engine: a fixed, plausible report, warming up until the sample has 100 emails.
+    senderScore: {
+      get: signal => run(signal, false, s => {
+        const sent = Math.min(s.emails.length, 100), graded = s.emails.length >= 100
+        const factor = (key: SenderScoreFactor['key'], label: string, weight: number, value: number | null, score: number | null): SenderScoreFactor => ({ key, label, weight, value, score, points: score === null ? null : Math.round(weight * score) / 100, source: score === null ? 'neutral' : 'measured', basis: 'Demo data.' })
+        const factors = [factor('complaints', 'Complaints', 25, 0.0005, 89), factor('bounces', 'Bounces', 20, 0.009, 100), factor('content', 'Content', 20, null, null), factor('auth', 'Authentication', 15, 0.4, 40), factor('hygiene', 'List hygiene', 10, 0.012, 84.4), factor('consistency', 'Consistency', 10, 1.4, 100)]
+        const history = Array.from({ length: 14 }, (_, i) => ({ date: new Date(Date.now() - (13 - i) * 86_400_000).toISOString().slice(0, 10), score: Math.min(84, 75 + 2 * (i + 1)) }))
+        return { state: graded ? 'graded' : 'warmup', emails: { firstEmails: sent, last30Days: s.emails.length }, needed: 100, score: graded ? 84 : null, grade: graded ? 'B' : null, target: 84.2, raw: 84.6, band: graded ? { min: 80, max: 90 } : null, next: graded ? { grade: 'A', at: 90 } : null, factors, history: graded ? history : [], computedAt: new Date().toISOString() }
+      }),
     },
     overview: {
       get: (input, signal) => run(signal, false, s => {

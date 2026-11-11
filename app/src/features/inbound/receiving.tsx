@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router'
-import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, PageHeader, SectionHeader, SkeletonText, StatusBadge } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, LoadingRegion, PageHeader, SectionHeader, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { useRouteIntent } from '../../data/prefetch'
 import { queries } from '../../data/queries'
@@ -138,16 +138,22 @@ export function ReceivingPage() {
   const { canAdminister } = useWorkspaceAccess()
   const intent = useRouteIntent()
   const domains = useApiDef(queries.inboundDomains(), { enabled: canAdminister })
+  // The sections' first reads. Their tables and empty states differ in height, so the sections appear together once
+  // every read has settled, and none of them pushes the next one down while loading.
+  const options = useApiDef(queries.inboundAddressOptions()), addresses = useApiDef(queries.receivingAddresses('', undefined))
+  const webhooks = useApiDef(queries.inboundWebhooks(), { enabled: canAdminister }), routing = useApiDef(queries.routing(), { enabled: canAdminister })
+  const settled = (query: { data?: unknown; error: unknown }, enabled = true) => !enabled || query.data !== undefined || Boolean(query.error)
+  const ready = settled(options) && settled(addresses) && settled(domains, canAdminister) && settled(webhooks, canAdminister) && settled(routing, canAdminister)
   const [openDomain, setOpenDomain] = useState<string | null>(null)
   const selected = domains.data?.find(domain => domain.id === openDomain)
   return <div className="stack inbound-stack">
     <PageHeader title="Receiving" actions={<Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox" {...intent('/receiving/inbox')}>Inbox</Link>} />
-    <div className="receiving-sections">
+    {!ready ? <LoadingRegion label="Loading receiving"><div className="receiving-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : <div className="receiving-sections">
       {canAdminister && <DomainsSection onOpen={setOpenDomain} />}
       <section className="section stack" aria-labelledby="receiving-inboxes"><SectionHeader title={<span id="receiving-inboxes">Agent inboxes</span>} actions={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/inboxes" {...intent('/receiving/inboxes')}>View inboxes</Link>} /><p className="muted">Expiring addresses that agents and end-to-end tests create, wait on and read through the API or MCP.</p></section>
       <RoutesSection onOpenDomain={setOpenDomain} />
       <AddressesSection domains={domains.data} />
-    </div>
+    </div>}
     {selected && <DomainDialog key={selected.id} domain={selected} onClose={() => setOpenDomain(null)} />}
   </div>
 }

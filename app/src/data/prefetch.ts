@@ -16,7 +16,7 @@ type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean }
 function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Scope): QueryDef<unknown>[] {
   const scoped = multiTenant || Boolean(regionId)
   switch (path) {
-    case '/': return scoped ? [queries.overview(regionId, '24h', 'all')] : []
+    case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore()] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.emails({ regionId, search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
     // Receiving domains and inbound webhooks are admin-only reads.
     case '/receiving': return [queries.inboundAddressOptions(), ...(canAdminister ? [queries.inboundDomains(), queries.inboundWebhooks()] : [])]

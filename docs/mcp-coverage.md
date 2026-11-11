@@ -119,6 +119,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `unsubscribeByLink` | Recipient capability link; never an agent call. |
 | `unsubscribeOneClick` | Recipient one-click unsubscribe; never an agent call. |
 | `getMetrics` | `usage` · `metrics` · sending |
+| `getSenderScore` | `usage` · `senderScore` · sending |
 | `listRegions` | `regions` · `list` · admin |
 | `configureRegion` | `regions` · `configure` · admin |
 | `discoverRegion` | `regions` · `discover` · admin |

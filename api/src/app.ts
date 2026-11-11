@@ -21,7 +21,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
   if (pathname === '/v1/events/ses') return 'ops-events';
   if (pathname === '/v1/domains' || pathname.startsWith('/v1/domains/')) return 'ops-domains';
-  if (/^\/v1\/(?:settings|webhooks|metrics)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
+  if (/^\/v1\/(?:settings|webhooks|metrics|sender-score)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
   if (pathname === '/v1/emails' || pathname.startsWith('/v1/emails/')) return 'sending-emails';
   if (/^\/v1\/(?:attachments|campaigns|campaign-content-guide)(?:\/|$)/.test(pathname)) return 'sending-other';
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
