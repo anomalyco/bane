@@ -8413,6 +8413,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const stored=await ingest('ritual-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});assert.deepEqual(replay.recipients,stored.routing.recipients);
         const payload=(await db.query('SELECT payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>\'messageId\'=$3',[wid,hook.id,stored.id])).rows[0].payload;assert.deepEqual(payload.ritualBody,{subject:'Test ritual-trace',recipient:box.address});
         assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[stored.id,box.id])).rows[0].labels.includes('handled'));await call('PUT',path,{});
+        await db.query('EXPLAIN INSERT INTO mailbox_webhook_deliveries DEFAULT VALUES ON CONFLICT(webhook_id,event_seq) DO NOTHING');
+        await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
+        const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});
       });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
