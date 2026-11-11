@@ -162,6 +162,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
     const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
+      : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
     // Messages and even record-key validation paths can contain caller-supplied addresses.

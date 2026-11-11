@@ -4983,11 +4983,29 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const {readFile,readdir}=await import('node:fs/promises'),dir=new URL('./migrations/',import.meta.url);
   for(const file of (await readdir(dir)).filter(f=>/^\d+_[a-z_]+\.sql$/.test(f)).sort()) {
     const source=await readFile(new URL(file,dir),'utf8');
+    if(file==='120_addresses.sql'){
+      await db.query(`INSERT INTO mailbox_domains(id,domain_id,workspace_id,name,region,status) VALUES ('r-old','r-old','default','upgrade.example','us-east-2','active'),('r-big','r-big','default','big.example','us-east-2','active');
+        INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,created_at) VALUES ('oldest','default','r-old','a@upgrade.example','["sales*@upgrade.example"]',now()-interval '2 days'),('narrow','default','r-old','b@upgrade.example','["sales-eu*@upgrade.example"]',now());
+        INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules) SELECT 'big'||i,'default','r-big',i||'@big.example',(SELECT jsonb_agg(j||repeat('x',192)||'*@big.example') FROM generate_series(1,20) j) FROM generate_series(1,64) i`);
+    }
+    if(source.startsWith('-- bane:batched\n')){
+      let cursor='';do{cursor=(await db.query(source,[cursor])).rows[0].cursor;}while(cursor);
+      await t.test('routing M1/M2: upgrading overlapping legacy rules preserves the legacy store and skips oversize domains',async()=>{
+        assert.equal((await db.query(`SELECT mail_route_input('default','["sales-eu-x@upgrade.example"]') p`)).rows[0].p,null);
+        assert.equal((await db.query("SELECT FROM mail_routing_state")).rowCount,0);assert.equal((await db.query("SELECT FROM mail_route_plan_issues WHERE domain_id='r-big' AND bytes>262144")).rowCount,1);
+        assert.equal((await db.query("SELECT FROM mail_routing_plans WHERE scope='r-old'")).rowCount,1);
+      });
+      await db.query("DELETE FROM mailboxes WHERE domain_id IN('r-old','r-big'); DELETE FROM mailbox_domains WHERE id IN('r-old','r-big'); DELETE FROM mailbox_write_lanes WHERE workspace_id='default' AND lane='address'");continue;
+    }
     // As the migrator: a marked file is one online index build per line, each outside a transaction.
     if(source.startsWith('-- bane:no-transaction\n')){for(const statement of source.split('\n').filter(line=>line.trim() && !line.startsWith('--')))await db.query(statement);continue;}
     // Only the trigram index needs the harness's existing public extension/opclass.
     await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
-    await db.query(source);await db.query('COMMIT');
+    await db.query(source);
+    if(file==='120_webhooks_validate.sql')await t.test('routing M3: constraint scans hold no exclusive lock on receiving tables',async()=>{
+      assert.equal((await db.query("SELECT FROM pg_locks WHERE pid=pg_backend_pid() AND relation IN('mailbox_webhooks'::regclass,'mail_receipts'::regclass,'mailboxes'::regclass,'mailbox_webhook_deliveries'::regclass) AND mode='AccessExclusiveLock'")).rowCount,0);
+    });
+    await db.query('COMMIT');
   }
   await db.query('CREATE TABLE opensend_migrations (LIKE public.bane_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.bane_migrations WHERE name NOT LIKE \'092_%\'');
   await t.test('secretless migration preserves ciphertext and the legacy ledger; explicit rotation rewraps it',async mt=>{
