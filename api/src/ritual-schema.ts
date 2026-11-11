@@ -114,9 +114,14 @@ export function fieldAt(path: readonly string[]): { field: Field } | { missing: 
 
 /** Closest candidate by edit distance, for "did you mean" hints. */
 export function closest(word: string, options: readonly string[]): string | null {
+  // Hints are optional. Bound both candidate count and edit-matrix cells, including workspace names.
+  if (word.length > 64 || options.length > 128) return null;
+  const lower=word.toLowerCase(); let cells=8192;
   let best: string | null = null, score = Math.max(2, Math.floor(word.length / 3)) + 1;
   for (const option of options) {
-    const d = distance(word.toLowerCase(), option.toLowerCase());
+    if (option.length>64 || Math.abs(option.length-word.length)>3) continue;
+    if ((cells-=word.length*option.length)<0) break;
+    const d = distance(lower, option.toLowerCase());
     if (d < score) { score = d; best = option; }
   }
   return best;

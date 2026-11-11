@@ -55,6 +55,7 @@ export const formatDiagnostic = (d: Diagnostic) => `${d.ritual ? `Ritual ${d.rit
 const at = (ritual: string, message: string, hint?: string, line = 1, column = 1): Diagnostic => ({ ritual, line, column, endLine: line, endColumn: column, message, ...(hint ? { hint } : {}) });
 export function compileConfig(c: Config): Programs {
   const diagnostics: Diagnostic[] = [], rituals: Record<string, RitualIR> = Object.create(null);
+  if(c.rituals.reduce((n,r)=>n+Buffer.byteLength(r.source),0)>256*1024)throw new RitualConfigError([at('','Workspace ritual sources exceed 256 KiB.')]);
   for (const h of c.rituals) {
     if (Object.hasOwn(rituals, h.key)) { diagnostics.push(at(h.key, `Two rituals use the key ${h.key}.`, 'Keys must be unique.')); continue; }
     try { rituals[h.key] = compileRitual(h.source); }

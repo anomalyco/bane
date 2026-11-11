@@ -53,14 +53,17 @@ function regex(pattern: string, flags: string) {
 }
 /** Static member path: email.from.address → ['email','from','address']; anything dynamic → null. */
 function staticPath(n: N): string[] | null {
-  if (n.type === 'Identifier') return [n.name];
-  if (n.type === 'ChainExpression') return staticPath(n.expression);
-  if (n.type !== 'MemberExpression') return null;
-  const base = staticPath(n.object);
-  if (!base) return null;
-  if (!n.computed && n.property.type === 'Identifier') return [...base, n.property.name];
-  if (n.computed && n.property.type === 'Literal' && (typeof n.property.value === 'string' || typeof n.property.value === 'number')) return [...base, String(n.property.value)];
-  return null;
+  const path:string[]=[];
+  for (;;) {
+    if (path.length>64) diagnostic(n,'Nesting exceeds 64 levels.');
+    if(n.type==='Identifier')return [...path,n.name].reverse();
+    if(n.type==='ChainExpression'){n=n.expression;continue;}
+    if(n.type!=='MemberExpression')return null;
+    if(!n.computed && n.property.type==='Identifier')path.push(n.property.name);
+    else if(n.computed && n.property.type==='Literal' && ['string','number'].includes(typeof n.property.value))path.push(String(n.property.value));
+    else return null;
+    n=n.object;
+  }
 }
 const dotted = (n: N) => staticPath(n)?.join('.') ?? '';
 function diagnostic(n: N, message: string, hint?: string): never {
@@ -114,10 +117,13 @@ export function compileRitual(source: string): RitualIR {
     const before = source.slice(0, secret.index).split('\n');
     throw new RitualError({ line: before.length, column: before.at(-1)!.length + 1, endLine: before.length, endColumn: before.at(-1)!.length + 1 + secret[0].length, message: 'The source contains a credential or webhook URL.', hint: 'Create an endpoint with the URL and call it by name: endpoints.<name>(…).' });
   }
-  let ast;
+  let ast, tokens=0, work=8192;
   try {
-    ast = parse(source, { ecmaVersion: 2022, sourceType: 'module', locations: true });
+    ast = parse(source, { ecmaVersion: 2022, sourceType: 'module', locations: true, onToken(t){
+      if (++tokens>8192 || (t.type.label==='name' && t.end-t.start>64)) throw new RitualError({line:t.loc!.start.line,column:t.loc!.start.column+1,endLine:t.loc!.end.line,endColumn:t.loc!.end.column+1,message:tokens>8192?'Compile token budget exceeded.':'Identifiers are limited to 64 characters.'});
+    }});
   } catch (e) {
+    if(e instanceof RitualError)throw e;
     const loc = (e as { loc?: { line: number; column: number } }).loc;
     const message = (e instanceof Error ? e.message : 'Invalid syntax').replace(/\s*\(\d+:\d+\)$/, '');
     throw new RitualError({ line: loc?.line ?? 1, column: (loc?.column ?? 0) + 1, endLine: loc?.line ?? 1, endColumn: (loc?.column ?? 0) + 2, message: `Syntax error: ${message}.` });
@@ -148,6 +154,7 @@ export function compileRitual(source: string): RitualIR {
     if (args.length < min || args.length > max) diagnostic(n, `${name}() takes ${min === max ? min : `${min}–${max}`} argument${max === 1 ? '' : 's'}; got ${args.length}.`, `Signature: ${signature}`);
   };
   function compile(n: N, env: Set<string>, depth = 0): I {
+    if ((work-=1+(n.type==='BlockStatement'||n.type==='IfStatement'?env.size:0))<0)diagnostic(n,'Compile work budget exceeded.');
     if (depth > 64) diagnostic(n, 'Nesting exceeds 64 levels.');
     const ir = (op: string, k?: string, a?: I[], v?: I['v']): I => ({
       op,

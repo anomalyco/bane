@@ -60,6 +60,12 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
+  const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
+  const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';
+  assert.equal(compileRitual(source('/*'+' '.repeat(65536-prefix.length-5)+'*/')).v,1);
+  for(const body of ['const '+'a'.repeat(65)+'=0;', ';'.repeat(8193), 'email'+'.a'.repeat(65)]) assert.throws(()=>compileRitual(source(body)),RitualError);
+});
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
