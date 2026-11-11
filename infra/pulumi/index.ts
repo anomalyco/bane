@@ -3,6 +3,7 @@ import * as cf from "@pulumi/cloudflare";
 import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
+import { mailGateway } from "./mail-gateway.js";
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
 import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
 
@@ -56,18 +57,19 @@ for (const purpose of ['webhooks','feedback-dlq']) {
   });
 }
 const bucket = `${stage.prefix}-attachments`;
-// Dev's bucket is created in anomaly-dev; only production's existing bucket is adopted.
+// Both buckets already hold attachments; adopt each in its stage's account.
 new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {
-  ...(production ? adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare) : { provider: cloudflare, protect: true }), ignoreChanges: ["location"], // ENAM; creation-only.
+  ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"],
 });
 
 // Hosted received mail (raw MIME and files) once BANE_MAIL_STORE=r2; agent inbox mail always.
-// Created here, not adopted. Keys start with their class: d/ default (raw kept 90 days, as in
+// Keys start with their class: d/ default (raw kept 90 days, as in
 // S3), a/ attachments (no expiry, as today), e/ agent inboxes (the app erases them; 45 days is
 // the backstop past the 30-day lease plus 7 days of grace), k/ kept mail (phase 2, app-managed).
 const mailBucket = `${stage.prefix}-mail`;
 const mailR2 = new cf.R2Bucket("mail", { accountId: cloudflareAccountId, name: mailBucket, jurisdiction: "default", location: "enam", storageClass: "Standard" }, {
-  provider: cloudflare, protect: true, ignoreChanges: ["location"], // Creation-only, like attachments.
+  ...(production ? { provider: cloudflare, protect: true } : adopt(`${cloudflareAccountId}/${mailBucket}/default`, cloudflare)),
+  ignoreChanges: ["location"], // Creation-only, like attachments.
 });
 const day = 86400;
 new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, bucketName: mailR2.name, jurisdiction: "default", rules: [
@@ -108,6 +110,7 @@ const account = stage.account, region = 'us-east-2', bucketName = `bane-${accoun
 const inboundArn = `arn:aws:sns:${region}:${account}:bane-inbound`;
 const opts = (id:string,provider:pulumi.ProviderResource) => imports.includes(id)?adopt(id,provider):{provider,protect:true};
 const tags = (purpose:string) => ({'bane:installation-id':'bane:pool','bane:purpose':purpose});
+export const mailGatewayEndpoint = mailGateway(stack, stage.account, cloudflareAccountId, config, ohio, iam, cloudflare, tags("mail-gateway"));
 const mail = new aws.s3.Bucket('pool-mail',{bucket:bucketName,tags:tags('mailbox-inbound')},opts(bucketName,ohio));
 const protectedOhio = {provider:ohio,protect:true};
 const block = new aws.s3.BucketPublicAccessBlock('pool-mail-private',{bucket:mail.id,blockPublicAcls:publicAccessBlock.BlockPublicAcls,
