@@ -1032,16 +1032,9 @@ function trustedSnsUrl(value: string, host: string, certificate: boolean) {
   if (url.protocol !== 'https:' || url.hostname !== host || url.port || url.username || url.password || url.hash || (certificate ? !/^\/SimpleNotificationService-[0-9a-fA-F]{32}\.pem$/.test(url.pathname) || value !== `https://${host}${url.pathname}` : url.pathname !== '/')) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS certificate or subscription URL is not trusted.');
   return url;
 }
-// Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
-const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
-// Only a valid signature may pin a signer. Unverified candidates, 404s and
-// peer throttles never replace these entries. Drop expired certificates only.
-const verifiedSigners = new Map<string, X509Certificate>();
-const missingCertificates=new Map<string,number>();
 // Node has no edge rate-limit binding. Reserve a miss synchronously, before I/O;
 // at capacity refuse new miss buckets rather than evicting a live peer's budget.
-const certMissPeers = new Map<string, { count: number; until: number }>();
-function allowLocalCertMiss(peer: string) {
+function allowLocalCertMiss(certMissPeers: SnsCertificateState['peers'], peer: string) {
   const now = Date.now();
   for (const [key, bucket] of certMissPeers) {
     if (bucket.until > now) break;
@@ -1072,8 +1065,17 @@ export class SnsCertMissBudget {
     try { return await lookup(); } finally { this.active--; }
   }
 }
-const isolateCertMissBudget = new SnsCertMissBudget();
-async function fetchSnsCert(url: URL, certificateTimeout: number) {
+export class SnsCertificateState {
+  // Share completed, public certificates, never an in-flight fetch. Only a
+  // verified signature pins its signer independently of candidates and 404s.
+  readonly candidates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
+  readonly verifiedSigners = new Map<string, X509Certificate>();
+  readonly missingCertificates = new Map<string, number>();
+  readonly peers = new Map<string, { count: number; until: number }>();
+  readonly budget = new SnsCertMissBudget();
+}
+const isolateCertState = new SnsCertificateState();
+async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertificates: Map<string,number>) {
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
@@ -1098,13 +1100,14 @@ async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) 
   const fields = envelope.Type === 'Notification' ? ['Message', 'MessageId', ...(envelope.Subject !== undefined ? ['Subject'] : []), 'Timestamp', 'TopicArn', 'Type'] : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
   const values = envelope as Record<string, unknown>;
   if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
+  const {candidates:snsCertificates, verifiedSigners, missingCertificates, peers, budget} = runtime.snsCertificateState ?? isolateCertState;
   const cached = snsCertificates.get(url.href);
   const pinned = verifiedSigners.get(url.href);
   let cert = pinned && Date.parse(pinned.validTo)>Date.now() ? pinned : cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
   if (!cert) {
     if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
-    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw certMissLimited();
-    cert=await isolateCertMissBudget.run(() => fetchSnsCert(url,certificateTimeout));
+    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peers,peer))) throw certMissLimited();
+    cert=await budget.run(() => fetchSnsCert(url,certificateTimeout,missingCertificates));
   }
   if (Date.now() < Date.parse(cert.validFrom) || Date.now() > Date.parse(cert.validTo) || cert.publicKey.asymmetricKeyType !== 'rsa') throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is expired or invalid.');
   if (cert !== pinned && (!cached || cached.expiresAt <= Date.now())) {

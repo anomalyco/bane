@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
+import { SnsCertificateState } from './src/operations.js';
 import {bucketPolicy,deliveryPolicy,feedbackPolicy,inboundPolicy,lifecycleRules,POOL_STREAMS,poolEventDestination,poolSuppression,publicAccessBlock,receiptRule,redrivePolicy} from './src/mail-controls.js';
 // On Linux, Node gives a child a socket as stdin, which openssl cannot reopen through /dev/stdin, so pass a private temp file.
 async function selfSignedPem(key:import('node:crypto').KeyObject) {
@@ -755,7 +756,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     const origin = 'https://mock-oauth.bane.dev';
     const emailAllowed = `${unique('mock-email-approved')}@unapproved.invalid`;
     const runtime: import('./src/core.js').Runtime = {
-      db: drizzle(authDb!),
+      db: drizzle(authDb!), snsCertificateState: new SnsCertificateState(),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
       config: { multiTenant: false, hostedSendCaps: {firstWeek:100,secondWeek:1000,mature:10000}, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
         allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1, dailyHeadroomPercent: 10 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
@@ -4706,6 +4707,11 @@ describe('Operational configuration and public event boundaries', () => {
         error(await check(negative),403,'SNS_INVALID_CERTIFICATE');
         assert.equal(transport.mock.callCount(),74,'All eleven signed callbacks use the pin without a new fetch');
       } finally { release(); await Promise.all(pending); }
+      // A separate fixture using the same peer and URL starts cold: neither
+      // the previous peer's exhausted budget nor its negative entry carries over.
+      hold=false; runtime.snsCertificateState = new SnsCertificateState();
+      error(await check(negative),403,'SNS_INVALID_CERTIFICATE');
+      assert.equal(transport.mock.callCount(),75);
     }));
   });
 
@@ -4764,6 +4770,7 @@ describe('Operational configuration and public event boundaries', () => {
     cleanup(t, instance.close);
     const runtime = instance.runtime;
     runtime.config.workspaceId = unique('redirect-workspace');
+    runtime.snsCertificateState = new SnsCertificateState();
     // The Node transport refuses loopback by design; route only this synthetic endpoint to the local 302 server.
     runtime.webhookFetch = async (url, init) => { assert.equal(url, webhookUrl); const r = await nativeFetch(`${loopback}/webhook`, { ...init, redirect: 'manual' }); await r.body?.cancel(); return { status: r.status }; };
     const app = createApp();
@@ -4771,6 +4778,10 @@ describe('Operational configuration and public event boundaries', () => {
     try {
       await drizzle(db).transaction(async tx => {
         runtime.db = tx;
+        // drainJobs claims across all workspaces. Rollback hides our job from
+        // other runners, but not their due jobs from us. Give this connection
+        // its own queue so every one-job drain exercises the intended delivery.
+        await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
         await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [runtime.config.workspaceId]);
         await db.query("UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = 'default'", [runtime.config.workspaceId, manager!.userId]);
         await regional.ensureRegionSettings(runtime.db, runtime.config);
@@ -4908,6 +4919,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   cleanup(t, instance.close);
   const runtime = instance.runtime;
   runtime.config.workspaceId = unique('simulated-ses-workspace');
+  runtime.snsCertificateState = new SnsCertificateState();
   assert.deepEqual(runtime.config.simulatedSes, { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, 'Test dispatch must default to the 100 ms provider simulator.');
   runtime.config.simulatedSes.latencyMs = 0;
   const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
@@ -5143,6 +5155,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
   const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
+  runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
     assert.deepEqual(await command('--plan'),first);assert.deepEqual(await database(),original);assert.match(hash,/^[a-f0-9]{64}$/);
     assert.deepEqual(first.domains,[...dom].sort());assert.deepEqual(first.workspaces,inventory);assert.deepEqual(first.unconnected,['default',personal]);assert.deepEqual(first.receivingHosts,['reply.e2e.example','reply.inbound.example']);
@@ -5565,6 +5578,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
     const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
+    runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
     cleanup(t,async()=>{
       await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);
@@ -5901,6 +5915,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
     const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
+    runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
     cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM provider_feedback_history WHERE aws_account_id=$1',[account]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);});
     await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),wid,user.userId]);
