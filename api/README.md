@@ -200,6 +200,8 @@ Each run sends to [run-tagged SES simulator addresses](https://docs.aws.amazon.c
 
 `e2e-report.json` contains the commit, timings, failures with request IDs, and every OpenAPI operation either attempted, explicitly skipped with a reason, or not reached. Failed steps, cleanup errors and unaccounted operations fail the check. CI uploads the report even on failure and lists each step in the Actions summary. Domain-restricted denials on required flows are reported as failures, not skips. Budget: about four minutes including cleanup.
 
+**Dev fixture capacity (one-time operator setup).** On the dev database, run `psql -X -v ON_ERROR_STOP=1 -v workspace_id="$DEV_E2E_WORKSPACE_ID" -f scripts/set-dev-e2e-send-cap.sql` from `api/`. Expect one audit row on first setup; zero means already configured or the workspace checks did not match. This sets a finite 500 recipients per rolling 24 hours (450 for marketing with the default reserve): six scheduled runs plus up to twelve deploy runs at the script’s 25-admission ceiling. Simulator recipients still consume capacity. Minute limits, pending limits, reputation holds, and provider quotas still apply. The E2E key and deploy workflow cannot grant this override.
+
 ## SDK and MCP
 
 - `/openapi.json` comes from the actual Zod route schemas; stable operation IDs define generated SDK methods. `bun run sdk` exports the contract, generates `../sdk/src`, and compiles it. Do not edit generated code. See [SDK usage](../sdk/README.md).

@@ -6421,6 +6421,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('dev E2E: finite operator override releases a held simulator campaign without exempting it', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
+      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333';
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const claim=(host:string)=>db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[host,wid]);
+      await claim(domain);
+      const script=await readFile(new URL('./scripts/set-dev-e2e-send-cap.sql',import.meta.url),'utf8');
+      const apply=()=>db.query(script.replace(":'workspace_id'",'$1'),[wid]);
+      assert.equal((await apply()).rowCount,0,'A Hosted workspace without both verified fixture domains is unchanged');
+      await claim('e2e-va.bane.mx');
+      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),91)`,[wid]);
+      const list=ok(await local('POST','/v1/lists',{name:'E2E fixture'}),201);
+      await db.query(`WITH contact AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ('e2e-cap-fixture',$1,'success@simulator.amazonses.com','subscribed') RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM contact`,[wid,list.id]);
+      const c=ok(await local('POST','/v1/campaigns',{name:'E2E fixture',from:`sender@${domain}`,subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}}),201);
+      const path=`/v1/campaigns/${c.id}`, delivery=async()=>ok(await local('GET',path)).delivery;
+      ok(await local('POST',path+'/send',{revision:c.revision}),202);await run('campaign.run');
+      const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
+      assert.equal((await apply()).rows[0].details.new,500);assert.equal((await apply()).rowCount,0);
+      await run('campaign.run');assert.equal((await delivery()).expanded,1);
+      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
+        [{used:'92',marketing:'450',burst:50,pending_cap_override:null,exempt_hosted_quotas:false}]);
+    });
+  });
+
   test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
