@@ -27,7 +27,7 @@ const FACTORS: Record<FactorKey, { label: string; weight: number; good: number; 
   content: { label: 'Content', weight: 20, good: 0.001, bad: 0.03, basis: 'Emails the hosted content screen rejected as spam ÷ emails created. Neutral when the workspace is not screened.' },
   auth: { label: 'Authentication', weight: 15, good: 1, bad: 0, basis: 'By sending volume: DKIM signing 40 %, a verified custom MAIL FROM (aligned SPF) 30 %, DMARC enforcing 30 % (p=none 15 %). Neutral without hosted domain records.' },
   hygiene: { label: 'List hygiene', weight: 10, good: 0.005, bad: 0.05, basis: 'Emails stopped by the suppression list ÷ emails created.' },
-  consistency: { label: 'Consistency', weight: 10, good: 3, bad: 20, basis: 'Busiest day ÷ the median of the seven days before it (at least 20).' },
+  consistency: { label: 'Consistency', weight: 10, good: 3, bad: 20, basis: 'Busiest day ÷ the median of the days with mail in the week before it (at least 20). Days with fewer than two such days are not compared.' },
 };
 
 const FactorSchema = z.object({
@@ -83,8 +83,12 @@ export function computeSenderScore(input: ScoreInputs, now = new Date()): Sender
       const ms = end - i * DAY_MS, row = count(ms);
       if (row) for (const key of Object.keys(totals) as (keyof typeof totals)[]) totals[key] += row[key];
       if (!row?.emails) continue;
-      const before = Array.from({ length: 7 }, (_, k) => count(ms - (k + 1) * DAY_MS)?.emails ?? 0).sort((a, b) => a - b);
-      spike = Math.max(spike ?? 1, row.emails / Math.max(before[3]!, SPIKE_FLOOR));
+      // The baseline is the median of the days that had mail in the week before, so a new sender's first days and
+      // a quiet weekend don't read as spikes; a day needs two such days before it to be compared at all.
+      const before = Array.from({ length: 7 }, (_, k) => count(ms - (k + 1) * DAY_MS)?.emails ?? 0).filter(Boolean).sort((a, b) => a - b);
+      if (before.length < 2) continue;
+      const median = before.length % 2 ? before[(before.length - 1) / 2]! : (before[before.length / 2 - 1]! + before[before.length / 2]!) / 2;
+      spike = Math.max(spike ?? 1, row.emails / Math.max(median, SPIKE_FLOOR));
     }
     const values: Record<FactorKey, number | null> = {
       complaints: totals.delivered ? totals.complained / totals.delivered : null,
