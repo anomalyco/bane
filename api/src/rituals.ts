@@ -28,7 +28,7 @@ const path = '/v1/rituals',
   ok = { 200: response(state), ...errors };
 export function ritualAdmin(c: Ctx, write = false) {
   const a=actor(c,!write&&c.get('actor')?.receivingConsent?'read':'manage');
-  if (a.domains.length || a.role === 'member' || (write && (a.credential==='agentToken'||a.credential==='mcp'&&!a.receivingConsent)))
+  if (a.domains.length || a.role === 'member' || (write && (a.credential==='agentToken'||a.grantId&&!a.receivingConsent)))
     throw new ApiError(
       403,
       'ADMIN_REQUIRED',
@@ -36,7 +36,7 @@ export function ritualAdmin(c: Ctx, write = false) {
     );
   return a;
 }
-export async function ownReceiving(tx:DbExecutor,c:Ctx,kind:'endpoint'|'rituals'|'key'|'route',resource:string){const a=c.get('actor');if(a.credential!=='mcp')return;if(!a.receivingConsent||!a.permissions.includes('manage'))throw new ApiError(403,'ADMIN_REQUIRED','Explicit manage and receiving consent required.');await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${a.keyId.slice(4)},${a.workspaceId},${kind},${resource}) ON CONFLICT DO NOTHING`)}
+export async function ownReceiving(tx:DbExecutor,c:Ctx,kind:'endpoint'|'rituals'|'key'|'route',resource:string){const a=c.get('actor');if(!a.grantId)return;if(!a.receivingConsent||!a.permissions.includes('manage'))throw new ApiError(403,'ADMIN_REQUIRED','Explicit manage and receiving consent required.');await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${a.grantId},${a.workspaceId},${kind},${resource}) ON CONFLICT DO NOTHING`)}
 async function current(tx: DbExecutor, w: string) {
   const r = (
     await tx.execute<{ version: number; config: Config | null }>(
@@ -105,7 +105,7 @@ async function prepare(tx: DbExecutor, w: string, c: Config) {
 async function save(tx: DbExecutor, c: Ctx, w: string, config: Config, version: number,preview=false) {
   const p = await prepare(tx, w, config),
     next = version + 1;
-  if(!preview&&c.get('actor').credential==='mcp'&&c.get('actor').receivingConsent){await ownReceiving(tx,c,'rituals','workspace');}
+  if(!preview) await ownReceiving(tx,c,'rituals','workspace');
   p.grants=(await tx.execute<{id:string}>(sql`SELECT grant_id AS id FROM mail_grant_objects WHERE workspace_id=${w} AND kind='rituals'`)).rows.map(r=>r.id);
   await tx.execute(
     sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},${next}) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version`,

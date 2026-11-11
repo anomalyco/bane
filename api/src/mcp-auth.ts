@@ -117,7 +117,7 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'bane:manage') && policies.every(list => (list ?? scopes).includes(scope)));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const actor: Actor = { receivingConsent:original.receiving,keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
+  const actor: Actor = { grantId:row.id, receivingConsent:original.receiving,keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
   return { actor,inboxIds:original.inboxIds, legacy: original.legacy, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 

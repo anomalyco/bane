@@ -2468,6 +2468,7 @@ describe('Hosted MCP OAuth and tools', () => {
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    error(await http('POST','/v1/inboxes',managed.token,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
       const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
       for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
@@ -2484,7 +2485,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(connections.some(row => row.id === `mcp_${consentId}`));
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
-    let grantKeyId='';
+    const grantKeys:string[]=[];
     await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async()=>{
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getContext'||x.name==='applyRituals'||x.name==='createAgentToken'));
@@ -2495,11 +2496,18 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack})).structuredContent.response.call,'endpoints["mcp-alerts"]');
       const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('createEndpoint')&&listed.includes('testEndpoint')&&!listed.includes('applyRituals'),listed.join());
       const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.response.ok,true,redact(checked));
-      const apiKey=await rpc(token,'tools/call',{name:'createApiKey',arguments:{confirm:true,body:{name:'agent script',permissions:['read']}}});assert.equal(apiKey.isError,false,redact(apiKey));grantKeyId=apiKey.structuredContent.response.id;
+      const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
+      secrets.add(parent.secret);grantKeys.push(parent.id);
+      const child=ok(await http('POST','/v1/api-keys',parent.secret,{name:'read fixture',permissions:['read']}),201);
+      secrets.add(child.secret);grantKeys.push(child.id);
+      assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
+      await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
+      error(await http('POST','/v1/inbound/keys',parent.secret,{name:'receiving fixture'}),403,'ADMIN_REQUIRED');
+      error(await http('POST','/v1/inboxes',parent.secret,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     });
     ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
     assert.equal((await db.query('SELECT FROM mail_grant_objects WHERE grant_id=$1',[consentId])).rowCount,0);
-    assert.ok((await db.query('SELECT revoked_at FROM api_keys WHERE id=$1',[grantKeyId])).rows[0].revoked_at,'An agent-created API key is revoked with its approval.');
+    assert.equal((await db.query('SELECT id FROM api_keys WHERE id=ANY($1) AND revoked_at IS NOT NULL',[grantKeys])).rowCount,2,'Both credential generations are revoked with their approval.');
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));

@@ -13,7 +13,7 @@ export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
   workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
-  role?: string; receivingConsent?:boolean;
+  role?: string; receivingConsent?:boolean; grantId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
   dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };
@@ -102,7 +102,7 @@ export interface Runtime {
   webhookFetch?: WebhookFetch;
 }
 export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number;retryAfter?:string|null }>;
-export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
+export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;

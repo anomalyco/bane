@@ -89,18 +89,24 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       const hash = await digest(token);
       const limit = c.env.config.apiRateLimitPerMinute;
       const credential = sql`
-        SELECT id, workspace_id, id AS key_id, permissions, domains,
+        SELECT k.id, k.workspace_id, k.id AS key_id, k.permissions, k.domains, g.grant_id,
           ${limit}::int AS max_requests
-        FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`;
+        FROM api_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='api_key' AND g.resource=k.id
+        WHERE k.hash = ${hash} AND k.revoked_at IS NULL`;
       if((verifiedFingerprints.get(hash)??0)>Date.now() && c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,credential));
+        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,sql`${credential} AND g.grant_id IS NULL`));
         if(response){rememberFingerprint(hash);return response;}
       }
-      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys,credential));
+      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null }>(c, apiKeys,credential));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
-      rememberFingerprint(hash);
-      c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
+      let grant:Actor|null=null;
+      if (key.grant_id) {
+        const {getMcpGrantActor}=await wrapModuleLoad(()=>import('./mcp-auth.js'));
+        grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id);
+        if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
+      } else rememberFingerprint(hash);
+      c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
     if (!Boolean(c.env.config.googleClientId && c.env.config.googleClientSecret && c.env.config.authSecret)) {
@@ -162,7 +168,7 @@ export function registerAuth(app: App) {
     const [key] = await c.env.db.transaction(async tx => {
       const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
       // A key created by an MCP agent lives only as long as the approval that created it.
-      if (auth.credential === 'mcp' && auth.keyId.startsWith('mcp_')) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.keyId.slice(4)},${auth.workspaceId},'api_key',${rows[0]!.id})`);
+      if (auth.grantId) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.grantId},${auth.workspaceId},'api_key',${rows[0]!.id})`);
       return rows;
     });
     return c.json({ ...keyView(key!), secret }, 201);

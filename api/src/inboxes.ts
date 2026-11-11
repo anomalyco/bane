@@ -165,8 +165,9 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     request: { body: json(create) }, responses: { 200: response(Inbox), 201: response(created), ...errors },
   }), async c => {
     const v = access(c, 'create'), input = c.req.valid('json');
-    const manageAddress = v.admin && c.get('actor')?.credential !== 'mcp' && c.get('actor')?.credential !== 'agentToken';
-    if(input.credential&&c.get('actor')?.receivingConsent)throw new ApiError(422,'USE_INBOX_CONNECTION','Create the inbox first, then use inboxes_connect for a grant-bound key.');
+    const grantId = c.get('actor')?.grantId ?? v.grantId;
+    const manageAddress = v.admin && !grantId;
+    if(input.credential&&grantId)throw new ApiError(422,'USE_INBOX_CONNECTION','Use an approval with receiving consent and create an inbox connection for a grant-bound key.');
     if (input.localPart && !manageAddress) throw new ApiError(403,'PERMISSION_DENIED','This credential must omit localPart and use a generated address.','localPart');
     if (!inboxStoreReady(c.env)) throw new ApiError(503, 'INBOXES_UNAVAILABLE', 'Agent inboxes are not enabled on this deployment yet.');
     const missing = [...(input.send.enabled ? ['send'] as const : []), ...(input.credential?.permissions ?? [])].filter(p => !v.permissions.includes(p));

@@ -42,10 +42,14 @@ async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermissi
 }
 
 export async function authorizeInboxKey(c:Ctx,token:string):Promise<MailboxAccess>{
-  const key=await chargeCredential<{id:string;workspace_id:string;mailbox_ids:string[]|null;permissions:MailboxPermission[]}>(c, mailboxKeys,sql`
-    SELECT k.id,k.workspace_id,k.id AS key_id,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=k.workspace_id AND b.created_by=k.id AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000)) ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
+  const key=await chargeCredential<{id:string;workspace_id:string;grant_id:string|null;mailbox_ids:string[]|null;permissions:MailboxPermission[]}>(c, mailboxKeys,sql`
+    SELECT k.id,k.workspace_id,k.id AS key_id,g.grant_id,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=k.workspace_id AND b.created_by=k.id AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000)) ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='key' AND g.resource=k.id WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
   if(!key)throw new ApiError(401,'AUTH_INVALID','The inbox key is invalid or expired.');
-  return {keyId:key.id,workspaceId:key.workspace_id,admin:false,mailboxIds:key.mailbox_ids,permissions:key.permissions};
+  if(key.grant_id){
+    const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+key.grant_id);
+    if(grant?.workspaceId!==key.workspace_id||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The originating receiving approval is no longer active.');
+  }
+  return {keyId:key.id,grantId:key.grant_id??undefined,workspaceId:key.workspace_id,admin:false,mailboxIds:key.mailbox_ids,permissions:key.permissions};
 }
 async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   const delegated=delegatedInbox(c.env);if(delegated){c.set('mailboxAccess',delegated);return next();}
@@ -696,7 +700,7 @@ function registerInboundWebhooks(app: App) {
     return { value, row };
   };
   // Endpoint subscriptions outlive the credential. Only non-delegated workspace administrators can manage them.
-  const manageHook=(c:Ctx)=>{const value=admin(c);if(c.get('actor').credential==='agentToken'||(c.get('actor').credential==='mcp'&&!c.get('actor').receivingConsent))throw new ApiError(403,'ADMIN_REQUIRED','Use a workspace admin session or unrestricted manage API key to manage inbound webhooks.');return value;};
+  const manageHook=(c:Ctx)=>{const value=admin(c);if(c.get('actor').credential==='agentToken'||(c.get('actor').grantId&&!c.get('actor').receivingConsent))throw new ApiError(403,'ADMIN_REQUIRED','Use a workspace admin session or a management credential with receiving authority.');return value;};
   const webhookFields = { ...z.object(hookOptions).partial().shape, url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length).describe('Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.'), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
@@ -801,8 +805,13 @@ function registerInboundWebhooks(app: App) {
     return c.json({ queued }, 202);
   });
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/rotate-secret`, operationId: 'rotateInboundWebhookSecret', security, tags, request: { params: IdParam }, responses: { 200: response(z.object({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the new X-Webhook-Verification-Token, which changes with the secret.') }).openapi('InboundWebhookRotatedSecret')), ...errors } }), async c => {
-    const { value, row } = await getWebhook(c, c.req.valid('param').id,manageHook(c)); const secret = webhookSecret();
-    await c.env.db.update(mailboxWebhooks).set({ encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, row.id)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, row.id));
+    const access=manageHook(c), secret=webhookSecret();
+    const row=await c.env.db.transaction(async tx=>{
+      const {row}=await getWebhook(c,c.req.valid('param').id,access,tx);
+      await ownReceiving(tx,c,'endpoint',row.id);
+      await tx.update(mailboxWebhooks).set({encryptedSecret:await encrypt(c.env,secret,webhookSecretBinding(access.workspaceId,row.id)),updatedAt:new Date().toISOString()}).where(eq(mailboxWebhooks.id,row.id));
+      return row;
+    });
     c.header('Cache-Control', 'no-store');
     return c.json({ secret, ...await inboundToken(row.format, secret) }, 200);
   });
