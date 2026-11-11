@@ -67,9 +67,15 @@ export function mailGateway(stage: "dev" | "production", account: string, cloudf
       ArnLike: { "aws:SourceArn": `arn:aws:ecs:us-east-2:${account}:*` } } }] });
   const task = new aws.iam.Role(`${name}-task`, { name: `${name}-task`, assumeRolePolicy, tags }, iamOpts);
   const execution = new aws.iam.Role(`${name}-execution`, { name: `${name}-execution`, assumeRolePolicy, tags }, iamOpts);
-  // Dax owns this allowlist; the deploy role may attach it here but cannot author IAM policies for the roles.
-  const executionAccess = new aws.iam.RolePolicyAttachment(`${name}-execution`, { role: execution.name,
-    policyArn: `arn:aws:iam::${account}:policy/${name}-execution` }, iamOpts);
+  const executionAccess = new aws.iam.RolePolicy(`${name}-execution`, {
+    name, role: execution.name,
+    policy: pulumi.jsonStringify({ Version: "2012-10-17", Statement: [
+      { Effect: "Allow", Action: "ecr:GetAuthorizationToken", Resource: "*", Condition: { StringEquals: { "aws:RequestedRegion": "us-east-2" } } },
+      { Effect: "Allow", Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], Resource: repo.arn },
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: `arn:aws:logs:us-east-2:${account}:log-group:/ecs/${name}:log-stream:gateway/${name}/*` },
+      { Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: secrets.map(secret => secret.valueFrom) },
+    ] }),
+  }, iamOpts);
 
   const cluster = new aws.ecs.Cluster(name, { name, tags }, opts);
   // A new image must be able to replace the task definition revision without unprotecting the service.
