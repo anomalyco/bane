@@ -10,7 +10,7 @@ export const RoutingKey = z
   .regex(/^[a-z0-9][a-z0-9-]{0,62}$/)
   .describe('Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.');
 const Address = z.string().trim().toLowerCase().max(254);
-const Destination = z.string().min(1).max(128).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).');
+const Destination = z.string().max(128).regex(/^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$/).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).');
 const RouteFields = z
   .object({
     key: RoutingKey.nullable().optional(),
@@ -155,8 +155,12 @@ function makeRoute(fields: RouteInput, previous?: Route): Route {
   };
 }
 /** A config entry updates the route with its key, or else the keyless route with its match. */
-const existingFor = (routes: Route[], f: RouteInput) =>
-  (f.key ? routes.find((r) => r.key === f.key) : undefined) ?? routes.find((r) => r.match === f.match.replace(/^@/, '*@') && (!f.key || !r.key));
+function applyEntries(routes:Route[],entries:RouteInput[]){
+  const byKey=new Map(routes.filter(r=>r.key).map(r=>[r.key,r])),byMatch=new Map(routes.map(r=>[r.match,r]));
+  return entries.map(f=>{const sameMatch=byMatch.get(f.match.replace(/^@/,'*@'));return makeRoute(f,(f.key?byKey.get(f.key):undefined)??(!f.key||!sameMatch?.key?sameMatch:undefined));});
+}
+const referenceSet=(routes:RouteInput[])=>new Set(routes.flatMap(r=>Array.isArray(r.to)?r.to:[]));
+function checkReferenceBudget(routes:RouteInput[]){if(referenceSet(routes).size>1000)throw fail(422,'DESTINATION_LIMIT','At most 1,000 distinct destinations per request.','to');}
 const same = (a: Route | undefined, b: Route) =>
   !!a && (['key', 'match', 'to', 'enabled', 'subaddresses', 'note'] as const).every((k) => JSON.stringify(a[k]) === JSON.stringify(b[k]));
 
@@ -164,9 +168,11 @@ function checkRoutes(routes: Route[]) {
   const matches = new Map<string, Route>(),
     keys = new Set<string>(),
     patterns = new Map<string, number>();
+  const ids=new Set<string>();
   let exact = 0;
   for (const r of routes) {
-    if (!ADDRESS.test(r.match) || hostOf(r.match).includes('*'))
+    if(ids.has(r.id))throw fail(409,'ROUTE_CONFLICT','Two entries update the same route.');ids.add(r.id);
+    if (/^[*]{2,}@/.test(r.match) || !ADDRESS.test(r.match) || hostOf(r.match).includes('*'))
       throw fail(
         422,
         'INVALID_MATCH',
@@ -190,15 +196,17 @@ function checkRoutes(routes: Route[]) {
 }
 /** Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing. */
 async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean) {
-  const refs = [...new Set(routes.flatMap((r) => (Array.isArray(r.to) ? r.to : [])))],
+  const refs = [...referenceSet(routes)],
     warnings: string[] = [];
   if (!refs.length) return warnings;
   const found = new Map(
     (
       await tx.execute<{ ref: string; id: string }>(
-        sql`WITH refs AS (SELECT jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) AS ref)
-          SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND (b.id=ref OR 'inbox:'||b.key=ref)
-          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND (h.id=ref OR 'webhook:'||h.key=ref)`,
+        sql`WITH refs AS MATERIALIZED (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) ref)
+          SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.id=ref WHERE starts_with(ref,'mbx_')
+          UNION ALL SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
+          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref WHERE starts_with(ref,'mwh_')
+          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key WHERE starts_with(ref,'webhook:')`,
       )
     ).rows.map((d) => [d.ref, d.id]),
   );
@@ -417,13 +425,12 @@ export function registerRouting(app: App) {
       },
       responses: { 200: response(RoutingChange), ...errors },
     }),
-    async (c) =>
-      c.json(
-        await edit(c, (routes) => c.req.valid('json').routes.map((f) => makeRoute(f, existingFor(routes, f))), {
+    async (c) => {checkReferenceBudget(c.req.valid('json').routes);return c.json(
+        await edit(c, (routes) => applyEntries(routes,c.req.valid('json').routes), {
           dryRun: c.req.valid('query').dryRun === 'true',
         }),
         200,
-      ),
+      );},
   );
   app.openapi(
     createRoute({
@@ -528,6 +535,7 @@ export function registerRouting(app: App) {
       const w = workspace(c),
         q = c.req.valid('query'),
         [cv, cr] = (q.cursor ?? '').split(':');
+      if(q.cursor && !/^[0-9]{1,9}:[A-Za-z0-9_-]+$/.test(q.cursor))throw fail(422,'INVALID_CURSOR','Use the nextCursor from the previous page.');
       const rows = (
         await c.env.db.execute<z.infer<typeof RoutingAuditEntry>>(
           sql`SELECT version,resource_id AS "resourceId",before,after,jsonb_build_object('type',actor_type,'id',actor_id) AS actor,request_id AS "requestId",note,created_at::text AS "createdAt" FROM mail_routing_audit WHERE workspace_id=${w}
@@ -628,6 +636,7 @@ export function registerRouting(app: App) {
     async (c) => {
       const w = workspace(c),
         input = c.req.valid('json');
+      if(input.config){if(input.config.routes.length>1000)throw fail(422,'TEST_CONFIG_LIMIT','A preview accepts up to 1,000 routes.');checkReferenceBudget(input.config.routes);}
       if (input.messageId && input.raw) throw fail(422, 'INVALID_TEST', 'Supply messageId or raw, not both.', 'raw');
       if (input.config && input.version !== undefined) throw fail(422, 'INVALID_TEST', 'Supply config or version, not both.', 'version');
       let to = input.envelope?.to,
@@ -669,7 +678,7 @@ export function registerRouting(app: App) {
           if (input.version !== undefined && input.version > saved)
             throw fail(404, 'NOT_FOUND', `Version ${input.version} does not exist yet. List versions with GET /v1/routing/versions.`, 'version');
           const candidate = input.config
-            ? input.config.routes.map((f) => makeRoute(f, existingFor(routes, f)))
+            ? applyEntries(routes,input.config.routes)
             : await historical(tx, w, input.version!);
           await save(tx, c, w, saved, routes, candidate, { lenient: !input.config });
           return { routing: await read(tx), version: input.version ?? saved };

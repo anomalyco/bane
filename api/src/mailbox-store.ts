@@ -79,7 +79,7 @@ export function validateRule(rule: string, domain: string) {
   if (!local || !host || value.split('@').length !== 2 || !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(local) || !/^[a-z0-9*.-]+$/.test(host)) throw new ApiError(422, 'INVALID_RULE', 'Rules look like support+*@example.com or *@help.example.com.', 'rules');
   const concrete = host.replace(/^\*\./, '');
   if (host.includes('*') && !host.startsWith('*.') || concrete.includes('*') || (concrete !== domain && !concrete.endsWith(`.${domain}`))) throw new ApiError(422, 'RULE_DOMAIN_MISMATCH', `Rules must stay within ${domain} or its subdomains.`, 'rules');
-  if (value === `*@${domain}`) throw new ApiError(422, 'RULE_TOO_BROAD', 'A rule cannot claim every address on the domain; use the domain catch-all setting instead.', 'rules');
+  if (/^\*{2,}$/.test(local) || value === `*@${domain}`) throw new ApiError(422, 'RULE_TOO_BROAD', 'A rule cannot claim every address on the domain; use the domain catch-all setting instead.', 'rules');
   return value;
 }
 

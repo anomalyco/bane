@@ -7822,6 +7822,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await route('extra-a@receive.example',owners.slice(0,10).map(b=>b.id));await route('extra-b@receive.example',owners.slice(9).map(b=>b.id));
         const cap=await ingest('extra-limit',['extra-a@receive.example','extra-b@receive.example']);assert.equal((await db.query("SELECT FROM mail_unrouted WHERE message_id=$1 AND address='extra-b@receive.example'",[cap.id])).rowCount,1);
       });
+      await t.test('routing M4: preview bounds distinct destination references before resolving them',async()=>{
+        const routes=Array.from({length:101},(_,i)=>({match:`a${i}@receive.example`,to:Array.from({length:10},(_,j)=>`inbox:k${10*i+j}`)}));
+        error(await local('POST','/v1/routing/test',{envelope:{to:[box.address]},config:{routes}}),422,'DESTINATION_LIMIT');
+        error(await local('POST','/v1/routing/test',{envelope:{to:[box.address]},config:{routes:[{match:box.address,to:['unknown:type']}]}}),422,'VALIDATION_FAILED');
+        error(await local('GET','/v1/routing/audit?cursor=bad'),422,'INVALID_CURSOR');
+      });
       let received: Json;
       await t.test(
         'routing: support@ route delivers to the inbox and the webhook once, deduplicated with an addressIds subscription',
