@@ -8391,6 +8391,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('rituals: ordered shaped webhook reuse routing, one admission and two or three ingest trips', async (it) => {
         const path='/v1/rituals',config={rituals:[{key:'triage',source:'export default function route(email,ctx){ label("handled");endpoints["support-hook"]( {subject:email.subject,recipient:ctx.recipient}) }'}],attachments:[{target:box.id,ritual:'triage'}]};
         const before=await call('GET',path);const demo=await call('POST',path+'/test',{config,mime:`To: ${box.address}\r\nSubject: hello\r\n\r\nTest`});assert.deepEqual(demo.trace.map((e:Json)=>e.kind),['ritual']);assert.deepEqual(demo.recipients[0].bodies[hook.id],{subject:'hello',recipient:box.address});assert.equal((await call('GET',path)).version,before.version);
+        const guard=async(source:string,text:string)=> (await call('POST',path+'/test',{config:{...config,rituals:[{key:'triage',source:`export default function route(email){${source}}`}]},mime:`To: ${box.address}\r\nSubject: fixture\r\n\r\n${text}`})).recipients[0];
+        assert.equal((await guard('if(/fixture/.test(email.text))block()','fixture'+' '.repeat(65536))).dropped,true);
+        const failed=await guard('label(email.text)','invalid label');assert.equal(failed.junk,true);assert.ok(failed.labels.includes('ritual-error'));assert.ok(!failed.webhooks.includes(hook.id));
         await call('PUT',path,config);
         await db.query('DELETE FROM jobs');
         const { processJobs } = await import('./src/jobs.js');

@@ -41,7 +41,7 @@ flowchart TD
   deliver --> slack["Slack"] & discord["Discord"] & hook["Webhook"] & fwd["Forward"]
 ```
 
-- A ritual that fails (step budget, a type error at run time) takes **no** actions and labels the message `ritual-error`; the message is still stored and routed as if the ritual were absent.
+- A ritual error stops evaluation for that recipient. Bane discards pending ritual actions, marks the message as junk with `ritual-error`, and uses the existing junk delivery rules. Ritual text and regex operations inspect at most the first 65,536 characters.
 - Local decisions commit with the message, so nobody sees mail before its final disposition. External calls are queued only after that commit.
 - A dry run (`testRituals`) runs the same pipeline on a stored message or pasted MIME inside a rolled-back transaction. It never delivers, never calls Jev and never saves; pass `scores` (or type answers in the dashboard) to see what an omen answer would do.
 

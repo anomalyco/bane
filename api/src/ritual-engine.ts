@@ -35,10 +35,11 @@ const LEGACY_ENDPOINTS = new Set(['slack', 'discord', 'webhook', 'forward']);
 const own = (o: object, k: string) => Object.hasOwn(o, k);
 const reserved = (k: string) => ['__proto__', 'constructor', 'prototype'].includes(k);
 const patterns = new Map<string, RE2JS>();
-function regex(pattern: string, flags: string) {
+function regex(pattern: string, flags: string, charge?: (n:number)=>void) {
   const key = flags + '\n' + pattern;
   let re = patterns.get(key);
   if (!re) {
+    charge?.(200);
     re = RE2JS.compile(
       pattern,
       (flags.includes('i') ? RE2JS.CASE_INSENSITIVE : 0) |
@@ -458,13 +459,13 @@ export function runRitual(
         return Object.fromEntries(a.map(e => [e.k!, scores[e.k!]]));
       case 'regex': {
         const s = x();
-        if (typeof s !== 'string' || s.length > 65536) throw Error('Regex input exceeds 64 Ki characters');
-        const re = regex(String(i.v), k);
-        tick(Math.ceil(((s.length + 1) * re.programSize()) / 16));
-        return re.test(s);
+        if (typeof s !== 'string') throw Error('Regex expected text');
+        const input=s.slice(0,BODY_BYTES), re=regex(String(i.v), k,tick);
+        tick(Math.ceil((input.length+1)/32));
+        return re.test(input);
       }
       case 'builtin': {
-        const [v, w] = a.map(visit);
+        const [v, w] = a.map(node=>{const value=visit(node);return typeof value==='string'?value.slice(0,BODY_BYTES):value;});
         if (typeof v !== 'string') throw Error(`${k}() expected text`);
         tick(Math.ceil((v.length + (typeof w === 'string' ? w.length : 0)) / 32));
         if (k === 'lists.has') {
@@ -490,6 +491,7 @@ export function runRitual(
         if (intents.length >= 32) throw Error('Action budget exceeded');
         const args = a.map(visit),
           ref = REF_ACTIONS.has(k) ? args[0] : undefined;
+        if(k==='label'&&(typeof args[0]!=='string'||!/^[a-z0-9][a-z0-9:_-]{0,63}$/i.test(args[0])))throw Error('Invalid label');
         if (ref && !ir.refs.includes(ref)) throw Error('Undeclared endpoint');
         if (k === 'allow' && !(email.auth as { fromVerified: boolean })?.fromVerified) return;
         let size = 0;
@@ -513,6 +515,7 @@ export function runRitual(
     }
   }
   try {
+    if(ir.v!==1)throw Error('Unsupported ritual instruction version');
     visit(ir.root);
     return { intents, steps, bytes, trace, error: null };
   } catch (e) {

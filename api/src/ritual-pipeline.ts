@@ -135,11 +135,11 @@ export function projectEmail(
     receivedAt: m.receivedAt!,
     size: m.sizeBytes,
     headers,
-    text: m.text ?? '',
+    text: (m.text ?? '').slice(0,65536),
     visibleText: visible.text.slice(0, 65536),
     hiddenContent: visible.hiddenContent,
     links: visible.extract.links,
-    html: m.html ? safeForwardHtml(m.html) : null,
+    html: m.html ? safeForwardHtml(m.html).slice(0,65536) : null,
     attachments,
     images: attachments.filter((f) => f.isImage),
     auth: {
@@ -258,6 +258,8 @@ export async function ritualPipeline(
       dropped: r.dropped,
       warnings: [],
     });
+    let failed=false;
+    const fail=(why:string)=>{failed=true;d.junk=true;d.refs=[];d.actions={};d.bodies={};d.labels=['ritual-error'];d.warnings.push(why);};
     const execute = (ir: RitualIR, key: string, kind: string) => {
       const scores: Record<string, number | boolean> = Object.create(null);
       for (const [name, e] of Object.entries(ir.omens)) {
@@ -288,8 +290,7 @@ export async function ritualPipeline(
       bytes += result.bytes;
       const error = result.error ?? (bytes > MESSAGE_BYTES ? 'Message output budget exceeded' : null);
       if (error) {
-        d.labels.push('ritual-error');
-        d.warnings.push(error);
+        fail(error);
       }
       const actions=error?[]:result.intents;
       if (preview)
@@ -315,11 +316,10 @@ export async function ritualPipeline(
     };
     return () => {
       for (const b of selected[i]) {
-        if (d.dropped || steps >= MESSAGE_STEPS) break;
+        if (d.dropped || failed) break;
+        if(steps>=MESSAGE_STEPS){fail('Message step budget exceeded');break;}
         if (execute(p.rituals[b.ritual], b.ritual, 'ritual') && !b.continue) break;
       }
-      if (steps >= MESSAGE_STEPS && !d.warnings.includes('Message step budget exceeded'))
-        d.warnings.push('Message step budget exceeded');
     };
   });
   const prompts = [
