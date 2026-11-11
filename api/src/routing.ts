@@ -337,7 +337,7 @@ class RolledBack<T> extends Error {
   }
 }
 /** Runs work in a transaction and always rolls it back: dry runs exercise the real write path without keeping it. */
-async function rolledBack<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>): Promise<T> {
+export async function rolledBack<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>): Promise<T> {
   try {
     await db.transaction(async (tx) => {
       throw new RolledBack(await work(tx));

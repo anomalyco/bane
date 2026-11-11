@@ -13,6 +13,7 @@ import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, cre
 import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
+import {registerHandlers} from './handlers.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -479,6 +480,7 @@ import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
   registerRouting(app);
+  registerHandlers(app);
   app.use('/v1/inbound/*', mailboxAuth);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
 

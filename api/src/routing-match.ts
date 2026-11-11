@@ -2,6 +2,7 @@
 export type RouteTarget = string[] | 'drop';
 type Route = { id: string | null; match: string; to: RouteTarget; subaddresses?: boolean };
 export type RoutingInput = {
+  programs?:import('./handler-pipeline.js').Programs|null;
   version: number;
   legacy: boolean;
   hosts: Record<string, { default: string; patterns: Route[] }> | null;
@@ -57,7 +58,7 @@ function resolve(input: RoutingInput, address: string): Resolved {
   return pattern(false) ?? subaddress ?? pattern(true) ?? { tier: 'default', route: null, to: [] };
 }
 
-export function matchRouting(input: RoutingInput, addresses: string[], junk: boolean, dmarc: string, received: string, now = Date.now()) {
+export function matchRouting(input: RoutingInput, addresses: string[], messageJunk: boolean, dmarc: string, received: string, now = Date.now(), changes?:Record<string,import('./handler-pipeline.js').HandlerDecision>) {
   const extraInboxes = new Set<string>(),
     webhooks = new Set<string>(),
     at = Date.parse(received);
@@ -65,14 +66,16 @@ export function matchRouting(input: RoutingInput, addresses: string[], junk: boo
     box.deleteAfter ? Date.parse(box.deleteAfter) > now : !box.expires || (Date.parse(box.created) <= at && Date.parse(box.expires) > Math.max(now, at));
   const recipients = addresses.map((address) => {
     const { tier, route, to } = resolve(input, address);
-    const refs = to === 'drop' ? [] : to,
+    const decision=changes?.[address],junk=decision?.junk??messageJunk;
+    const dropped=to==='drop'||!!decision?.dropped;
+    const refs = dropped ? [] : [...new Set([...to,...decision?.refs??[]])],
       mine = { inboxes: [] as string[], webhooks: [] as string[] },
-      warnings: string[] = [];
+      warnings: string[] = [...decision?.warnings??[]];
     // Each message reaches a bounded number of destinations across all of its recipients.
     let limited=false;
     const take = (kind: 'inboxes' | 'webhooks', id: string) => {
       // An implicit address (including its aliases, wildcard rules and plus base) is not fan-out.
-      if(kind==='inboxes' && (!route?.id || id===owner?.id)){mine.inboxes.push(id);return;}
+      if(kind==='inboxes' && ((!route?.id && Array.isArray(to)&&to.includes(id)) || id===owner?.id)){mine.inboxes.push(id);return;}
       const [seen, limit] = kind === 'inboxes' ? [extraInboxes, MESSAGE_INBOX_LIMIT] : [webhooks, MESSAGE_WEBHOOK_LIMIT];
       if (!seen.has(id) && seen.size >= limit) {limited=true;warnings.push(`${id} skipped: fan-out is limited to ${limit} extra ${kind}.`);return;}
       seen.add(id);
@@ -97,7 +100,8 @@ export function matchRouting(input: RoutingInput, addresses: string[], junk: boo
       ...mine,
       ...(limited?{limited:true as const}:{}),
       ...(tier==='default' && input.exact?.[plusBase(address)]?.subaddresses===false ? {skipBase:true as const}:{}),
-      dropped: to === 'drop',
+      dropped,
+      ...(decision?{labels:decision.labels,actions:Object.fromEntries(mine.webhooks.filter(id=>decision.actions[id]).map(id=>[id,decision.actions[id]])),bodies:Object.fromEntries(mine.webhooks.filter(id=>Object.hasOwn(decision.bodies,id)).map(id=>[id,decision.bodies[id]])),added:mine.inboxes.filter(id=>decision.refs.includes(id)&&!(Array.isArray(to)&&to.includes(id)))}:{}),
       junk,
       domainDefault: input.hosts?.[address.split('@')[1]!]?.default === 'create_mailbox' ? ('create_address' as const) : ('store' as const),
       warnings,

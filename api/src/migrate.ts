@@ -74,6 +74,7 @@ try {
     if(source.startsWith('-- bane:no-transaction\n')) {
       await client.query("SET lock_timeout='2s'; SET statement_timeout='10min'");
       for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {
+        if(/^DROP INDEX CONCURRENTLY IF EXISTS [a-z_][a-z0-9_]*;$/i.test(statement)){await client.query(statement);continue;}
         const match=/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);
         if(!match)throw new Error(`Invalid online index statement in ${name}`);
         const idx=match[1]!;

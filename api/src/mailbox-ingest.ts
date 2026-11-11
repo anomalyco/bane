@@ -24,7 +24,7 @@ const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
 
-const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
+export const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
   .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
 const verdict = (value: { status?: string } | undefined) => typeof value?.status === 'string' ? value.status : undefined;
 function singleFrom(email:Email,address:string,mail:ReceivedNotification['mail']) {
@@ -83,7 +83,7 @@ function authenticatedFrom(email: Email | null, address: string, mail: ReceivedN
   });
 }
 const cap = (value: string | undefined | null) => value && value.length > BODY_LIMIT ? { value: value.slice(0, BODY_LIMIT), truncated: true } : { value: value ?? null, truncated: false };
-function headersOf(email: Email | null): MailHeader[] {
+export function headersOf(email: Email | null): MailHeader[] {
   const out: MailHeader[] = []; let size = 0;
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }
   return out;
@@ -420,7 +420,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   }
   const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
   const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
-  const plan=receipt.routing && matchRouting(receipt.routing,receipt.recipients,spam,verdicts.dmarc??'',receivedAt);
+  let plan=receipt.routing && matchRouting(receipt.routing,receipt.recipients,spam,verdicts.dmarc??'',receivedAt);
   // Every recipient dropped by route: settle with the job and its trace, without reading S3 or storing anything.
   if(plan?.recipients.length && plan.recipients.every(r=>r.dropped)){
     s3.destroy();
@@ -432,7 +432,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const owners=receipt.routing?.owners;
   const needsDefault=plan?.recipients.some(r=>{
     const owner=owners?.[r.address]??owners?.[plusBase(r.address)];
-    return !r.dropped && (r.limited || r.inboxes.length!==1 || r.inboxes[0]!==owner?.id);
+    const p=receipt.routing?.programs,possible=p && [...p.guards.map(g=>g.ir),...p.attachments.filter(b=>b.target===r.address||b.target===owner?.id||r.inboxes.includes(b.target)).map(b=>p.handlers[b.handler])].some(ir=>ir.refs.some(ref=>ref.startsWith('inbox:')&&p.refs[ref]!==owner?.id));
+    return !r.dropped && (possible || r.limited || r.inboxes.length!==1 || r.inboxes[0]!==owner?.id);
   });
   const store=receivedMailStore(runtime,scope.workspaceId,needsDefault?{...receipt,delivery:undefined}:receipt,s3,{messageId:messageRowId,sesMessageId});
   const readStarted=performance.now();
@@ -498,14 +499,17 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
   } finally { s3.destroy(); }
 
-  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,{
+  const message:Parameters<typeof storeIncoming>[1]={
         id: messageRowId, ...scope, direction: 'inbound', region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
          fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: store.bucket, rawKey: store.rawKey, lifecycle: store.lifecycle,
         verdicts, spam, automated: automated(email, raw, from.address), status,
-      },attachments,verifiedFrom,!receipt.notification.stagingEtag,replyAuthorVerified(email,from.address,notification.mail,verdicts),plan);
+      };
+  const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
+  if(receipt.routing?.programs){const {handlerPipeline,projectEmail}=await import('./handler-pipeline.js');const evaluated=await handlerPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor));plan=evaluated.plan;Object.assign(verdicts,{handlerVerified:verifiedAuthor,handlerScores:evaluated.answers,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});}
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };

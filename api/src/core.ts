@@ -101,7 +101,7 @@ export interface Runtime {
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
   webhookFetch?: WebhookFetch;
 }
-export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number }>;
+export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number;retryAfter?:string|null }>;
 export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;

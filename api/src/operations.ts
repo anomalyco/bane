@@ -123,7 +123,7 @@ export async function postWebhook(runtime: Runtime, url: string, headers: Record
   try {
     const result=runtime.webhookFetch?await runtime.webhookFetch(url,init):await fetch(url,{...init,redirect:'manual'});
     if(result instanceof Response) await result.body?.cancel();
-    hookTimeouts.delete(key);return {status:result.status};
+    hookTimeouts.delete(key);return {status:result.status,retryAfter:result instanceof Response?result.headers.get('retry-after'):result.retryAfter};
   }catch(error){
     if(init.signal.aborted || error instanceof Error && error.name==='TimeoutError'){
       const last=hookTimeouts.get(key), count=1+(last && last.until>Date.now()?last.count:0);

@@ -115,6 +115,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
     if (c.req.path === '/v1/public/stats') return next();
+    if (['GET','POST'].includes(c.req.method) && /^\/v1\/routing\/forward-confirm\/verify_[A-Za-z0-9_-]+$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
