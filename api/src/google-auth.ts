@@ -96,7 +96,7 @@ export async function membershipForApprovedUser(db: DbExecutor, userId: string, 
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
 type DeniedSignup = { email: string; name: string; hostedDomain: string | null };
-export function createAuth(runtime: Runtime, options?: string | { consentWorkspace?: string; mcp?: boolean; onDenied?: (user: DeniedSignup) => void }) {
+export function createAuth(runtime: Runtime, options?: string | { consentWorkspace?: string; consentInboxes?:string[]; receiving?:boolean; mcp?: boolean; onDenied?: (user: DeniedSignup) => void }) {
   requireConfigured(runtime);
   const consentWorkspace = typeof options === 'string' ? options : options?.consentWorkspace;
   const includeMcp = typeof options === 'object' && options?.mcp === true;
@@ -147,7 +147,7 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
   return betterAuth({
     appName: 'Bane', baseURL: origin, basePath: '/api/auth', secret: runtime.config.authSecret,
     database,
-    plugins: includeMcp ? [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace)] : [],
+    plugins: includeMcp ? [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace,typeof options==='object'?options.consentInboxes:undefined,typeof options==='object'&&options.receiving===true)] : [],
     trustedOrigins: [origin],
     emailAndPassword: { enabled: false, disableSignUp: true },
     socialProviders: {
@@ -344,7 +344,7 @@ export function registerGoogleAuth(app: App) {
       return c.redirect(`${new URL(c.env.config.publicUrl).origin}/?auth=not_approved`, 302);
     };
     try {
-      const result = await timed(c, 'auth-handler-db', () => createAuth(c.env, { onDenied: user => { denied = user; } }).handler(c.req.raw));
+      const result = await timed(c, 'auth-ritual-db', () => createAuth(c.env, { onDenied: user => { denied = user; } }).handler(c.req.raw));
       // Provider errors may contain arbitrary descriptions: never send them to a browser or log.
       const location = result.headers.get('location');
       if (denied && location && new URL(location, c.env.config.publicUrl).searchParams.has('error')) return notApproved();

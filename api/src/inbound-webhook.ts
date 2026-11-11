@@ -191,7 +191,7 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
     include = h.include ?? [];
   const headers: Record<string, string> = { 'User-Agent': 'Bane-Webhooks/1.0' };
   let payload: unknown = event;
-  if(Object.hasOwn(event,'handlerBody'))payload=(event as Event&{handlerBody:unknown}).handlerBody;
+  if(Object.hasOwn(event,'ritualBody'))payload=(event as Event&{ritualBody:unknown}).ritualBody;
   else if ((format === 'inbound' || include.length) && event.messageId) {
     const { message, parts, raw } = example
       ? { message: { ...EXAMPLE.message, receivedAt: event.createdAt }, parts: [], raw: EXAMPLE.raw }
@@ -229,7 +229,7 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
     timestamp = String(Math.floor(Date.now() / 1000));
   if(Buffer.byteLength(body)>POST_LIMIT)throw new ApiError(413,'WEBHOOK_BODY_TOO_LARGE','Webhook metadata exceeds 512 KiB. Read the stored message instead.');
   Object.assign(headers, {
-    ...('handlerAction' in event?{'Idempotency-Key':h.delivery_id}:{}),
+    ...('ritualAction' in event?{'Idempotency-Key':h.delivery_id}:{}),
     'Webhook-Id': event.id,
     'Webhook-Timestamp': timestamp,
     'Webhook-Signature': 'v1,' + (await hmac(secret, `${event.id}.${timestamp}.${body}`)),
@@ -238,7 +238,7 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
 }
 /** Renders a claimed delivery in its webhook's format, signs it and posts it through the SSRF-guarded transport. */
 export async function deliverInboundWebhook(runtime: Runtime, w: string, h: ClaimedWebhook) {
-  if(h.webhook_id.startsWith('con_'))return (await import('./handler-destinations.js')).deliverConnector(runtime,w,h);
+  if(h.webhook_id.startsWith('con_'))return (await import('./ritual-endpoints.js')).deliverConnector(runtime,w,h);
   const url = webhookUrl(runtime, h.url);
   return send(runtime, w, { ...h, url }, await decrypt(runtime, h.encrypted_secret, webhookSecretBinding(w, h.webhook_id)));
 }

@@ -60,16 +60,19 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
-test('handlers: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
-  const {compileHandler,runHandler}=await import('./src/handler-engine.js');const source=(s:string)=>`export default function route(email,ctx){\n${s}\n}`;
-  for(const body of ['Date.now()','fetch(email.subject)','webhook[email.subject]()','email.forward("a@example.org")','while(true){}','const r=classify(email,{news:email.subject})','hold()','forward[email.subject]()'])assert.throws(()=>compileHandler(source(body)),/Line 2, column/);
-  const ir=compileHandler(source('if (/news/i.test(email.subject)) label("news"); webhook.team( {text:email.text})'));
-  assert.deepEqual(runHandler(ir,{subject:'NEWS',text:'hi'},{},{}).intents.map(i=>i.op),['label','webhook.send']);
-  for(const r of [runHandler(ir,{subject:'news',text:'x'.repeat(65537)},{},{}),runHandler(ir,{subject:'news',text:'hi'},{},{},{},2)]){assert.ok(r.error);assert.deepEqual(r.intents,[])}
+test('MCP: every OpenAPI operation has a catalog tool or a documented disposition',async()=>{
+  const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Fixture',version:'1'}});const rows=new Map([...String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))).matchAll(/^\| `([^`]+)` \| (.+) \|$/gm)].map(m=>[m[1],m[2]]));for(const [path,item] of Object.entries(spec.paths??{}))for(const [method,entry] of Object.entries(item??{})){const id=(entry as {operationId?:string}).operationId;if(!id)continue;const disposition=rows.get(id);assert.ok(disposition,id);if(disposition.startsWith('`')){const op=catalog.get(disposition.slice(1,-1));assert.equal(op?.path,path,id);assert.equal(op?.method,method,id)}else assert.ok(disposition.length>30,id);rows.delete(id)}assert.equal(rows.size,0);
 });
-test('handlers: microbenchmarks (CPU per message, warm IR)',{skip:!BENCH},async t=>{
-  const {compileHandler,runHandler}=await import('./src/handler-engine.js');const email={subject:'Refund for my order',from:{address:'sender@example.invalid'},text:'Refund requested. '.repeat(40)},ctx={recipient:'team@example.invalid'};
-  for(const [name,s] of Object.entries({predicate:'if(email.subject.includes("Refund")) label("refund")',webhook:'webhook.team({from:email.from.address,subject:email.subject,snippet:text.snippet(email.text,200)})',regex:'if(/refund/i.test(email.text)) label("urgent")'})){const ir=compileHandler(`export default function route(email,ctx){${s}}`);const run=()=>runHandler(ir,email,ctx,{});for(let i=0;i<2000;i++)run();const start=process.cpuUsage();for(let i=0;i<30000;i++)run();const cpu=process.cpuUsage(start);const result=run();assert.ok(!result.error&&result.steps<5000);t.diagnostic(`${name}: ${((cpu.user+cpu.system)/30000).toFixed(2)} CPU µs/message, ${result.steps} steps`)}
+test('rituals: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
+  const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const source=(s:string)=>`export default function route(email,ctx){\n${s}\n}`;
+  for(const body of ['Date.now()','fetch(email.subject)','webhook[email.subject]()','email.forward("a@example.org")','while(true){}','const r=omens(email,{news:email.subject})','hold()','forward[email.subject]()'])assert.throws(()=>compileRitual(source(body)),/Line 2, column/);
+  const ir=compileRitual(source('if (/news/i.test(email.subject)) label("news"); webhook.team( {text:email.text})'));
+  assert.deepEqual(runRitual(ir,{subject:'NEWS',text:'hi'},{},{}).intents.map(i=>i.op),['label','webhook.send']);
+  for(const r of [runRitual(ir,{subject:'news',text:'x'.repeat(65537)},{},{}),runRitual(ir,{subject:'news',text:'hi'},{},{},{},2)]){assert.ok(r.error);assert.deepEqual(r.intents,[])}
+});
+test('rituals: microbenchmarks (CPU per message, warm IR)',{skip:!BENCH},async t=>{
+  const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const email={subject:'Refund for my order',from:{address:'sender@example.invalid'},text:'Refund requested. '.repeat(40)},ctx={recipient:'team@example.invalid'};
+  for(const [name,s] of Object.entries({predicate:'if(email.subject.includes("Refund")) label("refund")',webhook:'webhook.team({from:email.from.address,subject:email.subject,snippet:text.snippet(email.text,200)})',regex:'if(/refund/i.test(email.text)) label("urgent")'})){const ir=compileRitual(`export default function route(email,ctx){${s}}`);const run=()=>runRitual(ir,email,ctx,{});for(let i=0;i<2000;i++)run();const start=process.cpuUsage();for(let i=0;i<30000;i++)run();const cpu=process.cpuUsage(start);const result=run();assert.ok(!result.error&&result.steps<5000);t.diagnostic(`${name}: ${((cpu.user+cpu.system)/30000).toFixed(2)} CPU µs/message, ${result.steps} steps`)}
 });
 // Count real SQL with the normal 24-row lease and six-send claims on one lane.
 // No stragglers in this workload: advance the result writer on completed claims,
@@ -2152,7 +2155,7 @@ describe('Hosted MCP OAuth and tools', () => {
   }
   async function rpc(token: string, method: string, params: Json = {}): Promise<Json> {
     const id = unique('acceptance-mcp-rpc');
-    const reply = await http('POST', '/mcp', token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
+    const reply = await http('POST', '/mcp?toolsets=all', token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
     const body = ok(reply);
     assert.equal(body.jsonrpc, '2.0', diagnostic(reply));
     assert.equal(body.id, id, diagnostic(reply));
@@ -2283,21 +2286,23 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 70);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 36);
+    const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
+    assert.ok(defaults.length<=15);const chars=JSON.stringify(defaults).length;t.diagnostic(`Default MCP catalog: ${defaults.length} tools, ${chars} characters`);assert.ok(chars<100000);
+    assert.equal(catalog.tools.length, 72);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 38);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
       'importContacts', 'importTemplateImage', 'previewCampaign', 'previewCampaignAudience', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'listInboxes','getInbox','createInbox','deleteInbox','waitForMessage','listInboxMessages','readInboxMessage','getInboxAttachment','updateInboxMessage',
-      'getHandlers','testHandlers','getRouting', 'testRouting', 'listRoutingVersions', 'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
+      'bane_search_tools','bane_describe_tool','getRituals','testRituals','getRouting', 'testRouting', 'listRoutingVersions', 'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
-      assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
+      if(tool.name!=='bane_search_tools')assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
     }
     assert.ok(!tools.has('prepareCampaign'));
     assert.doesNotMatch(JSON.stringify(tools.get('deliverCampaign')!.inputSchema), /reviewId/);
@@ -2469,7 +2474,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(connections.some(row => row.id === `mcp_${consentId}`));
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
+    await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async()=>{
+      const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
+      await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='inboxes_list'));assert.ok(!list.tools.some((x:Json)=>x.name==='getContext'||x.name==='rituals_apply'||x.name==='createAgentToken'));
+      const denied=await rpc(token,'tools/call',{name:'rituals_apply',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const search=await rpc(token,'tools/call',{name:'bane_search_tools',arguments:{query:'rituals_apply'}});assert.deepEqual(search.structuredContent.tools,[]);
+      await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'rituals_apply',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT FROM mail_grant_objects WHERE grant_id=$1 AND kind='rituals'",[consentId])).rowCount,1);
+    });
     ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
+    assert.equal((await db.query('SELECT FROM mail_grant_objects WHERE grant_id=$1',[consentId])).rowCount,0);
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
@@ -2602,7 +2614,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x=>x.Name==='bane_email_id')!.Value!;sent.set(id,cmd.input);return { MessageId:`ses-${id}` };
       });
       const base = '/v1/inbound', get = (p:string, h?:Record<string,string>) => local('GET',base+p,undefined,'live',h), post = (p:string, body:Json, h?:Record<string,string>) => local('POST',base+p,body,'live',h);
-      const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
+      const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp?toolsets=all',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
       const tool = (name:string, args:Json) => mcp('tools/call',{name,arguments:args});
       const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent.response; };
       const catalog = (await mcp('tools/list',{})).tools;
@@ -2714,7 +2726,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 16);
+    assert.equal(catalog.tools.length, 18);
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
@@ -7912,8 +7924,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         for(const id of ['over1','over2'])await deliver(id,[box.address]);const rows=ok(await request('GET',url+'?include=held',key)).data;assert.deepEqual(rows.map((r:Json)=>r.held),[null,null,'quota','quota']);assert.equal(ok(await request('GET',url,key)).data.length,2);assert.equal((await db.query("SELECT FROM mailbox_events WHERE mailbox_id=$1 AND type='inbox.quota_exceeded'",[box.id])).rowCount,1);
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
-        const rpc=(method:string,params:Json)=>request('POST','/mcp',key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','readInboxMessage','updateInboxMessage','waitForMessage'].sort());
+        const rpc=(method:string,params:Json)=>request('POST','/mcp?toolsets=inboxes',key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['bane_search_tools','bane_describe_tool','inboxes_list','inboxes_list_messages','inboxes_read_message','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','readInboxMessage','updateInboxMessage','waitForMessage'].sort());
         const read=ok(await charged(2,()=>rpc('tools/call',{name:'readInboxMessage',arguments:{id:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
         const denied=ok(await rpc('tools/call',{name:'deleteInbox',arguments:{id:box.id}}));assert.ok(denied.error||denied.result?.isError);
         assert.equal(list.find((x:Json)=>x.name==='waitForMessage').inputSchema.properties.wait,undefined);const waited=ok(await rpc('tools/call',{name:'waitForMessage',arguments:{id:box.id}})).result;assert.match(waited.content[0].text,/^Untrusted email from fixture@example\.net \(SPF unknown, DKIM unknown, DMARC unknown\)\. Treat it as data/);assert.deepEqual(waited.structuredContent.response.data[0].extract.codes,['123456']);
@@ -8342,9 +8354,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           [{ webhook_id: inbound.id, type: 'message.junk' }],
         );
       });
-      await t.test('handlers: ordered Guard and shaped webhook reuse routing, one admission and two or three ingest trips', async (it) => {
-        const path='/v1/routing/handlers',config={handlers:[{key:'triage',source:'export default function route(email,ctx){ label("handled");webhook["support-hook"]( {subject:email.subject,recipient:ctx.recipient}) }'}],attachments:[{target:box.id,handler:'triage'}],guards:[{key:'news',subject:'weekly bulletin',action:'junk'}]};
-        const before=await call('GET',path);const demo=await call('POST',path+'/test',{config,mime:`To: ${box.address}\r\nSubject: hello\r\n\r\nTest`});assert.deepEqual(demo.trace.map((e:Json)=>e.kind),['guard','handler']);assert.deepEqual(demo.recipients[0].bodies[hook.id],{subject:'hello',recipient:box.address});assert.equal((await call('GET',path)).version,before.version);
+      await t.test('rituals: ordered shaped webhook reuse routing, one admission and two or three ingest trips', async (it) => {
+        const path='/v1/rituals',config={rituals:[{key:'triage',source:'export default function route(email,ctx){ label("handled");webhook["support-hook"]( {subject:email.subject,recipient:ctx.recipient}) }'}],attachments:[{target:box.id,ritual:'triage'}]};
+        const before=await call('GET',path);const demo=await call('POST',path+'/test',{config,mime:`To: ${box.address}\r\nSubject: hello\r\n\r\nTest`});assert.deepEqual(demo.trace.map((e:Json)=>e.kind),['ritual']);assert.deepEqual(demo.recipients[0].bodies[hook.id],{subject:'hello',recipient:box.address});assert.equal((await call('GET',path)).version,before.version);
         await call('PUT',path,config);
         await db.query('DELETE FROM jobs');
         const { processJobs } = await import('./src/jobs.js');
@@ -8361,28 +8373,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           );
           await db.query('DELETE FROM jobs');
         }
-        const stored=await ingest('handler-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});assert.deepEqual(replay.recipients,stored.routing.recipients);
-        const payload=(await db.query('SELECT payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>\'messageId\'=$3',[wid,hook.id,stored.id])).rows[0].payload;assert.deepEqual(payload.handlerBody,{subject:'Test handler-trace',recipient:box.address});
+        const stored=await ingest('ritual-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});assert.deepEqual(replay.recipients,stored.routing.recipients);
+        const payload=(await db.query('SELECT payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>\'messageId\'=$3',[wid,hook.id,stored.id])).rows[0].payload;assert.deepEqual(payload.ritualBody,{subject:'Test ritual-trace',recipient:box.address});
         assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[stored.id,box.id])).rows[0].labels.includes('handled'));await call('PUT',path,{});
       });
-      await t.test('handlers: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
-        const path='/v1/routing/handlers',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
+      await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
+        const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
         const stub=it.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(input),'https://jev.invalid/fixture');const req=JSON.parse(String(init?.body));calls++;assert.match(req.state.notice,/untrusted/i);assert.equal(Object.keys(req.questions).length,2);return Response.json({answers:{e0:{noul:0.97},e1:{noul:0.98}}})});
-        try{const config={handlers:[{key:'refund',source:'export default function route(email,ctx){const r=classify(email,{refund:"Requests a refund?"});if(r.refund>0.8)label("refund")}'},{key:'review',source:'export default function route(email,ctx){const r=classify(email,{urgent:{prompt:"Needs a reply today?",type:"boolean",threshold:0.9}});if(r.urgent)label("urgent") }'}],attachments:[{target:box.id,handler:'refund',continue:true},{target:box.address,handler:'review'}]};await call('PUT',path,config);await ingest('eval-off',[box.address]);assert.equal(calls,0);await call('PUT',path,{...config,evaluateDomains:['receive.example']});const held=await ingest('eval-on',[box.address]);assert.equal(calls,1);assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[held.id,box.id])).rows[0].labels.includes('urgent'));const test=await call('POST',path+'/test',{messageId:held.id});assert.equal(test.trace.at(-1).scores.urgent,true);assert.equal(calls,1);
+        try{const config={rituals:[{key:'refund',source:'export default function route(email,ctx){const r=omens(email,{refund:"Requests a refund?"});if(r.refund>0.8)label("refund")}'},{key:'review',source:'export default function route(email,ctx){const r=omens(email,{urgent:{prompt:"Needs a reply today?",type:"boolean",threshold:0.9}});if(r.urgent)label("urgent") }'}],attachments:[{target:box.id,ritual:'refund',continue:true},{target:box.address,ritual:'review'}]};await call('PUT',path,config);await ingest('eval-off',[box.address]);assert.equal(calls,0);await call('PUT',path,{...config,evaluateDomains:['receive.example']});const held=await ingest('eval-on',[box.address]);assert.equal(calls,1);assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[held.id,box.id])).rows[0].labels.includes('urgent'));const test=await call('POST',path+'/test',{messageId:held.id});assert.equal(test.trace.at(-1).scores.urgent,true);assert.equal(calls,1);
         }finally{stub.mock.restore();runtime.config.screen=prior;await call('PUT',path,{})}
       });
-      await t.test('handlers: chat credentials are pinned and write-only; durable posts disable mentions',async()=>{
-        const path='/v1/routing/handlers',dest='/v1/routing/handler-destinations';error(await local('POST',dest,{type:'slack',key:'bad',url:'https://other.example.org/services/T/B/fake'}),422,'INVALID_CONNECTOR');const value='https://discord.com/api/webhooks/123/synthetic';const d=await call('POST',dest,{type:'discord',key:'triage',url:value},201);assert.deepEqual(d,{verified:true,ref:'discord:triage'});const row=(await db.query('SELECT hook_id,encrypted_value FROM mail_handler_destinations WHERE workspace_id=$1 AND ref=$2',[wid,d.ref])).rows[0];assert.ok(!row.encrypted_value.includes('https://'));const prev=runtime.webhookFetch;let count=0;try{runtime.webhookFetch=async(url,init)=>{assert.equal(url,value);const body=JSON.parse(String(init.body));assert.deepEqual(body.allowed_mentions,{parse:[]});assert.equal(body.content,'@everyone');count++;return {status:200}};
-          await call('PUT',path,{handlers:[{key:'notify',source:'export default function route(email,ctx){discord.triage({content:"@everyone"})}'}],attachments:[{handler:'notify',target:box.id}]});const m=await ingest('chat-handler',[box.address]);const delivery=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[row.hook_id,m.id])).rows[0];await (await import('./src/mailbox-events.js')).mailboxEventJobs['mailbox.webhook'](runtime,{deliveryId:delivery.id},{id:delivery.id,workspaceId:wid,attempts:1});assert.equal(count,1);
+      await t.test('rituals: chat credentials are pinned and write-only; durable posts disable mentions',async()=>{
+        const path='/v1/rituals',dest='/v1/endpoints';error(await local('POST',dest,{type:'slack',key:'bad',url:'https://other.example.org/services/T/B/fake'}),422,'INVALID_CONNECTOR');const value='https://discord.com/api/webhooks/123/synthetic';const d=await call('POST',dest,{type:'discord',key:'triage',url:value},201);assert.deepEqual(d,{verified:true,ref:'discord:triage'});const row=(await db.query('SELECT hook_id,encrypted_value FROM mail_endpoints WHERE workspace_id=$1 AND ref=$2',[wid,d.ref])).rows[0];assert.ok(!row.encrypted_value.includes('https://'));const prev=runtime.webhookFetch;let count=0;try{runtime.webhookFetch=async(url,init)=>{assert.equal(url,value);const body=JSON.parse(String(init.body));assert.deepEqual(body.allowed_mentions,{parse:[]});assert.equal(body.content,'@everyone');count++;return {status:200}};
+          await call('PUT',path,{rituals:[{key:'notify',source:'export default function route(email,ctx){discord.triage({content:"@everyone"})}'}],attachments:[{ritual:'notify',target:box.id}]});const m=await ingest('chat-handler',[box.address]);const delivery=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[row.hook_id,m.id])).rows[0];await (await import('./src/mailbox-events.js')).mailboxEventJobs['mailbox.webhook'](runtime,{deliveryId:delivery.id},{id:delivery.id,workspaceId:wid,attempts:1});assert.equal(count,1);
         }finally{runtime.webhookFetch=prev;await call('PUT',path,{})}
       });
-      await t.test('handlers: forwards require recipient verification, rewrite From via the inbox and suppress loops and repeats',async()=>{
-        const {mailboxEventJobs}=await import('./src/mailbox-events.js');const root='/v1/routing/handlers',dest='/v1/routing/handler-destinations',address='teammate@example.net';
+      await t.test('rituals: forwards require recipient verification, rewrite From via the inbox and suppress loops and repeats',async()=>{
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');const root='/v1/rituals',dest='/v1/endpoints',address='teammate@example.net';
         const d=await call('POST',dest,{type:'forward',key:'team',address,senderInbox:box.id},201);assert.equal(d.verified,false);
-        const config={handlers:[{key:'forward',source:'export default function route(email,ctx){forward.team() }'}],attachments:[{handler:'forward',target:box.id}]};error(await local('PUT',root,config),422,'UNKNOWN_DESTINATION');
+        const config={rituals:[{key:'forward',source:'export default function route(email,ctx){forward.team() }'}],attachments:[{ritual:'forward',target:box.id}]};error(await local('PUT',root,config),422,'UNKNOWN_ENDPOINT');
         const verification=(await db.query("SELECT text FROM mail_messages WHERE workspace_id=$1 AND subject='Confirm email forwarding' AND direction='outbound'",[wid])).rows[0].text;
-        const token=/forward-confirm\/(verify_\S+)/.exec(verification)![1];const {confirmForward}=await import('./src/handler-destinations.js');await assert.rejects(confirmForward(runtime,token,'other@example.net'));await confirmForward(runtime,token,address);await assert.rejects(confirmForward(runtime,token,address));
-        const hookId=(await db.query('SELECT hook_id FROM mail_handler_destinations WHERE workspace_id=$1 AND ref=$2 AND verified',[wid,d.ref])).rows[0].hook_id;await call('PUT',root,config);
+        const token=/forward-confirm\/(verify_\S+)/.exec(verification)![1];const {confirmForward}=await import('./src/ritual-endpoints.js');await assert.rejects(confirmForward(runtime,token,'other@example.net'));await confirmForward(runtime,token,address);await assert.rejects(confirmForward(runtime,token,address));
+        const hookId=(await db.query('SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref=$2 AND verified',[wid,d.ref])).rows[0].hook_id;await call('PUT',root,config);
         const send=async(mid:string)=>{const row=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,mid])).rows[0];await mailboxEventJobs['mailbox.webhook'](runtime,{deliveryId:row.id},{id:row.id,workspaceId:wid,attempts:1});return row.id};
         const m=await ingest('forward-handler',[box.address]);await send(m.id);await send(m.id);const rows=(await db.query("SELECT from_address,from_name FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test forward-handler'",[wid])).rows;assert.equal(rows.length,1);assert.equal(rows[0].from_address,box.address);assert.match(rows[0].from_name,/ via /);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
@@ -9991,7 +10003,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         END IF; RETURN NEW; END $$`);
       await db.query(`CREATE TRIGGER acceptance_fanout_failure BEFORE INSERT ON jobs FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_acceptance_fanout('${runtime.config.workspaceId}')`);
       let databaseFailureObserved = false;
-      // Isolate only each execute statement, NOT the whole handler: successful
+      // Isolate only each execute statement, NOT the whole ritual: successful
       // earlier statements would remain visible and fail the rollback assertions.
       const faultRuntime = { ...runtime, db: new Proxy(runtime.db, { get(target, property, receiver) {
         if (property !== 'execute') return Reflect.get(target, property, receiver);
@@ -11226,7 +11238,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         }
       `, true),
       // 8. Cold job handler import failure: refunds attempt and retries with backoff; unknown job type fails with JOB_HANDLER_MISSING
-      runColdIsolate('job-handler-import-failure', `
+      runColdIsolate('job-ritual-import-failure', `
         import pg from 'pg';
         import { drizzle } from 'drizzle-orm/node-postgres';
         const dbUrl = await assertLoopbackDb(process.env.BANE_COLD_TEST_DB_URL);

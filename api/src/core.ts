@@ -13,7 +13,7 @@ export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
   workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
-  role?: string;
+  role?: string; receivingConsent?:boolean;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
   dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };

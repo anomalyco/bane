@@ -5,16 +5,15 @@ export const actionKinds: Record<string, string> = {
   'slack.post': 'slack',
   'discord.post': 'discord',
   'email.forward': 'forward',
-  'guard.route': '*',
-  'guard.allow': '',
-  'guard.block': '',
+  'allow': '',
+  'block': '',
   junk: '',
   label: '',
   drop: '',
 };
-export const handlerSymbols = [
+export const ritualSymbols = [
   ...Object.keys(actionKinds).filter(k=>!actionKinds[k]||['guard.route','inbox.deliver'].includes(k)),
-  'classify',
+  'omens',
   'addr.matches',
   'lists.has',
   'text.snippet',

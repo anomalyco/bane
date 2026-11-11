@@ -7,16 +7,16 @@ export const RUN_STEPS = 50_000,
   MESSAGE_STEPS = 250_000,
   BODY_BYTES = 65536,
   MESSAGE_BYTES = 4 * BODY_BYTES;
-export type Evaluator = {
+export type Omen = {
   prompt: string;
   type: 'score' | 'boolean';
   threshold: number;
   onError: number | boolean | 'defer';
 };
 type I = { op: string; l: number; k?: string; v?: string | number | boolean | null; a?: I[] };
-export type HandlerIR = { v: 1; root: I; refs: string[]; evaluators: Record<string, Evaluator> };
+export type RitualIR = { v: 1; root: I; refs: string[]; omens: Record<string, Omen> };
 export type Intent = { op: string; ref?: string; body?: unknown; value?: string };
-import { actionKinds as actions } from './handler-schema.js';
+import { actionKinds as actions } from './ritual-schema.js';
 const own = (o: object, k: string) => Object.hasOwn(o, k);
 const reserved = (k: string) => ['__proto__', 'constructor', 'prototype'].includes(k);
 const patterns = new Map<string, RE2JS>();
@@ -59,7 +59,7 @@ function props(n: N) {
   });
 }
 const refPattern = /^(inbox|webhook|slack|discord|forward):[a-z0-9][a-z0-9_-]{0,63}$/;
-export function compileHandler(source: string): HandlerIR {
+export function compileRitual(source: string): RitualIR {
   if (
     Buffer.byteLength(source) > 65536 ||
     /hooks\.slack\.com\/services\/|discord\.com\/api\/webhooks\/|\b(?:ghp_|xox[bap]-|sk_live_)/i.test(source)
@@ -75,7 +75,7 @@ export function compileHandler(source: string): HandlerIR {
     );
   }
   const refs = new Set<string>(),
-    evaluators: Record<string, Evaluator> = Object.create(null),
+    omens: Record<string, Omen> = Object.create(null),
     globals = new Map<string, N>();
   let entry: N | undefined;
   for (const n of ast.body) {
@@ -83,7 +83,7 @@ export function compileHandler(source: string): HandlerIR {
       entry = n.declaration;
     else if (n.type === 'VariableDeclaration' && n.kind === 'const') {
       for (const d of n.declarations) {
-        if (d.id.type !== 'Identifier' || !d.init) diagnostic(d, 'Expected const name = literal evaluators.');
+        if (d.id.type !== 'Identifier' || !d.init) diagnostic(d, 'Expected const name = literal omens.');
         globals.set(d.id.name, d.init);
       }
     } else diagnostic(n, 'Export one default function (email, ctx).');
@@ -209,18 +209,18 @@ export function compileHandler(source: string): HandlerIR {
           }
           return ir('regex', flags, [sub(args[0])], pattern);
         }
-        if (name === 'classify') {
-          if (args.length !== 2 || path(args[0]) !== 'email') diagnostic(n, 'Use classify(email, literalEvaluators).');
+        if (name === 'omens') {
+          if (args.length !== 2 || path(args[0]) !== 'email') diagnostic(n, 'Use omens(email, literalOmens).');
           const defs = props(globals.get(path(args[1])) ?? args[1]);
           for (const [key, val] of defs) {
-            if (!/^[a-z][a-zA-Z0-9_]{0,39}$/.test(key) || reserved(key)) diagnostic(val, 'Invalid evaluator name.');
+            if (!/^[a-z][a-zA-Z0-9_]{0,39}$/.test(key) || reserved(key)) diagnostic(val, 'Invalid omen name.');
             const opts =
               val.type === 'Literal'
                 ? { prompt: str(val) }
                 : Object.fromEntries(
                     props(val).map(([k, v]) => {
                       if (!['prompt', 'type', 'threshold', 'onError'].includes(k) || v.type !== 'Literal')
-                        diagnostic(v, 'Expected literal evaluator options.');
+                        diagnostic(v, 'Expected literal omen options.');
                       return [k, v.value];
                     }),
                   );
@@ -241,10 +241,10 @@ export function compileHandler(source: string): HandlerIR {
               )
             )
               diagnostic(val, 'Invalid prompt, type, threshold or onError.');
-            const ev: Evaluator = { prompt, type, threshold, onError: onError as Evaluator['onError'] };
-            if (evaluators[key] && JSON.stringify(evaluators[key]) !== JSON.stringify(ev))
-              diagnostic(val, 'Conflicting evaluator name.');
-            evaluators[key] = ev;
+            const ev: Omen = { prompt, type, threshold, onError: onError as Omen['onError'] };
+            if (omens[key] && JSON.stringify(omens[key]) !== JSON.stringify(ev))
+              diagnostic(val, 'Conflicting omen name.');
+            omens[key] = ev;
           }
           return ir(
             'scores',
@@ -252,17 +252,17 @@ export function compileHandler(source: string): HandlerIR {
             defs.map(([k]) => ir('key', k)),
           );
         }
-        // Destination selection is syntax, never evaluated data. A quoted property also supports existing keys with hyphens.
+        // Endpoint selection is syntax, never evaluated data. A quoted property also supports existing keys with hyphens.
         const call=n.callee;
         if(call.type==='MemberExpression' && call.object.type==='Identifier' && ['slack','discord','webhook','forward'].includes(call.object.name)) {
           const kind=call.object.name, key=call.computed?str(call.property):path(call.property), ref=`${kind}:${key}`;
-          if(!refPattern.test(ref)||reserved(key))diagnostic(n,'Use a configured destination name.');
-          if(kind==='forward'?args.length!==0:kind==='webhook'?args.length>1:args.length!==1)diagnostic(n,'Wrong number of destination arguments.');
+          if(!refPattern.test(ref)||reserved(key))diagnostic(n,'Use a configured endpoint name.');
+          if(kind==='forward'?args.length!==0:kind==='webhook'?args.length>1:args.length!==1)diagnostic(n,'Wrong number of endpoint arguments.');
           if((kind==='slack'||kind==='discord') && args[0].type==='ObjectExpression'){const fields=props(args[0]);if(fields.length!==1||fields[0][0]!== (kind==='slack'?'text':'content'))diagnostic(n,kind==='slack'?'Expected {text}.':'Expected {content}.');}
           refs.add(ref);return ir('action',kind==='forward'?'email.forward':kind==='webhook'?'webhook.send':`${kind}.post`,[ir('literal',undefined,undefined,ref),...args.map(sub)]);
         }
-        if(name==='inbox.deliver'||name==='guard.route'){if(args.length!==1)diagnostic(n,'Use one literal destination key.');const ref=(name==='inbox.deliver'?'inbox:':'')+str(args[0]);if(!refPattern.test(ref))diagnostic(n,'Use a configured destination key, not an address or URL.');refs.add(ref);return ir('action',name,[ir('literal',undefined,undefined,ref)]);}
-        if(own(actions,name)&&!actions[name]){if(args.length>(name==='guard.allow'?0:1))diagnostic(n,'Too many action arguments.');return ir('action',name,args.map(sub));}
+        if(name==='inbox.deliver'){if(args.length!==1)diagnostic(n,'Use one literal endpoint key.');const ref=(name==='inbox.deliver'?'inbox:':'')+str(args[0]);if(!refPattern.test(ref))diagnostic(n,'Use a configured endpoint key, not an address or URL.');refs.add(ref);return ir('action',name,[ir('literal',undefined,undefined,ref)]);}
+        if(own(actions,name)&&!actions[name]){if(args.length>(name==='allow'?0:1))diagnostic(n,'Too many action arguments.');return ir('action',name,args.map(sub));}
         if (
           [
             'lists.has',
@@ -283,15 +283,15 @@ export function compileHandler(source: string): HandlerIR {
           ['includes', 'startsWith', 'endsWith', 'toLowerCase'].includes(n.callee.property.name)
         )
           return ir('builtin', n.callee.property.name, [sub(n.callee.object), ...args.map(sub)]);
-        diagnostic(n, 'Unknown call. Only named Handler built-ins may be called.');
+        diagnostic(n, 'Unknown call. Only named Ritual built-ins may be called.');
       }
     }
     return diagnostic(n, `Unsupported ${n.type}.`);
   }
   const root = compile(entry.body, new Set(['email', 'ctx']));
-  if(Object.keys(evaluators).length>10)diagnostic(entry,'Limit: 10 evaluators.');
-  const ir = { v: 1 as const, root, refs: [...refs], evaluators };
-  if (Buffer.byteLength(JSON.stringify(ir)) > 131072) diagnostic(entry, 'Compiled handler exceeds 128 KiB.');
+  if(Object.keys(omens).length>10)diagnostic(entry,'Limit: 10 omens.');
+  const ir = { v: 1 as const, root, refs: [...refs], omens };
+  if (Buffer.byteLength(JSON.stringify(ir)) > 131072) diagnostic(entry, 'Compiled ritual exceeds 128 KiB.');
   return ir;
 }
 
@@ -307,8 +307,8 @@ function weigh(v: unknown, charge: (n: number) => void, depth = 0) {
     }
   }
 }
-export function runHandler(
-  ir: HandlerIR,
+export function runRitual(
+  ir: RitualIR,
   email: Record<string, unknown>,
   ctx: Record<string, unknown>,
   scores: Record<string, number | boolean>,
@@ -433,8 +433,8 @@ export function runHandler(
         if (intents.length >= 32) throw Error('Action budget exceeded');
         const args = a.map(visit),
           ref = actions[k] ? args[0] : undefined;
-        if (ref && !ir.refs.includes(ref)) throw Error('Undeclared destination');
-        if (k === 'guard.allow' && !(email.auth as { fromVerified: boolean })?.fromVerified) return;
+        if (ref && !ir.refs.includes(ref)) throw Error('Undeclared endpoint');
+        if (k === 'allow' && !(email.auth as { fromVerified: boolean })?.fromVerified) return;
         let size = 0;
         for (const val of args) {
           weigh(val, (n) => {
@@ -468,7 +468,7 @@ export function runHandler(
       steps,
       bytes: 0,
       trace,
-      error: `Line ${line}: ${e instanceof Error ? e.message : 'Handler failed'}`,
+      error: `Line ${line}: ${e instanceof Error ? e.message : 'Ritual failed'}`,
     };
   }
 }

@@ -9,7 +9,7 @@ BEGIN
  WHERE d.workspace_id=w AND coalesce(receiving_host,name) IN (SELECT split_part(a,'@',2) FROM addresses) AND (d.status='active' OR (d.receiving_host IS NULL AND d.status IN ('waiting_for_mx','provisioning')))),
  exact AS MATERIALIZED (SELECT r.* FROM addresses JOIN mail_routes r ON r.workspace_id=w AND r.match=a JOIN hosts h ON h.id=r.domain_id WHERE enabled),
  owners AS MATERIALIZED (SELECT a.address,b.id,a.kind FROM addresses JOIN mailbox_addresses a ON a.workspace_id=w AND a.address=addresses.a JOIN mailboxes b ON b.workspace_id=w AND b.id=a.mailbox_id JOIN hosts h ON h.id=b.domain_id WHERE b.delete_after IS NULL OR b.delete_after>statement_timestamp()),
- programs AS MATERIALIZED (SELECT programs FROM mail_handler_configs WHERE workspace_id=w),
+ programs AS MATERIALIZED (SELECT programs FROM mail_ritual_configs WHERE workspace_id=w),
  refs(id) AS MATERIALIZED (SELECT value FROM programs,jsonb_each_text(programs.programs->'refs') UNION SELECT id FROM owners UNION SELECT jsonb_array_elements_text(destinations) FROM exact WHERE jsonb_typeof(destinations)='array' UNION SELECT jsonb_array_elements_text(item->'to') FROM hosts,jsonb_array_elements(plan) item WHERE jsonb_typeof(item->'to')='array')
  SELECT jsonb_build_object('programs',(SELECT programs FROM programs),'version',coalesce(s.version,0),'legacy',coalesce(s.legacy_base,true),'hosts',(SELECT jsonb_object_agg(host,jsonb_build_object('default',catch_all,'patterns',coalesce(plan,'[]'))) FROM hosts),
  'exact',(SELECT jsonb_object_agg(match,jsonb_build_object('id',id,'match',match,'to',destinations,'subaddresses',subaddresses)) FROM exact),
@@ -141,10 +141,10 @@ BEGIN
   ), subscribed AS (SELECT e.workspace_id,e.seq,e.type,h.id FROM events e
     CROSS JOIN LATERAL (SELECT id,event_types,mailbox_ids,junk,format,include FROM mailbox_webhooks WHERE workspace_id=e.workspace_id AND NOT paused AND event_types<>'[]' ORDER BY id LIMIT 32) h
     WHERE (e.mailbox_id IS NOT NULL OR e.type NOT IN ('message.received','message.junk')) AND (h.event_types ? e.type OR e.type='message.junk' AND h.event_types ? 'message.received') AND (e.type<>'message.junk' OR h.junk='include') AND (NOT is_spam OR h.junk='include' OR (e.type='message.stored' AND h.format='bane' AND h.include='[]')) AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id))),
-  routed AS (SELECT DISTINCT ON (ref.id,act->>'handlerAction') ref.id,e.seq,e.workspace_id,r.addr,r.item->>'route' AS route,act FROM hook_routes r CROSS JOIN jsonb_array_elements_text(r.item->'webhooks') ref(id)
+  routed AS (SELECT DISTINCT ON (ref.id,act->>'ritualAction') ref.id,e.seq,e.workspace_id,r.addr,r.item->>'route' AS route,act FROM hook_routes r CROSS JOIN jsonb_array_elements_text(r.item->'webhooks') ref(id)
     LEFT JOIN LATERAL jsonb_array_elements(r.item->'actions'->ref.id) act ON true
-    JOIN events e ON e.type IN ('message.received','message.junk') ORDER BY ref.id,act->>'handlerAction',EXISTS(SELECT FROM subscribed s WHERE s.id=ref.id AND s.seq=e.seq) DESC,(r.item->'inboxes' ? e.mailbox_id) DESC NULLS LAST,e.seq,r.n),
-  subscriptions AS (SELECT workspace_id,seq,jsonb_agg(hook) AS hooks FROM (
+    JOIN events e ON e.type IN ('message.received','message.junk') ORDER BY ref.id,act->>'ritualAction',EXISTS(SELECT FROM subscribed s WHERE s.id=ref.id AND s.seq=e.seq) DESC,(r.item->'inboxes' ? e.mailbox_id) DESC NULLS LAST,e.seq,r.n),
+  subscriptions AS (SELECT workspace_id,seq,jsonb_agg(CASE WHEN jsonb_array_length(plan->'grants')>0 THEN (CASE WHEN jsonb_typeof(hook)='object' THEN hook ELSE jsonb_build_object('id',hook,'subscription',true) END)||jsonb_build_object('grants',plan->'grants') ELSE hook END) AS hooks FROM (
     SELECT s.workspace_id,s.seq,to_jsonb(s.id) AS hook FROM subscribed s WHERE NOT EXISTS(SELECT FROM routed r WHERE r.id=s.id AND s.type IN ('message.received','message.junk'))
     UNION ALL SELECT workspace_id,seq,jsonb_build_object('id',id,'recipient',addr,'route',route)||coalesce(act,'{}'::jsonb) FROM routed) h GROUP BY workspace_id,seq),
   queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.fanout',workspace_id,jsonb_object_agg(seq::text,hooks) FROM subscriptions GROUP BY workspace_id RETURNING 1),

@@ -13,7 +13,7 @@ import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, cre
 import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
-import {registerHandlers} from './handlers.js';
+import {registerRituals,ownReceiving} from './rituals.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -480,7 +480,7 @@ import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
   registerRouting(app);
-  registerHandlers(app);
+  registerRituals(app);
   app.use('/v1/inbound/*', mailboxAuth);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
 
@@ -688,7 +688,7 @@ function registerInboundWebhooks(app: App) {
     return { value, row };
   };
   // Endpoint subscriptions outlive the credential. Only non-delegated workspace administrators can manage them.
-  const manageHook=(c:Ctx)=>{const value=admin(c);if(['agentToken','mcp'].includes(c.get('actor').credential??''))throw new ApiError(403,'ADMIN_REQUIRED','Use a workspace admin session or unrestricted manage API key to manage inbound webhooks.');return value;};
+  const manageHook=(c:Ctx)=>{const value=admin(c);if(c.get('actor').credential==='agentToken'||(c.get('actor').credential==='mcp'&&!c.get('actor').receivingConsent))throw new ApiError(403,'ADMIN_REQUIRED','Use a workspace admin session or unrestricted manage API key to manage inbound webhooks.');return value;};
   const webhookFields = { ...z.object(hookOptions).partial().shape, url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length).describe('Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.'), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
@@ -725,7 +725,7 @@ function registerInboundWebhooks(app: App) {
       if (!input.paused) await hookCapacity(tx, value.workspaceId, !input.eventTypes.length);
       // Junk delivery needs the routed store, which emits message.junk.
       if (junk === 'include') await enableRouting(tx, value.workspaceId);
-      return tx.insert(mailboxWebhooks).values(values).returning();
+      const r=await tx.insert(mailboxWebhooks).values(values).returning();await ownReceiving(tx,c,'endpoint',webhookId);return r;
     });
     c.header('Cache-Control', 'no-store');
     return c.json({ ...await webhookView(c, row!), secret, ...await inboundToken(format, secret) }, 201);
@@ -751,7 +751,7 @@ function registerInboundWebhooks(app: App) {
         c.get('actor').wakeJobs=1;
       }
       const url = input.url ? webhookUrl(c.env, input.url) : undefined;
-      const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
+      await ownReceiving(tx,c,'endpoint',webhookId);const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
         encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });

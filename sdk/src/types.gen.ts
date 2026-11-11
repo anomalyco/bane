@@ -11296,6 +11296,1188 @@ export type TestRoutingResponses = {
 
 export type TestRoutingResponse = TestRoutingResponses[keyof TestRoutingResponses];
 
+export type ListRitualVersionsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: number;
+        limit?: number;
+    };
+    url: '/v1/rituals/history';
+};
+
+export type ListRitualVersionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRitualVersionsError = ListRitualVersionsErrors[keyof ListRitualVersionsErrors];
+
+export type ListRitualVersionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            version: number;
+            actor: string;
+        }>;
+        nextCursor: number | null;
+    };
+};
+
+export type ListRitualVersionsResponse = ListRitualVersionsResponses[keyof ListRitualVersionsResponses];
+
+export type RestoreRitualVersionData = {
+    body: {
+        version: number;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/restore';
+};
+
+export type RestoreRitualVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RestoreRitualVersionError = RestoreRitualVersionErrors[keyof RestoreRitualVersionErrors];
+
+export type RestoreRitualVersionResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type RestoreRitualVersionResponse = RestoreRitualVersionResponses[keyof RestoreRitualVersionResponses];
+
+export type SetRitualEvaluationData = {
+    body: {
+        evaluateDomains?: Array<string>;
+        /**
+         * Route IDs opted in to Jev, in addition to the receiving domains.
+         */
+        evaluateRoutes?: Array<string>;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/omens';
+};
+
+export type SetRitualEvaluationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetRitualEvaluationError = SetRitualEvaluationErrors[keyof SetRitualEvaluationErrors];
+
+export type SetRitualEvaluationResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type SetRitualEvaluationResponse = SetRitualEvaluationResponses[keyof SetRitualEvaluationResponses];
+
+export type SetEndpointPolicyData = {
+    body: {
+        ref: string;
+        perMinute: number;
+        retryOnTimeout: boolean;
+        idempotent?: boolean;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/endpoints/policy';
+};
+
+export type SetEndpointPolicyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetEndpointPolicyError = SetEndpointPolicyErrors[keyof SetEndpointPolicyErrors];
+
+export type SetEndpointPolicyResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ref: string;
+        perMinute: number;
+        retryOnTimeout: boolean;
+        idempotent?: boolean;
+    };
+};
+
+export type SetEndpointPolicyResponse = SetEndpointPolicyResponses[keyof SetEndpointPolicyResponses];
+
+export type ListEndpointsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/endpoints';
+};
+
+export type ListEndpointsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListEndpointsError = ListEndpointsErrors[keyof ListEndpointsErrors];
+
+export type ListEndpointsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            ref: string;
+            verified: boolean;
+        }>;
+    };
+};
+
+export type ListEndpointsResponse = ListEndpointsResponses[keyof ListEndpointsResponses];
+
+export type CreateEndpointData = {
+    body: {
+        type: 'slack';
+        key: string;
+        url: string;
+    } | {
+        type: 'discord';
+        key: string;
+        url: string;
+    } | {
+        type: 'forward';
+        key: string;
+        address: string;
+        senderInbox: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/endpoints';
+};
+
+export type CreateEndpointErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateEndpointError = CreateEndpointErrors[keyof CreateEndpointErrors];
+
+export type CreateEndpointResponses = {
+    /**
+     * Success
+     */
+    201: {
+        ref: string;
+        verified: boolean;
+    };
+};
+
+export type CreateEndpointResponse = CreateEndpointResponses[keyof CreateEndpointResponses];
+
+export type CreateInboxConnectionData = {
+    body: {
+        inboxes: Array<string>;
+        client: 'opencode' | 'claude' | 'generic';
+        auth: 'key' | 'oauth';
+        reply?: boolean;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/inbox-connections';
+};
+
+export type CreateInboxConnectionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboxConnectionError = CreateInboxConnectionErrors[keyof CreateInboxConnectionErrors];
+
+export type CreateInboxConnectionResponses = {
+    /**
+     * Success
+     */
+    201: {
+        id: string | null;
+        inboxes: Array<string>;
+        config: {
+            [key: string]: unknown;
+        };
+        nextStep: string;
+    };
+};
+
+export type CreateInboxConnectionResponse = CreateInboxConnectionResponses[keyof CreateInboxConnectionResponses];
+
+export type DeleteRitualEntryData = {
+    body?: never;
+    headers?: {
+        'if-match'?: string;
+    };
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rituals/scripts/{key}';
+};
+
+export type DeleteRitualEntryErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteRitualEntryError = DeleteRitualEntryErrors[keyof DeleteRitualEntryErrors];
+
+export type DeleteRitualEntryResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type DeleteRitualEntryResponse = DeleteRitualEntryResponses[keyof DeleteRitualEntryResponses];
+
+export type GetRitualEntryData = {
+    body?: never;
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rituals/scripts/{key}';
+};
+
+export type GetRitualEntryErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRitualEntryError = GetRitualEntryErrors[keyof GetRitualEntryErrors];
+
+export type GetRitualEntryResponses = {
+    /**
+     * Success
+     */
+    200: {
+        key: string;
+        source: string;
+    };
+};
+
+export type GetRitualEntryResponse = GetRitualEntryResponses[keyof GetRitualEntryResponses];
+
+export type PutRitualEntryData = {
+    body: {
+        key: string;
+        source: string;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rituals/scripts/{key}';
+};
+
+export type PutRitualEntryErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PutRitualEntryError = PutRitualEntryErrors[keyof PutRitualEntryErrors];
+
+export type PutRitualEntryResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type PutRitualEntryResponse = PutRitualEntryResponses[keyof PutRitualEntryResponses];
+
+export type SetRitualAttachmentsData = {
+    body: {
+        attachments: Array<{
+            ritual: string;
+            /**
+             * A mailbox ID (mbx_…) or an existing recipient address.
+             */
+            target: string;
+            continue?: boolean;
+        }>;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/attachments';
+};
+
+export type SetRitualAttachmentsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetRitualAttachmentsError = SetRitualAttachmentsErrors[keyof SetRitualAttachmentsErrors];
+
+export type SetRitualAttachmentsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type SetRitualAttachmentsResponse = SetRitualAttachmentsResponses[keyof SetRitualAttachmentsResponses];
+
+export type GetRitualsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        version?: number;
+    };
+    url: '/v1/rituals';
+};
+
+export type GetRitualsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRitualsError = GetRitualsErrors[keyof GetRitualsErrors];
+
+export type GetRitualsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type GetRitualsResponse = GetRitualsResponses[keyof GetRitualsResponses];
+
+export type PutRitualsData = {
+    body: {
+        rituals?: Array<{
+            key: string;
+            source: string;
+        }>;
+        attachments?: Array<{
+            ritual: string;
+            /**
+             * A mailbox ID (mbx_…) or an existing recipient address.
+             */
+            target: string;
+            continue?: boolean;
+        }>;
+        senderLists?: {
+            [key: string]: Array<string>;
+        };
+        evaluateDomains?: Array<string>;
+        /**
+         * Route IDs opted in to Jev, in addition to the receiving domains.
+         */
+        evaluateRoutes?: Array<string>;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rituals';
+};
+
+export type PutRitualsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PutRitualsError = PutRitualsErrors[keyof PutRitualsErrors];
+
+export type PutRitualsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type PutRitualsResponse = PutRitualsResponses[keyof PutRitualsResponses];
+
+export type TestRitualsData = {
+    body: {
+        config?: {
+            rituals?: Array<{
+                key: string;
+                source: string;
+            }>;
+            attachments?: Array<{
+                ritual: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                continue?: boolean;
+            }>;
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to Jev, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+        messageId?: string;
+        mime?: string;
+        to?: Array<string>;
+        scores?: {
+            [key: string]: number;
+        };
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/test';
+};
+
+export type TestRitualsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type TestRitualsError = TestRitualsErrors[keyof TestRitualsErrors];
+
+export type TestRitualsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        recipients: Array<{
+            [key: string]: unknown;
+        }>;
+        trace: Array<{
+            [key: string]: unknown;
+        }>;
+        steps: number;
+    };
+};
+
+export type TestRitualsResponse = TestRitualsResponses[keyof TestRitualsResponses];
+
 export type ListInboxesData = {
     body?: never;
     path?: never;

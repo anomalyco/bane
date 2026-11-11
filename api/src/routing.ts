@@ -293,7 +293,7 @@ async function save(
   await tx.execute(
     sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
   );
-  const who = c.get('actor');
+  const who = c.get('actor');if(who?.receivingConsent&&who.credential==='mcp'&&who.permissions.includes('manage')){const {ownReceiving}=await import('./rituals.js');for(const r of rows)await ownReceiving(tx,c,'route',r.id)}
   await tx.execute(sql`INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,note)
     VALUES(${w},${next},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(after.map(r=>r.id).sort())}::jsonb)),ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(diff.map(d=>(d.before??d.after)!.id).sort())}::jsonb)),${who.credential??'apiKey'},${who.keyId},${note||null})`);
   // At most one retired manifest on a normal write; its audit rows share the same transaction.
@@ -356,7 +356,7 @@ export function registerRouting(app: App) {
   const path = '/v1/routing',
     meta = { security, tags: ['Routing'] };
   const workspace = (c: Ctx) => {
-    const a = actor(c, 'manage');
+    const a=actor(c,c.get('actor')?.receivingConsent&&(c.req.method==='GET'||c.req.path.endsWith('/test'))?'read':'manage');
     if (a.domains.length || a.role === 'member')
       throw fail(
         403,
@@ -371,7 +371,7 @@ export function registerRouting(app: App) {
     options: Parameters<typeof save>[6] = {},
   ) => {
     const w = workspace(c);
-    if (['mcp', 'agentToken'].includes(c.get('actor').credential ?? ''))
+    if (c.get('actor').credential==='agentToken'||(c.get('actor').credential==='mcp'&&!c.get('actor').receivingConsent))
       throw fail(403, 'ADMIN_REQUIRED', 'MCP and agent credentials can read and test routing, not change it. Change routes in the dashboard or with an API key.');
     const result = await c.env.db.transaction(async (tx) => {
       await lockMailboxLane(tx, w, 'address');

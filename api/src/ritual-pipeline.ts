@@ -3,35 +3,24 @@ import { digest, type Runtime } from './core.js';
 import { jevQuestions } from './screen.js';
 import { visibleMail } from './inbox-content.js';
 import { safeForwardHtml } from './mailbox-send.js';
-import { compileHandler, runHandler, MESSAGE_STEPS, MESSAGE_BYTES, type HandlerIR, type Intent } from './handler-engine.js';
+import { compileRitual, runRitual, MESSAGE_STEPS, MESSAGE_BYTES, type RitualIR, type Intent } from './ritual-engine.js';
 import { matchRouting, plusBase, type RoutingInput } from './routing-match.js';
 import type { mailMessages, mailAttachments } from './db/mailbox.js';
 import { JobDeferred } from './jobs.js';
 
 const key = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
   bounded = z.string().min(1).max(254);
-export const Handler = z.object({ key, source: z.string().max(65536) }).strict();
+export const Ritual = z.object({ key, source: z.string().max(65536) }).strict();
 export const Binding = z
   .object({
-    handler: key,
+    ritual: key,
     target: bounded.describe('A mailbox ID (mbx_…) or an existing recipient address.'),
     continue: z.boolean().default(false),
   })
   .strict();
-export const Guard = z
+export const RitualConfig = z
   .object({
-    key,
-    from: bounded.optional().describe('An exact address, wildcard, or list:key.'),
-    subject: bounded.optional(),
-    action: z.enum(['allow', 'block', 'junk', 'route']),
-    destination: bounded.optional(),
-    continue: z.boolean().default(false),
-  })
-  .strict();
-export const HandlerConfig = z
-  .object({
-    handlers: z.array(Handler).max(50).default([]),
-    guards: z.array(Guard).max(32).default([]),
+    rituals: z.array(Ritual).max(50).default([]),
     attachments: z.array(Binding).max(256).default([]),
     senderLists: z.record(key, z.array(bounded.toLowerCase()).max(500)).default({}),
     evaluateDomains: z.array(bounded.toLowerCase()).max(100).default([]),
@@ -42,10 +31,10 @@ export const HandlerConfig = z
       .describe('Route IDs opted in to Jev, in addition to the receiving domains.'),
   })
   .strict();
-export type Config = z.infer<typeof HandlerConfig>;
+export type Config = z.infer<typeof RitualConfig>;
 export type Programs = {
-  handlers: Record<string, HandlerIR>;
-  guards: { key: string; ir: HandlerIR; continue: boolean }[];
+  grants?:string[];
+  rituals: Record<string, RitualIR>;
   attachments: Config['attachments'];
   senderLists: Config['senderLists'];
   evaluateDomains: string[];
@@ -53,48 +42,26 @@ export type Programs = {
   refs: Record<string, string>;
 };
 export function compileConfig(c: Config): Programs {
-  const handlers = Object.fromEntries(c.handlers.map((h) => [h.key, compileHandler(h.source)]));
-  if (Object.keys(handlers).length !== c.handlers.length || new Set(c.guards.map((g) => g.key)).size !== c.guards.length)
-    throw Error('Duplicate handler or Guard key.');
+  const rituals = Object.fromEntries(c.rituals.map((h) => [h.key, compileRitual(h.source)]));
+  if (Object.keys(rituals).length !== c.rituals.length)
+    throw Error('Duplicate ritual key.');
   for (const a of c.attachments) {
-    if (!Object.hasOwn(handlers, a.handler)) throw Error(`Unknown handler: ${a.handler}`);
+    if (!Object.hasOwn(rituals, a.ritual)) throw Error(`Unknown ritual: ${a.ritual}`);
     if (
-      c.attachments.filter((x) => x.target === a.target && x.handler === a.handler).length > 1 ||
+      c.attachments.filter((x) => x.target === a.target && x.ritual === a.ritual).length > 1 ||
       c.attachments.filter((x) => x.target === a.target).length > 3
     )
-      throw Error('Attach up to three distinct handlers per target.');
+      throw Error('Attach up to three distinct rituals per target.');
   }
-  const guards = c.guards.map((g) => {
-    const conditions: string[] = [],
-      q = JSON.stringify;
-    if (!g.from && !g.subject) throw Error('Guard needs a from or subject condition.');
-    if (g.from) {
-      if (g.from.startsWith('list:') && !Object.hasOwn(c.senderLists, g.from.slice(5))) throw Error(`Unknown ${g.from}`);
-      conditions.push(
-        g.from.startsWith('list:')
-          ? `lists.has(${q(g.from)},email.from.address)`
-          : `addr.matches(email.from.address,${q(g.from.toLowerCase())})`,
-      );
-    }
-    if (g.subject) conditions.push(`email.subject.includes(${q(g.subject)})`);
-    const call =
-      g.action === 'route' ? `guard.route(${q(g.destination)})` : g.action === 'junk' ? 'junk()' : `guard.${g.action}()`;
-    return {
-      key: g.key,
-      continue: g.continue,
-      ir: compileHandler(`export default function route(email,ctx){if(${conditions.join(' && ')}) ${call};}`),
-    };
-  });
   const p = {
-    handlers,
-    guards,
+    rituals,
     attachments: c.attachments,
     evaluateDomains: c.evaluateDomains,
     evaluateRoutes: c.evaluateRoutes,
     senderLists: Object.fromEntries(Object.entries(c.senderLists).map(([k, v]) => ['list:' + k, v])),
     refs: {},
   };
-  if (Buffer.byteLength(JSON.stringify(p)) > 256 * 1024) throw Error('Workspace handler plan exceeds 256 KiB.');
+  if (Buffer.byteLength(JSON.stringify(p)) > 256 * 1024) throw Error('Workspace ritual plan exceeds 256 KiB.');
   return p;
 }
 
@@ -215,7 +182,7 @@ async function evaluate(runtime: Runtime, w: string, email: Email, prompts: stri
     return {};
   }
 }
-export async function handlerPipeline(
+export async function ritualPipeline(
   runtime: Runtime,
   w: string,
   input: RoutingInput,
@@ -231,7 +198,7 @@ export async function handlerPipeline(
       ? []
       : p.attachments
           .filter((b) => b.target === r.address || b.target === owner?.id || r.inboxes.includes(b.target))
-          .filter((b, i, all) => all.findIndex((x) => x.handler === b.handler) === i)
+          .filter((b, i, all) => all.findIndex((x) => x.ritual === b.ritual) === i)
           .slice(0, 3);
   });
   const opted = (a: string, route: string | null) =>
@@ -239,7 +206,7 @@ export async function handlerPipeline(
   let answers: Record<string, number> = recorded ?? {},
     steps = 0,
     bytes = 0;
-  const changes: Record<string, HandlerDecision> = Object.create(null),
+  const changes: Record<string, RitualDecision> = Object.create(null),
     trace: {
       recipient: string;
       kind: string;
@@ -251,7 +218,7 @@ export async function handlerPipeline(
       actions: Intent[];
     }[] = [];
   const runs = base.recipients.map((r, i) => {
-    const d: HandlerDecision = (changes[r.address] = {
+    const d: RitualDecision = (changes[r.address] = {
       refs: [],
       bodies: {},actions:{},
       labels: [],
@@ -259,16 +226,16 @@ export async function handlerPipeline(
       dropped: r.dropped,
       warnings: [],
     });
-    const execute = (ir: HandlerIR, key: string, kind: string) => {
+    const execute = (ir: RitualIR, key: string, kind: string) => {
       const scores: Record<string, number | boolean> = Object.create(null);
-      for (const [name, e] of Object.entries(ir.evaluators)) {
+      for (const [name, e] of Object.entries(ir.omens)) {
         const enabled = opted(r.address, r.route),
           n = enabled && Object.hasOwn(answers, e.prompt) ? answers[e.prompt] : undefined;
         const fallback = enabled ? e.onError : e.type === 'boolean' ? false : 0;
         if (n === undefined) {
           if (fallback === 'defer') {
             if (!preview) throw new JobDeferred(new Date(Date.now() + 60000).toISOString());
-            d.warnings.push('Evaluator requested deferral.');
+            d.warnings.push('Omen requested deferral.');
           }
         }
         scores[name] =
@@ -284,12 +251,12 @@ export async function handlerPipeline(
         junk: d.junk,
         now: email.receivedAt,
       };
-      const result = runHandler(ir, email, ctx, scores, p.senderLists, MESSAGE_STEPS - steps);
+      const result = runRitual(ir, email, ctx, scores, p.senderLists, MESSAGE_STEPS - steps);
       steps += result.steps;
       bytes += result.bytes;
       const error = result.error ?? (bytes > MESSAGE_BYTES ? 'Message output budget exceeded' : null);
       if (error) {
-        d.labels.push('handler-error');
+        d.labels.push('ritual-error');
         d.warnings.push(error);
       }
       const actions=error?[]:result.intents;
@@ -302,24 +269,20 @@ export async function handlerPipeline(
             d.warnings.push(`Unavailable: ${a.ref}`);
             continue;
           }
-          if(!a.ref.startsWith('inbox:')){const list=d.actions[id]??=[];if(list.length>=3){d.warnings.push(`Skipped ${a.ref}: at most three calls per destination.`);continue}list.push({handlerAction:[email.id,input.version,kind,key,index,r.address].join(':'),...(a.body===undefined?{}:{body:a.body})});}
+          if(!a.ref.startsWith('inbox:')){const list=d.actions[id]??=[];if(list.length>=3){d.warnings.push(`Skipped ${a.ref}: at most three calls per endpoint.`);continue}list.push({ritualAction:[email.id,input.version,kind,key,index,r.address].join(':'),...(a.body===undefined?{}:{body:a.body})});}
           if (!d.refs.includes(id)) d.refs.push(id);
           if (a.body !== undefined) d.bodies[id] = a.body;
-        } else if (['drop', 'guard.block'].includes(a.op)) d.dropped = true;
+        } else if (['drop', 'block'].includes(a.op)) d.dropped = true;
         else if (a.op === 'junk') d.junk = true;
-        else if (a.op === 'guard.allow') d.junk = false;
+        else if (a.op === 'allow') d.junk = false;
         else if (a.op === 'label' && a.value && !['guard-allowed','spam','unverified'].includes(a.value) && d.labels.length < 10) d.labels.push(a.value);
       }
       return actions.length > 0;
     };
-    for (const g of p.guards) {
-      if (d.dropped || steps >= MESSAGE_STEPS) break;
-      if (execute(g.ir, g.key, 'guard') && (!g.continue || d.dropped)) break;
-    }
     return () => {
       for (const b of selected[i]) {
         if (d.dropped || steps >= MESSAGE_STEPS) break;
-        if (execute(p.handlers[b.handler], b.handler, 'handler') && !b.continue) break;
+        if (execute(p.rituals[b.ritual], b.ritual, 'ritual') && !b.continue) break;
       }
       if (steps >= MESSAGE_STEPS && !d.warnings.includes('Message step budget exceeded'))
         d.warnings.push('Message step budget exceeded');
@@ -330,7 +293,7 @@ export async function handlerPipeline(
       selected.flatMap((bindings, i) => {
         const a = base.recipients[i].address;
         return !changes[a].dropped && opted(a, base.recipients[i].route)
-          ? bindings.flatMap((b) => Object.values(p.handlers[b.handler].evaluators).map((e) => e.prompt))
+          ? bindings.flatMap((b) => Object.values(p.rituals[b.ritual].omens).map((e) => e.prompt))
           : [];
       }),
     ),
@@ -338,7 +301,7 @@ export async function handlerPipeline(
   if (!recorded && !preview && prompts.length <= 10) answers = await evaluate(runtime, w, email, prompts);
   for (const run of runs) run();
   return {
-    plan: matchRouting(
+    plan: {...matchRouting(
       input,
       email.envelope.to,
       email.spam.junk,
@@ -346,16 +309,16 @@ export async function handlerPipeline(
       email.receivedAt,
       Date.now(),
       changes,
-    ),
+    ),grants:[...new Set([...p.grants??[],...input.grants??[]])]},
     trace,
     steps,
     answers,
   };
 }
-export type HandlerDecision = {
+export type RitualDecision = {
   refs: string[];
   bodies: Record<string, unknown>;
-  actions:Record<string,{handlerAction:string;body?:unknown}[]>;
+  actions:Record<string,{ritualAction:string;body?:unknown}[]>;
   labels: string[];
   junk: boolean;
   dropped: boolean;

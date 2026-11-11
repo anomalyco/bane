@@ -14,16 +14,16 @@ import {
   type Runtime,
 } from './core.js';
 import { mailboxes, mailMessages, mailboxWebhooks, retainedMail } from './db/mailbox.js';
-import { handlerAdmin } from './handlers.js';
+import { ritualAdmin,ownReceiving } from './rituals.js';
 import { encrypt, decrypt, webhookSecret, postWebhook } from './operations.js';
 import { webhookSecretBinding } from './mailbox-events.js';
 import { lockMailboxLane } from './mailbox-store.js';
 import { sendFromMailbox } from './mailbox-send.js';
 import { invitationRecipient } from './google-auth.js';
 
-const endpoint = '/v1/routing/handler-destinations',
+const endpoint = '/v1/endpoints',
   key = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
-  meta = { security, tags: ['Handlers'] };
+  meta = { security, tags: ['Rituals'] };
 const summary = z.object({ ref: z.string(), verified: z.boolean() });
 const connectorInput = z.discriminatedUnion('type', [
   z.object({ type: z.literal('slack'), key, url: z.string().max(2048) }),
@@ -55,24 +55,24 @@ export function renderChat(type: string, body: unknown) {
       }
     : { content: s.replace(/([\\*_~`|>])/g, '\\$1').slice(0, 2000), allowed_mentions: { parse: [] } };
 }
-export function registerHandlerDestinations(app: App) {
+export function registerEndpoints(app: App) {
   const policy=z.object({ref:z.string().max(128),perMinute:z.number().int().min(1).max(6000),retryOnTimeout:z.boolean(),idempotent:z.boolean().default(false)}).strict();
-  app.openapi(createRoute({...meta,method:'put',path:endpoint+'/policy',operationId:'setHandlerDeliveryPolicy',summary:'Set destination calls per minute and unknown-outcome retry policy; only declare idempotency for a webhook that implements Idempotency-Key',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const w=handlerAdmin(c,true).workspaceId,q=c.req.valid('json');if(q.idempotent&&!q.ref.startsWith('webhook:'))throw new ApiError(422,'UNSUPPORTED_IDEMPOTENCY','Only custom webhooks can declare idempotency support.');const result=await c.env.db.execute(sql`INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) SELECT ${w},id,${q.perMinute},${q.retryOnTimeout},${q.idempotent} FROM mailbox_webhooks WHERE workspace_id=${w} AND (('webhook:'||key=${q.ref} AND NOT starts_with(id,'con_')) OR id=(SELECT hook_id FROM mail_handler_destinations WHERE workspace_id=${w} AND ref=${q.ref})) ON CONFLICT(workspace_id,hook_id) DO UPDATE SET per_minute=excluded.per_minute,retry_on_timeout=excluded.retry_on_timeout,idempotent=excluded.idempotent RETURNING 1`);if(!result.rowCount)throw new ApiError(404,'NOT_FOUND','Unknown destination.');return c.json(q,200)});
+  app.openapi(createRoute({...meta,method:'put',path:endpoint+'/policy',operationId:'setEndpointPolicy',summary:'Set endpoint calls per minute and unknown-outcome retry policy; only declare idempotency for a webhook that implements Idempotency-Key',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const w=ritualAdmin(c,true).workspaceId,q=c.req.valid('json');if(q.idempotent&&!q.ref.startsWith('webhook:'))throw new ApiError(422,'UNSUPPORTED_IDEMPOTENCY','Only custom webhooks can declare idempotency support.');const result=await c.env.db.execute(sql`INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) SELECT ${w},id,${q.perMinute},${q.retryOnTimeout},${q.idempotent} FROM mailbox_webhooks WHERE workspace_id=${w} AND (('webhook:'||key=${q.ref} AND NOT starts_with(id,'con_')) OR id=(SELECT hook_id FROM mail_endpoints WHERE workspace_id=${w} AND ref=${q.ref})) ON CONFLICT(workspace_id,hook_id) DO UPDATE SET per_minute=excluded.per_minute,retry_on_timeout=excluded.retry_on_timeout,idempotent=excluded.idempotent RETURNING 1`);if(!result.rowCount)throw new ApiError(404,'NOT_FOUND','Unknown endpoint.');return c.json(q,200)});
   app.openapi(
     createRoute({
       ...meta,
       method: 'get',
       path: endpoint,
-      operationId: 'listHandlerDestinations',
+      operationId: 'listEndpoints',
       responses: { 200: response(z.object({ data: z.array(summary) })), ...errors },
     }),
     async (c) => {
-      const w = handlerAdmin(c).workspaceId;
+      const w = ritualAdmin(c).workspaceId;
       return c.json(
         {
           data: (
             await c.env.db.execute<{ ref: string; verified: boolean }>(
-              sql`SELECT ref,verified FROM mail_handler_destinations WHERE workspace_id=${w} UNION ALL SELECT 'webhook:'||key,true FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL AND NOT starts_with(id,'con_') UNION ALL SELECT 'inbox:'||key,true FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL ORDER BY ref`,
+              sql`SELECT ref,verified FROM mail_endpoints WHERE workspace_id=${w} UNION ALL SELECT 'webhook:'||key,true FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL AND NOT starts_with(id,'con_') UNION ALL SELECT 'inbox:'||key,true FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL ORDER BY ref`,
             )
           ).rows,
         },
@@ -85,13 +85,13 @@ export function registerHandlerDestinations(app: App) {
       ...meta,
       method: 'post',
       path: endpoint,
-      operationId: 'createHandlerDestination',
+      operationId: 'createEndpoint',
       summary: 'Add a write-only chat credential or send a forward verification request to its recipient',
       request: { body: json(connectorInput) },
       responses: { 201: response(summary), ...errors },
     }),
     async (c) => {
-      const a = handlerAdmin(c, true),
+      const a = ritualAdmin(c, true),
         q = c.req.valid('json'),
         w = a.workspaceId,
         ref = q.type + ':' + q.key,
@@ -102,26 +102,27 @@ export function registerHandlerDestinations(app: App) {
         await lockMailboxLane(tx, w, 'address');
         const count = (
           await tx.execute<{ n: number; exists: boolean }>(
-            sql`SELECT count(*)::int AS n,coalesce(bool_or(ref=${ref}),false) AS exists FROM mail_handler_destinations WHERE workspace_id=${w}`,
+            sql`SELECT count(*)::int AS n,coalesce(bool_or(ref=${ref}),false) AS exists FROM mail_endpoints WHERE workspace_id=${w}`,
           )
         ).rows[0];
         if (count.exists || count.n >= 50)
           throw new ApiError(
             409,
-            'DESTINATION_CONFLICT',
-            'Choose an unused key; at most 50 connector and forward destinations.',
+            'ENDPOINT_CONFLICT',
+            'Choose an unused key; at most 50 connector and forward endpoints.',
           );
         await tx.insert(mailboxWebhooks).values({
           id: hook,
           workspaceId: w,
           name: ref,
-          url: 'https://handler.invalid/',
+          url: 'https://ritual.invalid/',
           eventTypes: [],
           encryptedSecret: await encrypt(c.env, webhookSecret(), webhookSecretBinding(w, hook)),
         });
         await tx.execute(
-          sql`INSERT INTO mail_handler_destinations(workspace_id,ref,hook_id,encrypted_value,verified,proof_hash,expires_at) VALUES(${w},${ref},${hook},${await encrypt(c.env, value, w + ':destination:' + hook)},${q.type !== 'forward'},${q.type === 'forward' ? await digest(token) : null},now()+interval '24 hours')`,
+          sql`INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified,proof_hash,expires_at) VALUES(${w},${ref},${hook},${await encrypt(c.env, value, w + ':endpoint:' + hook)},${q.type !== 'forward'},${q.type === 'forward' ? await digest(token) : null},now()+interval '24 hours')`,
         );
+        await ownReceiving(tx,c,'endpoint',hook);
         if (q.type === 'forward') {
           const [box] = await tx
             .select()
@@ -176,16 +177,16 @@ export async function confirmForward(runtime: Runtime, token: string, verifiedEm
   await runtime.db.transaction(async (tx) => {
     const r = (
       await tx.execute<{ workspace_id: string; hook_id: string; encrypted_value: string }>(
-        sql`SELECT workspace_id,hook_id,encrypted_value FROM mail_handler_destinations WHERE proof_hash=${hash} AND expires_at>now() AND NOT verified FOR UPDATE`,
+        sql`SELECT workspace_id,hook_id,encrypted_value FROM mail_endpoints WHERE proof_hash=${hash} AND expires_at>now() AND NOT verified FOR UPDATE`,
       )
     ).rows[0];
     if (
       !r ||
-      (await decrypt(runtime, r.encrypted_value, r.workspace_id + ':destination:' + r.hook_id)) !==
+      (await decrypt(runtime, r.encrypted_value, r.workspace_id + ':endpoint:' + r.hook_id)) !==
         verifiedEmail.toLowerCase()
     )
       throw new ApiError(403, 'VERIFICATION_REQUIRED', 'Use the unexpired link while signed in as its recipient.');
-    await tx.execute(sql`UPDATE mail_handler_destinations SET verified=true,proof_hash=NULL WHERE proof_hash=${hash}`);
+    await tx.execute(sql`UPDATE mail_endpoints SET verified=true,proof_hash=NULL WHERE proof_hash=${hash}`);
   });
 }
 async function checkExternal(tx: Pick<Runtime['db'], 'execute'>, w: string, address: string) {
@@ -210,22 +211,22 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
   const event = h.payload as {
       messageId: string;
       type: string;
-      handlerBody?: unknown;
+      ritualBody?: unknown;
       data: { recipients?: string[]; junk?: boolean };
     },
     hook = h.webhook_id;
   const d = (
     await runtime.db.execute<{ ref: string; encrypted_value: string }>(
-      sql`SELECT ref,encrypted_value FROM mail_handler_destinations WHERE workspace_id=${w} AND hook_id=${hook} AND verified`,
+      sql`SELECT ref,encrypted_value FROM mail_endpoints WHERE workspace_id=${w} AND hook_id=${hook} AND verified`,
     )
   ).rows[0];
   if (!d || event.type !== 'message.received' || event.data.junk || !event.data.recipients?.length)
     throw new ApiError(422, 'CONNECTOR_UNAVAILABLE', 'Only verified, routed non-junk deliveries can leave.');
   const type = d.ref.split(':')[0],
-    value = await decrypt(runtime, d.encrypted_value, w + ':destination:' + hook);
+    value = await decrypt(runtime, d.encrypted_value, w + ':endpoint:' + hook);
   if (type !== 'forward') {
-    const body = JSON.stringify(renderChat(type, event.handlerBody));
-    return postWebhook(runtime,pinnedUrl(type,value),{},body,null,w+':destination:'+hook);
+    const body = JSON.stringify(renderChat(type, event.ritualBody));
+    return postWebhook(runtime,pinnedUrl(type,value),{},body,null,w+':endpoint:'+hook);
   }
   await runtime.db.transaction(async (tx) => {
     await checkExternal(tx, w, value);
@@ -287,7 +288,7 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
       mailbox: box,
       from: box.address,
       fromName: `${(
-        ((m.verdicts as { handlerVerified?: boolean }).handlerVerified && m.fromName) ||
+        ((m.verdicts as { ritualVerified?: boolean }).ritualVerified && m.fromName) ||
         m.fromAddress ||
         'Sender'
       )

@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AcceptWorkspaceInvitationData, AcceptWorkspaceInvitationErrors, AcceptWorkspaceInvitationResponses, AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, ApplyRoutingData, ApplyRoutingErrors, ApplyRoutingResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CheckInboundDomainData, CheckInboundDomainErrors, CheckInboundDomainResponses, ChooseReceivingHostData, ChooseReceivingHostErrors, ChooseReceivingHostResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, CompleteDomainDnsSetupData, CompleteDomainDnsSetupErrors, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateConnectionData, CreateConnectionErrors, CreateConnectionResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateInboundAddressData, CreateInboundAddressErrors, CreateInboundAddressResponses, CreateInboundKeyData, CreateInboundKeyErrors, CreateInboundKeyResponses, CreateInboundSubdomainData, CreateInboundSubdomainErrors, CreateInboundSubdomainResponses, CreateInboundThreadData, CreateInboundThreadErrors, CreateInboundThreadResponses, CreateInboundWebhookData, CreateInboundWebhookErrors, CreateInboundWebhookResponses, CreateInboxData, CreateInboxErrors, CreateInboxResponses, CreateRouteData, CreateRouteErrors, CreateRouteResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceInvitationData, CreateWorkspaceInvitationErrors, CreateWorkspaceInvitationResponses, CreateWorkspaceResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteConnectionData, DeleteConnectionErrors, DeleteConnectionResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteDomainData, DeleteDomainErrors, DeleteDomainResponses, DeleteInboundAddressData, DeleteInboundAddressErrors, DeleteInboundAddressResponses, DeleteInboundWebhookData, DeleteInboundWebhookErrors, DeleteInboundWebhookResponses, DeleteInboxData, DeleteInboxErrors, DeleteInboxResponses, DeleteRouteData, DeleteRouteErrors, DeleteRouteResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DisableInboundDomainData, DisableInboundDomainErrors, DisableInboundDomainResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, EnableInboundDomainData, EnableInboundDomainErrors, EnableInboundDomainResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetConnectionData, GetConnectionErrors, GetConnectionRegionStatusData, GetConnectionRegionStatusErrors, GetConnectionRegionStatusResponses, GetConnectionResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainDnsSetupData, GetDomainDnsSetupErrors, GetDomainDnsSetupResponses, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailDetailData, GetEmailDetailErrors, GetEmailDetailResponses, GetEmailErrors, GetEmailResponses, GetInboundAddressData, GetInboundAddressErrors, GetInboundAddressResponses, GetInboundAttachmentData, GetInboundAttachmentErrors, GetInboundAttachmentResponses, GetInboundDomainData, GetInboundDomainErrors, GetInboundDomainResponses, GetInboundMessageData, GetInboundMessageErrors, GetInboundMessageResponses, GetInboundScanPolicyData, GetInboundScanPolicyErrors, GetInboundScanPolicyResponses, GetInboundSubdomainData, GetInboundSubdomainErrors, GetInboundSubdomainResponses, GetInboundThreadData, GetInboundThreadErrors, GetInboundThreadResponses, GetInboundWebhookData, GetInboundWebhookErrors, GetInboundWebhookResponses, GetInboxAttachmentData, GetInboxAttachmentErrors, GetInboxAttachmentResponses, GetInboxData, GetInboxErrors, GetInboxMessageData, GetInboxMessageErrors, GetInboxMessageResponses, GetInboxResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetPublicStatsData, GetPublicStatsErrors, GetPublicStatsResponses, GetRouteData, GetRouteErrors, GetRouteResponses, GetRoutingAuditData, GetRoutingAuditErrors, GetRoutingAuditResponses, GetRoutingData, GetRoutingErrors, GetRoutingResponses, GetRoutingVersionData, GetRoutingVersionErrors, GetRoutingVersionResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceInvitationData, GetWorkspaceInvitationErrors, GetWorkspaceInvitationResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportConnectionDomainsData, ImportConnectionDomainsErrors, ImportConnectionDomainsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, InviteWorkspaceMemberData, InviteWorkspaceMemberErrors, InviteWorkspaceMemberResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListConnectionRegionsData, ListConnectionRegionsErrors, ListConnectionRegionsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListInboundAddressesData, ListInboundAddressesErrors, ListInboundAddressesResponses, ListInboundDomainsData, ListInboundDomainsErrors, ListInboundDomainsResponses, ListInboundEventsData, ListInboundEventsErrors, ListInboundEventsResponses, ListInboundKeysData, ListInboundKeysErrors, ListInboundKeysResponses, ListInboundMessagesData, ListInboundMessagesErrors, ListInboundMessagesResponses, ListInboundSubdomainsData, ListInboundSubdomainsErrors, ListInboundSubdomainsResponses, ListInboundThreadsData, ListInboundThreadsErrors, ListInboundThreadsResponses, ListInboundWebhookDeliveriesData, ListInboundWebhookDeliveriesErrors, ListInboundWebhookDeliveriesResponses, ListInboundWebhooksData, ListInboundWebhooksErrors, ListInboundWebhooksResponses, ListInboxesData, ListInboxesErrors, ListInboxesResponses, ListInboxMessagesData, ListInboxMessagesErrors, ListInboxMessagesResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListRoutesData, ListRoutesErrors, ListRoutesResponses, ListRoutingVersionsData, ListRoutingVersionsErrors, ListRoutingVersionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, ListWorkspaceInvitationsData, ListWorkspaceInvitationsErrors, ListWorkspaceInvitationsResponses, ListWorkspaceMembersData, ListWorkspaceMembersErrors, ListWorkspaceMembersResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, PauseCampaignData, PauseCampaignErrors, PauseCampaignResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RedeliverInboundMessageData, RedeliverInboundMessageErrors, RedeliverInboundMessageResponses, RefreshConnectionScanData, RefreshConnectionScanErrors, RefreshConnectionScanResponses, ReleaseRetiredAddressData, ReleaseRetiredAddressErrors, ReleaseRetiredAddressResponses, RemoveInboundSubdomainData, RemoveInboundSubdomainErrors, RemoveInboundSubdomainResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RemoveWorkspaceMemberData, RemoveWorkspaceMemberErrors, RemoveWorkspaceMemberResponses, RenameCurrentWorkspaceData, RenameCurrentWorkspaceErrors, RenameCurrentWorkspaceResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, ReplyToInboundThreadData, ReplyToInboundThreadErrors, ReplyToInboundThreadResponses, RestoreRoutingVersionData, RestoreRoutingVersionErrors, RestoreRoutingVersionResponses, ResumeCampaignData, ResumeCampaignErrors, ResumeCampaignResponses, RetryInboundWebhookDeliveryData, RetryInboundWebhookDeliveryErrors, RetryInboundWebhookDeliveryResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeInboundKeyData, RevokeInboundKeyErrors, RevokeInboundKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RevokeWorkspaceInvitationData, RevokeWorkspaceInvitationErrors, RevokeWorkspaceInvitationResponses, RotateInboundWebhookSecretData, RotateInboundWebhookSecretErrors, RotateInboundWebhookSecretResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendDomainTestEmailData, SendDomainTestEmailErrors, SendDomainTestEmailResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignPacingData, SetCampaignPacingErrors, SetCampaignPacingResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, SimulateInboxMessageData, SimulateInboxMessageErrors, SimulateInboxMessageResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestInboundWebhookData, TestInboundWebhookErrors, TestInboundWebhookResponses, TestRoutingData, TestRoutingErrors, TestRoutingResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateInboundAddressData, UpdateInboundAddressErrors, UpdateInboundAddressResponses, UpdateInboundDomainData, UpdateInboundDomainErrors, UpdateInboundDomainResponses, UpdateInboundScanPolicyData, UpdateInboundScanPolicyErrors, UpdateInboundScanPolicyResponses, UpdateInboundSubdomainData, UpdateInboundSubdomainErrors, UpdateInboundSubdomainResponses, UpdateInboundThreadData, UpdateInboundThreadErrors, UpdateInboundThreadResponses, UpdateInboundWebhookData, UpdateInboundWebhookErrors, UpdateInboundWebhookResponses, UpdateInboxData, UpdateInboxErrors, UpdateInboxMessageData, UpdateInboxMessageErrors, UpdateInboxMessageResponses, UpdateInboxResponses, UpdateRouteData, UpdateRouteErrors, UpdateRouteResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceMemberData, UpdateWorkspaceMemberErrors, UpdateWorkspaceMemberResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyConnectionData, VerifyConnectionErrors, VerifyConnectionResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AcceptWorkspaceInvitationData, AcceptWorkspaceInvitationErrors, AcceptWorkspaceInvitationResponses, AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, ApplyRoutingData, ApplyRoutingErrors, ApplyRoutingResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CheckInboundDomainData, CheckInboundDomainErrors, CheckInboundDomainResponses, ChooseReceivingHostData, ChooseReceivingHostErrors, ChooseReceivingHostResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, CompleteDomainDnsSetupData, CompleteDomainDnsSetupErrors, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateConnectionData, CreateConnectionErrors, CreateConnectionResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateEndpointData, CreateEndpointErrors, CreateEndpointResponses, CreateInboundAddressData, CreateInboundAddressErrors, CreateInboundAddressResponses, CreateInboundKeyData, CreateInboundKeyErrors, CreateInboundKeyResponses, CreateInboundSubdomainData, CreateInboundSubdomainErrors, CreateInboundSubdomainResponses, CreateInboundThreadData, CreateInboundThreadErrors, CreateInboundThreadResponses, CreateInboundWebhookData, CreateInboundWebhookErrors, CreateInboundWebhookResponses, CreateInboxConnectionData, CreateInboxConnectionErrors, CreateInboxConnectionResponses, CreateInboxData, CreateInboxErrors, CreateInboxResponses, CreateRouteData, CreateRouteErrors, CreateRouteResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceInvitationData, CreateWorkspaceInvitationErrors, CreateWorkspaceInvitationResponses, CreateWorkspaceResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteConnectionData, DeleteConnectionErrors, DeleteConnectionResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteDomainData, DeleteDomainErrors, DeleteDomainResponses, DeleteInboundAddressData, DeleteInboundAddressErrors, DeleteInboundAddressResponses, DeleteInboundWebhookData, DeleteInboundWebhookErrors, DeleteInboundWebhookResponses, DeleteInboxData, DeleteInboxErrors, DeleteInboxResponses, DeleteRitualEntryData, DeleteRitualEntryErrors, DeleteRitualEntryResponses, DeleteRouteData, DeleteRouteErrors, DeleteRouteResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DisableInboundDomainData, DisableInboundDomainErrors, DisableInboundDomainResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, EnableInboundDomainData, EnableInboundDomainErrors, EnableInboundDomainResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetConnectionData, GetConnectionErrors, GetConnectionRegionStatusData, GetConnectionRegionStatusErrors, GetConnectionRegionStatusResponses, GetConnectionResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainDnsSetupData, GetDomainDnsSetupErrors, GetDomainDnsSetupResponses, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailDetailData, GetEmailDetailErrors, GetEmailDetailResponses, GetEmailErrors, GetEmailResponses, GetInboundAddressData, GetInboundAddressErrors, GetInboundAddressResponses, GetInboundAttachmentData, GetInboundAttachmentErrors, GetInboundAttachmentResponses, GetInboundDomainData, GetInboundDomainErrors, GetInboundDomainResponses, GetInboundMessageData, GetInboundMessageErrors, GetInboundMessageResponses, GetInboundScanPolicyData, GetInboundScanPolicyErrors, GetInboundScanPolicyResponses, GetInboundSubdomainData, GetInboundSubdomainErrors, GetInboundSubdomainResponses, GetInboundThreadData, GetInboundThreadErrors, GetInboundThreadResponses, GetInboundWebhookData, GetInboundWebhookErrors, GetInboundWebhookResponses, GetInboxAttachmentData, GetInboxAttachmentErrors, GetInboxAttachmentResponses, GetInboxData, GetInboxErrors, GetInboxMessageData, GetInboxMessageErrors, GetInboxMessageResponses, GetInboxResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetPublicStatsData, GetPublicStatsErrors, GetPublicStatsResponses, GetRitualEntryData, GetRitualEntryErrors, GetRitualEntryResponses, GetRitualsData, GetRitualsErrors, GetRitualsResponses, GetRouteData, GetRouteErrors, GetRouteResponses, GetRoutingAuditData, GetRoutingAuditErrors, GetRoutingAuditResponses, GetRoutingData, GetRoutingErrors, GetRoutingResponses, GetRoutingVersionData, GetRoutingVersionErrors, GetRoutingVersionResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceInvitationData, GetWorkspaceInvitationErrors, GetWorkspaceInvitationResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportConnectionDomainsData, ImportConnectionDomainsErrors, ImportConnectionDomainsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, InviteWorkspaceMemberData, InviteWorkspaceMemberErrors, InviteWorkspaceMemberResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListConnectionRegionsData, ListConnectionRegionsErrors, ListConnectionRegionsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListEndpointsData, ListEndpointsErrors, ListEndpointsResponses, ListInboundAddressesData, ListInboundAddressesErrors, ListInboundAddressesResponses, ListInboundDomainsData, ListInboundDomainsErrors, ListInboundDomainsResponses, ListInboundEventsData, ListInboundEventsErrors, ListInboundEventsResponses, ListInboundKeysData, ListInboundKeysErrors, ListInboundKeysResponses, ListInboundMessagesData, ListInboundMessagesErrors, ListInboundMessagesResponses, ListInboundSubdomainsData, ListInboundSubdomainsErrors, ListInboundSubdomainsResponses, ListInboundThreadsData, ListInboundThreadsErrors, ListInboundThreadsResponses, ListInboundWebhookDeliveriesData, ListInboundWebhookDeliveriesErrors, ListInboundWebhookDeliveriesResponses, ListInboundWebhooksData, ListInboundWebhooksErrors, ListInboundWebhooksResponses, ListInboxesData, ListInboxesErrors, ListInboxesResponses, ListInboxMessagesData, ListInboxMessagesErrors, ListInboxMessagesResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListRitualVersionsData, ListRitualVersionsErrors, ListRitualVersionsResponses, ListRoutesData, ListRoutesErrors, ListRoutesResponses, ListRoutingVersionsData, ListRoutingVersionsErrors, ListRoutingVersionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, ListWorkspaceInvitationsData, ListWorkspaceInvitationsErrors, ListWorkspaceInvitationsResponses, ListWorkspaceMembersData, ListWorkspaceMembersErrors, ListWorkspaceMembersResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, PauseCampaignData, PauseCampaignErrors, PauseCampaignResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, PutRitualEntryData, PutRitualEntryErrors, PutRitualEntryResponses, PutRitualsData, PutRitualsErrors, PutRitualsResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RedeliverInboundMessageData, RedeliverInboundMessageErrors, RedeliverInboundMessageResponses, RefreshConnectionScanData, RefreshConnectionScanErrors, RefreshConnectionScanResponses, ReleaseRetiredAddressData, ReleaseRetiredAddressErrors, ReleaseRetiredAddressResponses, RemoveInboundSubdomainData, RemoveInboundSubdomainErrors, RemoveInboundSubdomainResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RemoveWorkspaceMemberData, RemoveWorkspaceMemberErrors, RemoveWorkspaceMemberResponses, RenameCurrentWorkspaceData, RenameCurrentWorkspaceErrors, RenameCurrentWorkspaceResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, ReplyToInboundThreadData, ReplyToInboundThreadErrors, ReplyToInboundThreadResponses, RestoreRitualVersionData, RestoreRitualVersionErrors, RestoreRitualVersionResponses, RestoreRoutingVersionData, RestoreRoutingVersionErrors, RestoreRoutingVersionResponses, ResumeCampaignData, ResumeCampaignErrors, ResumeCampaignResponses, RetryInboundWebhookDeliveryData, RetryInboundWebhookDeliveryErrors, RetryInboundWebhookDeliveryResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeInboundKeyData, RevokeInboundKeyErrors, RevokeInboundKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RevokeWorkspaceInvitationData, RevokeWorkspaceInvitationErrors, RevokeWorkspaceInvitationResponses, RotateInboundWebhookSecretData, RotateInboundWebhookSecretErrors, RotateInboundWebhookSecretResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendDomainTestEmailData, SendDomainTestEmailErrors, SendDomainTestEmailResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignPacingData, SetCampaignPacingErrors, SetCampaignPacingResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, SetEndpointPolicyData, SetEndpointPolicyErrors, SetEndpointPolicyResponses, SetRitualAttachmentsData, SetRitualAttachmentsErrors, SetRitualAttachmentsResponses, SetRitualEvaluationData, SetRitualEvaluationErrors, SetRitualEvaluationResponses, SimulateInboxMessageData, SimulateInboxMessageErrors, SimulateInboxMessageResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestInboundWebhookData, TestInboundWebhookErrors, TestInboundWebhookResponses, TestRitualsData, TestRitualsErrors, TestRitualsResponses, TestRoutingData, TestRoutingErrors, TestRoutingResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateInboundAddressData, UpdateInboundAddressErrors, UpdateInboundAddressResponses, UpdateInboundDomainData, UpdateInboundDomainErrors, UpdateInboundDomainResponses, UpdateInboundScanPolicyData, UpdateInboundScanPolicyErrors, UpdateInboundScanPolicyResponses, UpdateInboundSubdomainData, UpdateInboundSubdomainErrors, UpdateInboundSubdomainResponses, UpdateInboundThreadData, UpdateInboundThreadErrors, UpdateInboundThreadResponses, UpdateInboundWebhookData, UpdateInboundWebhookErrors, UpdateInboundWebhookResponses, UpdateInboxData, UpdateInboxErrors, UpdateInboxMessageData, UpdateInboxMessageErrors, UpdateInboxMessageResponses, UpdateInboxResponses, UpdateRouteData, UpdateRouteErrors, UpdateRouteResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceMemberData, UpdateWorkspaceMemberErrors, UpdateWorkspaceMemberResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyConnectionData, VerifyConnectionErrors, VerifyConnectionResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -2601,6 +2601,333 @@ export const testRouting = <ThrowOnError extends boolean = false>(options: Optio
         }
     ],
     url: '/v1/routing/test',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List saved ritual versions, newest first
+ */
+export const listRitualVersions = <ThrowOnError extends boolean = false>(options?: Options<ListRitualVersionsData, ThrowOnError>): RequestResult<ListRitualVersionsResponses, ListRitualVersionsErrors, ThrowOnError> => (options?.client ?? client).get<ListRitualVersionsResponses, ListRitualVersionsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/history',
+    ...options
+});
+
+/**
+ * Recompile a retained version and restore it as a new version
+ */
+export const restoreRitualVersion = <ThrowOnError extends boolean = false>(options: Options<RestoreRitualVersionData, ThrowOnError>): RequestResult<RestoreRitualVersionResponses, RestoreRitualVersionErrors, ThrowOnError> => (options.client ?? client).post<RestoreRitualVersionResponses, RestoreRitualVersionErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/restore',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Set the domains and routes that may send inbound evidence to Jev
+ */
+export const setRitualEvaluation = <ThrowOnError extends boolean = false>(options: Options<SetRitualEvaluationData, ThrowOnError>): RequestResult<SetRitualEvaluationResponses, SetRitualEvaluationErrors, ThrowOnError> => (options.client ?? client).put<SetRitualEvaluationResponses, SetRitualEvaluationErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/omens',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Set endpoint calls per minute and unknown-outcome retry policy; only declare idempotency for a webhook that implements Idempotency-Key
+ */
+export const setEndpointPolicy = <ThrowOnError extends boolean = false>(options: Options<SetEndpointPolicyData, ThrowOnError>): RequestResult<SetEndpointPolicyResponses, SetEndpointPolicyErrors, ThrowOnError> => (options.client ?? client).put<SetEndpointPolicyResponses, SetEndpointPolicyErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/endpoints/policy',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const listEndpoints = <ThrowOnError extends boolean = false>(options?: Options<ListEndpointsData, ThrowOnError>): RequestResult<ListEndpointsResponses, ListEndpointsErrors, ThrowOnError> => (options?.client ?? client).get<ListEndpointsResponses, ListEndpointsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/endpoints',
+    ...options
+});
+
+/**
+ * Add a write-only chat credential or send a forward verification request to its recipient
+ */
+export const createEndpoint = <ThrowOnError extends boolean = false>(options: Options<CreateEndpointData, ThrowOnError>): RequestResult<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError> => (options.client ?? client).post<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/endpoints',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Generate client config for selected inboxes. Key shown once; OAuth requires human selection at consent.
+ */
+export const createInboxConnection = <ThrowOnError extends boolean = false>(options: Options<CreateInboxConnectionData, ThrowOnError>): RequestResult<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbox-connections',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Remove a script and detach it everywhere
+ */
+export const deleteRitualEntry = <ThrowOnError extends boolean = false>(options: Options<DeleteRitualEntryData, ThrowOnError>): RequestResult<DeleteRitualEntryResponses, DeleteRitualEntryErrors, ThrowOnError> => (options.client ?? client).delete<DeleteRitualEntryResponses, DeleteRitualEntryErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/scripts/{key}',
+    ...options
+});
+
+/**
+ * Read one reusable script
+ */
+export const getRitualEntry = <ThrowOnError extends boolean = false>(options: Options<GetRitualEntryData, ThrowOnError>): RequestResult<GetRitualEntryResponses, GetRitualEntryErrors, ThrowOnError> => (options.client ?? client).get<GetRitualEntryResponses, GetRitualEntryErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/scripts/{key}',
+    ...options
+});
+
+/**
+ * Create or update one reusable script
+ */
+export const putRitualEntry = <ThrowOnError extends boolean = false>(options: Options<PutRitualEntryData, ThrowOnError>): RequestResult<PutRitualEntryResponses, PutRitualEntryErrors, ThrowOnError> => (options.client ?? client).put<PutRitualEntryResponses, PutRitualEntryErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/scripts/{key}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Attach, reorder and detach rituals by replacing the ordered binding list
+ */
+export const setRitualAttachments = <ThrowOnError extends boolean = false>(options: Options<SetRitualAttachmentsData, ThrowOnError>): RequestResult<SetRitualAttachmentsResponses, SetRitualAttachmentsErrors, ThrowOnError> => (options.client ?? client).put<SetRitualAttachmentsResponses, SetRitualAttachmentsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/attachments',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Read rituals, ordered attachments, and sender lists
+ */
+export const getRituals = <ThrowOnError extends boolean = false>(options?: Options<GetRitualsData, ThrowOnError>): RequestResult<GetRitualsResponses, GetRitualsErrors, ThrowOnError> => (options?.client ?? client).get<GetRitualsResponses, GetRitualsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals',
+    ...options
+});
+
+/**
+ * Create, replace or remove rituals and ordered bindings in one version
+ */
+export const putRituals = <ThrowOnError extends boolean = false>(options: Options<PutRitualsData, ThrowOnError>): RequestResult<PutRitualsResponses, PutRitualsErrors, ThrowOnError> => (options.client ?? client).put<PutRitualsResponses, PutRitualsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Trace saved or proposed Rituals on a stored message or pasted MIME; never calls Jev or delivers mail
+ */
+export const testRituals = <ThrowOnError extends boolean = false>(options: Options<TestRitualsData, ThrowOnError>): RequestResult<TestRitualsResponses, TestRitualsErrors, ThrowOnError> => (options.client ?? client).post<TestRitualsResponses, TestRitualsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'bane.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Host-bane.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/rituals/test',
     ...options,
     headers: {
         'Content-Type': 'application/json',

@@ -2,7 +2,8 @@
 export type RouteTarget = string[] | 'drop';
 type Route = { id: string | null; match: string; to: RouteTarget; subaddresses?: boolean };
 export type RoutingInput = {
-  programs?:import('./handler-pipeline.js').Programs|null;
+  grants?:string[];
+  programs?:import('./ritual-pipeline.js').Programs|null;
   version: number;
   legacy: boolean;
   hosts: Record<string, { default: string; patterns: Route[] }> | null;
@@ -58,7 +59,7 @@ function resolve(input: RoutingInput, address: string): Resolved {
   return pattern(false) ?? subaddress ?? pattern(true) ?? { tier: 'default', route: null, to: [] };
 }
 
-export function matchRouting(input: RoutingInput, addresses: string[], messageJunk: boolean, dmarc: string, received: string, now = Date.now(), changes?:Record<string,import('./handler-pipeline.js').HandlerDecision>) {
+export function matchRouting(input: RoutingInput, addresses: string[], messageJunk: boolean, dmarc: string, received: string, now = Date.now(), changes?:Record<string,import('./ritual-pipeline.js').RitualDecision>) {
   const extraInboxes = new Set<string>(),
     webhooks = new Set<string>(),
     at = Date.parse(received);
@@ -107,6 +108,6 @@ export function matchRouting(input: RoutingInput, addresses: string[], messageJu
       warnings,
     };
   });
-  return { version: input.version, recipients };
+  return { version: input.version, recipients,...(input.grants?.length?{grants:input.grants}:{}) };
 }
 export type RoutingResult = ReturnType<typeof matchRouting>;
