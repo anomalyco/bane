@@ -368,13 +368,14 @@ const scheduleDnsPage:JobHandler=async(runtime,payload)=>{
   const after=typeof payload.after==='string' ? sql`WHERE domain_id>${payload.after}` : sql``;
   const {rows:[next]}=await runtime.db.execute<{after:string}>(sql`WITH page AS MATERIALIZED (
       SELECT domain_id,connection_id,workspace_id,name,region FROM domain_sending_bindings ${after} ORDER BY domain_id LIMIT ${dnsPage}
-    ), due AS (SELECT dc.token,dc.workspace_id,d.domain_id AS id,coalesce(j.created_at,dc.created_at) AS last_attempt FROM page d
+    ), due AS (SELECT dc.token,dc.workspace_id,d.domain_id AS id,coalesce(j.created_at,dc.created_at) AS last_attempt,pc.legacy AND dc.identity ? 'adopted' AS attested FROM page d
       JOIN domain_claims dc ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.connection_id=dc.connection_id
       JOIN regional_connections pc ON pc.id=d.connection_id AND pc.region=d.region AND ${connectionReady()}
       LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.identity IS NOT NULL AND (${claimReceivable()} OR dc.sending_state IN ('verified','lost')) AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
       ORDER BY last_attempt,j.created_at NULLS FIRST,dc.token LIMIT ${dnsBatch}), verify AS (
       INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||dc.token,'domain.verify',d.workspace_id,jsonb_build_object('domainId',d.id,'token',dc.token) FROM due d JOIN domain_claims dc ON dc.token=d.token JOIN provider_connections pc ON pc.id=dc.connection_id
-      WHERE dc.receiving_host IS NOT NULL AND (dc.receiving_identity_at IS NULL OR dc.receiving_identity_at<now()-CASE WHEN pc.kind='byo' THEN interval '8 hours' ELSE interval '24 hours' END)
+      -- The adopted platform root re-checks its pinned SES fingerprint daily even before it receives.
+      WHERE (dc.receiving_host IS NOT NULL OR d.attested) AND (dc.receiving_identity_at IS NULL OR dc.receiving_identity_at<now()-CASE WHEN pc.kind='byo' THEN interval '8 hours' ELSE interval '24 hours' END)
       ON CONFLICT(id) DO UPDATE SET status='pending',payload=excluded.payload,available_at=now(),attempts=0,lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed')), queued AS (
       INSERT INTO jobs(id,type,workspace_id,payload,available_at)
       SELECT 'domain.mx:'||token,'domain.mx',workspace_id,jsonb_build_object('domainId',id,'token',token),

@@ -3,7 +3,7 @@ import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/cl
 import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
-import { sendingConnections, verifiedClaim } from './domain-claims.js';
+import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
 import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
@@ -523,7 +523,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       ORDER BY workspace_id,email FOR UPDATE
     ), pinned_routes AS MATERIALIZED (
       ${runtime.config.multiTenant ? sql`SELECT keys.*,r.* FROM (SELECT DISTINCT workspace_id,split_part(sender,'@',2) AS host FROM input WHERE binding IS NOT NULL) keys
-        CROSS JOIN LATERAL regional_sender(keys.workspace_id,keys.host,${isSimulatedSes(runtime)}) r` : sql`SELECT 1`}
+        CROSS JOIN LATERAL ${regionalSender(runtime,sql`keys.workspace_id`,sql`keys.host`)} r` : sql`SELECT 1`}
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed

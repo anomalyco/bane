@@ -6,7 +6,7 @@ import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleL
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
 import { domains } from './db/operations.js';
-import { regionalSending, unverifiedSender, verifiedClaim } from './domain-claims.js';
+import { regionalSender, regionalSending, unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
@@ -29,7 +29,7 @@ const ownsUpload = (wid: string, file: ResolvedAttachment) => file.sourceTemplat
 type MailboxRow = typeof mailboxes.$inferSelect;
 type MessageRow = typeof mailMessages.$inferSelect;
 const mailboxSender = (runtime:Runtime,from:string) => regionalSending(runtime)
-  ? sql`EXISTS (SELECT FROM regional_sender(d.workspace_id,${from.split('@')[1]!.toLowerCase()},${isSimulatedSes(runtime)}) r WHERE r.verified AND r.connection IS NOT NULL)`
+  ? sql`EXISTS (SELECT FROM ${regionalSender(runtime,sql`d.workspace_id`,from.split('@')[1]!.toLowerCase())} r WHERE r.verified AND r.connection IS NOT NULL)`
   : verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`);
 
 /** Resolve to immutable sending uploads before admission, never inside a message transaction. */

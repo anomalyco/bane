@@ -612,15 +612,18 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       }
       // The platform domain also receives. The operator's attestation, which SES keeps current by checking the
       // platform's own DKIM records, stands in for the claim tag and the _bane TXT; the MX checks are the ordinary
-      // ones. A drifted identity stops sending and receiving until the operator attests it again.
-      const identityVerified=identity.VerificationStatus==='SUCCESS', ses=sesFacts(identity);
+      // ones. A drifted identity stops sending and receiving at once (no grace) until the operator attests it again,
+      // and a claim whose adoption never completed (sending still pending) never receives.
+      const ses=sesFacts(identity);
       const [dmarc,observation]=await Promise.all([observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return null;}),receivingMx(runtime.db,row,job.workspaceId)]);
       await runtime.db.transaction(async db=>{
         const current=await hostedDomain(db,job.workspaceId,row.id,true);
         if (!current?.identity?.adopted || current.token!==row.token || current.expired) return;
-        if (current.receiving_host!==row.receiving_host) defer(5000); // Never replace a newer MX observation with this one.
-        await db.execute(sql`UPDATE domain_claims SET ${observeProof(verified)},receiving_identity_at=CASE WHEN ${identityVerified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
-        await saveObservation(db,current,job.workspaceId,ses,observation,{sending:verified && sends(current),sendingRevoked:!verified,identityVerified,proven:verified},dmarc);
+        // A newer MX observation, or an operator re-attestation made while SES was read, wins over this read.
+        if (current.receiving_host!==row.receiving_host || current.identity.adopted.fingerprint!==row.identity!.adopted!.fingerprint) defer(5000);
+        const attested=verified && sends(current);
+        await db.execute(sql`UPDATE domain_claims SET ${observeProof(attested)},receiving_identity_at=CASE WHEN ${verified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
+        await saveObservation(db,current,job.workspaceId,ses,observation,{sending:attested,sendingRevoked:!verified,identityVerified:verified,proven:attested},dmarc);
       });
       return;
     }
