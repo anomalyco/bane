@@ -92,23 +92,57 @@ export function resourceActions(name: string): Readonly<Record<string, string>> 
   return Object.hasOwn(resources, name) ? resources[name].actions : undefined;
 }
 
+const commonArgs = new Set(['cursor', 'limit', 'search', 'from', 'subjectContains', 'idempotencyKey', 'ifMatch']);
+const commonBodyFields = new Set(['name', 'type', 'from', 'to', 'subject', 'text', 'html', 'email', 'ttlSeconds']);
+type Schema = Record<string, any>;
+
+// Listing only: show required fields and everyday options without copying entire DTOs.
+// Omitted properties remain valid in their normal positions. Dispatch always validates
+// against the full operation, never against this deliberately open summary.
+function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
+  if (field.$ref) return fieldSummary(defs[field.$ref.slice('#/$defs/'.length)], defs, depth);
+  if (field.const !== undefined) return { const: field.const };
+  if (field.enum) return { enum: field.enum };
+  const variants: Schema[] | undefined = field.oneOf ?? field.anyOf;
+  if (variants) return { anyOf: variants.map(v => fieldSummary(v, defs, depth)) };
+  const schema: Schema = field.type ? { type: field.type } : {};
+  if (field.items) schema.items = depth < 2 ? fieldSummary(field.items, defs, depth + 1) : {};
+  if (depth < 2 && field.properties) {
+    const required: string[] = field.required ?? [];
+    const properties = Object.entries<Schema>(field.properties).filter(([k]) => required.includes(k) || commonBodyFields.has(k));
+    if (properties.length) schema.properties = Object.fromEntries(properties.map(([k, v]) => [k, fieldSummary(v, defs, depth + 1)]));
+    if (required.length) schema.required = required;
+  }
+  return schema;
+}
+
+export const describeTool: Tool = {
+  name: 'describe_tool', description: 'Get the complete input and output schemas for one listed resource action, including optional filters and nested body fields. Pass those fields directly to the resource tool.',
+  inputSchema: { type: 'object', properties: { resource: { type: 'string' }, action: { type: 'string' } }, required: ['resource', 'action'], additionalProperties: false },
+  annotations: { readOnlyHint: true, openWorldHint: false },
+};
+
+export function describeAction(resource: string, action: string, op: McpOperation) {
+  const input = op.tool.inputSchema;
+  return { name: resource, description: op.tool.description, inputSchema: { ...input, properties: { action: { const: action }, ...input.properties }, required: ['action', ...(input.required ?? [])] }, outputSchema: op.tool.outputSchema };
+}
+
 /** Build the discriminated union *after* filtering operations by grant and requested toolsets. */
 export function resourceTools(operations: ReadonlyMap<string, McpOperation>): Tool[] {
-  return Object.entries(resources).flatMap(([name, { description, actions }]) => {
-    const defs = Object.create(null);
+  return Object.entries(resources).flatMap<Tool>(([name, { description, actions }]) => {
     const visible = Object.entries(actions).flatMap(([action, id]) => {
       const op = operations.get(id);
       return op ? [{ action, op }] : [];
     });
     if (!visible.length) return [];
     const oneOf = visible.map(({ action, op }) => {
-      const { $defs, properties, required = [], ...rest } = op.tool.inputSchema;
-      Object.assign(defs, $defs); // All refs come from the same OpenAPI components.
-      return { ...rest, properties: { action: { type: 'string', const: action }, ...properties }, required: ['action', ...required] };
+      const { $defs = {}, properties = {}, required = [] } = op.tool.inputSchema;
+      const fields = Object.entries(properties).filter(([k]) => required.includes(k) || commonArgs.has(k));
+      return { properties: { action: { const: action }, ...Object.fromEntries(fields.map(([k, v]) => [k, fieldSummary(v as Schema, $defs as Schema)])) }, ...(required.length ? { required } : {}) };
     });
-    return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { type: 'string', enum: visible.map(x => x.action) } }, required: ['action'], oneOf, ...(Object.keys(defs).length ? { $defs: defs } : {}) },
+    return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { type: 'string', enum: visible.map(x => x.action) } }, required: ['action'], oneOf },
       annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
-  });
+  }).concat([describeTool]);
 }
 
 export function resourceInventory() {

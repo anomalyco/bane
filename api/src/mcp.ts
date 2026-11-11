@@ -4,7 +4,7 @@ import { dispatchAsActor,dispatchAsMailboxAccess } from './auth.js';
 import { ModuleLoadError, type Actor, type MailboxAccess, type App, type Runtime } from './core.js';
 import { withMcpAuthorization } from './mcp-auth.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
-import { resourceActions, resourceTools } from './mcp-resources.js';
+import { describeAction, describeTool, resourceActions, resourceTools } from './mcp-resources.js';
 
 type ObjectValue = Record<string, any>;
 const INPUT_LIMIT = 12 * 1024 * 1024;
@@ -82,8 +82,9 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Ac
   const codeMode = params.get('codemode') === 'true' || (params.get('codemode') !== 'false' && requested.includes('all'));
   const selected = requested.filter(x => (TOOLSETS as readonly string[]).includes(x));
   // Toolsets narrow listings, not calls. Scoped inbox connections always see their allowed inbox operations.
+  const listed = (op: McpOperation) => !(inbox && op.tool.name === 'createInboundThread') && (inbox || requested.includes('all') || !selected.length || selected.includes(op.toolset));
   function listTools() {
-    const visible = new Map([...operations].filter(([id, op]) => !(inbox && id === 'createInboundThread') && (inbox || requested.includes('all') || !selected.length || selected.includes(op.toolset))));
+    const visible = new Map([...operations].filter(([, op]) => listed(op)));
     return codeMode ? [...visible.values()].map(op => op.tool) : resourceTools(visible);
   }
   const pending = new Set<Promise<CallToolResult>>();
@@ -151,21 +152,28 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Ac
       if (!response.ok) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
       return { status, requestId: apiRequestId, response: data };
   }
+  function resolveAction(resource: string, action: unknown) {
+    const actions = resourceActions(resource);
+    if (!actions || !Object.values(actions).some(id => operations.has(id))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
+    if (typeof action !== 'string') fail('INVALID_ARGUMENTS', 'Supply an action for this resource.');
+    return Object.hasOwn(actions, action) ? operations.get(actions[action]) : undefined;
+  }
+
   async function call(name: string, args: ObjectValue): Promise<CallToolResult> {
     let status: number | null = null;
     let apiRequestId: string | null = null;
     try {
-      let id = name;
-      if (!codeMode) {
-        const actions = resourceActions(name);
-        if (!actions || !Object.values(actions).some(key => operations.has(key))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
-        const { action, ...rest } = args;
-        if (typeof action !== 'string') fail('INVALID_ARGUMENTS', 'Supply an action for this resource.');
-        if (!Object.hasOwn(actions, action)) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
-        id = actions[action]; args = rest;
+      if (!codeMode && name === describeTool.name) {
+        const { resource, action } = args;
+        if (typeof resource !== 'string' || typeof action !== 'string' || Object.keys(args).length !== 2) fail('INVALID_ARGUMENTS', 'Supply a resource and an action.');
+        const op = resolveAction(resource, action);
+        if (!op || !listed(op)) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
+        return result(describeAction(resource, action, op));
       }
-      const op = operations.get(id);
+      const op = codeMode ? operations.get(name) : resolveAction(name, args.action);
       if (!op) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
+      const id = op.tool.name;
+      if (!codeMode) { const { action, ...rest } = args; args = rest; }
       if (byteLength(JSON.stringify(args)) > INPUT_LIMIT) fail('INVALID_ARGUMENTS', 'Arguments exceed the 12 MiB limit.');
       if (inbox && id === 'createInboundThread') fail('EPHEMERAL_REPLY_ONLY', 'Inboxes may only reply.');
       const value = await invoke(op, args);

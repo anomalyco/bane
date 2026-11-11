@@ -14,7 +14,7 @@ Choose the catalog that fits your client:
 
 | Client | URL | What `tools/list` returns |
 |---|---|---|
-| Plain MCP | `/mcp` or `/mcp?codemode=false` | Resource tools such as `contacts` and `messages`. Each has an `action` and advertises the arguments for each authorized action. |
+| Plain MCP | `/mcp` or `/mcp?codemode=false` | Resource tools such as `contacts` and `messages`, with compact schemas for each authorized action. `describe_tool` gives the full schema for one listed action. |
 | OpenCode Code Mode, Claude Code, Codex | `/mcp?codemode=true` (alias: `/mcp?toolsets=all`) | Each authorized operation as a separate tool with input and output schemas; use the client’s own tool search. |
 
 To narrow either listing, add `toolsets=inboxes,routing` (or choose from `rituals`, `endpoints`, `sending`, `admin`). Toolsets filter the listing, not the grant. Inbox-only connections always list only their allowed inbox operations. Bane does not run arbitrary agent code. The [operation inventory](../docs/mcp-coverage.md) maps between the catalogs and identifies human-only steps.
@@ -38,7 +38,7 @@ Authenticated dashboard clients can inspect their approvals with `GET /api/auth/
 
 ## Arguments and results
 
-`tools/list` provides the exact schemas for the current grant. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes require `confirm: true`; `idempotencyKey` is required for thread sends and optional for other writes.
+The plain listing shows required arguments and common options. For all fields, validation rules and the output schema of one action, call `describe_tool({"resource":"contacts","action":"list"})`. You can skip this lookup if you know the arguments: optional filters still go at the top level and nested fields stay in `body`. The server validates the full schema either way. Code Mode lists complete schemas directly. Writes require `confirm: true`; `idempotencyKey` is required for thread sends and optional for other writes.
 
 For example, `contacts({"action":"get","contactId":"ct_…"})` and `getContact({"contactId":"ct_…"})` return the same contact. To list contacts instead, use action `list` or `listContacts`. Pass the returned `nextCursor` as `cursor` to continue.
 
