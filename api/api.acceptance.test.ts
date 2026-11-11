@@ -8275,6 +8275,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const real=Date.now,clock=t.mock.method(Date,'now',()=>real()-310000);const old=mailObjectUrl(runtime,wid,first.raw_key,'a.eml','message/rfc822');clock.mock.restore();assert.equal((await app.fetch(new Request(old.url),runtime)).status,404);
         await db.query("UPDATE mail_messages SET verdicts=verdicts||'{\"virus\":\"GRAY\"}' WHERE id=$1",[first.id]);assert.equal(ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url,null);await db.query("UPDATE mail_messages SET verdicts=verdicts||'{\"virus\":\"PASS\"}' WHERE id=$1",[first.id]);
       });
+      await t.test('R2 mail store: importTemplateImage reads its own object links in process, with the download route’s checks',async it=>{
+        const png=Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),Buffer.from('own-link fixture')]),foreignWid='ws_foreign';
+        const own=(w:string,k:string,body:Buffer)=>{stored.set(k,body);return mailObjectUrl(runtime,w,k,'logo.png','application/octet-stream').url;};
+        const load=(url:string)=>local('POST','/v1/template-assets/import',{url});
+        const refused=async(url:string)=>assert.match(error(await load(url),422,'PUBLIC_IMAGE_FETCH_FAILED').message,/HTTP 404/);
+        const link=own(wid,`e/${wid}/${box.id}/${first.id}/own/png`,png),foreign=own(foreignWid,`a/${foreignWid}/msg/own/png`,png);
+        const real=Date.now,clock=it.mock.method(Date,'now',()=>real()-310000),expired=own(wid,`a/${wid}/msg/own/old`,png);clock.mock.restore();
+        const assets=new Map<string,{body:Uint8Array;contentType:string}>();it.mock.method(runtime.storage,'put',async(k:string,body:Uint8Array,contentType:string)=>{assets.set(k,{body,contentType});});
+        it.mock.method(runtime.storage,'get',async(k:string)=>assets.get(k)??null);it.mock.method(runtime.storage,'delete',async(k:string)=>{assets.delete(k);});
+        const importer=runtime.importPublicImage;runtime.importPublicImage=async()=>{throw Error('An own object link must not be fetched over HTTP.');};
+        try{
+          const imported=ok(await load(link),201);assert.equal(imported.asset.contentType,'image/png');
+          assert.deepEqual(Buffer.from(ok(await local('GET',`/v1/template-assets/${imported.asset.id}/content`)).content,'base64'),png);
+          ok(await local('DELETE',`/v1/template-assets/${imported.asset.id}`));
+          // Another workspace's link is genuine and still downloads publicly, but never imports into this workspace.
+          assert.equal((await app.fetch(new Request(foreign),runtime)).status,200);await refused(foreign);
+          const i=link.lastIndexOf('.')+1;await refused(link.slice(0,i)+(link[i]==='A'?'B':'A')+link.slice(i+1));
+          await refused(expired);await refused(own(wid,`e/${wid}/mbx_ended/${first.id}/own/png`,png));
+          error(await load(own(wid,`a/${wid}/msg/own/text`,Buffer.from('not an image'))),422,'PUBLIC_IMAGE_TYPE_UNSUPPORTED');
+          error(await load(own(wid,`a/${wid}/msg/own/big`,Buffer.concat([png,Buffer.alloc(8*1024*1024)]))),413,'PUBLIC_IMAGE_TOO_LARGE');
+        }finally{runtime.importPublicImage=importer;}
+      });
       await t.test('ephemeral inbox: wait starts before the call and advances only through returned deliveries',async()=>{
         const second=await deliver('next',[box.address]);const page=ok(await charged(3,()=>request('GET',`${url}?wait=1&limit=1`,key)));assert.equal(page.data[0].id,first.id);assert.equal(page.hasMore,true);const next=ok(await charged(2,()=>request('GET',`${url}?after=${page.cursor}`,key)));assert.deepEqual(next.data.map((m:Json)=>m.id),[second.id]);ok(await charged(2,()=>request('PATCH',`${url}/${first.id}`,key,{read:true})));assert.equal(ok(await charged(2,()=>request('GET',path,key))).usage.unread,1);
       });

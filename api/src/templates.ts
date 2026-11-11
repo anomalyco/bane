@@ -5,6 +5,8 @@ import { actor, ApiError, chargeRenderBudget, errors, id, IdParams, json, notFou
 import { attachmentLinks, attachments } from './db/sending.js';
 import { templateAssetLinks, templateAssets, templates, type TemplateDraft } from './db/templates.js';
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
+import { readPublicImage } from './adapters/public-image.js';
+import { readOwnMailObject } from './mail-object-route.js';
 import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 
 const MAX_ASSET_BYTES = MAX_ATTACHMENT_BYTES;
@@ -93,7 +95,9 @@ export function registerTemplates(app: App) {
     const identity = manageTemplates(c), input = c.req.valid('json');
     if (!c.env.importPublicImage) throw new ApiError(503, 'PUBLIC_IMAGE_IMPORT_UNAVAILABLE', 'Public image importing is not configured for this installation.', undefined, true);
     await chargeRenderBudget(c, identity.workspaceId);
-    const imported = await c.env.importPublicImage(input.url), hash = await checksum(imported.data), extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[imported.contentType];
+    // Bane's own download links are read in process: a Worker cannot fetch its own domain.
+    const own = await readOwnMailObject(c.env, input.url, identity.workspaceId);
+    const imported = own ? await readPublicImage(own, true) : await c.env.importPublicImage(input.url), hash = await checksum(imported.data), extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[imported.contentType];
     const contentId = input.contentId ?? `image-${hash.slice(0, 16)}`;
     const asset = await saveAsset(c.env, identity, { filename: input.filename ?? `image-${hash.slice(0, 12)}.${extension}`, contentType: imported.contentType, disposition: 'inline', contentId }, imported.data);
     return c.json({ asset, src: `cid:${contentId}` }, 201);
