@@ -33,6 +33,7 @@ export interface Config {
   apiRateLimitPerMinute: number;
   workspaceId: string;
   authSecret: string;
+  mailGatewayToken?:string;
   previousAuthSecret?: string;
   googleClientId?: string;
   googleClientSecret?: string;

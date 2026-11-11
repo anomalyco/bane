@@ -170,6 +170,7 @@ async function loadInputs(runtime: Runtime, workspaceId: string, now: Date): Pro
   return { days: row?.days ?? [], domains: (row?.domains ?? []).map(d => ({ ...d, dkim: d.dkim === true, mailFrom: d.mailFrom === true, emails: volume(d.name) })), firstEmails: row?.first_emails ?? 0, screened, today };
 }
 
+export async function protocolScoreCap(runtime:Runtime,w:string){const now=new Date();const grade=computeSenderScore(await loadInputs(runtime,w,now),now).grade;return grade===null?200:({'A+':2000,A:2000,B:1000,C:300,D:100,F:50})[grade];}
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
     description: 'The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 non-simulated emails. The score moves at most +2 or −15 a day towards its target. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.',

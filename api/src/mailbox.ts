@@ -487,6 +487,7 @@ function registerAddresses(app: App) {
 
 import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
+import {registerMailGateway} from './mail-gateway.js';
 export function registerMailbox(app: App) {
   registerRouting(app);
   registerRituals(app);
@@ -501,6 +502,7 @@ export function registerMailbox(app: App) {
   app.use('/v1/inboxes/*', mailboxCreates);
   registerInboxes(app, access);
   registerMailObjects(app);
+  registerMailGateway(app);
   app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address for reuse (workspace admin)',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
     const v=admin(c);await c.env.db.execute(sql`DELETE FROM mail_retired_addresses WHERE workspace_id=${v.workspaceId} AND address=${c.req.valid('param').address.toLowerCase()}`);return c.json({ok:true as const},200);
   });
