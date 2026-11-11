@@ -8444,6 +8444,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await call('PUT',path,{rituals:[{key:'notify',source:'export default function route(email,ctx){endpoints.triage({content:"@everyone"})}'}],attachments:[{ritual:'notify',target:box.id}]});const m=await ingest('chat-handler',[box.address]);const delivery=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[row.hook_id,m.id])).rows[0];await (await import('./src/mailbox-events.js')).mailboxEventJobs['mailbox.webhook'](runtime,{deliveryId:delivery.id},{id:delivery.id,workspaceId:wid,attempts:1});assert.equal(count,1);
           // One retry path for every endpoint type: decimal Retry-After, unknown outcomes replay only when the endpoint allows it.
           const {ActionRetry}=await import('./src/ritual-retry.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+          const legacy='/v1/inbound/webhooks/'+row.hook_id;
+          error(await local('PATCH',legacy,{paused:true}),404,'NOT_FOUND');error(await local('DELETE',legacy),404,'NOT_FOUND');
+          assert.ok(!(await call('GET','/v1/inbound/webhooks')).data.some((h:Json)=>h.id===row.hook_id));
           const deliveryFor=async(mid:string)=>{const m=await ingest(mid,[box.address]);return (await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[row.hook_id,m.id])).rows[0].id as string};
           const attempt=(id:string,attempts:number)=>mailboxEventJobs['mailbox.webhook'](runtime,{deliveryId:id},{id,workspaceId:wid,attempts});const state=async(id:string)=>(await db.query('SELECT state FROM mail_action_attempts WHERE delivery_id=$1',[id])).rows[0].state;
           const timeout=async()=>{throw Object.assign(new Error('timed out'),{name:'TimeoutError'})};

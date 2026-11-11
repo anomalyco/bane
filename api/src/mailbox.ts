@@ -694,6 +694,7 @@ function registerInboundWebhooks(app: App) {
   const idFilter = z.array(z.string().min(1).max(120)).min(1).max(500).nullable().describe('Only events for these receiving addresses; null for all.');
   const readAccess = (c: Ctx) => c.get('actor')?.credential === 'apiKey' ? access(c) : admin(c);
   const getWebhook = async (c: Ctx, webhookId: string, value = admin(c), tx?: Parameters<Parameters<Runtime['db']['transaction']>[0]>[0]) => {
+    if(webhookId.startsWith('con_'))throw new ApiError(404,'NOT_FOUND','Webhook was not found.');
     const query = (tx ?? c.env.db).select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), eq(mailboxWebhooks.id, webhookId)));
     const [row] = await (tx ? query.for('update') : query);
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
@@ -746,7 +747,7 @@ function registerInboundWebhooks(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags, responses: { 200: response(z.object({ data: z.array(InboundWebhookSchema) }).openapi('InboundWebhookList')), ...errors } }), async c => {
     const value = readAccess(c);
-    const rows = await c.env.db.select().from(mailboxWebhooks).where(eq(mailboxWebhooks.workspaceId, value.workspaceId)).orderBy(desc(mailboxWebhooks.id)).limit(100);
+    const rows = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId),sql`NOT starts_with(${mailboxWebhooks.id},'con_')`)).orderBy(desc(mailboxWebhooks.id)).limit(100);
     return c.json({ data: await Promise.all(rows.map(row => webhookView(c, row))) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(await webhookView(c, (await getWebhook(c, c.req.valid('param').id, readAccess(c))).row), 200));
