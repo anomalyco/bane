@@ -31,13 +31,13 @@ async function takeEarly(path: string, signal?: AbortSignal) {
     return response
   } finally { signal?.removeEventListener('abort', restore) }
 }
-export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string } = {}): Promise<T> {
+export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number } = {}): Promise<T> {
   const started = performance.now()
   let response: Response
   try {
     const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
     response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
+      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error

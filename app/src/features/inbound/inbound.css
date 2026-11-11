@@ -177,3 +177,7 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .routing-result dt { color: var(--color-muted); }
 .routing-result dd { margin: 0; overflow-wrap: anywhere; }
 .routing-warning { display: block; }
+
+.ritual-editor { border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
+.ritual-editor .cm-content { min-height: 11rem; font-family: inherit; }
+.ritual-binding { display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-8); min-height:53px; }

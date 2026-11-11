@@ -65,7 +65,7 @@ export function RoutingPage() {
     : setEditing(row.route ? { match: row.match, to: row.to, route: row.route } : { match: row.match, to: row.kind === 'default' ? [] : row.to })
   const uses = (id: string) => routes.filter(r => Array.isArray(r.to) && r.to.includes(id)).length
   return <div className="stack inbound-stack">
-    <PageHeader title="Routing" backTo="/receiving" actions={<><Button onClick={() => setTesting(true)}>Test routing</Button><Button variant="primary" onClick={() => setEditing({ match: '', to: [] })}>Add route</Button></>} />
+    <PageHeader title="Routing" backTo="/receiving" actions={<><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals">Rituals</Link><Button onClick={() => setTesting(true)}>Test routing</Button><Button variant="primary" onClick={() => setEditing({ match: '', to: [] })}>Add route</Button></>} />
     <p className="muted inbound-note">Mail to an address goes to the inbox that owns it. A route sends it somewhere else, or to more places: one address, a pattern like <code>reply+*@</code>, or a whole domain with <code>*@</code>. The most specific match wins.</p>
     <Tabs label="Routing views" value={tab} onValueChange={setTab} items={[{ value: 'addresses', label: 'Addresses', count: rows.length }, { value: 'destinations', label: 'Destinations', count: destinations.length }]} />
     {failure ? <ErrorState error={failure} onRetry={() => { void routing.refetch(); void addresses.refetch(); void webhooks.refetch(); void domains.refetch() }} />

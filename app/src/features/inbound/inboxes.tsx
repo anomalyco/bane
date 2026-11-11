@@ -1,3 +1,4 @@
+import {ConnectAgent} from './ritual-connections'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
@@ -147,6 +148,7 @@ function InboxDetail({ id }: { id: string }) {
   return <div className="stack inbound-stack">
     <PageHeader title={b ? b.address : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
       {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
+      {canAdminister && b.status==='active' && <ConnectAgent id={id}/>}
       {canAdminister && b.status !== 'deleting' && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
     </>} />
     {b && <>
