@@ -8464,6 +8464,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');const root='/v1/rituals',dest='/v1/endpoints',address='teammate@example.net';
         const d=await call('POST',dest,{type:'forward',name:'team',address,from:box.id},201);assert.equal(d.status,'pending');assert.match(d.nextStep,/Only the recipient can confirm/);
         error(await local('POST',dest,{type:'forward',name:'outside',address:'x@example.net',preverify:true}),422,'PREVERIFY_NOT_ALLOWED');
+        runtime.config.multiTenant=true;try{error(await local('POST',dest,{type:'forward',name:'outside-hosted',address:'x@example.net',preverify:true}),422,'PREVERIFY_NOT_ALLOWED');}finally{runtime.config.multiTenant=false;}
         const config={rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]};assert.match(error(await local('PUT',root,config),422,'UNKNOWN_ENDPOINT').message,/waiting for its recipient to confirm/);
         // The link alone confirms, so the workspace never sees it: the sent copy and the email content API withhold it.
         const sent=(await db.query("SELECT m.text AS stored,e.id,e.snapshot->>'text' AS sent FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id WHERE m.workspace_id=$1 AND m.subject=$2 AND m.direction='outbound'",[wid,'Confirm forwarding from '+box.address])).rows[0];

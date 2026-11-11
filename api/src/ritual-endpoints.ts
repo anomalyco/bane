@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, and, eq } from 'drizzle-orm';
 import { ApiError, digest, errors, id, json, randomSecret, response, security, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type Runtime } from './core.js';
+import { claimSends } from './states.js';
 import { mailboxes, mailMessages, mailboxWebhooks, retainedMail } from './db/mailbox.js';
 import { ritualAdmin, ownReceiving } from './rituals.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, WebhookHeaders, webhookSecret, webhookUrl } from './operations.js';
@@ -131,7 +132,7 @@ async function checkExternal(tx: DbExecutor, w: string, address: string) {
 async function ownVerifiedDomain(runtime: Runtime, tx: DbExecutor, w: string, address: string) {
   const host = address.split('@')[1]!;
   const found = runtime.config.multiTenant
-    ? await tx.execute(sql`SELECT FROM domain_claims WHERE workspace_id=${w} AND verified AND (name=${host} OR right(${host},length(name)+1)='.'||name) LIMIT 1`)
+    ? await tx.execute(sql`SELECT FROM domain_claims dc WHERE workspace_id=${w} AND ${claimSends()} AND (name=${host} OR right(${host},length(name)+1)='.'||name) LIMIT 1 FOR SHARE`)
     : await tx.execute(sql`SELECT FROM operation_domains WHERE workspace_id=${w} AND (name=${host} OR right(${host},length(name)+1)='.'||name) LIMIT 1`);
   return !!found.rowCount;
 }
