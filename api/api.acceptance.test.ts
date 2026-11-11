@@ -8336,6 +8336,35 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(first.uid,1);assert.equal(second.uid,2);assert.ok(BigInt(second.modseq)>BigInt(first.modseq));assert.ok(wakes.includes(bid));
     }finally{await a.query('ROLLBACK');await b.query('UNLISTEN bane_inbox_changed');}
   });
+  test('H1: permanent removal holds the ingest lane; a reopened envelope delivers only the new membership',async t=>{
+    const writer=await fixtureDatabase(t),peer=await fixtureDatabase(t),w=unique('reopen'),domain=unique('mdom'),mid=unique('msg');
+    const bids=[unique('mbx'),unique('mbx')],addrs=['a@reopen.invalid','b@reopen.invalid'];
+    const {randomSecret,digest}=await import('./src/core.js'),tokens=[randomSecret('bane_mbx_'),randomSecret('bane_mbx_')];
+    await writer.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'reopen.invalid',$3,'active','store')",[domain,w,REGION]);
+    for(const [i,bid] of bids.entries()){
+      await writer.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')",[bid,w,domain,addrs[i]]);
+      await writer.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addrs[i],bid]);
+      await writer.query('INSERT INTO inbox_state(workspace_id,inbox_id) VALUES($1,$2)',[w,bid]);
+      await writer.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'reader',$3,'fixture',jsonb_build_array($4::text),'["read"]')`,[unique('mbk'),w,await digest(tokens[i]!),bid]);
+    }
+    const received=new Date().toISOString();
+    const store=(addresses:string[])=>peer.query("SELECT * FROM mail_store_incoming($1,'[]','[]',$2,false,false,NULL,NULL)",[
+      {id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:addresses,direction:'inbound',subject:'Synthetic receipt',from_address:'fixture@example.invalid',to:[],cc:[],bcc:[],reply_to:[],references:[],received_at:received,body_truncated:false,snippet:'fixture',headers:[],size_bytes:42,attachment_count:0,verdicts:{},spam:false,automated:false,status:'received'},JSON.stringify(addresses.map((addr,n)=>({addr,n,valid:true})))]);
+    await peer.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','fixture',$4,'{}')",[w,mid,REGION,JSON.stringify(addrs.slice(0,1))]);
+    await store(addrs.slice(0,1));
+    await peer.query("UPDATE mail_receipts SET status='pending',recipients=$3 WHERE workspace_id=$1 AND ses_message_id=$2",[w,mid,JSON.stringify(addrs)]);
+    await writer.query('BEGIN');try{
+      const removed=(await writer.query("SELECT inbox_mutate($1,$2,$3,'expunge','{}') r",[w,bids[0],mid])).rows[0].r;
+      assert.equal(removed.removed,true);
+      // Prove exclusion directly, without relying on a timer or racing a content read.
+      await assert.rejects(peer.query("SELECT FROM mailbox_write_lanes WHERE workspace_id=$1 AND lane='ingest' FOR UPDATE NOWAIT",[w]),{code:'55P03'});
+      await writer.query('COMMIT');
+    }finally{await writer.query('ROLLBACK');}
+    await store(addrs);
+    error(await http('GET',`/v1/inboxes/${bids[0]}/messages/${mid}`,tokens[0]!),404);
+    assert.equal(ok(await http('GET',`/v1/inboxes/${bids[1]}/messages/${mid}`,tokens[1]!)).id,mid);
+    assert.deepEqual((await peer.query("SELECT total,uid_next::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bids[0]])).rows,[{total:0,uid_next:2}]);
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
@@ -8386,6 +8415,39 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(ingest.delivery?.drop)assert.equal(reads,before);return (await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
       };
       const first=await deliver('r2-first',[box.address],true),defaultMsg=await deliver('r2-mixed',[other.address,'ordinary@'+host],true);
+      await t.test('M1: a previous-generation writer cannot commit unjournaled inbox or thread state',async()=>{
+        const snapshot=async()=>ok(await request('GET',path+'/folders',key));
+        const before=await snapshot();
+        for(const [statement,id] of [
+          ['UPDATE mailbox_messages SET read=true WHERE mailbox_id=$1 AND message_id=$2',first.id],
+          ["UPDATE mailbox_threads SET archived=true,starred=true,labels=ARRAY['fixture'] WHERE mailbox_id=$1 AND thread_id=$2",first.thread_id],
+        ] as const){
+          await db.query('SAVEPOINT previous_writer');
+          try{await assert.rejects(db.query(statement,[box.id,id]),{code:'40001'});}finally{await db.query('ROLLBACK TO previous_writer; RELEASE previous_writer');}
+        }
+        assert.deepEqual(await snapshot(),before);
+        assert.equal(ok(await request('GET',`${url}/${first.id}`,key)).read,false);
+        assert.deepEqual(ok(await request('GET',path+'/changes?since='+before.state,key)).changed,[]);
+        ok(await request('PATCH',`${url}/${first.id}`,key,{read:true}));
+        assert.equal((await snapshot()).data.find((f:Json)=>f.role==='inbox').unseen,0);
+        assert.deepEqual(ok(await request('GET',path+'/changes?since='+before.state,key)).changed,[first.id]);
+        ok(await request('PATCH',`${url}/${first.id}`,key,{read:false}));
+      });
+      await t.test('M2: persistent creation and receipt binding require the verified BYO role and bucket',async()=>{
+        await db.query('SAVEPOINT policy_fixture');
+        try{
+          const cid=unique('conn'),account='444455556666',role=`arn:aws:iam::${account}:role/Bane-fixture`;
+          await db.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn) VALUES($1,$2,$3,'ready','byo',$4,gen_random_uuid(),'v4',$5,'fixture-platform')",[cid,wid,REGION,account,role]);
+          await db.query('UPDATE mailbox_regions SET account_id=$2 WHERE workspace_id=$1',[wid,account]);
+          const p={wid,hosted:true,admin:true,input:{type:'persistent',domain:'not-provisioned.invalid'}},refusal=async()=>(await db.query('SELECT create_managed_inbox($1) r',[p])).rows[0].r.error;
+          const {storageBinding}=await import('./src/mailbox-ingest-input.js');const verified=async()=>(await runtime.db.execute<{b:{kept_policy_v1:boolean}}>(sql`SELECT ${storageBinding(wid,REGION,bucket)} b`)).rows[0].b.kept_policy_v1;
+          assert.equal(await refusal(),'BYO_KEPT_POLICY_REQUIRED');assert.equal(await verified(),false);
+          await db.query('INSERT INTO mail_kept_policy_v1(connection_id,role_arn,region,bucket) VALUES($1,$2,$3,$4)',[cid,role,REGION,'different-bucket']);
+          assert.equal(await refusal(),'BYO_KEPT_POLICY_REQUIRED');assert.equal(await verified(),false);
+          await db.query('UPDATE mail_kept_policy_v1 SET bucket=$2 WHERE connection_id=$1',[cid,bucket]);
+          assert.equal(await verified(),true);assert.equal(await refusal(),'RECEIVING_DOMAIN_REQUIRED');
+        }finally{await db.query('ROLLBACK TO policy_fixture; RELEASE policy_fixture');}
+      });
       await t.test('R2 mail store: hosted ingest writes scrubbed raw and attachments with unchanged DB trips',async()=>{
         assert.equal(first.raw_bucket,'r2:fixture-r2');assert.equal(first.raw_key,`e/${wid}/${box.id}/${first.id}.eml`);assert.deepEqual(stored.get(first.raw_key),Buffer.from(raw.get('r2-first')!.toString().split('\r\n').slice(1).join('\r\n')));assert.equal(defaultMsg.raw_key,`d/${wid}/${defaultMsg.id}.eml`);assert.ok([...stored.keys()].some(k=>k.startsWith(`a/${wid}/${defaultMsg.id}/`)));assert.equal(s3mail.size,0);
       });
@@ -9160,6 +9222,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(rows.some(s=>s.Action.includes('s3:AbortMultipartUpload') && s.Effect==='Allow' && s.Resource.startsWith(bucket+'/workspaces/') && s.Resource.endsWith('/raw/?*.eml')));
     }
     assert.ok(all.some(s=>s.Effect==='Deny' && s.Action?.includes('s3:ListBucket') && s.Condition?.StringNotEquals?.['s3:ResourceAccount']===account));
+  });
+
+  test('M2: direct and promoted kept S3 raw use the versioned receiving grants, not the ordinary expiry tag',async t=>{
+    const {receivedMailStore}=await import('./src/mail-objects.js'),{copyWorkspaceRaw}=await import('./src/mailbox-mime.js'),{S3Client}=await import('@aws-sdk/client-s3');
+    const {load}=await import('js-yaml'),{render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href);
+    const w='ws_'+'a'.repeat(32),mid='msg_'+'b'.repeat(32),account='123456789012',region='us-east-2',prefix='bane-'+'c'.repeat(20),bucket=`${prefix}-mail-${region}`;
+    const client=new S3Client({region}),commands:Json[]=[],raw=Buffer.from('Bcc: private@example.invalid\r\nSubject: Fixture\r\n\r\nStored body');
+    t.mock.method(client,'send',async(cmd:any)=>{switch(cmd.constructor.name){case 'HeadObjectCommand':return {ETag:'"pin"',ContentLength:raw.length};case 'GetObjectCommand':return {Body:{transformToByteArray:async()=>raw}};case 'PutObjectCommand':commands.push(cmd.input);return {};default:throw Error(cmd.constructor.name);}});
+    const store=receivedMailStore({config:{multiTenant:true}} as import('./src/core.js').Runtime,w,{bucket,binding:{kind:'byo',id:'fixture',role_arn:'fixture',external_id:'fixture',aws_account_id:account},delivery:{lifecycle:'kept',prefixInbox:null,drop:false,owners:[]}},client,{messageId:mid,sesMessageId:'receipt'});
+    const copied=await copyWorkspaceRaw(client,region,bucket,'staging/receipt',store.rawKey,[],'kept');await store.objects.put(store.rawKey,copied.bytes,'message/rfc822');client.destroy();
+    assert.equal(commands.length,2);assert.equal(store.rawKey,`workspaces/${w}/raw/kept/${mid}.eml`);
+    const hosted=Object.values(render('--fresh',{account,origin:'https://dev.bane.mx'}) as Record<string,{Statement:IamStatement[]}>).flatMap(doc=>doc.Statement);
+    const cases:[IamStatement[],string][]=[[hosted,`bane-${account}-mail-${region}`]];
+    for(const file of ['byo-template.yaml','byo-template-v4.yaml']){
+      const src=await readFile(new URL(file,import.meta.url),'utf8'),params:Record<string,string>={ResourcePrefix:prefix,WorkspaceId:w,'AWS::Region':region,'!aws:RequestedRegion':region,'AWS::AccountId':account};
+      const cfn=load(src.replace(/\$\{([^}]+)\}/g,(m,k:string)=>params[k]??m).replaceAll("!Ref 'AWS::AccountId'",JSON.stringify(account)).replaceAll('!Ref ReceivingRegions','[us-east-2]').replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json;
+      const policy=cfn.Resources.KeptReceivingV1.Properties.PolicyDocument;
+      assert.ok(JSON.stringify(policy).length<=6144);assert.equal(cfn.Outputs.KeptReceivingPolicy.Value,`kept-v1:${w}`);
+      // Include the old receiving permissions as well, not just the new grant.
+      const legacy=file==='byo-template.yaml'?cfn.Resources.ReceivingPolicy.Properties.PolicyDocument:cfn.Resources.BaneRole.Properties.Policies.find((p:Json)=>Array.isArray(p)&&p[1]?.PolicyName==='Receiving')[1].PolicyDocument;
+      cases.push([[...legacy.Statement,...policy.Statement],bucket]);
+    }
+    for(const [policy,b] of cases){
+      const allow=(action:string,key:string,kind:string)=>iamAllows(policy,action,`arn:aws:s3:::${b}/${key}`,{'aws:RequestedRegion':region,'s3:ResourceAccount':account,'s3:RequestObjectTag/bane-kind':kind,'s3:RequestObjectTagKeys':['bane-kind']});
+      for(const {Key,Tagging} of commands){assert.equal(Tagging,'bane-kind=kept');assert.ok(allow('s3:PutObject',Key,'kept'));assert.ok(allow('s3:PutObjectTagging',Key,'kept'));assert.ok(allow('s3:PutObjectTagging',Key,'orphan'));}
+      const ordinary=`workspaces/${w}/raw/receipt.eml`;assert.ok(allow('s3:PutObject',ordinary,'raw'));assert.equal(allow('s3:PutObject',ordinary,'kept'),false);assert.equal(allow('s3:PutObjectTagging',ordinary,'orphan'),false);
+    }
   });
 
   test('attachment keys built by the code are authorized by the hosted, BYO and self-hosted IAM policies, and nothing wider (N1)',async()=>{
@@ -11833,6 +11922,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.mail_receive_limits (LIKE public.mail_receive_limits INCLUDING ALL);
           CREATE FUNCTION \${schema}.mail_route_input(text,jsonb,boolean,jsonb) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb';
           CREATE TABLE \${schema}.mailbox_regions (LIKE public.mailbox_regions INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_kept_policy_v1 (LIKE public.mail_kept_policy_v1 INCLUDING ALL);
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);
