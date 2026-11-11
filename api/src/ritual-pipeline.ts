@@ -69,6 +69,8 @@ export function compileConfig(c: Config): Programs {
         diagnostics.push(at(name, `No sender list named ${list.name}.`, guess ? `Did you mean "${guess}"?` : 'Add it to senderLists, for example { "vip": ["ceo@example.com", "@partner.com"] }.', list.line, list.column));
       }
   const known = Object.keys(rituals).concat(c.rituals.map(r => r.key));
+  const prompts=new Set(c.attachments.flatMap(b=>Object.values(rituals[b.ritual]?.omens??{}).map(o=>o.prompt)));
+  if(prompts.size>10&&(c.evaluateDomains.length||c.evaluateRoutes.length))diagnostics.push(at('','Opted-in attachments may reference at most ten distinct Omen questions in total.'));
   for (const a of c.attachments) {
     if (!known.includes(a.ritual)) { const guess = closest(a.ritual, known); diagnostics.push(at(a.ritual, `Attachment to ${a.target} names ritual ${a.ritual}, which does not exist.`, guess ? `Did you mean ${guess}?` : undefined)); continue; }
     if (c.attachments.filter(x => x.target === a.target && x.ritual === a.ritual).length > 1) diagnostics.push(at(a.ritual, `${a.ritual} is attached to ${a.target} twice.`));
@@ -221,6 +223,7 @@ export async function ritualPipeline(
   email: Email,
   recorded?: Record<string, number>,
   preview = false,
+  receiptCreatedAt?: string,
 ) {
   const base = matchRouting(input, email.envelope.to, email.spam.junk, email.auth.dmarc.toUpperCase(), email.receivedAt),
     p = input.programs!;
@@ -275,7 +278,11 @@ export async function ritualPipeline(
         const fallback = enabled ? e.onError : e.type === 'boolean' ? false : 0;
         if (n === undefined) {
           if (fallback === 'defer') {
-            if (!preview) throw new JobDeferred(new Date(Date.now() + 60000).toISOString());
+             if (!preview) {
+               const deadline=Date.parse(receiptCreatedAt??'')+30*60000;
+               if (Date.now()<deadline && prompts.length<=10)throw new JobDeferred(new Date(Math.min(deadline,Date.now()+60000)).toISOString());
+               fail('Omen unavailable after the deferral limit.');return false;
+             }
             d.warnings.push('Omen requested deferral.');
           }
         }

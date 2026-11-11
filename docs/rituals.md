@@ -138,7 +138,7 @@ if (result.urgent) endpoints.oncall({ text: email.subject })
 
 - Questions are literal text, fixed when you save, so a message cannot change what is asked. Answers are plain data: use them in any condition.
 - Jev sees the subject, sender, authentication verdicts and up to 8,000 characters of visible text, framed as untrusted evidence. It answers only the declared questions with a closed schema.
-- Omens are asked only for receiving domains or routes opted in with `setOmenOptIns`. Elsewhere, and when Jev cannot answer, a score is `0` and a boolean is `false`, or the `onError` value you set (`"defer"` waits and retries the message).
+- Omens are asked only for opted-in receiving domains or routes. Their attachments may reference at most ten distinct questions across the plan. When Jev cannot answer, the configured `onError` applies. `"defer"` retries for up to 30 minutes from receipt creation, then marks that recipient’s message as junk with `ritual-error`.
 - One call per message answers every question across every ritual (up to ten). Dry runs reuse the stored answers or the `scores` you pass, and never call Jev.
 
 ### Sender lists
