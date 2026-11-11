@@ -1,8 +1,8 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
-import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
+import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'bane.demo.v1'
@@ -448,6 +448,29 @@ function parseSnapshot(stored: string): DemoState | undefined {
   } catch { return undefined }
 }
 
+// The demo's copy of the API's route tiers: exact or owned address, local pattern, plus base, catch-all, domain default.
+const glob = (pattern: string, address: string) => new RegExp(`^${pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(address)
+function demoRoute(state: DemoState, address: string): RoutedRecipient {
+  const routes = (state.mailRoutes ??= demoRoutes()).routes.filter(route => route.enabled), boxes = state.mailboxes ??= demoMailboxes().mailboxes
+  const hooks = state.mailboxWebhooks ??= demoMailboxAccess().webhooks, base = address.replace(/\+[^@]*@/, '@')
+  const at = (addr: string) => {
+    const route = routes.find(r => r.match === addr), owner = boxes.find(box => box.address === addr || box.aliases.includes(addr))
+    return route ? { tier: 'exact' as const, route: route.id, to: route.to } : owner ? { tier: 'address' as const, route: null, to: [owner.id] } : undefined
+  }
+  const pattern = (catchAll: boolean) => routes.filter(r => r.match.includes('*') && r.match.startsWith('*@') === catchAll && glob(r.match, address)).sort((a, b) => b.match.replace(/\*/g, '').length - a.match.replace(/\*/g, '').length)[0]
+  const local = pattern(false), any = pattern(true), parent = address === base ? undefined : at(base)
+  const hit = at(address) ?? (local && { tier: 'pattern' as const, route: local.id, to: local.to }) ?? (parent && { ...parent, tier: 'subaddress' as const }) ?? (any && { tier: 'catchall' as const, route: any.id, to: any.to }) ?? { tier: 'default' as const, route: null, to: [] as string[] }
+  const refs = hit.to === 'drop' ? [] : hit.to
+  return { address, tier: hit.tier, route: hit.route, inboxes: refs.filter(id => boxes.some(box => box.id === id)), webhooks: refs.filter(id => hooks.some(hook => hook.id === id && !hook.paused)),
+    dropped: hit.to === 'drop', junk: false, domainDefault: mailboxDomains(state).find(domain => address.endsWith('@' + domain.name))?.catchAll ?? 'store', warnings: refs.filter(id => hooks.some(hook => hook.id === id && hook.paused)).map(id => `${id} is unavailable: it was deleted, has expired or is paused.`) }
+}
+function checkDemoRoute(state: DemoState, input: { match: string; to: MailRoute['to'] }, except?: string) {
+  const match = input.match.trim().toLowerCase().replace(/^@/, '*@')
+  if (!/^[^@\s]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(match)) invalid('match', 'Use an address (support@acme.com), a local-part pattern (reply+*@acme.com) or a catch-all (*@acme.com).')
+  if (!mailboxDomains(state).some(domain => match.endsWith('@' + domain.name))) invalid('match', `${match.split('@')[1]} is not a receiving domain in this workspace.`)
+  if ((state.mailRoutes ??= demoRoutes()).routes.some(route => route.match === match && route.id !== except)) throw new ApiError(`A route already matches ${match}. Add the destinations to that route instead.`, 'ROUTE_CONFLICT', { match: 'A route already matches this.' })
+  return match
+}
 export function createMockApi(): BaneApi {
   let state: DemoState | undefined
   let storage: Storage | undefined
@@ -1013,6 +1036,25 @@ export function createMockApi(): BaneApi {
       deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
       rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
       webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),
+    },
+    routing: {
+      routes: signal => run(signal, false, s => { const state = s.mailRoutes ??= demoRoutes(); return { version: state.version, routes: [...state.routes].sort((a, b) => a.match.localeCompare(b.match)) } }),
+      createRoute: (input, signal) => run(signal, true, s => {
+        const route: MailRoute = { id: id('rte'), key: null, match: checkDemoRoute(s, input), to: input.to, enabled: input.enabled ?? true, subaddresses: true, note: '', createdAt: now() }
+        const state = s.mailRoutes ??= demoRoutes(); state.routes.push(route); state.version++; return route
+      }),
+      updateRoute: (routeId, patch, signal) => run(signal, true, s => {
+        const state = s.mailRoutes ??= demoRoutes(), route = find(state.routes, routeId, 'Route')
+        Object.assign(route, patch, patch.match === undefined ? {} : { match: checkDemoRoute(s, { match: patch.match, to: patch.to ?? route.to }, route.id) }); state.version++; return { ...route }
+      }),
+      deleteRoute: (routeId, signal) => run(signal, true, s => { const state = s.mailRoutes ??= demoRoutes(); state.routes.splice(state.routes.indexOf(find(state.routes, routeId, 'Route')), 1); state.version++ }),
+      test: (input, signal) => run(signal, false, s => {
+        const raw = input.raw ? new TextDecoder().decode(Uint8Array.from(atob(input.raw), c => c.charCodeAt(0))) : ''
+        const header = (name: string) => new RegExp(`^${name}:\\s*(.*)$`, 'im').exec(raw)?.[1]?.trim() ?? null
+        const to = input.to ?? [...new Set([header('To'), header('Cc')].flatMap(value => value?.match(/[^\s<>,"]+@[^\s<>,"]+/g) ?? []).map(value => value.toLowerCase()))]
+        if (!to.length) throw new ApiError('Supply a recipient, or a message with To or Cc addresses.', 'MISSING_RECIPIENTS')
+        return { version: (s.mailRoutes ??= demoRoutes()).version, unsaved: false, message: raw ? { from: header('From'), subject: header('Subject') } : null, recipients: to.map(address => demoRoute(s, address)) }
+      }),
     },
     webhooks: {
       list: signal => run(signal, false, s => s.webhooks.map(webhook => ({ ...webhook, headers: webhook.headers ?? [] }))),

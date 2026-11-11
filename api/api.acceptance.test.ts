@@ -1603,6 +1603,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.deepEqual(await otherState(),{sending_state:'pending',receiving_state:'active',receiving_lost:false});assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receivingIssue.code,'proof_stale');
             answer=otherProof;await pace();await assert.rejects(verifyOther(),JobDeferred);assert.deepEqual(await otherState(),{sending_state:'pending',receiving_state:'active',receiving_lost:false});
             answer=proof.value;
+            // Exercise legacy auto-creation deliberately. New hosts now keep unmatched mail.
+            for(const [user,domainId] of [[a,other.id],[b,created.id]] as const){const path=`/v1/inbound/domains/${domainId}`,headers={'x-bane-environment':'live'};assert.equal(ok(await local('GET',path,undefined,user.cookie,headers)).catchAll,'store');ok(await local('PATCH',path,{catchAll:'create_address'},user.cookie,headers));}
             const sesMessageId=unique('incoming'),trace=`Received: from sender.invalid by inbound-smtp.${region}.amazonaws.com with SMTP id ${sesMessageId}\r\n for <${blind}>; Tue, 3 Nov 2026 00:00:00 +0000\r\n`;
             const body=Buffer.from(`Received: from original.invalid by sender.invalid; Tue, 3 Nov 2026 00:00:00 +0000\r\nFrom: sender@example.org\r\nTo: ${custom}\r\nMessage-ID: <${sesMessageId}@example.org>\r\nSubject: Incoming\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nMessage\r\n--part\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n/wA=\r\n--part--\r\n`);
             const raw=Buffer.concat([Buffer.from(trace),body]);objects.set(`${bucket}/staging/${sesMessageId}`,Buffer.concat([Buffer.from(`Bcc: ${blind},\r\n ${dropped}\r\nResent-Bcc: ${blind}\r\n`),raw]));
@@ -2270,15 +2272,15 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 65);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 31);
+    assert.equal(catalog.tools.length, 68);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 34);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
       'importContacts', 'importTemplateImage', 'previewCampaign', 'previewCampaignAudience', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'listInboxes','getInbox','createInbox','deleteInbox','waitForMessage','listInboxMessages','readInboxMessage','getInboxAttachment','updateInboxMessage',
-      'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
+      'getRouting', 'testRouting', 'listRoutingVersions', 'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -2440,6 +2442,13 @@ describe('Hosted MCP OAuth and tools', () => {
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
+      const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
+      for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
+      const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
+      error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
+      assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,url);ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+    });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
@@ -2604,7 +2613,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const updated=await success('saveInboundAddress',{action:'update',addressId:a.id,body:{displayName:'Customer support'},confirm:true});assert.deepEqual(updated.aliases,['help@example.com']);assert.deepEqual(updated.metadata,{purpose:'support'});
       assert.equal((await success('getInboundAddress',{addressId:a.id})).id,a.id);
       const domain = ok(await get(`/domains/${domainId}`));
-      assert.equal(domain.addressCount,2); assert.equal(domain.catchAll,'create_address'); assert.ok(!('mailboxCount' in domain));
+      assert.equal(domain.addressCount,2); assert.equal(domain.catchAll,'store'); assert.ok(!('mailboxCount' in domain));
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'store'},'live')).catchAll,'store');
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'create_address'},'live')).catchAll,'create_address');
       const key=ok(await post('/keys',{name:'support only',addressIds:[a.id],permissions:['read','send']}),201);const h={authorization:`Bearer ${key.secret}`};
@@ -5043,11 +5052,29 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const {readFile,readdir}=await import('node:fs/promises'),dir=new URL('./migrations/',import.meta.url);
   for(const file of (await readdir(dir)).filter(f=>/^\d+_[a-z_]+\.sql$/.test(f)).sort()) {
     const source=await readFile(new URL(file,dir),'utf8');
+    if(file==='120_addresses.sql'){
+      await db.query(`INSERT INTO mailbox_domains(id,domain_id,workspace_id,name,region,status) VALUES ('r-old','r-old','default','upgrade.example','us-east-2','active'),('r-big','r-big','default','big.example','us-east-2','active');
+        INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,created_at) VALUES ('oldest','default','r-old','a@upgrade.example','["sales*@upgrade.example"]',now()-interval '2 days'),('narrow','default','r-old','b@upgrade.example','["sales-eu*@upgrade.example"]',now());
+        INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules) SELECT 'big'||i,'default','r-big',i||'@big.example',(SELECT jsonb_agg(j||repeat('x',192)||'*@big.example') FROM generate_series(1,20) j) FROM generate_series(1,64) i`);
+    }
+    if(source.startsWith('-- bane:batched\n')){
+      let cursor='';do{cursor=(await db.query(source,[cursor])).rows[0].cursor;}while(cursor);
+      await t.test('routing M1/M2: upgrading overlapping legacy rules preserves the legacy store and skips oversize domains',async()=>{
+        assert.equal((await db.query(`SELECT mail_route_input('default','["sales-eu-x@upgrade.example"]') p`)).rows[0].p,null);
+        assert.equal((await db.query("SELECT FROM mail_routing_state")).rowCount,0);assert.equal((await db.query("SELECT FROM mail_route_plan_issues WHERE domain_id='r-big' AND bytes>262144")).rowCount,1);
+        assert.equal((await db.query("SELECT FROM mail_routing_plans WHERE scope='r-old'")).rowCount,1);
+      });
+      await db.query("DELETE FROM mailboxes WHERE domain_id IN('r-old','r-big'); DELETE FROM mailbox_domains WHERE id IN('r-old','r-big'); DELETE FROM mailbox_write_lanes WHERE workspace_id='default' AND lane='address'");continue;
+    }
     // As the migrator: a marked file is one online index build per line, each outside a transaction.
     if(source.startsWith('-- bane:no-transaction\n')){for(const statement of source.split('\n').filter(line=>line.trim() && !line.startsWith('--')))await db.query(statement);continue;}
     // Only the trigram index needs the harness's existing public extension/opclass.
     await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
-    await db.query(source);await db.query('COMMIT');
+    await db.query(source);
+    if(file==='120_webhooks_validate.sql')await t.test('routing M3: constraint scans hold no exclusive lock on receiving tables',async()=>{
+      assert.equal((await db.query("SELECT FROM pg_locks WHERE pid=pg_backend_pid() AND relation IN('mailbox_webhooks'::regclass,'mail_receipts'::regclass,'mailboxes'::regclass,'mailbox_webhook_deliveries'::regclass) AND mode='AccessExclusiveLock'")).rowCount,0);
+    });
+    await db.query('COMMIT');
   }
   await db.query('CREATE TABLE opensend_migrations (LIKE public.bane_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.bane_migrations WHERE name NOT LIKE \'092_%\'');
   await t.test('secretless migration preserves ciphertext and the legacy ledger; explicit rotation rewraps it',async mt=>{
@@ -8075,6 +8102,306 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         }
         assert.equal((await db.query("SELECT count(DISTINCT thread_id)::int AS n FROM mail_messages WHERE workspace_id=$1 AND ses_message_id IN ('parent-count','reply-count')",[wid])).rows[0].n,1);
       });
+      const call = async (method: string, path: string, data?: Json, status = 200) => ok(await local(method, path, data), status);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'support@receive.example', key: 'support' }), 201);
+      error(await local('POST', '/v1/inbound/addresses', { address: 'help@receive.example', key: 'support' }), 409, 'KEY_TAKEN');
+      const hook = await call(
+        'POST',
+        '/v1/inbound/webhooks',
+        { url: 'https://hooks.example.org/support', addressIds: [box.id], key: 'support-hook' },
+        201,
+      );
+      const route = (match: string, to: string[] | 'drop', key?: string) => call('POST', '/v1/routing/routes', { match, to, key }, 201);
+      const dry = (to: string[]) => call('POST', '/v1/routing/test', { envelope: { to }, verdicts: { spam: 'PASS', dmarc: 'PASS' } });
+      const ingest = async (mid: string, to: string[], scans: Json = cleanScans) => {
+        raw.set(mid, Buffer.from(`From: Agent <a@example.org>\r\nSubject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
+        await submit(mid, to, 'Mail', scans);
+        await run('mailbox.ingest', { sesMessageId: mid });
+        await expandFixtureOutbox(runtime, wid);
+        return (
+          await db.query(
+            'SELECT m.id,r.routing FROM mail_receipts r LEFT JOIN mail_messages m USING(workspace_id,ses_message_id) WHERE r.workspace_id=$1 AND r.ses_message_id=$2',
+            [wid, mid],
+          )
+        ).rows[0];
+      };
+      await t.test("routing: a workspace without routing keeps today's delivery, events and statement counts", async () => {
+        const m = await ingest('route-legacy', [box.address]);
+        assert.equal(m.routing, null);
+        assert.deepEqual(
+          (await db.query('SELECT type FROM mailbox_events WHERE message_id=$1 ORDER BY seq', [m.id])).rows.map((r) => r.type),
+          ['message.stored', 'message.received'],
+        );
+      });
+      const both = await route(box.address, ['inbox:support', 'webhook:support-hook'], 'support');
+      await t.test('routing H1: all twelve owned addresses receive the message, independent of the extra-destination limit',async()=>{
+        const owners=[];for(let i=0;i<12;i++)owners.push(await call('POST','/v1/inbound/addresses',{address:`owner${i}@receive.example`},201));
+        const recipients=owners.map(b=>b.address),msg=await ingest('many-owners',recipients);
+        assert.equal((await db.query('SELECT FROM mailbox_messages WHERE message_id=$1',[msg.id])).rowCount,12);
+        assert.equal((await db.query("SELECT FROM mailbox_events WHERE message_id=$1 AND type='message.received'",[msg.id])).rowCount,12);
+        await route('extra-a@receive.example',owners.slice(0,10).map(b=>b.id));await route('extra-b@receive.example',owners.slice(9).map(b=>b.id));
+        const cap=await ingest('extra-limit',['extra-a@receive.example','extra-b@receive.example']);assert.equal((await db.query("SELECT FROM mail_unrouted WHERE message_id=$1 AND address='extra-b@receive.example'",[cap.id])).rowCount,1);
+      });
+      await t.test('routing M4: preview bounds distinct destination references before resolving them',async()=>{
+        const routes=Array.from({length:101},(_,i)=>({match:`a${i}@receive.example`,to:Array.from({length:10},(_,j)=>`inbox:k${10*i+j}`)}));
+        error(await local('POST','/v1/routing/test',{envelope:{to:[box.address]},config:{routes}}),422,'DESTINATION_LIMIT');
+        error(await local('POST','/v1/routing/test',{envelope:{to:[box.address]},config:{routes:[{match:box.address,to:['unknown:type']}]}}),422,'VALIDATION_FAILED');
+        error(await local('GET','/v1/routing/audit?cursor=bad'),422,'INVALID_CURSOR');
+      });
+      await t.test('routing: warm claim input cost (local PostgreSQL, one host)',async it=>{
+        const elapsed=async(stmt:string,params:unknown[])=>{const times:number[]=[];for(let i=0;i<9;i++){const start=performance.now();await db.query(stmt,params);if(i)times.push(performance.now()-start);}return times.sort((a,b)=>a-b)[3]!.toFixed(3);};
+        const read='SELECT mail_route_input($1,$2::jsonb)';it.diagnostic(`Warm route input median, ms: baseline=${await elapsed('SELECT NULL::jsonb',[])} off=${await elapsed(read,['never-enrolled','["support@receive.example"]'])} on=${await elapsed(read,[wid,'["support@receive.example"]'])}`);
+      });
+      let received: Json;
+      await t.test(
+        'routing: support@ route delivers to the inbox and the webhook once, deduplicated with an addressIds subscription',
+        async () => {
+          received = await ingest('route-both', [box.address]);
+          assert.equal(
+            (await db.query('SELECT FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2', [received.id, box.id])).rowCount,
+            1,
+          );
+          assert.equal(
+            (
+              await db.query("SELECT FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2", [
+                hook.id,
+                received.id,
+              ])
+            ).rowCount,
+            1,
+          );
+        },
+      );
+      await t.test('routing: dry run on a stored message equals the routing ingest recorded on its receipt', async () => {
+        const replay = await call('POST', '/v1/routing/test', { messageId: received.id });
+        assert.deepEqual({ version: replay.version, recipients: replay.recipients }, received.routing);
+        assert.deepEqual(replay.message, { from: 'a@example.org', subject: 'Test route-both' });
+      });
+      const inbound = await call(
+        'POST',
+        '/v1/inbound/webhooks',
+        {
+          key: 'legacy',
+          url: 'https://hooks.example.org/mail',
+          format: 'inbound',
+          name: 'Helpdesk',
+          eventTypes: [],
+          retryAttempts: 0,
+          timeoutSeconds: 2,
+        },
+        201,
+      );
+      const compat = await route('*@receive.example', [inbound.id], 'catch-all'),
+        pattern = await route('support+*@receive.example', [hook.id]),
+        specific = await route('support+exact@receive.example', []);
+      await t.test('routing: tiers pick exact over local pattern over plus-base over host catch-all over domain default', async () => {
+        const to = ['support+exact', 'support+other', 'unknown'].map((local) => local + '@receive.example');
+        assert.deepEqual(
+          (await dry(to)).recipients.map((r: Json) => r.route),
+          [specific.id, pattern.id, compat.id],
+        );
+        await call('PATCH', '/v1/routing/routes/' + pattern.id, { enabled: false });
+        assert.equal((await dry([to[1]!])).recipients[0].tier, 'subaddress');
+        await call('PATCH', '/v1/routing/routes/' + compat.id, { enabled: false });
+        assert.equal((await dry([to[2]!])).recipients[0].tier, 'default');
+        await call('PATCH', '/v1/routing/routes/' + compat.id, { enabled: true });
+      });
+      let compatMail: Json;
+      await t.test('routing: a catch-all webhook route keeps unknown-recipient mail and never auto-creates addresses', async () => {
+        compatMail = await ingest('route-unknown', ['unknown@receive.example']);
+        assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1', [compatMail.id])).rowCount, 1);
+        assert.equal(
+          (await db.query("SELECT FROM mailbox_addresses WHERE workspace_id=$1 AND address='unknown@receive.example'", [wid])).rowCount,
+          0,
+        );
+      });
+      await t.test("routing: inbound-format webhook matches inbound's documented payload and sends legacy and HMAC headers", async (it) => {
+        const d = (
+          await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2", [
+            inbound.id,
+            compatMail.id,
+          ])
+        ).rows[0];
+        assert.ok(d);
+        it.mock.method(S3Client.prototype, 'send', async () => ({
+          Body: { transformToString: async () => raw.get('route-unknown')!.toString() },
+        }));
+        const { mailboxEventJobs } = await import('./src/mailbox-events.js');
+        let body = '',
+          h = new Headers();
+        runtime.webhookFetch = async (_url, init) => {
+          body = String(init.body);
+          h = new Headers(init.headers);
+          return { status: 204 };
+        };
+        await mailboxEventJobs['mailbox.webhook']!(runtime, { deliveryId: d.id }, { id: 'render', workspaceId: wid, attempts: 1 });
+        const p = JSON.parse(body);
+        assert.equal(p.event, 'email.received');
+        assert.equal(p.email.id, compatMail.id);
+        assert.equal(p.email.recipient, 'unknown@receive.example');
+        assert.equal(p.email.parsedData.raw, raw.get('route-unknown')!.toString());
+        assert.equal(p.email.cleanedContent.text, 'Hello\n');
+        assert.equal(p.email.spam.isJunk, false);
+        assert.deepEqual(p.email.envelopeRecipients, ['unknown@receive.example']);
+        assert.match(p.email.threadId, /^thr_/);
+        assert.equal(p.email.messageId, '<route-unknown@example.org>');
+        assert.equal(p.email.parsedData.headers.subject, 'Test route-unknown');
+        assert.deepEqual(p.endpoint, { id: inbound.id, name: 'Helpdesk', type: 'webhook' });
+        assert.equal(h.get('x-webhook-verification-token'), inbound.verificationToken);
+        assert.equal(h.get('x-webhook-event'), p.event);
+        assert.equal(h.get('x-endpoint-id'), p.endpoint.id);
+        assert.equal(h.get('x-webhook-timestamp'), p.timestamp);
+        assert.equal(h.get('x-email-id'), compatMail.id);
+        // The SDK verifier accepts the exact body and rejects any change to it.
+        const { verifyWebhook } = await import('../sdk/src/webhooks.js');
+        assert.equal(await verifyWebhook(body, h, inbound.secret), true);
+        assert.equal(await verifyWebhook(Buffer.from(body), Object.fromEntries(h), inbound.secret), true);
+        assert.equal(await verifyWebhook(body + ' ', h, inbound.secret), false);
+      });
+      await t.test('routing: webhook tests do not disclose endpoint credentials to override URLs; redelivery is fenced', async () => {
+        let signed = '';
+        runtime.webhookFetch = async (_, init) => {
+          signed = new Headers(init.headers).get('x-webhook-verification-token') ?? '';
+          return { status: 204 };
+        };
+        const path = `/v1/inbound/webhooks/${inbound.id}/test`;
+        assert.equal((await call('POST', path, {})).statusCode, 204);
+        assert.equal(signed, inbound.verificationToken);
+        error(await local('POST', path, { overrideUrl: 'https://127.0.0.1/' }), 422, 'INVALID_WEBHOOK_URL');
+        await call('POST', path, { overrideUrl: 'https://example.org/other' });
+        assert.ok(signed);
+        assert.notEqual(signed, inbound.verificationToken);
+        assert.equal((await call('POST', `/v1/inbound/messages/${compatMail.id}/redeliver`, { destination: inbound.id }, 202)).queued, 1);
+        assert.equal((await call('POST', `/v1/inbound/messages/${compatMail.id}/redeliver`, {}, 202)).queued, 0);
+      });
+      await t.test('routing M5/M7: bounded signed payload, HTTP-safe message ID, cooldown and shared manual budget',async it=>{
+        const mid=compatMail.id,delivery=(await db.query("SELECT id,generation FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>'messageId'=$3",[wid,inbound.id,mid])).rows[0];
+        const original='wide-雪'+String.fromCharCode(1)+'@example.org';await db.query("UPDATE mail_messages SET message_id=$2,text=repeat('abc',90000),size_bytes=700000 WHERE id=$1",[mid,original]);
+        let posted=false;runtime.webhookFetch=async(_url,init)=>{const h=new Headers(init.headers),b=String(init.body),p=JSON.parse(b);assert.equal(h.get('x-message-id'),null);assert.equal(p.email.messageId,`<${original}>`);assert.ok(Buffer.byteLength(b)<=512*1024);assert.ok(p.email.bodyTruncated);posted=true;return {status:204};};
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:delivery.id,generation:delivery.generation},{id:'bounded',workspaceId:wid,attempts:1});assert.ok(posted);
+        const path=`/v1/inbound/messages/${mid}/redeliver`;assert.equal((await call('POST',path,{},202)).queued,0);
+        await db.query("UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now()-interval '11 minutes' WHERE id=$1",[delivery.id]);
+        await db.query('UPDATE mailbox_manual_delivery_budget SET used=60 WHERE workspace_id=$1',[wid]);error(await local('POST',path,{}),429,'WEBHOOK_REDELIVERY_LIMIT');assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery.id])).rows[0].status,'delivered');
+      });
+      await t.test('routing: junk reaches only webhooks with junk include, as message.junk', async () => {
+        await call('PATCH', '/v1/inbound/policy', { spam: 'store' });
+        await call('PATCH', '/v1/routing/routes/support', { to: [box.id, hook.id, inbound.id] });
+        const m = await ingest('route-junk', [box.address], { ...cleanScans, spamVerdict: { status: 'FAIL' } });
+        assert.deepEqual(
+          (
+            await db.query("SELECT webhook_id,payload->>'type' AS type FROM mailbox_webhook_deliveries WHERE payload->>'messageId'=$1", [
+              m.id,
+            ])
+          ).rows,
+          [{ webhook_id: inbound.id, type: 'message.junk' }],
+        );
+      });
+      await t.test('routing: claimed ingest still uses two DB trips with routing on, three with files', async (it) => {
+        await db.query('DELETE FROM jobs');
+        const { processJobs } = await import('./src/jobs.js');
+        const queries = it.mock.method(pg.Client.prototype, 'query');
+        for (const [i, src] of ['parent-count', 'reply-count'].entries()) {
+          const mid = 'route-budget-' + i;
+          raw.set(mid, Buffer.from(raw.get(src)!.toString().replaceAll(src, mid)));
+          await submit(mid, [box.address]);
+          const n = queries.mock.callCount();
+          assert.equal(await processJobs(runtime, mailboxIngestJobs, 1, 1), 1);
+          assert.equal(queries.mock.callCount() - n, 2 + (i ? 3 : 2));
+          assert.ok(
+            (await db.query('SELECT routing FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2', [wid, mid])).rows[0].routing,
+          );
+          await db.query('DELETE FROM jobs');
+        }
+      });
+      await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
+        const read = await local('GET', '/v1/routing?format=config'),
+          cfg = ok(read),
+          apply = (config: Json, version: number, preview = false) =>
+            local('PUT', '/v1/routing' + (preview ? '?dryRun=true' : ''), config, 'live', { 'if-match': `"${version}"` });
+        assert.equal(read.headers.get('etag'), `"${cfg.version}"`);
+        assert.deepEqual(ok(await apply(cfg, cfg.version)), { version: cfg.version, diff: [], warnings: [] });
+        const changed = { routes: [...cfg.routes, { key: 'drop', match: 'drop@receive.example', to: 'drop' }] };
+        assert.equal(ok(await apply(changed, cfg.version, true)).diff.length, 1);
+        assert.equal((await call('GET', '/v1/routing')).version, cfg.version);
+        error(await apply(changed, cfg.version - 1), 409, 'VERSION_CONFLICT');
+        const applied = await apply(changed, cfg.version);
+        assert.equal(ok(applied).version, cfg.version + 1);
+        assert.equal(applied.headers.get('etag'), `"${cfg.version + 1}"`);
+        error(await local('PATCH', '/v1/routing/routes/drop', { note: 'stale' }, 'live', { 'if-match': String(cfg.version) }), 409, 'VERSION_CONFLICT');
+      });
+      await t.test('routing: an all-drop message settles in the claim and settlement statements, without S3', async (it) => {
+        await db.query('DELETE FROM jobs');
+        const { processJobs } = await import('./src/jobs.js');
+        raw.set('route-drop', Buffer.from('Subject: drop\r\n\r\nBody'));
+        await submit('route-drop', ['drop@receive.example']);
+        const queries = it.mock.method(pg.Client.prototype, 'query'),
+          s3 = it.mock.method(S3Client.prototype, 'send');
+        assert.equal(await processJobs(runtime, mailboxIngestJobs, 1, 1), 1);
+        assert.equal(queries.mock.callCount(), 2);
+        assert.equal(s3.mock.callCount(), 0);
+        const m = (
+          await db.query(
+            'SELECT m.id,r.status,r.routing FROM mail_receipts r LEFT JOIN mail_messages m USING(workspace_id,ses_message_id) WHERE r.workspace_id=$1 AND r.ses_message_id=$2',
+            [wid, 'route-drop'],
+          )
+        ).rows[0];
+        assert.deepEqual([m.id, m.status, m.routing.recipients[0].dropped], [null, 'processed', true]);
+      });
+      await t.test('routing: dry runs try pasted MIME, unsaved routes and earlier versions without saving anything', async () => {
+        const saved = await call('GET', '/v1/routing'),
+          draft = await call('GET', '/v1/routing?format=config');
+        draft.routes.push({ match: 'billing@receive.example', to: ['inbox:support'] });
+        const pasted = Buffer.from('From: Ana <Ana@Example.org>\r\nTo: billing@receive.example\r\nCc: Sales <sales@receive.example>\r\nSubject: Invoice\r\n\r\nHi').toString('base64');
+        const preview = await call('POST', '/v1/routing/test', { raw: pasted, config: draft });
+        assert.deepEqual([preview.unsaved, preview.version, preview.message], [true, saved.version, { from: 'ana@example.org', subject: 'Invoice' }]);
+        assert.deepEqual(
+          preview.recipients.map((r: Json) => [r.address, r.tier, r.inboxes]),
+          [['billing@receive.example', 'exact', [box.id]], ['sales@receive.example', 'catchall', []]],
+        );
+        assert.deepEqual(await call('GET', '/v1/routing'), saved);
+        const first = await call('POST', '/v1/routing/test', { envelope: { to: [box.address] }, version: 0 });
+        assert.deepEqual([first.version, first.recipients[0].tier, first.recipients[0].inboxes], [0, 'address', [box.id]]);
+        error(await local('POST', '/v1/routing/test', { envelope: { to: [box.address] }, config: { routes: [{ match: box.address, to: ['inbox:missing'] }] } }), 422, 'UNKNOWN_DESTINATION');
+        error(await local('POST', '/v1/routing/test', { raw: Buffer.from('Subject: no recipients\r\n\r\n').toString('base64') }), 422, 'MISSING_RECIPIENTS');
+      });
+      await t.test('routing: restoring version N recreates routes and plans; audit records the actor and diff', async () => {
+        const { version } = await call('GET', '/v1/routing');
+        await call('DELETE', '/v1/routing/routes/' + compat.id);
+        assert.equal((await dry(['new@receive.example'])).recipients[0].tier, 'default');
+        const restored = await call('POST', `/v1/routing/versions/${version}/restore`, {});
+        assert.equal(restored.version, version + 2);
+        assert.equal((await dry(['new@receive.example'])).recipients[0].route, compat.id);
+        const { data } = await call('GET', '/v1/routing/audit');
+        assert.equal(data[0].before, null);
+        assert.equal(data[0].after.id, compat.id);
+        assert.deepEqual([data[0].version, data[0].note, data[0].actor.type], [version + 2, `Restore of v${version}`, 'dashboard']);
+        assert.ok(data[0].actor.id);
+        const versions = await call('GET', '/v1/routing/versions?limit=2');
+        assert.deepEqual(versions.data.map((v: Json) => v.version), [version + 2, version + 1]);
+        assert.equal(versions.nextCursor, String(version + 1));
+      });
+      await t.test('routing M6: version pages survive expired ancestors; restore refuses pruned history',async()=>{
+        const current=await call('GET','/v1/routing');const proof=await call('GET',`/v1/routing/versions/${current.version}?limit=1`);assert.equal(proof.routes.length,1);assert.ok(proof.nextCursor);const next=await call('GET',`/v1/routing/versions/${current.version}?limit=1&cursor=${proof.nextCursor}`);assert.notEqual(next.routes[0].id,proof.routes[0].id);
+        await db.query("UPDATE mail_routing_versions SET created_at=now()-interval '366 days' WHERE workspace_id=$1 AND version=1",[wid]);await db.query('SELECT mail_prune_route_versions()');assert.equal((await db.query('SELECT FROM mail_routing_audit WHERE workspace_id=$1 AND version=1',[wid])).rowCount,0);
+        error(await local('POST','/v1/routing/versions/1/restore',{}),410,'VERSION_EXPIRED');const retained=await call('GET',`/v1/routing/versions/${current.version}?limit=100`);assert.deepEqual(retained.routes.map((r:Json)=>r.id).sort(),current.routes.map((r:Json)=>r.id).sort());
+      });
+      await t.test('routing: deleted or expired destinations fall back to keep, with a trace warning', async () => {
+        await call('PATCH', '/v1/routing/routes/support', { to: [box.id] });
+        await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 second' WHERE id=$1", [box.id]);
+        const m = await ingest('route-expired', [box.address]);
+        assert.deepEqual(m.routing.recipients[0].inboxes, []);
+        assert.match(m.routing.recipients[0].warnings[0], /unavailable/);
+        assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1', [m.id])).rowCount, 1);
+      });
+      await t.test('routing: deleting a referenced destination returns 409 unless detached', async () => {
+        error(await local('DELETE', '/v1/inbound/addresses/' + box.id), 409, 'REFERENCED');
+        const { version } = await call('GET', '/v1/routing');
+        await call('DELETE', '/v1/inbound/addresses/' + box.id + '?detach=true');
+        assert.deepEqual((await call('GET', '/v1/routing/routes/' + both.id)).to, []);
+        // Restoring a version that still listed the deleted inbox leaves it out and says so.
+        const restored = await call('POST', `/v1/routing/versions/${version}/restore`, {});
+        assert.match(restored.warnings.join(' '), new RegExp(`Removed ${box.id} from support@receive.example`));
+      });
     });
   });
 
@@ -10788,6 +11115,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);
           CREATE TABLE \${schema}.mail_receipts (LIKE public.mail_receipts INCLUDING ALL);
           CREATE TABLE \${schema}.mail_receive_limits (LIKE public.mail_receive_limits INCLUDING ALL);
+          CREATE FUNCTION \${schema}.mail_route_input(text,jsonb) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb';
           CREATE TABLE \${schema}.mailbox_regions (LIKE public.mailbox_regions INCLUDING ALL);
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);

@@ -60,6 +60,17 @@ try {
     }
     // Marked files contain one restartable concurrent index build per line. Separate query
     // messages matter: sending all the DDL together creates an implicit transaction in pg.
+    if (source.startsWith('-- bane:batched\n')) {
+      // Each page commits before the next page starts. A restart replays the idempotent pages.
+      await client.query("SET lock_timeout='2s'; SET statement_timeout='60s'");
+      let cursor='';
+      for (;;) {
+        const next:string|null=(await client.query(source,[cursor])).rows[0].cursor;
+        if(next===null)break;if(next===cursor)throw new Error(`Stuck backfill cursor in ${name}`);cursor=next;
+      }
+      await client.query('INSERT INTO bane_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
+      await client.query('RESET lock_timeout; RESET statement_timeout');continue;
+    }
     if(source.startsWith('-- bane:no-transaction\n')) {
       await client.query("SET lock_timeout='2s'; SET statement_timeout='10min'");
       for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {

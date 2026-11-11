@@ -216,6 +216,16 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
     return c.json({...messageView(row,row.addressIds,row.isRead),html:q.includeHtml==='true'?row.html:null,attachments},200);
   });
+  // Persistent API-key URLs in webhook payloads; presign only after workspace-level authorization.
+  app.get('/v1/inbound/messages/:messageId/parts/:part',async c=>{
+    const v=messageScope(c,'true'),mid=c.req.param('messageId'),part=c.req.param('part');
+    const [f]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename}).from(messages).innerJoin(mailAttachments,and(eq(mailAttachments.messageId,messages.id),eq(mailAttachments.workspaceId,v.workspaceId))).where(and(accessible(v,{}),eq(messages.id,mid),eq(mailAttachments.id,part),sql`${messages.verdicts}->>'virus'='PASS'`));
+    if(!f?.region)throw new ApiError(404,'NOT_FOUND','Attachment not found.');return c.redirect((await signedUrl(c.env,v.workspaceId,'att',f.region,f.bucket,f.key,f.filename)).url,307);
+  });
+  app.get('/v1/inbound/messages/:messageId/raw',async c=>{
+    const v=messageScope(c,'true'),mid=c.req.param('messageId');const [m]=await c.env.db.select({region:messages.region,bucket:messages.rawBucket,key:messages.rawKey}).from(messages).where(and(accessible(v,{}),eq(messages.id,mid),sql`${messages.verdicts}->>'virus'='PASS' AND least(${messages.createdAt},${messages.receivedAt})>now()-interval '90 days'`));
+    if(!m?.region||!m.bucket||!m.key)throw new ApiError(404,'NOT_FOUND','Raw message not found.');return c.redirect((await signedUrl(c.env,v.workspaceId,'raw',m.region,m.bucket,m.key,mid+'.eml')).url,307);
+  });
   app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
     request:{params:z.object({messageId:Id,attachmentId:Id}),query:AddressFilter},responses:{200:response(z.object({url:z.string(),expiresAt:z.string()}).openapi('InboundAttachmentDownload')),...errors}}),async c=>{
     const v=access(c,'read'),p=c.req.valid('param'),q=c.req.valid('query');

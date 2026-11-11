@@ -144,3 +144,28 @@ A trial merge of `feat/routing` into this branch (2026-11-11) leaves `mailbox-in
 ### Review erasure benchmark
 
 With both GC foreign keys indexed before rollout, `mail_gc_batch(1000)` removed 1,000 messages, message-ID rows and empty threads in **26.9 ms** beside 50,000 unrelated messages/thread summaries, and **31.6 ms** beside 200,000. Same local synthetic harness, one wire statement per batch. The populated fixture is gated behind `BANE_BENCH=1`. This is database time, not a claim about R2 deletion latency.
+
+## Route-enabled receiving (phase 1)
+
+The acceptance fixture runs the real queue claim and settlement against PostgreSQL, with synthetic SES envelopes and a mocked S3 transport. An exact route to an inbox and a webhook that is also subscribed to that address produces **one** membership and **one** delivery. A dry run of a stored message uses the same matcher, and the test compares its result with `mail_receipts.routing`.
+
+| Stage | Plain message | With files | Every recipient dropped |
+|---|---:|---:|---:|
+| Admission | 1 | 1 | 1 |
+| Claim, including route input | 1 | 1 | 1 |
+| Claimed handler (byte debit, optional attachment journal, store) | **2** | **3** | **0** |
+| Fenced job settlement (carries the receipt trace when dropped) | 1 | 1 | 1 |
+| Claim through settlement | **4** | **5** | **2** |
+| S3 calls | unchanged | unchanged | **0** |
+
+All four columns are asserted (`routing: claimed ingest still uses two DB trips with routing on, three with files` and `routing: an all-drop message settles in the claim and settlement statements, without S3`). No subscriptions are expanded and no webhook bodies are rendered in the ingest lane; the webhook job renders them from the immutable message row (one indexed read, plus one S3 GET when raw MIME is included). `mail_route_input` returns NULL for a workspace without routing state, which keeps the six-argument store. Migration 120 checks for possible legacy plus-base dependencies at explicit opt-in without reading stored message content. The existing domain catch-all column is **not** backfilled.
+
+Dry runs (`POST /v1/routing/test`) with unsaved routes or an earlier version apply them through the real save path in a transaction that is always rolled back, then read the same claim input. They take the workspace's address lane for the length of that transaction, as any routing change does.
+
+**Not measured yet:** the design's latency targets on a 100k-ingest queue (claim ≤ +0.05 ms with routing on, store hold ≤ +10%, a 300-domain routing write). They need the 100k audit fixture, so they are not part of the acceptance suite or `BANE_BENCH=1`.
+
+**Not versioned yet:** webhook delivery settings (format, junk, include, timeout, retries) and domain catch-all settings. Restoring a version restores routes only; the restore description says so.
+
+The companion inboxes branch changes storage and adds lifecycle/quota handling to `mail_store_incoming_v2`. When integrating the branches, keep its R2 object access, held/retired gates and membership counters in **both** paths, and run the combined fixture. The six-argument and seven-argument stores here are for the address schema at `b0dbc95`, not a substitute for those gates.
+
+Review follow-up, warm local PostgreSQL: median single `SELECT mail_route_input(...)` round trip (one unmeasured warmup, eight observations, one host and recipient) was **0.039 ms off**, **0.476 ms on**, versus **0.035 ms** for `SELECT NULL::jsonb`. The cached PL/pgSQL early return makes unconfigured lookup negligible in this fixture. **Configured lookup is still over the +0.05 ms target.** These are isolated lookup timings, not whole-claim measurements on the 100k queue.

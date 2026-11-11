@@ -6,7 +6,9 @@ type ObjectValue = Record<string, any>;
 export interface McpStepResult { status: number; requestId: string | null; response: any; image?: { data: string; mimeType: string }; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
 export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly inbox?: 'read'|'create'|'modify'|'send'; readonly untrustedContent?:boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue, allowWrites: boolean) => McpPlan; }
-const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
+const EXCLUDED = new Set(['applyRouting','createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
+// POST operations that change nothing: no confirm argument, read-only hint.
+const READ_ONLY_POSTS = new Set(['testRouting']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
@@ -51,7 +53,8 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
     properties[p.name] = p.schema;
     if (p.required || p.in === 'path') required.push(p.name);
   }
-  if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.name.toLowerCase() !== 'idempotency-key'))) invalid('Unsupported API parameter location.');
+  // Optional headers such as If-Match are not tool arguments; a required one would make the tool unusable.
+  if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.required && p.name.toLowerCase() !== 'idempotency-key'))) invalid('Unsupported API parameter location.');
   if (operation.operationId === 'replyToInboundThread' && !operation.requestBody) return undefined;
   if (operation.requestBody) {
     const body = reference(spec, operation.requestBody);
@@ -398,6 +401,9 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   inbound(custom('enableInboundDomain', 'Enable receiving for the confirmed domain ID. Checks SES verification and MX before queuing the receipt rule and related resources. Does not change DNS or override a conflicting mail provider. Read getInboundDomain after the 202 response to verify status=active.', {
     type: 'object', properties: { id: domainId, confirm }, required: ['id', 'confirm'], additionalProperties: false,
   }, true, args => ({ steps: [{ operation: enable, args: { id: args.id, confirm: args.confirm, body: { force: false } } }] }), enable.tool.outputSchema));
+  inbound(alias(need('getRouting'), 'getRouting', "Read the workspace's inbound routes and routing version. Mail to an address an inbox owns goes to that inbox without a route; an explicit route for it replaces that. format=config returns an editable copy that refers to keyed inboxes and webhooks as inbox:<key> and webhook:<key>."));
+  inbound(alias(need('testRouting'), 'testRouting', 'Preview where mail would go. Nothing is delivered or saved. Supply envelope.to, a base64 raw message or a stored messageId; add config to try unsaved routes or version to try an earlier one. Each recipient reports the tier that matched, the route ID, the inboxes and webhooks, and any skipped destinations with the reason. MCP cannot change routing: propose the config and ask the user to apply it in the dashboard.'));
+  inbound(alias(need('listRoutingVersions'), 'listRoutingVersions', 'List routing versions newest first, with who made each change and how many routes it touched. Use getRouting for the current routes.'));
   for (const name of ['listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents']) inbound(need(name));
   inbound(actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail.', { create: need('createInboundAddress'), update: need('updateInboundAddress') }));
   const threadSends: Record<string, McpOperation> = { start: need('createInboundThread') };
@@ -440,7 +446,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) invalid('Invalid OpenAPI operationId.');
       if (EXCLUDED.has(name) || (path === '/v1/api-keys' && method !== 'get')) continue;
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
-      const write = method !== 'get';
+      const write = method !== 'get' && !READ_ONLY_POSTS.has(name);
       if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
       const queryParameters = toolParameters(spec, item as ObjectValue, operation).filter(p => p.in === 'query').map(p => p.name as string);
       const input = inputSchema(spec, item as ObjectValue, operation, write);

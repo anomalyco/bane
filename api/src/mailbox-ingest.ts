@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { receivedMailStore, withMailObjects } from './mail-objects.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
+import { matchRouting, plusBase } from './routing-match.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
@@ -405,7 +406,6 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
-  const store=receivedMailStore(runtime,scope.workspaceId,receipt,s3,{messageId:messageRowId,sesMessageId});
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
   const quarantine=verdicts.virus!=='PASS'?'MAILBOX_VIRUS_QUARANTINED':spam && receipt.spamPolicy==='quarantine'?'MAILBOX_SPAM_QUARANTINED':null;
@@ -418,6 +418,23 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       return;
     } finally {s3.destroy();}
   }
+  const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
+  const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
+  const plan=receipt.routing && matchRouting(receipt.routing,receipt.recipients,spam,verdicts.dmarc??'',receivedAt);
+  // Every recipient dropped by route: settle with the job and its trace, without reading S3 or storing anything.
+  if(plan?.recipients.length && plan.recipients.every(r=>r.dropped)){
+    s3.destroy();
+    const recorded=sql`recorded AS (UPDATE mail_receipts SET status='processed',processed_at=now(),routing=mail_routing_trace(${JSON.stringify(plan)}::jsonb) FROM settled WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
+    if(job.recordWithSettlement)job.recordWithSettlement(recorded);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${recorded} SELECT 1`);return;
+  }
+  // An address-owned envelope can nevertheless route to another inbox or just a webhook.
+  // Only retain it under e/ if every kept recipient actually delivers to its own inbox alone.
+  const owners=receipt.routing?.owners;
+  const needsDefault=plan?.recipients.some(r=>{
+    const owner=owners?.[r.address]??owners?.[plusBase(r.address)];
+    return !r.dropped && (r.limited || r.webhooks.length>0 || r.inboxes.length!==1 || r.inboxes[0]!==owner?.id);
+  });
+  const store=receivedMailStore(runtime,scope.workspaceId,needsDefault?{...receipt,delivery:undefined}:receipt,s3,{messageId:messageRowId,sesMessageId});
   const readStarted=performance.now();
   let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;
   try {
@@ -454,8 +471,6 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const references = messageIdList(email?.references);
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
-  const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
-  const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
   const verifiedFrom = !!sesTimestamp && authenticatedFrom(email, from.address, notification.mail, verdicts);
   const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
 
@@ -490,7 +505,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: store.bucket, rawKey: store.rawKey, lifecycle: store.lifecycle,
         verdicts, spam, automated: automated(email, raw, from.address), status,
-      },attachments,verifiedFrom,!receipt.notification.stagingEtag,replyAuthorVerified(email,from.address,notification.mail,verdicts));
+      },attachments,verifiedFrom,!receipt.notification.stagingEtag,replyAuthorVerified(email,from.address,notification.mail,verdicts),plan);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };

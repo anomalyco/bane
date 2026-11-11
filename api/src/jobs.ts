@@ -8,6 +8,8 @@ import { failCampaign } from './states.js';
 import { storageBinding, ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
+/** An inbound webhook delivery gets its first attempt plus the webhook's retries (9 by default, today's 10 attempts). */
+export const mailboxWebhookAttempts = (hook?: Pick<ClaimedWebhook, 'retry_attempts'> | null) => 1 + (hook?.retry_attempts ?? WEBHOOK_ATTEMPTS - 1);
 const LOAD_ERROR_THRESHOLD = 6;
 export async function wakeWebhooks(runtime:Runtime,count:number) {
   if (count) try { await runtime.wake?.(count,'webhook'); } catch { log('warn',{code:'QUEUE_WAKE_FAILED',message:'Webhook jobs remain durable.'}); }
@@ -73,10 +75,10 @@ export const webhookClaimCtes = sql`hook_inputs AS MATERIALIZED (
   last_error=CASE WHEN h.url IS NULL THEN 'ENDPOINT_DELETED' ELSE 'ENDPOINT_PAUSED' END,updated_at=now()
   FROM hook_inputs h WHERE d.id=h.delivery_id AND d.workspace_id=h.workspace_id AND d.generation=h.generation AND (h.url IS NULL OR (h.paused AND NOT h.synthetic)))`;
 const hookJoin = sql`LEFT JOIN hook_inputs h ON h.job_id=j.id AND h.url IS NOT NULL AND (NOT h.paused OR h.synthetic)`;
-export const inboundHookClaim=sql`inbound_hooks AS MATERIALIZED (SELECT j.id AS job_id,d.id AS delivery_id,d.generation,d.webhook_id,d.payload,d.payload->>'id' AS event_id,w.url,w.encrypted_secret,w.encrypted_headers,
-  CASE WHEN w.paused THEN 'ENDPOINT_PAUSED' WHEN NOT(w.event_types ? (d.payload->>'type') AND (w.mailbox_ids IS NULL OR (d.payload->>'type'<>'message.stored' AND w.mailbox_ids ? (d.payload->>'addressId')))) THEN 'SUBSCRIPTION_CHANGED' END AS blocked
+export const inboundHookClaim=sql`inbound_hooks AS MATERIALIZED (SELECT j.id AS job_id,d.id AS delivery_id,d.generation,d.webhook_id,d.payload,d.payload->>'id' AS event_id,d.format,w.name,w.include,w.retry_attempts,w.timeout_seconds,w.url,w.encrypted_secret,w.encrypted_headers,
+  CASE WHEN w.paused THEN 'ENDPOINT_PAUSED' WHEN d.payload->>'type'='message.junk' AND w.junk<>'include' THEN 'SUBSCRIPTION_CHANGED' WHEN NOT d.routed AND NOT((w.event_types ? (d.payload->>'type') OR (d.payload->>'type'='message.junk' AND w.event_types ? 'message.received')) AND (w.mailbox_ids IS NULL OR (d.payload->>'type'<>'message.stored' AND w.mailbox_ids ? (d.payload->>'addressId')))) THEN 'SUBSCRIPTION_CHANGED' END AS blocked
   FROM claimed j JOIN mailbox_webhook_deliveries d ON j.type='mailbox.webhook' AND d.workspace_id=j.workspace_id AND d.id=j.payload->>'deliveryId' AND d.status='pending' AND d.generation=coalesce((j.payload->>'generation')::int,0)
-  JOIN LATERAL (SELECT h.url,h.encrypted_secret,h.encrypted_headers,h.paused,h.event_types,h.mailbox_ids FROM mailbox_webhooks h WHERE h.workspace_id=d.workspace_id AND h.id=d.webhook_id FOR SHARE) w ON true),
+  JOIN LATERAL (SELECT h.url,h.encrypted_secret,h.encrypted_headers,h.paused,h.event_types,h.mailbox_ids,h.name,h.include,h.retry_attempts,h.timeout_seconds,h.junk FROM mailbox_webhooks h WHERE h.workspace_id=d.workspace_id AND h.id=d.webhook_id FOR SHARE) w ON true),
   inbound_parked AS (UPDATE mailbox_webhook_deliveries d SET status=CASE WHEN h.blocked='ENDPOINT_PAUSED' THEN 'paused' ELSE 'failed' END,last_error=h.blocked,updated_at=now() FROM inbound_hooks h WHERE h.blocked IS NOT NULL AND d.id=h.delivery_id AND d.generation=h.generation AND d.status='pending')`;
 export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM claimed j ${hookJoin}`;
 // Reserve before awaiting the claim, so overlapping drains in one isolate cannot both lease MIME work.
@@ -149,9 +151,9 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
       const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
-      const retry = error instanceof ApiError && error.retryable && (job.attempts < (hook ? WEBHOOK_ATTEMPTS : MAX_ATTEMPTS) || error.code === 'JOB_FINALIZATION_FAILED');
+      const retry = error instanceof ApiError && error.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || error.code === 'JOB_FINALIZATION_FAILED');
       const delay=Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
-      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(handlerPayload !== job.payload ? { payload: handlerPayload } : {}) }).where(fence));
+      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
       log('error', { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: error instanceof ApiError ? error.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
     } finally {
       activeJobs--;
@@ -168,7 +170,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const claimStarted = Date.now();
       // The claim already charged the attempt before the isolate died. Retire exhausted
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
-      const exhausted=sql`j.attempts >= CASE WHEN j.type IN ('operation.webhook','mailbox.webhook') THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
+      const exhausted=sql`j.attempts >= CASE WHEN j.type='mailbox.webhook' THEN coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int) WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
       const slots=pool==='webhooks'?0:Math.min(claimBatchSize,ingestSlots-ingestReserved);
       // Only the head of each class enters the preference sort. The expression matches
