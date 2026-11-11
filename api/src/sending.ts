@@ -6,6 +6,7 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNul
 import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
+import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, SuppressionEventData } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
@@ -1681,7 +1682,7 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
   }
   if (mail.actorKeyId.startsWith('mbk_')) {
     // Mailbox keys may send only as an address of a mailbox they are scoped to.
-    const [key] = await db.select().from(mailboxKeys).where(and(eq(mailboxKeys.id, mail.actorKeyId), eq(mailboxKeys.workspaceId, mail.workspaceId))).for('share');
+    const [key] = await db.select().from(mailboxKeys).where(and(eq(mailboxKeys.id, mail.actorKeyId), eq(mailboxKeys.workspaceId, mail.workspaceId),sql`mail_key_grant_allows(${mailboxKeys.workspaceId},${mailboxKeys.id},'key',${receivingPolicy(runtime.config)}::jsonb)`)).for('share');
     if (!key || key.revokedAt || !key.permissions.includes('send')) return false;
     const [owner] = await db.select({ mailboxId: mailboxAddresses.mailboxId }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, mail.workspaceId), eq(mailboxAddresses.address, mail.snapshot.from.toLowerCase())));
     return !!owner && (!key.mailboxIds || key.mailboxIds.includes(owner.mailboxId));
@@ -1693,7 +1694,7 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
       senderDomainAllowed(grant.domains, mail.snapshot.from.split('@')[1]!);
   }
   // Removed bootstrap origins fail closed; only durable API keys are accepted below.
-  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId))).for('share');
+  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId),sql`mail_key_grant_allows(${apiKeys.workspaceId},${apiKeys.id},'api_key',${receivingPolicy(runtime.config)}::jsonb)`)).for('share');
   // Shared readers allow parallel sends but conflict with revocation/permission updates through the durable attempt claim,
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
   return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && senderDomainAllowed(key.domains, mail.snapshot.from.split('@')[1]!);

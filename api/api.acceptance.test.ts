@@ -2548,6 +2548,37 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('R2: disabled OAuth client cancels queued sends from descendant keys, not independent keys',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,request,run})=>{
+      const {originAllowed}=await import('./src/sending.js');
+      const {token,consentId,clientId}=await oauthGrant(t,db,writableScope,request);
+      const parent=ok(await request('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R2 parent',permissions:['manage']}}}},rpcHeaders)).result.structuredContent.response;
+      const child=ok(await request('POST','/v1/api-keys',parent.secret,{name:'R2 child',permissions:['send']}),201);
+      const independent=ok(await local('POST','/v1/api-keys',{name:'R2 independent',permissions:['send']}),201);
+      for(const key of [parent,child,independent])secrets.add(key.secret);
+      const wid=runtime.config.workspaceId, allowed=(id:string,from='sender@example.com')=>originAllowed(runtime,runtime.db,{workspaceId:wid,actorKeyId:id,snapshot:{from}});
+      const queue=async(secret:string)=>ok(await request('POST','/v1/emails/send',secret,mail()),202).id;
+      // A send-capable API key does not need receiving consent, only its live management grant.
+      assert.equal(await allowed(child.id),true);
+      const first=await queue(child.secret);await run('email.dispatch');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[first])).rows[0].status,'accepted');
+      const second=await queue(child.secret),control=await queue(independent.secret);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      const domain=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'receive.example',$3,'active')",[domain,wid,REGION]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')",[wid,REGION]);
+      const box=ok(await local('POST','/v1/inbound/addresses',{address:'support@receive.example'}),201);
+      const mbk=ok(await request('POST','/v1/inbound/keys',parent.secret,{name:'R2 inbox',addressIds:[box.id],permissions:['read','send']}),201);secrets.add(mbk.secret);
+      assert.equal(await allowed(mbk.id,box.address),true);
+      const thread=ok(await request('POST','/v1/inbound/threads',mbk.secret,{addressId:box.id,to:['recipient@example.net'],subject:'R2 fixture',text:'Synthetic message'}),202);
+      const mailboxEmail=(await db.query('SELECT sending_email_id FROM mail_messages WHERE workspace_id=$1 AND id=$2',[wid,thread.id])).rows[0].sending_email_id;
+      await db.query('UPDATE oauth_client SET disabled=true WHERE client_id=$1',[clientId]);
+      for(const [id,from] of [[child.id,'sender@example.com'],[mbk.id,box.address]])assert.equal(await allowed(id,from),false);
+      await run('email.dispatch');
+      for(const emailId of [second,mailboxEmail])assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[emailId])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[control])).rows[0].status,'accepted');
+    });
+  });
+
   test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });

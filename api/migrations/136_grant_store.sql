@@ -1,18 +1,30 @@
 SET LOCAL lock_timeout='2s';
 -- Called inside the existing claim and store statements. A positive decision locks the identity
 -- and policy rows until that statement commits; the store must recheck a claim's decision.
-CREATE FUNCTION mail_receiving_grant(w text,gid text,policy jsonb) RETURNS boolean LANGUAGE sql VOLATILE AS $$
+CREATE FUNCTION mail_management_grant(w text,gid text,policy jsonb,needs_receiving boolean) RETURNS boolean LANGUAGE sql VOLATILE AS $$
  SELECT EXISTS(SELECT FROM oauth_consent c JOIN oauth_client k USING(client_id)
   JOIN oauth_client_resource cr USING(client_id) JOIN oauth_resource r ON r.identifier=cr.resource_id
   JOIN auth_user u ON u.id=c.user_id JOIN auth_account a ON a.user_id=u.id AND a.provider_id='google' AND a.account_id<>''
   JOIN workspace_members m ON m.user_id=u.id AND m.workspace_id=w AND m.role IN ('owner','admin')
   WHERE c.id=gid AND r.identifier=$3->>'resource' AND c.resources=ARRAY[r.identifier]
-  AND c.reference_id ~ '^mcp_v2_[0-9a-f-]{36}\|[^|]+(\|[^|]+)?\|receiving$'
-  AND coalesce(nullif(split_part(left(c.reference_id,-10),'|',3),''),'default')=w
-  AND 'bane:manage'=ANY(string_to_array(split_part(c.reference_id,'|',2),' ')) AND 'bane:manage'=ANY(c.scopes)
+  AND (NOT needs_receiving OR right(c.reference_id,10)='|receiving')
+  AND regexp_replace(c.reference_id,'\|receiving$','') ~ '^mcp_(v2_)?[0-9a-f-]{36}\|[^|]+(\|[A-Za-z0-9_.-]+)?$'
+  AND coalesce(nullif(split_part(regexp_replace(c.reference_id,'\|receiving$',''),'|',3),''),'default')=w
+  AND string_to_array(split_part(c.reference_id,'|',2),' ') <@ ARRAY['bane:read','bane:send','bane:manage','bane:live','opensend:read','opensend:send','opensend:manage','opensend:live','offline_access']
+  AND string_to_array(split_part(c.reference_id,'|',2),' ') && ARRAY['bane:manage','opensend:manage'] AND c.scopes && ARRAY['bane:manage','opensend:manage']
   AND NOT coalesce(k.disabled,false) AND NOT coalesce(r.disabled,false)
-  AND (k.scopes IS NULL OR 'bane:manage'=ANY(k.scopes)) AND (r.allowed_scopes IS NULL OR 'bane:manage'=ANY(r.allowed_scopes))
+  AND (k.scopes IS NULL OR k.scopes && ARRAY['bane:manage','opensend:manage']) AND (r.allowed_scopes IS NULL OR r.allowed_scopes && ARRAY['bane:manage','opensend:manage'])
+  AND (starts_with(c.reference_id,'mcp_v2_') OR (string_to_array(split_part(c.reference_id,'|',2),' ') && ARRAY['bane:live','opensend:live'] AND c.scopes && ARRAY['bane:live','opensend:live'] AND (k.scopes IS NULL OR k.scopes && ARRAY['bane:live','opensend:live']) AND (r.allowed_scopes IS NULL OR r.allowed_scopes && ARRAY['bane:live','opensend:live'])))
   AND u.email_verified AND u.email<>'' AND (($3->>'hosted')::boolean OR $3->'emails' ? lower(u.email) OR $3->'domains' ? nullif(lower(u.google_hosted_domain),'')) FOR SHARE);
+$$;
+CREATE FUNCTION mail_receiving_grant(w text,gid text,policy jsonb) RETURNS boolean LANGUAGE sql VOLATILE AS $$
+ SELECT mail_management_grant(w,gid,policy,true);
+$$;
+
+-- An independent key has no owner. Only derived keys enter the locking OAuth check.
+CREATE FUNCTION mail_key_grant_allows(w text,kid text,object_kind text,policy jsonb) RETURNS boolean LANGUAGE sql VOLATILE AS $$
+ SELECT NOT EXISTS(SELECT FROM mail_grant_objects g WHERE g.workspace_id=w AND g.resource=kid AND g.kind=object_kind
+   AND NOT mail_management_grant(w,g.grant_id,policy,object_kind='key'));
 $$;
 
 ALTER FUNCTION mail_store_incoming(jsonb,jsonb,jsonb,jsonb,boolean,boolean,jsonb) RENAME TO mail_store_ritual_plan;

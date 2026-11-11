@@ -513,7 +513,8 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
   return sql`input AS MATERIALIZED (${input}
     ), key_state AS MATERIALIZED (
       SELECT id, workspace_id, permissions, domains FROM api_keys WHERE revoked_at IS NULL
-        AND (workspace_id, id) IN (SELECT workspace_id, actor_key_id FROM input) FOR SHARE
+        AND (workspace_id, id) IN (SELECT workspace_id, actor_key_id FROM input)
+        AND mail_key_grant_allows(workspace_id,id,'api_key',${receivingPolicy(runtime.config)}::jsonb) FOR SHARE
     ), campaign_state AS MATERIALIZED (
       SELECT id, workspace_id, state FROM sending_campaigns WHERE (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
     ), dest AS (
@@ -537,6 +538,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
           WHEN starts_with(x.actor_key_id, 'mbk_') THEN EXISTS (
             SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.address = x.sender
             WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id AND k.revoked_at IS NULL AND k.permissions ? 'send'
+              AND mail_key_grant_allows(k.workspace_id,k.id,'key',${receivingPolicy(runtime.config)}::jsonb)
               AND (k.mailbox_ids IS NULL OR k.mailbox_ids ? b.mailbox_id) FOR SHARE OF k, b)
           ELSE EXISTS (SELECT 1 FROM key_state k WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id
             AND (k.permissions ? 'manage' OR k.permissions ? 'send') AND (k.domains = '[]'::jsonb OR EXISTS (
