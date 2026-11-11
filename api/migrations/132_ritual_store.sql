@@ -144,9 +144,12 @@ BEGIN
   routed AS (SELECT DISTINCT ON (ref.id,act->>'ritualAction') ref.id,e.seq,e.workspace_id,r.addr,r.item->>'route' AS route,act FROM hook_routes r CROSS JOIN jsonb_array_elements_text(r.item->'webhooks') ref(id)
     LEFT JOIN LATERAL jsonb_array_elements(r.item->'actions'->ref.id) act ON true
     JOIN events e ON e.type IN ('message.received','message.junk') ORDER BY ref.id,act->>'ritualAction',EXISTS(SELECT FROM subscribed s WHERE s.id=ref.id AND s.seq=e.seq) DESC,(r.item->'inboxes' ? e.mailbox_id) DESC NULLS LAST,e.seq,r.n),
-  subscriptions AS (SELECT workspace_id,seq,jsonb_agg(CASE WHEN jsonb_array_length(plan->'grants')>0 THEN (CASE WHEN jsonb_typeof(hook)='object' THEN hook ELSE jsonb_build_object('id',hook,'subscription',true) END)||jsonb_build_object('grants',plan->'grants') ELSE hook END) AS hooks FROM (
+  subscriptions AS (SELECT h.workspace_id,seq,jsonb_agg(CASE WHEN g.ids IS NOT NULL THEN (CASE WHEN jsonb_typeof(hook)='object' THEN hook ELSE jsonb_build_object('id',hook,'subscription',true) END)||jsonb_build_object('grants',g.ids) ELSE hook END) AS hooks FROM (
     SELECT s.workspace_id,s.seq,to_jsonb(s.id) AS hook FROM subscribed s WHERE NOT EXISTS(SELECT FROM routed r WHERE r.id=s.id AND s.type IN ('message.received','message.junk'))
-    UNION ALL SELECT workspace_id,seq,jsonb_build_object('id',id,'recipient',addr,'route',route)||coalesce(act,'{}'::jsonb) FROM routed) h GROUP BY workspace_id,seq),
+    UNION ALL SELECT workspace_id,seq,jsonb_build_object('id',id,'recipient',addr,'route',route)||coalesce(act,'{}'::jsonb) FROM routed) h
+    LEFT JOIN LATERAL (SELECT jsonb_agg(DISTINCT gid) AS ids FROM (
+      SELECT grant_id AS gid FROM mail_grant_objects WHERE workspace_id=h.workspace_id AND ((kind='endpoint' AND resource=coalesce(hook->>'id',hook#>>'{}')) OR (kind='route' AND resource=hook->>'route'))
+      UNION ALL SELECT jsonb_array_elements_text(hook->'grants')) deps) g ON true GROUP BY h.workspace_id,seq),
   queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.fanout',workspace_id,jsonb_object_agg(seq::text,hooks) FROM subscriptions GROUP BY workspace_id RETURNING 1),
   owned_files AS (DELETE FROM mail_candidate_uploads u USING stored s WHERE u.batch=split_part(file_items->0->>'storageKey','/',-2) AND u.workspace_id=s.workspace_id AND u.message_id=s.id AND u.keys[1]=file_items->0->>'storageKey')
   SELECT (SELECT count(*)::int FROM queued),(SELECT jsonb_agg(jsonb_build_object('bid',a.mailbox_id,'mid',a.message_id,'seq',e.seq)) FROM added a JOIN locked_inboxes l ON l.inbox_id=a.mailbox_id LEFT JOIN events e ON e.mailbox_id=a.mailbox_id AND e.message_id=a.message_id AND e.type IN ('message.received','message.junk','message.held')) INTO queued_count,published;

@@ -6,7 +6,6 @@ BEGIN
  IF OLD.kind='endpoint' THEN UPDATE mailbox_webhooks SET paused=true WHERE workspace_id=OLD.workspace_id AND id=OLD.resource;
  ELSIF OLD.kind='route' THEN UPDATE mail_routes SET enabled=false WHERE workspace_id=OLD.workspace_id AND id=OLD.resource RETURNING domain_id INTO domain; IF domain IS NOT NULL THEN PERFORM mail_compile_routes(OLD.workspace_id,domain); END IF;
  ELSIF OLD.kind='key' THEN UPDATE mailbox_keys SET revoked_at=now() WHERE workspace_id=OLD.workspace_id AND id=OLD.resource;
- ELSIF OLD.kind='rituals' THEN UPDATE mail_ritual_configs SET programs=NULL WHERE workspace_id=OLD.workspace_id;
  ELSIF OLD.kind='api_key' THEN UPDATE api_keys SET revoked_at=coalesce(revoked_at,now()) WHERE workspace_id=OLD.workspace_id AND id=OLD.resource;
  END IF;
  RETURN NULL;

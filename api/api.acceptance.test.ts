@@ -2496,18 +2496,22 @@ describe('Hosted MCP OAuth and tools', () => {
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getContext'||x.name==='applyRituals'||x.name==='createAgentToken'));
       const denied=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const search=await rpc(token,'tools/call',{name:'search_tools',arguments:{query:'applyRituals'}});assert.deepEqual(search.structuredContent.tools,[]);
-      await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT FROM mail_grant_objects WHERE grant_id=$1 AND kind='rituals'",[consentId])).rowCount,1);
+      await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const slack={confirm:true,idempotencyKey:'mcp-endpoint-1',body:{type:'slack',name:'mcp-alerts',url:'https://hooks.slack.com/services/T0/B0/mcpfixture'}};const endpoint=await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack});assert.equal(endpoint.isError,false,redact(endpoint));assert.equal(endpoint.structuredContent.response.status,'ready');
       assert.equal((await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack})).structuredContent.response.call,'endpoints["mcp-alerts"]');
       const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('createEndpoint')&&listed.includes('testEndpoint')&&!listed.includes('applyRituals'),listed.join());
       const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.response.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
+      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',id,jsonb_build_object('resource',resources[1],'hosted',true)) AS ok FROM oauth_consent WHERE id=$1",[consentId])).rows[0].ok;
+      assert.equal(await live(),true);
+      await assert.rejects(db.query(await readFile(new URL('./migrations/119_mvp_ownership_preflight.sql',import.meta.url),'utf8')),/MVP_OWNERSHIP_PREFLIGHT/);
       secrets.add(parent.secret);grantKeys.push(parent.id);
       const child=ok(await http('POST','/v1/api-keys',parent.secret,{name:'read fixture',permissions:['read']}),201);
       secrets.add(child.secret);grantKeys.push(child.id);
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
       await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
+      assert.equal(await live(),false);
       error(await http('POST','/v1/inbound/keys',parent.secret,{name:'receiving fixture'}),403,'ADMIN_REQUIRED');
       error(await http('POST','/v1/inboxes',parent.secret,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     });
@@ -7931,7 +7935,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const body=Buffer.from(`Bcc: private@else.example\r\nFrom: fixture@example.net\r\nMessage-ID: <${wireId}@fixture.example>\r\nSubject: Test\r\n${file?fileMime:'\r\n'+mid}`);raw.set(mid,body);
         const notification={notificationType:'Received',mail:{messageId:mid,source},receipt:{...cleanScans,...scans,timestamp:new Date().toISOString(),recipients:to,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}};
         assert.equal(await charged(1,()=>acceptInboundNotification(runtime,{message:notification,region:REGION,topicArn:topic})),1);
-        const ingest=(await runtime.db.execute<{i:import('./src/mailbox-ingest-input.js').IngestInput}>(sql`SELECT ${ingestInput(false,wid,mid)} i`)).rows[0].i;
+        const ingest=(await runtime.db.execute<{i:import('./src/mailbox-ingest-input.js').IngestInput}>(sql`SELECT ${ingestInput({...runtime.config,multiTenant:false},wid,mid)} i`)).rows[0].i;
         const shared={kind:'shared' as const,id:'fixture',aws_account_id:'111122223333',role_arn:'',external_id:''};
         const before=reads;await charged(ingest.delivery?.drop?1:file?3:2,()=>mailboxIngestJobs['mailbox.ingest']({...runtime,config:{...runtime.config,multiTenant:hosted}},{sesMessageId:mid},{id:'synthetic',workspaceId:wid,attempts:1,ingest:{...ingest,binding:byo?{...shared,kind:'byo',template_version:'v1',role_arn:'arn:aws:iam::111122223333:role/synthetic',external_id:'fixture'}:hosted?shared:null}}));
         if(ingest.delivery?.drop)assert.equal(reads,before);return (await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
@@ -8413,6 +8417,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const stored=await ingest('ritual-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});assert.deepEqual(replay.recipients,stored.routing.recipients);
         const payload=(await db.query('SELECT payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>\'messageId\'=$3',[wid,hook.id,stored.id])).rows[0].payload;assert.deepEqual(payload.ritualBody,{subject:'Test ritual-trace',recipient:box.address});
         assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[stored.id,box.id])).rows[0].labels.includes('handled'));await call('PUT',path,{});
+        const mixed={rituals:[...config.rituals,{key:'temporary',source:'export default function route(email){block()}'}],attachments:[{target:box.id,ritual:'temporary'},...config.attachments]};
+        await call('PUT',path,mixed);
+        // A deleted grant can no longer authorize its binding to a human script. The other
+        // binding still runs, and the unrelated outgoing action has no grant dependency.
+        await db.query("UPDATE mail_ritual_configs SET programs=jsonb_set(programs,'{owners}',(programs->'owners')||jsonb_build_object($2::text,'retired-fixture'::text)) WHERE workspace_id=$1",[wid,'attachment:'+box.id+':temporary']);
+        const independent=await ingest('mixed-ownership',[box.address]);
+        const independentAction=(await db.query("SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hook.id,independent.id])).rows[0].payload;
+        assert.equal(independentAction.ritualBody.subject,'Test mixed-ownership');assert.equal(independentAction.grants,undefined);
+        await call('PUT',path,{});
         await db.query('EXPLAIN INSERT INTO mailbox_webhook_deliveries DEFAULT VALUES ON CONFLICT(webhook_id,event_seq) DO NOTHING');
         await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
         const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});

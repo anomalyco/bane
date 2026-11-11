@@ -1,3 +1,4 @@
+import { receivingPolicy } from './mailbox-ingest-input.js';
 import {registerInboxConnection} from './inbox-connection.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
@@ -105,13 +106,20 @@ async function prepare(tx: DbExecutor, w: string, c: Config) {
 async function save(tx: DbExecutor, c: Ctx, w: string, config: Config, version: number,preview=false) {
   const p = await prepare(tx, w, config),
     next = version + 1;
-  if(!preview) await ownReceiving(tx,c,'rituals','workspace');
-  p.grants=(await tx.execute<{id:string}>(sql`SELECT grant_id AS id FROM mail_grant_objects WHERE workspace_id=${w} AND kind='rituals'`)).rows.map(r=>r.id);
+  const prior=(await tx.execute<{config:Config;owners:Record<string,string|null>}>(sql`SELECT config,owners FROM mail_ritual_configs WHERE workspace_id=${w} FOR UPDATE`)).rows[0];
+  const parts=(cfg:Config)=>new Map<string,string>([
+    ...cfg.rituals.map(r=>['ritual:'+r.key,r.source] as const),
+    ...cfg.attachments.map(b=>['attachment:'+b.target+':'+b.ritual,String(b.continue)] as const),
+    ...Object.entries(cfg.senderLists).map(([k,v])=>['list:'+k,JSON.stringify(v)] as const),
+    ...cfg.evaluateDomains.map(k=>['domain:'+k,k] as const),...cfg.evaluateRoutes.map(k=>['route:'+k,k] as const),
+  ]);
+  const before=prior&&parts(prior.config), grant=c.get('actor').grantId??null;
+  p.owners=Object.fromEntries([...parts(config)].map(([k,v])=>[k,before?.get(k)===v?prior?.owners[k]??null:preview?null:grant]));
   await tx.execute(
     sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},${next}) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version`,
   );
   await tx.execute(
-    sql`INSERT INTO mail_ritual_configs VALUES(${w},${next},${JSON.stringify(config)}::jsonb,${config.attachments.length ? JSON.stringify(p) : null}::jsonb) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version,config=excluded.config,programs=excluded.programs`,
+    sql`INSERT INTO mail_ritual_configs(workspace_id,version,config,programs,owners) VALUES(${w},${next},${JSON.stringify(config)}::jsonb,${config.attachments.length ? JSON.stringify(p) : null}::jsonb,${JSON.stringify(p.owners)}::jsonb) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version,config=excluded.config,programs=excluded.programs,owners=excluded.owners`,
   );
   const who = c.get('actor');
   await tx.execute(
@@ -351,7 +359,7 @@ export function registerRituals(app: App) {
         if (q.config) await save(tx, c, w, q.config, s.version,true);
         const input = (
           await tx.execute<{ p: RoutingInput }>(
-            sql`SELECT mail_route_input(${w},${JSON.stringify(email.envelope.to)}::jsonb,true) AS p`,
+            sql`SELECT mail_route_input(${w},${JSON.stringify(email.envelope.to)}::jsonb,true,${receivingPolicy(c.env.config)}::jsonb) AS p`,
           )
         ).rows[0].p;
         input.programs ??= compileConfig(RitualConfig.parse({}));

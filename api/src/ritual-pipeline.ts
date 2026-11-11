@@ -34,7 +34,7 @@ export const RitualConfig = z
   .strict();
 export type Config = z.infer<typeof RitualConfig>;
 export type Programs = {
-  grants?: string[];
+  owners?: Record<string,string|null>;
   rituals: Record<string, RitualIR>;
   attachments: Config['attachments'];
   senderLists: Config['senderLists'];
@@ -224,17 +224,22 @@ export async function ritualPipeline(
 ) {
   const base = matchRouting(input, email.envelope.to, email.spam.junk, email.auth.dmarc.toUpperCase(), email.receivedAt),
     p = input.programs!;
+  const owner=(key:string)=>p.owners?.[key]??null, active=(key:string)=>!owner(key)||input.grants?.includes(owner(key)!);
+  const bindingKey=(b:Config['attachments'][number])=>'attachment:'+b.target+':'+b.ritual;
+  const skipped=new Set<string>();
   const selected = base.recipients.map((r) => {
     const owner = input.owners?.[r.address] ?? input.owners?.[plusBase(r.address)];
     return r.dropped
       ? []
       : p.attachments
-          .filter((b) => b.target === r.address || b.target === owner?.id || r.inboxes.includes(b.target))
+           .filter((b) => b.target === r.address || b.target === owner?.id || r.inboxes.includes(b.target))
+           .filter(b=>{const ok=active('ritual:'+b.ritual)&&active(bindingKey(b));if(!ok)skipped.add(r.address);return ok;})
           .filter((b, i, all) => all.findIndex((x) => x.ritual === b.ritual) === i)
           .slice(0, 3);
   });
   const opted = (a: string, route: string | null) =>
-    p.evaluateDomains.includes(a.split('@')[1]) || (!!route && p.evaluateRoutes.includes(route));
+    (p.evaluateDomains.includes(a.split('@')[1])&&active('domain:'+a.split('@')[1])) || (!!route && p.evaluateRoutes.includes(route)&&active('route:'+route));
+  const lists=Object.fromEntries(Object.entries(p.senderLists).filter(([name])=>active('list:'+name)));
   let answers: Record<string, number> = recorded ?? {},
     steps = 0,
     bytes = 0;
@@ -256,11 +261,13 @@ export async function ritualPipeline(
       labels: [],
       junk: r.junk,
       dropped: r.dropped,
-      warnings: [],
+      warnings: skipped.has(r.address)?['Skipped a ritual whose receiving approval is no longer active.']:[],
     });
     let failed=false;
     const fail=(why:string)=>{failed=true;d.junk=true;d.refs=[];d.actions={};d.bodies={};d.labels=['ritual-error'];d.warnings.push(why);};
-    const execute = (ir: RitualIR, key: string, kind: string) => {
+    const execute = (ir: RitualIR, key: string, kind: string,binding:Config['attachments'][number]) => {
+      const deps=['ritual:'+key,bindingKey(binding),...(ir.lists??[]).map(l=>'list:'+l.name),...(Object.keys(ir.omens).length?['domain:'+r.address.split('@')[1],'route:'+r.route]:[])];
+      const grants=[...new Set(deps.filter(active).map(owner).filter((id):id is string=>id!==null))];
       const scores: Record<string, number | boolean> = Object.create(null);
       for (const [name, e] of Object.entries(ir.omens)) {
         const enabled = opted(r.address, r.route),
@@ -285,7 +292,7 @@ export async function ritualPipeline(
         junk: d.junk,
         now: email.receivedAt,
       };
-      const result = runRitual(ir, email, ctx, scores, p.senderLists, MESSAGE_STEPS - steps);
+      const result = runRitual(ir, email, ctx, scores, lists, MESSAGE_STEPS - steps);
       steps += result.steps;
       bytes += result.bytes;
       const error = result.error ?? (bytes > MESSAGE_BYTES ? 'Message output budget exceeded' : null);
@@ -304,7 +311,7 @@ export async function ritualPipeline(
           }
           const problem = payloadProblem(p.types?.[a.ref], a.body);
           if (problem) { d.warnings.push(`Skipped ${a.ref.replace(/^endpoint:/, 'endpoints.')}: ${problem}.`); continue; }
-          if(!a.ref.startsWith('inbox:')){const list=d.actions[id]??=[];if(list.length>=3){d.warnings.push(`Skipped ${a.ref}: at most three calls per endpoint.`);continue}list.push({ritualAction:[email.id,input.version,kind,key,index,r.address].join(':'),...(a.body===undefined?{}:{body:a.body})});}
+          if(!a.ref.startsWith('inbox:')){const list=d.actions[id]??=[];if(list.length>=3){d.warnings.push(`Skipped ${a.ref}: at most three calls per endpoint.`);continue}list.push({ritualAction:[email.id,input.version,kind,key,index,r.address].join(':'),...(grants.length?{grants}:{}),...(a.body===undefined?{}:{body:a.body})});}
           if (!d.refs.includes(id)) d.refs.push(id);
           if (a.body !== undefined) d.bodies[id] = a.body;
         } else if (['drop', 'block'].includes(a.op)) d.dropped = true;
@@ -318,7 +325,7 @@ export async function ritualPipeline(
       for (const b of selected[i]) {
         if (d.dropped || failed) break;
         if(steps>=MESSAGE_STEPS){fail('Message step budget exceeded');break;}
-        if (execute(p.rituals[b.ritual], b.ritual, 'ritual') && !b.continue) break;
+        if (execute(p.rituals[b.ritual], b.ritual, 'ritual',b) && !b.continue) break;
       }
     };
   });
@@ -343,7 +350,7 @@ export async function ritualPipeline(
       email.receivedAt,
       Date.now(),
       changes,
-    ),grants:[...new Set([...p.grants??[],...input.grants??[]])]},
+    )},
     trace,
     steps,
     answers,
@@ -352,7 +359,7 @@ export async function ritualPipeline(
 export type RitualDecision = {
   refs: string[];
   bodies: Record<string, unknown>;
-  actions:Record<string,{ritualAction:string;body?:unknown}[]>;
+  actions:Record<string,{ritualAction:string;body?:unknown;grants?:string[]}[]>;
   labels: string[];
   junk: boolean;
   dropped: boolean;

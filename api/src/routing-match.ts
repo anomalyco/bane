@@ -3,6 +3,7 @@ export type RouteTarget = string[] | 'drop';
 type Route = { id: string | null; match: string; to: RouteTarget; subaddresses?: boolean };
 export type RoutingInput = {
   grants?:string[];
+  routeOwners?:Record<string,string[]>;
   programs?:import('./ritual-pipeline.js').Programs|null;
   version: number;
   legacy: boolean;
@@ -37,17 +38,18 @@ export function addressGlob(pattern: string, address: string) {
 
 type Resolved = { tier: RouteTier; route: Route | null; to: RouteTarget };
 function resolve(input: RoutingInput, address: string): Resolved {
+  const active=(r:Route)=>!r.id||!input.routeOwners?.[r.id]?.some(id=>!input.grants?.includes(id));
   const host = input.hosts?.[address.split('@')[1]!],
     base = plusBase(address);
   const at = (addr: string): Resolved | undefined => {
     const route = input.exact?.[addr],
       owner = input.owners?.[addr];
-    if (route) return { tier: 'exact', route, to: route.to };
+    if (route && active(route)) return { tier: 'exact', route, to: route.to };
     // A send-only public address never receives.
     if (owner) return { tier: 'address', route: null, to: owner.public ? [] : [owner.id] };
   };
   const pattern = (catchAll: boolean) => {
-    const route = host?.patterns.find((r) => r.match.startsWith('*@') === catchAll && addressGlob(r.match, address));
+    const route = host?.patterns.find((r) => active(r) && r.match.startsWith('*@') === catchAll && addressGlob(r.match, address));
     return route && { tier: catchAll ? ('catchall' as const) : ('pattern' as const), route, to: route.to };
   };
   const exact = at(address);

@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
 import { actor, ApiError, errors, id, json, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
 import { ADDRESS, lockMailboxLane } from './mailbox-store.js';
 import { matchRouting, ROUTE_TIERS, type RoutingInput } from './routing-match.js';
@@ -679,7 +680,7 @@ export function registerRouting(app: App) {
       }
       if (!to?.length) throw fail(422, 'MISSING_RECIPIENTS', 'Supply envelope.to, a raw message with To or Cc addresses, or a messageId.', 'envelope');
       const read = async (tx: DbExecutor) =>
-        (await tx.execute<{ p: RoutingInput }>(sql`SELECT mail_route_input(${w},${JSON.stringify(to)}::jsonb,true) AS p`)).rows[0]!.p;
+        (await tx.execute<{ p: RoutingInput }>(sql`SELECT mail_route_input(${w},${JSON.stringify(to)}::jsonb,true,${receivingPolicy(c.env.config)}::jsonb) AS p`)).rows[0]!.p;
       let routing: RoutingInput,
         version: number;
       if (input.config || input.version !== undefined) {
