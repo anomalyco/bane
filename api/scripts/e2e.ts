@@ -709,7 +709,7 @@ async function prepare() {
   // refused before any DNS read or write; dashboard-only routes refuse bearer keys; stats are public.
   await expectDenial(() => api('chooseReceivingHost', { path, body: { host: `${prefix}.invalid`, confirm: false } }), 422, 'RECEIVING_HOST_INVALID');
   await expectDenial(() => api('sendDomainTestEmail', { path }), 401, 'AUTH_REQUIRED');
-  await expectDenial(() => api('getWorkspaceInvitation', { path: { id: `inv_${randomUUID().replace(/-/g, '')}` } }), 403, 'DASHBOARD_AUTH_REQUIRED');
+  await expectDenial(() => api('getWorkspaceInvitation', { path: { id: `inv_${randomUUID().replace(/-/g, '')}` } }), 401, 'AUTH_REQUIRED');
   const stats = await api('getPublicStats', {});
   check(typeof stats.available === 'boolean', 'public stats missing availability');
   return true;
