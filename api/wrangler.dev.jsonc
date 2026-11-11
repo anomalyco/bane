@@ -4,7 +4,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "bane-dev",
-  "account_id": "15d29c8639fd3733b1b5486a2acfd968",
+  "account_id": "d8e944f537ceef3f06a5bd3aec1d7a53",
   "workers_dev": false,
   "routes": [{ "pattern": "dev.bane.mx", "custom_domain": true }],
   "main": "src/worker.ts",
@@ -51,8 +51,8 @@
   // Run HTTP requests next to the bane-dev database (PlanetScale aws-us-east-2).
   "placement": { "region": "aws:us-east-2" },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
-  // Hyperdrive config `bane-dev` (caching disabled, 15 origin connections: the database allows 25).
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "67bf6907a42a483da37f4d2256847281" }],
+  // Hyperdrive config `bane-dev` in anomaly-dev (caching disabled, 15 origin connections: the database allows 25).
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "8c45a6d9fd9c48af94fd30baf40410fd" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "bane-dev-attachments" }, { "binding": "MAIL", "bucket_name": "bane-dev-mail" }],
   "queues": {
@@ -71,10 +71,10 @@
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
-  // Rate limiter namespaces are per account; 8793001 and 8793101 are taken.
+  // Rate limiter namespaces are per account; these are unused in anomaly-dev.
   "ratelimits": [
-    { "name": "ADMISSION", "namespace_id": "8793201", "simple": { "limit": 6000, "period": 60 } },
-    { "name": "SNS_CERT_MISSES", "namespace_id": "8793202", "simple": { "limit": 60, "period": 60 } }
+    { "name": "ADMISSION", "namespace_id": "8794001", "simple": { "limit": 6000, "period": 60 } },
+    { "name": "SNS_CERT_MISSES", "namespace_id": "8794002", "simple": { "limit": 60, "period": 60 } }
   ],
   "observability": {
     "enabled": true,

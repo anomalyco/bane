@@ -230,7 +230,10 @@ jobs:
       id-token: write
     env:
       STAGE: ${{ needs.authorize.outputs.stage }}
-      CF_ACCOUNT_ID: "15d29c8639fd3733b1b5486a2acfd968"
+      # dev.bane.mx and everything behind it lives in anomaly-dev; production stays
+      # in anomaly-production. Both the token issuer and every API call use this.
+      CF_ACCOUNT_ID: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}
+      CF_R2_ENDPOINT: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}.r2.cloudflarestorage.com
     steps:
       - &unfrozen
         name: Require production deploys to be unfrozen
@@ -305,7 +308,7 @@ jobs:
           # runtime user, host, port and database matter, so the password here is
           # a placeholder.
           case "$STAGE" in
-            dev) hyperdrive=67bf6907a42a483da37f4d2256847281 ;;
+            dev) hyperdrive=8c45a6d9fd9c48af94fd30baf40410fd ;;
             production) hyperdrive=556aba191add406eaa58a0e26eebb6b1 ;;
             *) echo "::error::unknown stage $STAGE"; exit 1 ;;
           esac
@@ -326,7 +329,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true' && github.event_name == 'workflow_dispatch' && inputs.init
         working-directory: infra/pulumi
         env:
-          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
         run: |
           set -euo pipefail
           if pulumi stack select "$STAGE" >/dev/null 2>&1; then
@@ -366,7 +369,7 @@ jobs:
           command: ${{ inputs.preview && 'preview' || 'up' }}
           stack-name: ${{ env.STAGE }}
           work-dir: infra/pulumi
-          cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=15d29c8639fd3733b1b5486a2acfd968.r2.cloudflarestorage.com&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+          cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
           pulumi-version: 3.274.1
           suppress-progress: true
 
@@ -385,6 +388,9 @@ jobs:
     environment: ${{ github.ref_name }}
     env:
       STAGE: ${{ needs.authorize.outputs.stage }}
+      # Must match the stage's cloudflare account: the token is minted there and
+      # verified against this id before Wrangler sees it.
+      CF_ACCOUNT_ID: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}
     steps:
       - *unfrozen
       - *stage-tip
@@ -429,6 +435,8 @@ jobs:
       - name: Mint a short-lived Cloudflare token
         id: cloudflare
         uses: ./.github/actions/cloudflare-token
+        with:
+          account-id: ${{ env.CF_ACCOUNT_ID }}
 
       - name: Fetch the stage secrets
         uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
