@@ -708,7 +708,7 @@ async function prepare() {
   // Onboarding endpoints, exercised without changing the shared fixture: a host outside the domain is
   // refused before any DNS read or write; dashboard-only routes refuse bearer keys; stats are public.
   await expectDenial(() => api('chooseReceivingHost', { path, body: { host: `${prefix}.invalid`, confirm: false } }), 422, 'RECEIVING_HOST_INVALID');
-  await expectDenial(() => api('sendDomainTestEmail', { path }), 403, 'DASHBOARD_SESSION_REQUIRED');
+  await expectDenial(() => api('sendDomainTestEmail', { path }), 401, 'AUTH_REQUIRED');
   await expectDenial(() => api('getWorkspaceInvitation', { path: { id: `inv_${randomUUID().replace(/-/g, '')}` } }), 403, 'DASHBOARD_AUTH_REQUIRED');
   const stats = await api('getPublicStats', {});
   check(typeof stats.available === 'boolean', 'public stats missing availability');
