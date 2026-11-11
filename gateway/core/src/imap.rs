@@ -1,6 +1,6 @@
 use crate::{
     fetch, search,
-    session::{Account, Action, Protocol, Reply, decode64},
+    session::{Action, Identity, Protocol, Reply, decode64},
     store::{Change, Date, Error, Flags, Folder, FolderOp, MailStore, Mode},
     wire,
 };
@@ -150,7 +150,7 @@ impl Imap {
     pub fn step(
         &mut self,
         bytes: &[u8],
-        account: &Account,
+        account: &dyn Identity,
         store: &mut dyn MailStore,
         now: Date,
     ) -> Reply {
@@ -298,6 +298,7 @@ impl Imap {
                 reference,
                 mailbox_wildcard,
             } => {
+                s.list_fresh()?;
                 let lsub = matches!(c, C::Lsub { .. });
                 let kind = if lsub { "LSUB" } else { "LIST" };
                 let pat = match mailbox_wildcard {
@@ -344,6 +345,7 @@ impl Imap {
             C::Select { mailbox, .. } | C::Examine { mailbox, .. } => {
                 self.selected = None;
                 let p = path(mailbox)?;
+                s.select(p)?;
                 let f = s.folder(p)?;
                 let ro = matches!(c, C::Examine { .. });
                 r.line(format!(
@@ -477,6 +479,21 @@ impl Imap {
                                 && let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
                             {
                                 let e = &f.entries[j];
+                                let loaded;
+                                let e = if items.iter().any(|x| {
+                                    !matches!(
+                                        x,
+                                        Item::Flags
+                                            | Item::Uid
+                                            | Item::InternalDate
+                                            | Item::Rfc822Size
+                                    )
+                                }) {
+                                    loaded = s.materialize(&p, e)?;
+                                    &loaded
+                                } else {
+                                    e
+                                };
                                 if let Err(err) = fetch::render(&mut r.bytes, i + 1, e, &items) {
                                     r.bytes.clear();
                                     r.line(format!("{t} NO {err}"));
@@ -549,18 +566,22 @@ impl Imap {
                         let f = s.folder(&p)?;
                         let mut text = String::from("* SEARCH");
                         for (i, (u, _)) in sel.view.iter().enumerate() {
-                            if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
-                                && criteria.as_ref().iter().all(|k| {
+                            if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid) {
+                                let loaded = s.materialize(&p, &f.entries[j])?;
+                                if criteria.as_ref().iter().all(|k| {
                                     search::matches(
                                         k,
-                                        &f.entries[j],
+                                        &loaded,
                                         i as u32 + 1,
                                         sel.view.len() as u32,
                                         sel.view.last().map_or(0, |v| v.0),
                                     )
-                                })
-                            {
-                                text.push_str(&format!(" {}", if *uid { *u } else { i as u32 + 1 }))
+                                }) {
+                                    text.push_str(&format!(
+                                        " {}",
+                                        if *uid { *u } else { i as u32 + 1 }
+                                    ))
+                                }
                             }
                         }
                         r.line(text)
@@ -623,7 +644,8 @@ impl Imap {
 }
 fn status(f: &Folder, s: &Status) -> String {
     let (name, n) = match s {
-        Status::Messages => ("MESSAGES", f.entries.len()),
+        Status::Messages => ("MESSAGES", f.counts.map_or(f.entries.len(), |c| c.0)),
+        Status::Unseen if f.counts.is_some() => ("UNSEEN", f.counts.map_or(0, |c| c.1)),
         Status::Unseen => (
             "UNSEEN",
             f.entries

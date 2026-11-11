@@ -2,6 +2,9 @@
 """One-command loopback acceptance gate. No production addresses, credentials or delivery."""
 
 import base64
+import hashlib
+import hmac
+import urllib.request
 import contextlib
 import imaplib
 import os
@@ -38,6 +41,148 @@ def run(args, **kw):
     return text
 
 
+REAL = {}
+
+
+def sql(query, user="postgres"):
+    return run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            REAL["pg"],
+            "psql",
+            "-XAt",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            user,
+            "-d",
+            "fixture",
+        ],
+        input=query.encode(),
+    ).strip()
+
+
+@contextlib.contextmanager
+def real_services():
+    if "--real" not in sys.argv:
+        yield
+        return
+    sys.argv.remove("--real")
+    api = ROOT.parent / "api"
+    run(["bun", "install", "--frozen-lockfile"], cwd=api)
+    with contextlib.ExitStack() as stack:
+
+        def container(args):
+            cid = run(["docker", "run", "-d", "--rm", *args]).strip().splitlines()[-1]
+            stack.callback(run, ["docker", "rm", "-f", cid])
+            return cid
+
+        def port(cid, n):
+            return int(run(["docker", "port", cid, str(n)]).strip().split(":")[-1])
+
+        pg = container(
+            [
+                "-e",
+                "POSTGRES_HOST_AUTH_METHOD=trust",
+                "-e",
+                "POSTGRES_DB=fixture",
+                "-p",
+                "127.0.0.1::5432",
+                "pgvector/pgvector:pg17",
+                "-c",
+                "shared_preload_libraries=pg_stat_statements",
+            ]
+        )
+        REAL["pg"] = pg
+        pw = secrets.token_hex(24)
+        s3 = container(
+            [
+                "-e",
+                "MINIO_ROOT_USER=fixture",
+                "-e",
+                "MINIO_ROOT_PASSWORD=" + pw,
+                "-p",
+                "127.0.0.1::9000",
+                "--entrypoint",
+                "sh",
+                "minio/minio:latest",
+                "-c",
+                "mkdir -p /data/mailgw; exec minio server /data",
+            ]
+        )
+        db = f"postgres://postgres@127.0.0.1:{port(pg, 5432)}/fixture"
+        until = time.monotonic() + 30
+        while sp.run(
+            ["docker", "exec", pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True
+        ).returncode:
+            assert time.monotonic() < until
+            time.sleep(0.1)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            http = s.getsockname()[1]
+        url = f"http://127.0.0.1:{http}"
+        secret = secrets.token_hex(32)
+        key = secrets.token_hex(32)
+        env = dict(
+            PATH=os.environ["PATH"],
+            HOME=os.environ["HOME"],
+            HOST="127.0.0.1",
+            PORT=str(http),
+            PUBLIC_URL=url,
+            BETTER_AUTH_SECRET=secret,
+            DATABASE_URL=db,
+            ENABLE_LIVE_SES="false",
+            S3_BUCKET="mailgw",
+            S3_ENDPOINT=f"http://127.0.0.1:{port(s3, 9000)}",
+            S3_ACCESS_KEY_ID="fixture",
+            S3_SECRET_ACCESS_KEY=pw,
+            MAILGW_API_TOKEN=key,
+        )
+        run(["node", "--import", "tsx", "src/migrate.ts"], cwd=api, env=env)
+        prk = hmac.digest(bytes(32), secret.encode(), "sha256")
+        pepper = hmac.digest(prk, b"bane:protocol-password:v1\x01", "sha256")
+        digest = hmac.new(pepper, PASS.encode(), "sha256").hexdigest()
+        sql(f"""CREATE EXTENSION pg_stat_statements; CREATE ROLE fixture_observer SUPERUSER LOGIN; CREATE ROLE fixture_listener LOGIN; GRANT CONNECT ON DATABASE fixture TO fixture_listener;
+        INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES('fixture','default','fixture','example.invalid','us-east-1','active','store');
+        INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES('default','us-east-1','mailgw','fixture');
+        INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES('mbx_fixture','default','fixture','{USER}','inbox','forever');
+        INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES('default','{USER}','mbx_fixture','primary'),('default','{ALIAS}','mbx_fixture','alias');
+        INSERT INTO inbox_state(inbox_id,workspace_id) VALUES('mbx_fixture','default');
+        INSERT INTO inbox_app_passwords VALUES('app_fixture','mbx_fixture','fixture','{digest}',ARRAY['smtp','imap']); UPDATE inbox_state SET protocol_passwords=1;
+        """)
+        log = stack.enter_context(open(ROOT / "target/real-api.log", "w"))
+        proc = sp.Popen(
+            ["node", "--import", "tsx", "src/server.ts"],
+            cwd=api,
+            env=env,
+            stdout=log,
+            stderr=log,
+        )
+        stack.callback(lambda: (proc.terminate(), proc.wait(timeout=10)))
+        run(
+            [
+                "curl",
+                "--retry",
+                "20",
+                "--retry-all-errors",
+                "--retry-delay",
+                "1",
+                "--fail",
+                url + "/health",
+            ]
+        )
+        REAL.update(
+            MAILGW_API_TOKEN=key,
+            MAILGW_API_URL=url,
+            DATABASE_URL=db.replace("postgres@", "fixture_listener@"),
+            MAILGW_HEALTH_PORT="0",
+        )
+        yield
+        REAL.clear()
+
+
 @contextlib.contextmanager
 def gateway(tmp, **overrides):
     env = dict(
@@ -50,6 +195,13 @@ def gateway(tmp, **overrides):
         **{"MAILGW_" + p + "_PORT": "0" for p in ("IMAP", "IMAPS", "SMTP", "SMTPS")},
     )
     env.update(overrides)
+    if REAL:
+        env.pop("MAILGW_FIXTURE_PASSWORD")
+        env.update({k: v for k, v in REAL.items() if k != "pg"})
+        if "MAILGW_MONTHLY" in overrides:
+            sql(
+                "UPDATE inbox_state SET protocol_monthly=(SELECT count(*)+1 FROM mail_messages WHERE sender_mailbox_id='mbx_fixture') WHERE inbox_id='mbx_fixture'"
+            )
     with sp.Popen(
         [ROOT / "target/debug/mailgw"], env=env, stdout=sp.PIPE, text=True
     ) as proc:
@@ -64,6 +216,8 @@ def gateway(tmp, **overrides):
             yield ports, proc.pid
         finally:
             proc.terminate()
+            if REAL and "MAILGW_MONTHLY" in overrides:
+                sql("UPDATE inbox_state SET protocol_monthly=2000")
 
 
 def connect(port):
@@ -250,7 +404,7 @@ def admission(tmp):
             with smtplib.SMTP_SSL("localhost", p["SMTPS"], context=CTX, timeout=5) as c:
                 c.login(login, PASS)
                 c.mail(ALIAS)
-                c.rcpt(USER)
+                c.rcpt("other@example.invalid")
                 assert c.data(RAW)[0] == (250 if accepted else 451)
 
 
@@ -541,6 +695,59 @@ def memory(tmp):
         )
 
 
+def budgets(tmp):
+    # Server statements only. Probe/fixture writes and pg_stat queries run as a different role.
+    def count():
+        return int(
+            sql(
+                "SELECT coalesce(sum(calls),0) FROM pg_stat_statements WHERE userid='postgres'::regrole AND dbid=(SELECT oid FROM pg_database WHERE datname=current_database())",
+                "fixture_observer",
+            )
+        )
+
+    def measure(name, expected, fn):
+        n = count()
+        result = fn()
+        used = count() - n
+        print(f"SQL {name}: {used}", flush=True)
+        assert used == expected, (name, expected, used)
+        return result
+
+    with gateway(tmp) as (p, _), contextlib.ExitStack() as stack:
+
+        def open_client():
+            c = imaplib.IMAP4_SSL("localhost", p["IMAPS"], ssl_context=CTX, timeout=5)
+            stack.callback(c.shutdown)
+            return c
+
+        a = open_client()
+        measure("LOGIN cold", 1, lambda: ok(a.login(USER, PASS)))
+        b = open_client()
+        measure("LOGIN cached", 0, lambda: ok(b.login(USER, PASS)))
+        ok(a.create("Budget"))
+        ok(a.append("Budget", None, None, RAW))
+        measure("SELECT", 1, lambda: ok(a.select("Budget")))
+        ok(b.select("Budget"))
+        measure("FETCH flags", 0, lambda: ok(a.fetch("1", "(UID FLAGS)")))
+        assert (
+            measure("FETCH body PEEK", 0, lambda: ok(a.fetch("1", "BODY.PEEK[]")))[0][1]
+            == RAW
+        )
+        for c in (a, b):
+            c.send(b"i IDLE\r\n")
+            assert c.readline().startswith(b"+")
+
+        def wake():
+            sql(
+                "SELECT inbox_mutate('default','mbx_fixture',e.message_id,'flags','{\"read\":true}') FROM inbox_entries e JOIN inbox_folders f USING(inbox_id,role) WHERE f.custom_path='Budget' AND e.uid=1",
+                "fixture_observer",
+            )
+            for c in (a, b):
+                assert b"\\Seen" in c.readline()
+
+        measure("IDLE wake, 2 sessions", 1, wake)
+
+
 def main():
     global CTX
     if not __debug__:
@@ -550,7 +757,7 @@ def main():
     run(["cargo", "build", "--locked", "--bins", "--examples"], timeout=300)
     success = []
     failed = []
-    with tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
+    with real_services(), tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
         tmp = Path(d).resolve()
         run(
             [
@@ -588,6 +795,7 @@ def main():
                 ("imaptest scripts", lambda: imaptest(tmp, p)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
+                *([("DB budgets", lambda: budgets(tmp))] if REAL else []),
             ]:
                 if len(sys.argv) > 1 and name not in sys.argv[1:]:
                     continue

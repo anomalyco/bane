@@ -1,4 +1,5 @@
 mod admission;
+mod remote;
 use admission::{Limits, Slot};
 use anyhow::{Context, Result, anyhow};
 use mailgw_core::{
@@ -34,6 +35,10 @@ struct State {
     caps: Caps,
 }
 struct Gateway {
+    api: Option<Arc<remote::Api>>,
+    events: tokio::sync::broadcast::Sender<(String, bool)>,
+    per_inbox: Mutex<std::collections::HashMap<String, std::sync::Weak<Semaphore>>>,
+    limit: usize,
     tls: TlsAcceptor,
     account: Account,
     state: Mutex<State>,
@@ -98,6 +103,13 @@ impl Gateway {
         };
         write(&mut stream, greeting.as_bytes()).await?;
         let mut changed = self.changed.subscribe();
+        let mut events = self.events.subscribe();
+        let identity = self.api.as_ref().map(|api| remote::Login {
+            api: api.clone(),
+            principal: Mutex::new(None),
+        });
+        let mut backend: Option<remote::Store> = None;
+        let mut stale = false;
         let mut slot = Some(slot);
         let mut login = None;
         let mut failures = 0;
@@ -111,6 +123,8 @@ impl Gateway {
             let read = tokio::select! {
                 biased;
                 _=tokio::time::sleep_until(deadline)=>break,
+                event=events.recv(),if backend.is_some()=>{let Some(store)=backend.as_mut()else{continue};match event{Ok((inbox,auth)) if inbox.is_empty()||inbox==store.principal.inbox=>{if auth{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;},Err(_)=>break,_=>continue}
+                    if idling && let Core::Imap(i)=&mut core{tokio::task::block_in_place(||store.reload(true))?;stale=false;let r=i.update(store);write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
                 n=stream.read(&mut buf)=>n?,
                 _=tokio::time::sleep_until(heartbeat),if idling=>{
                     write(&mut stream,b"* OK Still here\r\n").await?;
@@ -155,9 +169,58 @@ impl Gateway {
                 {
                     return Ok(());
                 }
-                let r = self.step(&mut core, &bytes)?;
+                let r = if let Some(identity) = &identity {
+                    tokio::task::block_in_place(|| -> Result<Reply> {
+                        let now = chrono::Utc::now().fixed_offset();
+                        if let Some(store) = backend.as_mut() {
+                            if matches!(core, Core::Imap(_))
+                                && (stale || store.stamp.elapsed() > Duration::from_secs(240))
+                            {
+                                store.refresh()?;
+                                stale = false
+                            }
+                            Ok(match &mut core {
+                                Core::Imap(i) => i.step(&bytes, identity, store, now),
+                                Core::Smtp(s) => s.step(&bytes, identity, store, now),
+                            })
+                        } else {
+                            Ok(match &mut core {
+                                Core::Imap(i) => {
+                                    i.step(&bytes, identity, &mut Memory::default(), now)
+                                }
+                                Core::Smtp(s) => {
+                                    s.step(&bytes, identity, &mut remote::Offline, now)
+                                }
+                            })
+                        }
+                    })?
+                } else {
+                    self.step(&mut core, &bytes)?
+                };
                 if r.action == Action::Login {
-                    let Ok(permit) = self.slots.clone().try_acquire_owned() else {
+                    let slots = if let Some(auth) = &identity {
+                        let p = auth
+                            .principal
+                            .lock()
+                            .map_err(|_| anyhow!("login unavailable"))?
+                            .clone()
+                            .context("missing principal")?;
+                        let mut m = self
+                            .per_inbox
+                            .lock()
+                            .map_err(|_| anyhow!("limits unavailable"))?;
+                        m.retain(|_, s| s.strong_count() > 0);
+                        let slots = m
+                            .get(&p.inbox)
+                            .and_then(std::sync::Weak::upgrade)
+                            .unwrap_or_else(|| Arc::new(Semaphore::new(self.limit)));
+                        m.insert(p.inbox.clone(), Arc::downgrade(&slots));
+                        backend = Some(remote::Store::new(auth.api.clone(), p));
+                        slots
+                    } else {
+                        self.slots.clone()
+                    };
+                    let Ok(permit) = slots.try_acquire_owned() else {
                         write(
                             &mut stream,
                             match port.protocol {
@@ -227,8 +290,27 @@ async fn main() -> Result<()> {
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();
-    let cert = File::open(env::var("MAILGW_CERT")?)?;
-    let key = File::open(env::var("MAILGW_KEY")?)?;
+    fn pem(value: &str, file: &str) -> Result<Box<dyn std::io::Read>> {
+        if let Ok(s) = env::var(value) {
+            return Ok(Box::new(std::io::Cursor::new(s.into_bytes())));
+        }
+        Ok(Box::new(File::open(env::var(file)?)?))
+    }
+    let cert = pem("MAILGW_CERT_PEM", "MAILGW_CERT")?;
+    let key = pem("MAILGW_KEY_PEM", "MAILGW_KEY")?;
+    let api = env::var("MAILGW_API_TOKEN")
+        .ok()
+        .map(|key| {
+            remote::Api::new(
+                env::var("MAILGW_API_URL").unwrap_or_else(|_| "https://bane.mx".into()),
+                key,
+            )
+            .map(Arc::new)
+        })
+        .transpose()?;
+    tokio_rustls::rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -236,10 +318,22 @@ async fn main() -> Result<()> {
             rustls_pemfile::private_key(&mut BufReader::new(key))?.context("No TLS private key")?,
         )?;
     config.send_tls13_tickets = 0;
-    let pass = env::var("MAILGW_FIXTURE_PASSWORD")
-        .context("memory adapter requires an explicit fixture password")?;
-    anyhow::ensure!(!pass.is_empty(), "empty fixture password");
+    let pass = env::var("MAILGW_FIXTURE_PASSWORD").unwrap_or_default();
+    anyhow::ensure!(
+        api.is_some() != !pass.is_empty(),
+        "configure exactly one backend"
+    );
+    let bind = setting("MAILGW_BIND", std::net::Ipv4Addr::LOCALHOST)?;
+    anyhow::ensure!(
+        api.is_some() || bind.is_loopback(),
+        "fixture must stay on loopback"
+    );
+    let limit = setting("MAILGW_LOGIN_LIMIT", 10)?;
     let gw = Arc::new(Gateway {
+        api: api.clone(),
+        events: tokio::sync::broadcast::channel(256).0,
+        per_inbox: Mutex::default(),
+        limit,
         tls: TlsAcceptor::from(Arc::new(config)),
         account: Account::new(
             "mbx_fixture".into(),
@@ -263,17 +357,32 @@ async fn main() -> Result<()> {
         preauth: Duration::from_secs(setting("MAILGW_AUTH_SECONDS", 30)?),
     });
     let mut listeners = JoinSet::new();
+    if let Some(api) = api {
+        let db = env::var("DATABASE_URL")?;
+        let events = gw.events.clone();
+        let (ready, mut rx) = watch::channel(false);
+        listeners.spawn(async move {
+            loop {
+                if remote::listen(&db, &events, &api, &ready).await.is_err() {
+                    ready.send_replace(false);
+                    tracing::warn!("protocol notification connection unavailable");
+                    api.clear();
+                    drop(events.send((String::new(), true)));
+                    tokio::time::sleep(Duration::from_secs(1)).await
+                }
+            }
+        });
+        timeout(IO, rx.wait_for(|up| *up)).await??;
+        let health = TcpListener::bind((bind, setting("MAILGW_HEALTH_PORT", 8080)?)).await?;
+        listeners.spawn(async move{let mut tasks=JoinSet::new();loop{tokio::select!{v=health.accept()=>{let(mut s,_)=v?;if tasks.len()<32{tasks.spawn(async move{let _result=timeout(Duration::from_secs(2),async{let mut line=Vec::new();while line.len()<128{let b=s.read_u8().await?;line.push(b);if b==b'\n'{break}}let status=if line==b"GET /health HTTP/1.1\r\n"||line==b"GET /health HTTP/1.0\r\n"{"200 OK"}else{"404 Not Found"};s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await}).await;});}},Some(res)=tasks.join_next()=>res?,}}#[allow(unreachable_code)]Ok::<(),anyhow::Error>(())});
+    }
     for (name, number, protocol, implicit) in [
         ("IMAPS", 993, Protocol::Imap, true),
         ("IMAP", 143, Protocol::Imap, false),
         ("SMTPS", 465, Protocol::Smtp, true),
         ("SMTP", 587, Protocol::Smtp, false),
     ] {
-        let l = TcpListener::bind((
-            std::net::Ipv4Addr::LOCALHOST,
-            setting(&format!("MAILGW_{name}_PORT"), number)?,
-        ))
-        .await?;
+        let l = TcpListener::bind((bind, setting(&format!("MAILGW_{name}_PORT"), number)?)).await?;
         println!("{name} {}", l.local_addr()?.port());
         let gw = gw.clone();
         listeners.spawn(async move{let mut connections=JoinSet::new();loop{tokio::select!{c=l.accept()=>{let(t,a)=c?;let g=gw.clone();if let Some(slot)=Slot::take(g.limits.clone(),a.ip(),Instant::now()){connections.spawn(async move{if g.serve(t,Port{protocol,implicit},a.ip(),slot).await.is_err(){tracing::debug!("connection ended before logout")}});}},Some(result)=connections.join_next()=>{result?;}}}#[allow(unreachable_code)]Ok::<(),anyhow::Error>(())});

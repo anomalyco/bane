@@ -10,6 +10,7 @@ pub type Flags = BTreeSet<String>;
 pub type Date = DateTime<FixedOffset>;
 #[derive(Clone)]
 pub struct Entry {
+    pub size: usize,
     pub uid: u32,
     pub id: u64,
     pub raw: Arc<[u8]>,
@@ -19,6 +20,7 @@ pub struct Entry {
 }
 #[derive(Clone)]
 pub struct Folder {
+    pub counts: Option<(usize, usize)>,
     pub validity: u32,
     pub next: u32,
     pub highest: u64,
@@ -28,6 +30,8 @@ pub struct Folder {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("[UNAVAILABLE] Backend unavailable")]
+    Unavailable,
     #[error("[NONEXISTENT] No such mailbox")]
     Missing,
     #[error("[ALREADYEXISTS] Mailbox exists")]
@@ -70,6 +74,15 @@ pub struct Applied {
 }
 
 pub trait MailStore {
+    fn list_fresh(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn select(&mut self, _path: &str) -> Result<(), Error> {
+        Ok(())
+    }
+    fn materialize(&self, _path: &str, entry: &Entry) -> Result<Entry, Error> {
+        Ok(entry.clone())
+    }
     fn folders(&self) -> Vec<String>;
     fn folder(&self, path: &str) -> Result<&Folder, Error>;
     fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error>;
@@ -98,6 +111,7 @@ impl Default for Memory {
             m.folders.insert(
                 name.into(),
                 Folder {
+                    counts: None,
                     validity: m.validity,
                     next: 1,
                     highest: 1,
@@ -154,6 +168,7 @@ impl MailStore for Memory {
                 self.folders.insert(
                     path.into(),
                     Folder {
+                        counts: None,
                         validity: self.validity,
                         next: 1,
                         highest: self.seq,
@@ -249,6 +264,7 @@ impl MailStore for Memory {
                 let uid = f.next;
                 f.next = f.next.checked_add(1).ok_or(Error::Limit)?;
                 f.entries.push(Entry {
+                    size: raw.len(),
                     uid,
                     id: seq,
                     raw: raw.into(),

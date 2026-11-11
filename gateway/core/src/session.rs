@@ -22,20 +22,26 @@ impl Account {
             imap_enabled,
         }
     }
-    pub fn owns(&self, address: &str) -> bool {
+}
+pub trait Identity {
+    fn owns(&self, address: &str) -> bool;
+    fn login(&self, p: Protocol, user: &[u8], password: &[u8]) -> bool;
+    fn plain(&self, p: Protocol, bytes: &[u8]) -> bool {
+        let fields: Vec<_> = bytes.split(|&b| b == 0).take(4).collect();
+        matches!(&fields[..],[az,user,pw] if (az.is_empty()||az==user)&&self.login(p,user,pw))
+    }
+}
+impl Identity for Account {
+    fn owns(&self, address: &str) -> bool {
         self.addresses
             .iter()
             .any(|s| s.eq_ignore_ascii_case(address))
     }
-    pub fn login(&self, p: Protocol, user: &[u8], password: &[u8]) -> bool {
+    fn login(&self, p: Protocol, user: &[u8], password: &[u8]) -> bool {
         (p != Protocol::Imap || self.imap_enabled)
             && str::from_utf8(user).is_ok_and(|s| self.owns(s) || s == self.id)
             && !self.secret.is_empty()
             && self.secret.as_bytes() == password
-    }
-    pub fn plain(&self, p: Protocol, bytes: &[u8]) -> bool {
-        let fields: Vec<_> = bytes.split(|&b| b == 0).take(4).collect();
-        matches!(&fields[..],[az,user,pw] if (az.is_empty() || az==user) && self.login(p,user,pw))
     }
 }
 pub fn decode64(b: &[u8]) -> Option<Zeroizing<Vec<u8>>> {

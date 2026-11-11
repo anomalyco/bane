@@ -1,5 +1,5 @@
 use crate::{
-    session::{Account, Action, Protocol, Reply, decode64},
+    session::{Action, Identity, Protocol, Reply, decode64},
     store::{Change, Date, MailStore},
     wire,
 };
@@ -18,7 +18,7 @@ pub enum SubmitError {
     Rejected,
 }
 pub struct Submission<'a> {
-    pub principal: &'a Account,
+    pub principal: &'a dyn Identity,
     pub sender: &'a str,
     pub recipients: &'a [String],
     pub raw: &'a [u8],
@@ -153,7 +153,7 @@ impl Smtp {
     pub fn step(
         &mut self,
         bytes: &[u8],
-        account: &Account,
+        account: &dyn Identity,
         submit: &mut dyn Submitter,
         date: Date,
     ) -> Reply {
@@ -326,7 +326,7 @@ impl Smtp {
         Reply::one("334 UGFzc3dvcmQ6")
     }
 }
-fn owned_headers(body: &[u8], account: &Account) -> bool {
+fn owned_headers(body: &[u8], account: &dyn Identity) -> bool {
     let Some(m) = MessageParser::default().parse_headers(body) else {
         return false;
     };
@@ -357,6 +357,7 @@ fn owned_headers(body: &[u8], account: &Account) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Account;
     use crate::store::Memory;
     #[test]
     fn quota_resets_on_utc_day_and_month_and_rejections_do_not_archive() {

@@ -291,7 +291,7 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
         let text = match item {
             Item::Flags => format!("FLAGS ({})", flags(&e.flags)),
             Item::Uid => format!("UID {}", e.uid),
-            Item::Rfc822Size => format!("RFC822.SIZE {}", e.raw.len()),
+            Item::Rfc822Size => format!("RFC822.SIZE {}", e.size),
             Item::InternalDate => format!("INTERNALDATE \"{}\"", e.date.format("%d-%b-%Y %T %z")),
             Item::Envelope | Item::Body | Item::BodyStructure => {
                 let m = mime
