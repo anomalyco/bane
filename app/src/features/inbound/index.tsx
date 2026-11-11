@@ -1,3 +1,4 @@
+export { RoutingPage } from './routing'
 import { Navigate, useLocation, useParams } from 'react-router'
 
 export { InboundPage } from './threads'

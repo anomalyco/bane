@@ -106,14 +106,14 @@ function RoutesSection({ onOpenDomain }: { onOpenDomain: (id: string) => void })
       key: `catch-all:${domain.id}`, match: `*@${domain.name}`, kind: 'Catch-all', open: () => onOpenDomain(domain.id),
       to: domain.catchAll === 'create_address' ? 'A new address per recipient' : <span className="muted">Stored as unrouted</span>,
     })),
-    ...(canAdminister ? webhooks.data ?? [] : []).map(webhook => ({
+    ...(canAdminister ? webhooks.data ?? [] : []).filter(h=>h.eventTypes.length>0).map(webhook => ({
       key: `webhook:${webhook.id}`, kind: webhook.paused ? 'Webhook · paused' : 'Webhook', open: () => navigate(`/receiving/webhooks/${webhook.id}`),
       match: <div className="settings-cell-stack"><span className="receiving-clip">{webhook.addressIds ? webhook.addressIds.map(id => byId.get(id)?.address ?? id).join(', ') : 'Every address'}</span><span className="muted receiving-clip">{webhook.eventTypes.length === 1 ? webhook.eventTypes[0] : plural(webhook.eventTypes.length, 'event')}</span></div>,
       to: <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${webhook.id}`}>{webhook.description || new URL(webhook.url).host}</Link>{webhook.description && <span className="muted receiving-clip">{new URL(webhook.url).host}</span>}</div>,
     })),
   ]
   return <section className="section stack" aria-labelledby="receiving-routes">
-    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/webhooks">Webhooks</Link>} />
+    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/routing">Manage routing</Link>} />
     {addresses.error ? <ErrorState error={addresses.error} onRetry={() => void addresses.refetch()} /> : <>
       <DataTable loading={loading} skeletonRows={3} rows={rows} rowKey={row => row.key} onRowClick={row => row.open?.()}
         empty={<EmptyState title="No routes yet" description="Aliases, wildcard rules, catch-alls and webhooks show here." />}
