@@ -4,8 +4,13 @@ config:
   bane:deployRoleArn: arn:aws:iam::009882681002:role/bane-deploy
   bane:permissionsBoundary: arn:aws:iam::009882681002:policy/bane-runtime-boundary
   bane:mailControlImports:
+    - "bane-009882681002-mail-us-east-2"
+    - "bane-inbound:bane-inbound-all"
+    - "arn:aws:sns:us-east-2:009882681002:bane-inbound"
+    - "arn:aws:sns:us-east-2:009882681002:bane-inbound:f8e627a1-6627-46e6-a2b5-8ba509b692f4"
     - "arn:aws:sns:us-east-2:009882681002:bane-feedback"
     - "arn:aws:sns:us-east-2:009882681002:bane-feedback:60f95a6f-24ae-438f-8157-e59b994137e5"
+    - "arn:aws:sns:us-east-1:009882681002:bane-trusted-feedback"
     - "bane-transactional|bane-events"
     - "bane-marketing|bane-events"
   bane:receivingAlarmTopicArn: arn:aws:sns:us-east-2:009882681002:bane-alerts
