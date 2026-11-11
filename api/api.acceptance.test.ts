@@ -2508,7 +2508,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     const grantKeys:string[]=[];
-    await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async()=>{
+    await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async t=>{
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getCurrentIdentity'||x.name==='applyRituals'||x.name==='createAgentToken'));
       const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
@@ -2516,6 +2516,15 @@ describe('Hosted MCP OAuth and tools', () => {
       const inboxTools = (await rpc(token,'tools/list',{},'/mcp?toolsets=admin')).tools;
       const sendActions = inboxTools.find((tool:Json)=>tool.name==='reply').inputSchema.properties.action.enum;
       assert.deepEqual(sendActions, ['reply']);
+      await t.test('L1: inbox-only descriptions advertise no workspace, outbound attachment or thread-start actions', () => {
+        const descriptions = new Map<string,string>(inboxTools.map((tool:Json)=>[tool.name,tool.description]));
+        assert.match(descriptions.get('reply')!, /reply/i);
+        assert.doesNotMatch(descriptions.get('reply')!, /start|create/i);
+        assert.match(descriptions.get('messages')!, /wait/i);
+        assert.doesNotMatch(descriptions.get('messages')!, /workspace|inbound|search|events|update/i);
+        assert.match(descriptions.get('attachments')!, /inbox/i);
+        assert.doesNotMatch(descriptions.get('attachments')!, /outgoing|outbound|upload|delete|inbound/i);
+      });
       const hiddenStart = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'reply',action:'start'}},'/mcp');
       assert.equal(hiddenStart.structuredContent.error.code,'TOOL_UNAVAILABLE');
       for (const [path,name,args] of [['/mcp','reply',{action:'start'}],['/mcp?codemode=true','createInboundThread',{}]] as const) {
@@ -2528,6 +2537,9 @@ describe('Hosted MCP OAuth and tools', () => {
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
       assert.equal(fullListing.result.tools.length, 29); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
+      const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
+      assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
+      assert.doesNotMatch(inboxSet.find((tool:Json)=>tool.name==='attachments').description, /upload|outgoing|delete/i);
       const slack={confirm:true,idempotencyKey:'mcp-endpoint-1',body:{type:'slack',name:'mcp-alerts',url:'https://hooks.slack.com/services/T0/B0/mcpfixture'}};const endpoint=await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack});assert.equal(endpoint.isError,false,redact(endpoint));assert.equal(endpoint.structuredContent.status,'ready');
       assert.equal((await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack})).structuredContent.call,'endpoints["mcp-alerts"]');
       const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rituals'),listed.join());
@@ -2934,8 +2946,17 @@ describe('Hosted MCP OAuth and tools', () => {
     const denied = await rpc(token, 'tools/call', { name: 'createContact', arguments: { confirm: true, body: { email: address() } } });
     assert.equal(denied.isError, true, redact(denied));
     assert.equal(denied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(denied));
-    const actions = (await rpc(token, 'tools/list', {}, '/mcp')).tools.find((tool:Json) => tool.name === 'contacts').inputSchema.oneOf.map((branch:Json) => branch.properties.action.const);
+    const plainTools = (await rpc(token, 'tools/list', {}, '/mcp')).tools;
+    const contacts = plainTools.find((tool:Json) => tool.name === 'contacts');
+    const actions = contacts.inputSchema.oneOf.map((branch:Json) => branch.properties.action.const);
     assert.ok(actions.includes('get') && !actions.includes('create'));
+    await t.test('L1: read-only descriptions omit contact writes, credential creation and inbound keys', () => {
+      assert.match(contacts.description, /list contacts/i);
+      assert.doesNotMatch(contacts.description, /manage|create|update|delete/i);
+      const keys = plainTools.find((tool:Json)=>tool.name==='keys');
+      assert.match(keys.description, /list agent tokens/i);
+      assert.doesNotMatch(keys.description, /manage|create|revoke|secret|inbound/i);
+    });
     const mergedDenied = await rpc(token, 'tools/call', { name:'contacts', arguments:{ action:'create', confirm:true, body:{ email:address() } } }, '/mcp');
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
     const hidden = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'contacts',action:'create'}},'/mcp');
