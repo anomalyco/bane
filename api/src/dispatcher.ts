@@ -37,18 +37,19 @@ function loadDispatchTransport(runtime: Runtime): Promise<DispatchTransport> {
 }
 
 export type Mail = typeof emails.$inferSelect;
-type Review = { version:number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
-type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; tenantName?: string; feedbackTopic?: string };
+type Review = { version:number; draft: CampaignDraft; rendered: { html?: string; text?: string }; assets:AttachmentRow[]; contentHash: string | null; recipient: ReviewedRecipient };
+type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
-type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
+type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: Partial<EmailSnapshot> };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; accountPauseAt?:number; dailyBlockedUntil?: number; tailExhausted?: boolean }
+export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; accountPauseAt?:number; dailyBlockedUntil?: number; tailExhausted?: boolean; ownerCursor?: string; screenRetryAt?: number }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
+export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/2))) : 24;
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
 // Far below interrupted-attempt recovery (3 min) and the queue lease (2 min). Ordinary groups
@@ -61,6 +62,8 @@ export interface DispatcherOptions {
   batchSize?: number;
   /** Provider requests in flight per loop; Workers allow six connections awaiting headers. */
   sendConcurrency?: number;
+  /** Clock for flushing a partially returned SES claim. A complete claim never waits on a timer. */
+  schedulePartialFlush?: (flush: () => void) => () => void;
   /** Independent claim→send→record pipelines sharing the gate; keeps the provider busy while a batch is being recorded. */
   lanes?: number;
   /** This shard's share of the regional quota: 1/count. */
@@ -204,17 +207,21 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }): Promise<Leased[]> {
+async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, gate:GateState, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
+  const mx=runtime.config.multiTenant, liveMx=mx && !isSimulatedSes(runtime);
+  const cost=sql`hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)`;
+  const domain=sql`lower(split_part(e.from_address,'@',2))`;
+  const tick=sql`date_trunc('minute',statement_timestamp())`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
+    ${liveMx && (gate.screenRetryAt??0)>Date.now() ? sql`AND (NOT o.required_screen OR (o.trusted AND ${transactional}))` : sql``}
     -- A boolean range is an index condition on 061's expression. Equality to true is
     -- simplified to a text comparison and can scan the kind index over delivered mail.
     ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
-    ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
-      WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
+    ${deferred.length ? sql`AND ${transactional} BETWEEN (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='marketing').map(d=>d.workspace_id))}::text[])) AND NOT (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='transactional').map(d=>d.workspace_id))}::text[]))` : sql``}`;
   // Look up each due stream separately: the immediate ordered index contains no future mail,
   // and the scheduled index can stop at this statement's cutoff. Merge only bounded pages.
   const page = (size: SQL, lock = false, exclude = sql``) => {
@@ -225,17 +232,23 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
   };
   // Seek to the next distinct owner rather than scanning a large campaign to discover its neighbors.
   // Interleaving the bounded owner queues by turn gives every active owner a slot before any gets two.
-  const mx = runtime.config.multiTenant;
-  const ownersSql = mx ? sql`SELECT workspace_id FROM ${sendingConnections(runtime)} WHERE region=${region} AND aws_account_id=${accountId} AND paused_at IS NULL` : sql`
-      (SELECT workspace_id FROM sending_emails WHERE ${queued} ORDER BY workspace_id LIMIT 1)
-      UNION ALL SELECT n.workspace_id FROM owners o CROSS JOIN LATERAL (
-        SELECT workspace_id FROM sending_emails WHERE ${queued} AND workspace_id > o.workspace_id ORDER BY workspace_id LIMIT 1
-      ) n`;
+  const seek=(after:SQL)=>sql`SELECT workspace_id FROM (
+    (SELECT workspace_id FROM sending_emails WHERE ${queued} AND scheduled_at IS NULL AND workspace_id>${after} ORDER BY workspace_id LIMIT 1) UNION ALL
+    (SELECT workspace_id FROM sending_emails WHERE ${queued} AND scheduled_at<=statement_timestamp() AND workspace_id>${after} ORDER BY workspace_id LIMIT 1)
+    ) heads ORDER BY workspace_id LIMIT 1`;
+  const queuedOwners = sql`SELECT n.workspace_id,1 FROM (${seek(sql`${gate.ownerCursor??''}`)}) n
+      UNION ALL SELECT n.workspace_id,o.step+1 FROM queued_owners o CROSS JOIN LATERAL (${seek(sql`o.workspace_id`)}) n WHERE o.step<${limit}`;
+  const ownersSql = mx ? sql`SELECT q.workspace_id ${liveMx?sql`,cap,cap-coalesce(b.used,0) AS remaining,pc.kind='shared' AS required_screen,
+    (${!!runtime.config.trustedPool} AND pc.pool_tier='trusted' AND NOT pc.legacy_names) AS trusted`:sql``}
+    FROM queued_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
+    ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
+      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap) p`:sql``}
+    WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL ${liveMx?sql`AND (cap IS NULL OR cap-coalesce(b.used,0)>0)`:sql``}` : sql`SELECT workspace_id FROM queued_owners`;
   // A single small, admitted transactional envelope needs no external preflight. For an idle
   // MX lane only, run the SAME durable claim on the locked fair selection. Both UPDATEs below
   // are disjoint: Postgres must never update the same email twice in one WITH statement.
   const simple = inline && sql`SELECT e.id,e.workspace_id,e.dispatch_version,e.campaign_id,e.actor_key_id,lower(e.snapshot->>'from') AS sender,
-      false AS mcp_allowed,s.connection->>'feedback_topic_arn' AS feedback_topic,e.snapshot->'binding' AS binding,jsonb_build_array(lower(e.snapshot#>>'{to,0}')) AS destinations,false AS marketing,e.snapshot->'replyAuthors' AS reply_authors,
+      false AS mcp_allowed,s.connection->>'kind'='shared' AS hosted,s.connection->>'feedback_topic_arn' AS feedback_topic,e.snapshot->'binding' AS binding,jsonb_build_array(lower(e.snapshot#>>'{to,0}')) AS destinations,false AS marketing,e.snapshot->'replyAuthors' AS reply_authors,
       NULL::jsonb AS snapshot,NULL::text AS token_hash,NULL::text AS token_email,${id('event')}::text AS event_id,
       'attempt-start:'||e.id||':'||e.dispatch_version AS external_id,e.dispatch_version+1 AS attempt
     FROM selected e JOIN settings s ON s.workspace_id=e.workspace_id AND s.stream=e.snapshot->>'kind'
@@ -244,6 +257,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       AND (${isSimulatedSes(runtime)} OR NOT e.simulated) AND (${isSimulatedSes(runtime)} OR s.connection->>'kind'<>'shared' OR s.connection->>'tenant_state'='ready')
       AND e.campaign_id IS NULL AND e.review_id IS NULL AND s.stream='transactional' AND NOT starts_with(e.actor_key_id,'mcp_')
       AND NOT (e.snapshot ?| array['raw','deferredCampaign']) AND NOT coalesce((e.snapshot->>'screen')::boolean,false)
+      AND (${!runtime.config.hostedScreen || isSimulatedSes(runtime)} OR s.connection->>'kind'<>'shared')
       AND e.snapshot->'attachments'='[]'::jsonb AND e.snapshot->'cc'='[]'::jsonb AND e.snapshot->'bcc'='[]'::jsonb
       AND jsonb_array_length(e.snapshot->'to')=1 AND octet_length(e.snapshot::text)<65536
       AND ((s.quota_sample->>'age_ms')::float8 < ${inline.period} OR ((s.quota_sample->>'age_ms')::float8 < ${maxProvisionalAge(inline.period)}
@@ -251,7 +265,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       AND floor(extract(epoch FROM (s.quota_sample->>'checked')::timestamptz)*1000) >= ${inline.gate.quota?.checkedAt ?? 0}
       AND ((s.quota_sample->>'max')::float8 < 0 OR (s.quota_sample->>'max')::float8 - (s.quota_sample->>'sent')::float8
         - ceil((s.quota_sample->>'max')::float8 * ${runtime.config.dispatch.dailyHeadroomPercent} / 100) > ${inline.margin})`;
-  const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE owners(workspace_id) AS (${ownersSql}), candidates AS (
+  const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE queued_owners(workspace_id,step) AS (${queuedOwners}), owners AS MATERIALIZED (${ownersSql}), candidates AS (
       SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.transactional DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
         SELECT p.*,row_number() OVER (ORDER BY transactional DESC,created_at,id) AS turn FROM (${page(sql`${limit}`)}) p
       ) q
@@ -261,16 +275,23 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     ), allocated AS MATERIALIZED (
       -- Allocate slots, not IDs: a competing shard can hold this owner's entire first page.
       -- Lock the next available rows in index order; later owners can fill slots skipped under contention.
-      SELECT o.workspace_id, e.id FROM shares o CROSS JOIN LATERAL (
-        ${page(sql`o.slots`,true)}
+      SELECT o.workspace_id, e.id FROM owners o JOIN shares sh USING(workspace_id) CROSS JOIN LATERAL (
+        ${page(sql`sh.slots`,true)}
       ) e LIMIT ${limit}
-    ), due AS (
+    ), picks AS (
       -- Consume the fair allocation first. A full lease skips the fallback; a short one only
       -- revisits owners with candidates beyond their share. Our own locks are not SKIPped.
       SELECT workspace_id, id FROM allocated UNION ALL
-      SELECT o.workspace_id, e.id FROM shares o CROSS JOIN LATERAL (
+      SELECT o.workspace_id, e.id FROM owners o JOIN shares sh USING(workspace_id) CROSS JOIN LATERAL (
         ${page(sql`${limit}`,true,sql`AND e.id NOT IN (SELECT id FROM allocated)`)}
-      ) e WHERE o.candidates > o.slots LIMIT ${limit}
+      ) e WHERE sh.candidates > sh.slots LIMIT ${limit}
+    ) ${liveMx ? sql`, fit AS MATERIALIZED (
+      SELECT p.*,e.snapshot->>'kind' AS stream,o.remaining,o.cap,d.used,c.n,sum(c.n) OVER tenant AS total,sum(c.n) OVER identity AS subtotal
+      FROM picks p JOIN owners o USING(workspace_id) JOIN sending_emails e USING(workspace_id,id)
+      CROSS JOIN LATERAL (SELECT ${cost} AS n) c LEFT JOIN hosted_burst_windows d ON d.workspace_id=p.workspace_id AND d.scope=${domain} AND d.minute=${tick}
+      WINDOW tenant AS (PARTITION BY p.workspace_id ORDER BY ${transactional} DESC,e.created_at,p.id),
+        identity AS (PARTITION BY p.workspace_id,${domain} ORDER BY ${transactional} DESC,e.created_at,p.id)
+      )`:sql``}, due AS MATERIALIZED (${liveMx ? sql`SELECT workspace_id,id FROM fit WHERE cap IS NULL OR n=0 OR (total<=remaining AND subtotal<=greatest(50,cap/2)-coalesce(used,0))` : sql`SELECT * FROM picks`}
     ), selected AS MATERIALIZED (
       ${inline ? sql`SELECT e.* FROM due JOIN sending_emails e USING (workspace_id,id)` : sql`UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*`}
     ), settings AS MATERIALIZED (
@@ -288,28 +309,35 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       LEFT JOIN ses_installation_settings s USING (workspace_id)
       ${mx ? sql`JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=p.workspace_id AND pc.region=${region} AND pc.aws_account_id=${accountId}` : !isSimulatedSes(runtime) ? sql`LEFT JOIN ses_region_discovery d ON d.workspace_id = p.workspace_id AND d.region = ${region}` : sql``}
     ), reviews AS (
-      SELECT carrier, r.renderer_version, r.draft, r.rendered FROM (
+      SELECT carrier, r.renderer_version, r.draft, r.rendered,
+        (SELECT jsonb_agg(jsonb_build_object('id',a.id,'workspaceId',a.workspace_id,'filename',a.filename,'contentType',a.content_type,'size',a.size,
+          'disposition',a.disposition,'contentId',a.content_id,'storageKey',a.storage_key,'checksum',a.checksum,'sourceTemplateAssetId',a.source_template_asset_id,'createdAt',a.created_at) ORDER BY a.id)
+         FROM sending_attachments a WHERE a.workspace_id=r.workspace_id AND a.id IN (SELECT jsonb_array_elements_text(r.draft->'attachments'))) AS assets FROM (
         SELECT workspace_id, campaign_id, review_id, min(id) AS carrier FROM selected WHERE review_id IS NOT NULL GROUP BY 1,2,3
       ) refs JOIN sending_campaign_reviews r ON r.workspace_id=refs.workspace_id AND r.campaign_id=refs.campaign_id AND r.id=refs.review_id
     ) ${simple ? sql`, ${claimCtes(runtime,region,simple)}, slow AS (
       UPDATE sending_emails e SET lease_until=clock_timestamp()+interval '2 minutes' FROM due WHERE e.workspace_id=due.workspace_id AND e.id=due.id AND NOT EXISTS(SELECT 1 FROM input WHERE id=e.id)
     )` : sql``}
-    SELECT ${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
+    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND used>=greatest(50,cap/2)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
       ${simple ? sql`CASE WHEN EXISTS(SELECT 1 FROM input WHERE id=leased.id) THEN coalesce((SELECT status FROM claimed WHERE id=leased.id),'lost') END` : sql`NULL`} AS claim_status,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
-      r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
+      r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered,r.assets AS review_assets, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM selected leased
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
     LEFT JOIN reviews r ON r.carrier = leased.id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
+    RIGHT JOIN (SELECT max(workspace_id) FILTER(WHERE step=${limit}) AS cursor FROM queued_owners) meta ON true
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
+  gate.ownerCursor=result.rows[0]?.cursor as string || undefined;
+  for(const d of (result.rows[0]?.blocked_streams??[]) as DeferredStream[]) deferBurst(deferred,d.workspace_id,d.stream);
+  if (!result.rows[0]?.id) return [];
   if (result.rows[0]?.webhooks) await wakeWebhooks(runtime,Number(result.rows[0].webhooks));
   const owners = new Map<string, Owner>();
-  const reviews = new Map<string, Pick<Review, 'version' | 'draft' | 'rendered'>>();
+  const reviews = new Map<string, Pick<Review, 'version' | 'draft' | 'rendered' | 'assets'>>();
   const reviewKey = (row: Record<string, unknown>) => JSON.stringify([row.workspaceId, row.campaignId, row.reviewId]);
   for (const row of result.rows) if (row.review_draft && row.review_rendered) {
-    reviews.set(reviewKey(row), { version:Number(row.review_version), draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
+    reviews.set(reviewKey(row), { version:Number(row.review_version), draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'],assets:(row.review_assets??[]) as AttachmentRow[] });
   }
   return result.rows.map(row => {
     const { review_version, review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, claim_status, webhooks, ...fields } = row;
@@ -331,12 +359,13 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       const namespace=pc?.legacy_names===false ? pc.kind==='shared' ? pc.pool_tier : 'byo' : undefined;
       const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string,namespace);
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, transport, ses: transport.clientFor(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
+      owner = { runtime: scoped, trusted:runtime.config.trustedPool && pc?.pool_tier==='trusted' && pc.legacy_names===false, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, transport, ses: transport.clientFor(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
         sendClient:pc?.template_version==='v5'?domainId=>transport.clientFor(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
         tenantName: pc?.kind === 'shared' ? pc.pool_tenant_name ?? (pc.managed_tenant ? mxResourceName(workspaceId) : `bane-${workspaceId}`) : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
+    if(mail.snapshot.deferredCampaign) mail.snapshot={...mail.snapshot,from:mail.from,to:mail.to,cc:mail.cc,bcc:mail.bcc,region:mail.region,subject:mail.subject,attachments:shared?shared.draft.attachments:mail.snapshot.attachments??[],binding:shared?shared.draft.binding:mail.snapshot.binding};
     return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), quota: quota_sample as LeaseQuota | undefined, claimStatus: claim_status as Leased['claimStatus'], review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
 }
@@ -346,21 +375,26 @@ class ScreenRejected extends ApiError {
   constructor(public screen: { spam: number; model: string; threshold: number }) { super(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this message to be unsolicited advertising.'); }
 }
 let screenSkipLoggedAt = 0;
-// Opt-in Jev screen for live transactional mail. It fails open: a classifier outage must never stop transactional mail.
-async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot) {
+// Fail closed for probation and marketing. Trusted transactional and explicit BYO
+// checks may fail open. Policy is decided from the leased connection, never caller input.
+async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, required:boolean, hostedGate?:GateState) {
   const settings = runtime.config.screen;
   if (!settings) {
+    if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
     if (Date.now() - screenSkipLoggedAt >= 60000) { screenSkipLoggedAt = Date.now(); log('warn', { code: 'CONTENT_SCREEN_SKIPPED', emailId: mail.id, message: 'screen requested but TYPESAFE_API_KEY is not configured' }); }
     return;
   }
   let result: Awaited<ReturnType<typeof screenSnapshot>>;
-  try { result = await screenSnapshot(runtime, s); }
+  try { result = await screenSnapshot(runtime, s, required); }
   catch (error) {
+    if(!(error instanceof ApiError) || error.code!=='CONTENT_SCREEN_UNAVAILABLE') throw error;
+    if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
+    if(hostedGate){if((hostedGate.screenRetryAt??0)>Date.now())return;hostedGate.screenRetryAt=Date.now()+30_000;}
     log('warn', { code: 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id, message: error instanceof ApiError ? error.message : 'The content classifier failed; sending unscreened.' });
     return;
   }
   if (!result || result.spam < settings.threshold) return;
-  if (settings.mode === 'reject') throw new ScreenRejected({ spam: result.spam, model: result.model, threshold: settings.threshold });
+  if (required || settings.mode === 'reject') throw new ScreenRejected({ spam: result.spam, model: result.model, threshold: settings.threshold });
   log('warn', { code: 'CONTENT_SPAM_SUSPECTED', emailId: mail.id, spam: result.spam, model: result.model });
 }
 
@@ -369,15 +403,19 @@ function simpleContent(s: EmailSnapshot, parts: Attachment[]): SendEmailCommandI
   return { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } };
 }
 function batchAttachments(runtime: Runtime, batch: Leased[]) {
-  const wanted = batch.flatMap(({ mail }) => mail.snapshot.attachments.map(id => ({ workspace_id: mail.workspaceId, id })));
+  // Campaign metadata travels once per review in the lease (on its carrier row),
+  // not once per envelope or in a second query per page. Bodies stay in storage.
+  const reviewed=new Map(batch.filter(x=>x.review).map(x=>[x.mail.reviewId!,x.review!.assets]));
+  const wanted = batch.filter(x=>!x.review).flatMap(({ mail }) => mail.snapshot.attachments.map(id => ({ workspace_id: mail.workspaceId, id })));
   let rows: Promise<AttachmentRow[]> | undefined;
   return async (mail: Mail) => {
     if (!mail.snapshot.attachments.length) return [];
+    if(mail.reviewId && reviewed.has(mail.reviewId))return reviewed.get(mail.reviewId)!;
     rows ??= runtime.db.select().from(attachments).where(sql`(${attachments.workspaceId}, ${attachments.id}) IN (SELECT workspace_id, id FROM jsonb_to_recordset(${JSON.stringify(wanted)}::jsonb) AS x(workspace_id text, id text))`).orderBy(attachments.id).execute();
     return (await rows).filter(row => row.workspaceId === mail.workspaceId && mail.snapshot.attachments.includes(row.id));
   };
 }
-async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (mail: Mail) => Promise<AttachmentRow[]>): Promise<Prepared> {
+async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (mail: Mail) => Promise<AttachmentRow[]>, gate:GateState): Promise<Prepared> {
   const { runtime, a } = leased.owner;
   let mail = leased.mail;
   if (mail.simulated && !isSimulatedSes(runtime)) throw new ApiError(409, 'SES_MODE_CHANGED', 'This message was queued for simulated delivery. Submit it again to send through SES.');
@@ -390,7 +428,13 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   }
   const s = mail.snapshot;
   if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
-  if (s.screen && !isSimulatedSes(runtime) && s.kind === 'transactional') await screenMail(runtime, mail, s);
+  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
+    const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
+    if (hosted && (gate.screenRetryAt??0)>Date.now()) {
+      if (required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted screen temporarily unavailable.',undefined,true);
+    } else await screenMail(runtime,mail,s,required,hosted?gate:undefined);
+  }
   const parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
   for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
@@ -409,10 +453,10 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
   const retryable = error instanceof ApiError ? error.retryable : true;
   if (retryable) {
     // Transient dependency failure: release the lease with a short backoff and let the loop retry.
-    await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL, scheduled_at = greatest(coalesce(scheduled_at, clock_timestamp()), clock_timestamp() + interval '15 seconds'), error_code = ${code}, updated_at = clock_timestamp()
-      WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion}`);
-    log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' });
-    return;
+    const missing=code==='ATTACHMENT_STORAGE_UNAVAILABLE';
+    const retry=await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL, attachment_failures=attachment_failures+${missing?1:0}::smallint, scheduled_at = greatest(coalesce(scheduled_at, clock_timestamp()), clock_timestamp() + interval '15 seconds'), error_code = ${code}, updated_at = clock_timestamp()
+      WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} ${missing?sql`AND attachment_failures<4`:sql``}`);
+    if(!missing || retry.rowCount) { log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' }); return; }
   }
   const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
@@ -454,13 +498,13 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
   const input = prepared.map(item => ({
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
-    feedback_topic: item.owner.feedbackTopic, binding:item.stored?.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
-    marketing: item.snapshot.kind === 'marketing', reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
+    feedback_topic: item.owner.feedbackTopic, binding:item.review?.draft.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
+    hosted:!!item.owner.tenantName,marketing: item.snapshot.kind === 'marketing', reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
+        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, hosted boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
   const claimed = await db.execute<{ id: string; status: EmailStatus; webhooks:number }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id,status,(SELECT count(*)::int FROM webhook_jobs) AS webhooks FROM claimed`);
   return {statuses:new Map(claimed.rows.map(row => [row.id, row.status])),webhooks:claimed.rows[0]?.webhooks??0};
 }
@@ -477,6 +521,9 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       SELECT workspace_id, email, suppressed, suppression_reason, deleted_at, marketing_consent FROM audience_contacts
       WHERE (workspace_id, email) IN (SELECT workspace_id, email FROM dest)
       ORDER BY workspace_id,email FOR UPDATE
+    ), pinned_routes AS MATERIALIZED (
+      ${runtime.config.multiTenant ? sql`SELECT keys.*,r.* FROM (SELECT DISTINCT workspace_id,split_part(sender,'@',2) AS host FROM input WHERE binding IS NOT NULL) keys
+        CROSS JOIN LATERAL regional_sender(keys.workspace_id,keys.host,${isSimulatedSes(runtime)}) r` : sql`SELECT 1`}
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed
@@ -491,7 +538,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
                 OR right(split_part(x.sender, '@', 2), length(d.value) + 1) = '.' || lower(d.value)))) END
           AS origin_ok,
         ${runtime.config.multiTenant ? sql`CASE WHEN x.binding IS NULL THEN ${verifiedClaim(sql`x.workspace_id`, sql`${region}`, sql`split_part(x.sender, '@', 2)`)} ELSE EXISTS (
-          SELECT 1 FROM regional_sender(x.workspace_id,split_part(x.sender,'@',2),${isSimulatedSes(runtime)}) r WHERE r.region=${region} AND r.verified AND r.binding=x.binding
+          SELECT 1 FROM pinned_routes r WHERE r.workspace_id=x.workspace_id AND r.host=split_part(x.sender,'@',2) AND r.region=${region} AND r.verified AND r.binding=x.binding
             AND r.connection IS NOT NULL AND r.connection->>'paused_at' IS NULL AND (r.connection->>'kind'='byo' OR ${isSimulatedSes(runtime)} OR r.connection->>'tenant_state'='ready')
             AND r.connection->>'feedback_topic_arn' IS NOT DISTINCT FROM x.feedback_topic) END` : sql`true`} AS binding_ok,
         (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.state <> 'canceled')) AS campaign_allowed,
@@ -504,14 +551,17 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
             WHEN x.marketing AND c.marketing_consent IS DISTINCT FROM 'subscribed' THEN 'consent_missing' END AS reason) cause
           WHERE d.email_id=x.id AND cause.reason IS NOT NULL ORDER BY d.n LIMIT 1) AS suppression_reason
       FROM input x
-    ), claimed AS (
+    ), budget AS MATERIALIZED (SELECT x.id,${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`CASE WHEN x.hosted AND el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.suppression_reason IS NULL
+        THEN hosted_burst_ok(x.workspace_id,split_part(x.sender,'@',2),hosted_real_cost(x.destinations)) ELSE true END` : sql`true`} AS allowed
+      FROM input x JOIN eligibility el USING(id) ORDER BY x.workspace_id,x.sender,x.id), claimed AS (
       UPDATE sending_emails e SET simulated = ${isSimulatedSes(runtime)},
-        status = CASE WHEN NOT el.origin_ok OR NOT el.binding_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.suppression_reason IS NULL THEN 'attempting' ELSE 'suppressed' END,
-        attempt_started_at = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.suppression_reason IS NULL THEN clock_timestamp() ELSE e.attempt_started_at END,
-        error_code = CASE WHEN NOT el.binding_ok AND x.binding IS NOT NULL THEN 'SENDER_BINDING_CHANGED' WHEN NOT el.origin_ok OR NOT el.binding_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.suppression_reason IS NULL THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+        status = CASE WHEN NOT b.allowed THEN 'queued' WHEN NOT el.origin_ok OR NOT el.binding_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.suppression_reason IS NULL THEN 'attempting' ELSE 'suppressed' END,
+        scheduled_at=CASE WHEN NOT b.allowed THEN date_trunc('minute',statement_timestamp())+interval '1 minute' ELSE e.scheduled_at END,
+        attempt_started_at = CASE WHEN b.allowed AND el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.suppression_reason IS NULL THEN clock_timestamp() ELSE e.attempt_started_at END,
+        error_code = CASE WHEN NOT b.allowed THEN 'HOSTED_BURST_LIMIT' WHEN NOT el.binding_ok AND x.binding IS NOT NULL THEN 'SENDER_BINDING_CHANGED' WHEN NOT el.origin_ok OR NOT el.binding_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.suppression_reason IS NULL THEN nullif(e.error_code,'HOSTED_BURST_LIMIT') ELSE 'RECIPIENT_INELIGIBLE' END,
         suppression_reason = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed THEN el.suppression_reason END,
-        ${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`feedback_topic_arn=x.feedback_topic,` : sql``} snapshot = coalesce(x.snapshot, e.snapshot), lease_until = NULL, updated_at = clock_timestamp()
-      FROM input x JOIN eligibility el ON el.id = x.id
+        ${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`feedback_topic_arn=x.feedback_topic,` : sql``} snapshot = CASE WHEN b.allowed THEN coalesce(x.snapshot, e.snapshot) ELSE e.snapshot END, lease_until = NULL, updated_at = clock_timestamp()
+      FROM input x JOIN eligibility el ON el.id = x.id JOIN budget b ON b.id=x.id
       WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
         ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=x.workspace_id AND pc.paused_at IS NULL FOR SHARE)` : sql``}
       RETURNING e.id,e.workspace_id,e.status,e.region,e.simulated,e.error_code,e.suppression_reason,e.dispatch_version
@@ -553,7 +603,7 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     ...(item.owner.tenantName ? { TenantName: item.owner.tenantName } : {}), Content: item.content,
   };
   const command = new item.owner.transport.SendEmailCommand(request);
-  const client = item.owner.sendClient?.((item.stored?.binding ?? mail.snapshot.binding)?.domain ?? '') ?? ses;
+  const client = item.owner.sendClient?.((item.review?.draft.binding ?? mail.snapshot.binding)?.domain ?? '') ?? ses;
   try {
     const result = await client.send(command);
     if (!result.MessageId) return { mail, type: 'acceptance_unknown', errorCode: 'SES_ACCEPTANCE_UNKNOWN', data: { code: 'SES_MESSAGE_ID_MISSING' } };
@@ -566,6 +616,13 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, region: s.region, ...diagnostics });
     const providerRetries = item.rateRetries;
     const definitive = status !== undefined && status >= 400 && status < 500;
+    // Only a definitive provider refusal proves non-acceptance. A transport error,
+    // 5xx or missing message ID remains ambiguous and must not be auto-replayed.
+    if (definitive && (['InvalidClientTokenId','SignatureDoesNotMatch','UnrecognizedClientException','ExpiredToken','ExpiredTokenException'].includes(failure.name ?? '') ||
+      (status === 403 && /security token included in the request is (?:invalid|expired)|request signature we calculated does not match|access key id you provided does not exist/i.test(failure.message ?? '')))) {
+      const backoff = Math.min(300_000, 5000 * 2 ** Math.min(6,mail.dispatchVersion));
+      return {mail,type:'provider_throttled',errorCode:'SES_CREDENTIALS_INVALID',data:{code:'SES_CREDENTIALS_INVALID',retryable:true},requeueAt:new Date(Date.now()+backoff).toISOString()};
+    }
     const pause = /\b(?:paused|disabled|suspended)\b/i;
     if (definitive && item.owner.tenantName && /\btenant\b/i.test(failure.message ?? '') && (failure.name === 'SendingPausedException' || pause.test(failure.message ?? ''))) {
       return { mail, type: 'reject', errorCode: 'SES_TENANT_SENDING_PAUSED', data: { code: 'SES_TENANT_SENDING_PAUSED', retryable: false } };
@@ -613,7 +670,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *
     ), updated AS (
       UPDATE sending_emails e SET
-        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
+        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','SES_CREDENTIALS_INVALID','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
         account_pause_started_at = CASE WHEN x.error_code='SES_ACCOUNT_SENDING_PAUSED' THEN coalesce(e.account_pause_started_at,clock_timestamp()) END,
         dispatch_version = CASE WHEN x.next_status = 'queued' THEN e.dispatch_version + 1 ELSE e.dispatch_version END,
         scheduled_at = CASE WHEN x.next_status = 'queued' THEN clock_timestamp() + x.wait_ms * interval '1 millisecond' ELSE e.scheduled_at END,
@@ -680,7 +737,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcome: Outcome) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { attachmentBytes:number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -785,6 +842,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   // sample and its one provisional batch available for a subsequent deliverable message.
   const status = ready[0]!.claimStatus;
   if (status && status !== 'attempting') {
+    if(status==='queued') deferBurst(lane.deferred,ready[0]!.mail.workspaceId,ready[0]!.mail.snapshot.kind);
     counters.skipped++;
     if (status === 'lost') logLost(1);
     return { processed: 1, blocked: false };
@@ -857,71 +915,115 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     const snapshot = single.mail.snapshot;
     lane.held.recipients++;
     const result = await phase('send', () => lane.send({ ...single, snapshot, content: simpleContent(snapshot, []) }, Date.now() + MAX_PRE_SEND_MS));
-    await lane.record(result);
+    await lane.record([result]);
     return { processed: 1, blocked: false };
   }
   const loadAttachments = batchAttachments(base, ready);
+  const screenDeferred:Mail[]=[];
   const prepare = async (item: typeof ready[number]) => {
-    try { return await prepareMail(item, loadAttachments); }
+    try { return await prepareMail(item, loadAttachments,gate); }
     catch (error) {
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
+      if (error instanceof ApiError && error.code==='CONTENT_SCREEN_UNAVAILABLE') {
+        if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
+          gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
+        }
+        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); return;
+      }
       counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error);
     }
   };
-  if (ready.some(({mail, owner}) => mail.snapshot.screen && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
-    // Start every preflight together, but don't gate unrelated sends on the slowest classifier.
-    // Drain completions in groups; those arriving during a claim/send form the next group.
-    const available: Prepared[] = [];
-    let notify: (() => void) | undefined, finished = false;
-    const preparing = Promise.allSettled(ready.map(async item => {
-      const p = await prepare(item);
-      if (p) { available.push(p); notify?.(); }
-    })).then(results => { finished = true; notify?.(); return results; });
+  const streamPage=async(items:typeof ready,coalesce=false)=>{
+    const available:Prepared[]=[]; let notify:(()=>void)|undefined,finished=false,next=0;
+    const workers=Promise.allSettled(Array.from({length:Math.min(items.length,options.sendConcurrency)},async()=>{
+      while(next<items.length){ const p=await prepare(items[next++]!); if(p){available.push(p);notify?.();} }
+    })).then(results=>{finished=true;notify?.();return results;});
     try {
-      while (!finished || available.length) {
-        if (available.length) await dispatchPrepared(base, lane, available.splice(0));
-        else await new Promise<void>(resolve => { notify = resolve; });
+      while(!finished || available.length){
+        if(available.length){
+          // Give fast sibling object reads a short collection window. A slow
+          // object never holds the page, and ordinary campaign pages share the
+          // claim and result writer instead of issuing one claim per object.
+          if(coalesce && !finished) await Promise.race([workers,new Promise(resolve=>setTimeout(resolve,10))]);
+          await dispatchPrepared(base,lane,available.splice(0));
+        }
+        else await new Promise<void>(resolve=>{notify=resolve;});
       }
-    } finally {
-      for (const result of await preparing) if (result.status === 'rejected') throw result.reason;
+    } finally {for(const r of await workers) if(r.status==='rejected') throw r.reason;}
+  };
+  if(ready.some(item=>item.mail.snapshot.attachments.length)) {
+    // Reserve bytes, not a whole lane. Small pages overlap and share the result
+    // writer; disjoint large bodies still cannot accumulate across sibling lanes.
+    const limit=8*1024*1024;let page:typeof ready=[],bytes=0;
+    const flush=async()=>{
+      while(lane.attachmentBytes+bytes>limit) await (lane.bytesReleased??=new Promise(resolve=>{lane.notifyBytes=resolve;}));
+      lane.attachmentBytes+=bytes;
+      try {
+        // A single immutable review shares all object reads. With no external
+        // classifier, prepare one full claim at a time; CPU speed is not a
+        // reason to split it. Unrelated objects/probes still stream below.
+        const review=page[0]!.mail.reviewId;
+        if (review && page.every(({mail,owner}) => mail.reviewId===review && (isSimulatedSes(owner.runtime) || !owner.tenantName || !owner.runtime.config.hostedScreen))) {
+          const prepared:Prepared[]=[];
+          for (const group of chunk(page,options.sendConcurrency)) {
+            for(const p of await Promise.all(group.map(prepare))) if(p) prepared.push(p);
+          }
+          await dispatchPrepared(base,lane,prepared);
+        } else await streamPage(page,true);
+      }finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
+      page=[];bytes=0;
+    };
+    for(const item of ready){
+      // Invalid oversize metadata is rejected in prepare before reading the object.
+      const n=Math.min(limit,(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,0));
+      if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;
     }
+    if(page.length)await flush();
+  } else if (ready.some(({mail, owner}) => (mail.snapshot.screen || owner.tenantName && owner.runtime.config.hostedScreen) && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
+    // Bound simultaneous probes, but don't gate unrelated sends on the slowest classifier.
+    // Drain completions in groups; those arriving during a claim/send form the next group.
+    await streamPage(ready);
   } else {
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
   }
+  if(screenDeferred.length) await base.db.execute(sql`UPDATE sending_emails e SET lease_until=NULL,error_code='CONTENT_SCREEN_UNAVAILABLE',scheduled_at=clock_timestamp()+interval '30 seconds'
+    FROM jsonb_to_recordset(${JSON.stringify(screenDeferred.map(m=>({id:m.id,version:m.dispatchVersion})))}::jsonb) x(id text,version int)
+    WHERE e.id=x.id AND e.dispatch_version=x.version AND e.status='queued'`);
   return { processed: ready.length, blocked: false };
 }
 const logLost = (count:number) => log('warn', { code:'DISPATCH_CLAIM_LOST', count, message:'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
+function deferBurst(deferred:DeferredStream[],workspace_id:string,stream:DeferredStream['stream']) {
+  if(!deferred.some(d=>d.workspace_id===workspace_id && d.stream===stream)) deferred.push({workspace_id,stream,until:(Math.floor(Date.now()/60000)+1)*60000});
+}
 async function recordBatch(base: Runtime,lane: Lane,outcomes: Outcome[]) {
   await lane.phase('record', () => recordOutcomes(base,outcomes));
   for (const outcome of outcomes) {
+    if(outcome.type==='acceptance_unknown' || outcome.type==='provider_throttled' || outcome.errorCode==='SES_TENANT_SENDING_PAUSED') log(outcome.type==='acceptance_unknown'?'error':'warn',{code:outcome.errorCode,region:outcome.mail.region,stream:outcome.mail.snapshot.kind});
     if (outcome.type === 'accepted') lane.counters.sent++; else if (requeued(outcome)) lane.counters.deferred++; else lane.counters.skipped++;
     if (outcome.mail.campaignId && !requeued(outcome)) lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
   }
 }
-// One writer per run, shared by all lanes. The first response starts SQL immediately;
-// responses received during that write go into the next set-based statement. Never wait
-// on a different SES call to commit a provider ID, and don't fan out DB connections.
+// One writer per run. Concurrent lanes can share the next statement without
+// fanning out DB connections. The caller decides when a claim is ready to write.
 function outcomeRecorder(write: (ready: Outcome[]) => Promise<void>) {
   const ready: Outcome[] = [];
-  let writing: Promise<void> | undefined, lastStart = -Infinity;
+  let writing: Promise<void> | undefined;
   async function flush() {
     let failure: { reason: unknown } | undefined;
     try {
       while (ready.length) {
-        // On sub-LAN-latency databases, back-to-back writes would degenerate to one
-        // statement per recipient. Coalesce for at most 16 ms from the *previous start*;
-        // idle sends and real Hyperdrive RTTs already exceed this window and never sleep.
-        const delay = 16 - (performance.now() - lastStart);
-        if (delay > 0) await sleep(delay);
-        lastStart = performance.now();
         try { await write(ready.splice(0)); } catch (reason) { failure ??= { reason }; }
       }
       if (failure) throw failure.reason;
     }
     finally { writing = undefined; }
   }
-  return (outcome: Outcome) => { ready.push(outcome); return writing ??= flush(); };
+  return (outcomes: Outcome[]) => { ready.push(...outcomes); return writing ??= flush(); };
+}
+function schedulePartialFlush(flush: () => void) {
+  const timer = setTimeout(flush, 16);
+  return () => clearTimeout(timer);
 }
 async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
   if (!prepared.length) return;
@@ -968,6 +1070,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       return checkMcp ? base.db.transaction(tx => claim(group, tx)) : claim(group, base.db);
     });
     if (webhooks) pendingRecords.push(wakeWebhooks(base,webhooks));
+    for(const item of group) if(statuses.get(item.mail.id)==='queued') deferBurst(lane.deferred,item.mail.workspaceId,item.snapshot.kind);
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
     for (const item of group) if (statuses.get(item.mail.id) !== 'attempting') lane.held.recipients -= cost(item);
     const lost = group.filter(item => !statuses.has(item.mail.id));
@@ -979,11 +1082,25 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
     if (!attempting.length) continue;
     // Each message takes its own evenly spaced slot, so the provider sees a steady stream at the target
     // rate rather than one burst per group; a throttled response brakes every lane on this shard.
-    await phase('send', () => Promise.all(attempting.map(async item => {
-      const write = lane.record(await lane.send(item, claimDeadline));
+    // Record the complete claim together, even on a fast database. Start a
+    // bounded flush at the first result so a stuck provider cannot hold its
+    // siblings' IDs. Singleton claims and the last response flush immediately.
+    const ready: Outcome[] = [];
+    let received = 0;
+    let cancel: (() => void) | undefined;
+    const flush = () => {
+      cancel?.(); cancel = undefined;
+      if (!ready.length) return;
+      const write = lane.record(ready.splice(0));
       void write.catch(() => {}); // Observe immediately; propagate the write error when the batch joins.
       pendingRecords.push(write);
+    };
+    const sends = await phase('send', () => Promise.allSettled(attempting.map(async item => {
+      ready.push(await lane.send(item, claimDeadline));
+      if (++received < attempting.length) cancel ??= (options.schedulePartialFlush ?? schedulePartialFlush)(flush);
     })));
+    flush();
+    for (const send of sends) if (send.status === 'rejected') { await Promise.all(pendingRecords); throw send.reason; }
   }
   // Local marketing allowance is not a regional hold: a sibling may still have capacity. Do not
   // hide the tail of its queue for a minute. Oversize transactional envelopes still get backoff.
@@ -1017,7 +1134,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
   const held = { recipients: 0 };
   const runClients = new Map<string, SESv2Client>();
-  const lane: Lane = { deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
+  const lane: Lane = { attachmentBytes:0,deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
   const lease = async (priorityOnly = false, first = false) => {
     const now = Date.now();
     if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
@@ -1029,7 +1146,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     }
     const inline = first && runtime.config.multiTenant && !gate.dailyBlockedUntil && gate.nextAllowedAt <= now && (gate.brakeUntil ?? 0) <= now
       ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs), margin: provisionalMargin(gate.sentSinceRefresh, 1, options.shard) } : undefined;
-    return phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
+    return phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
   };
   let blocked = false;
   const drainLane = async (batch: Leased[]) => {
@@ -1037,9 +1154,9 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       const { processed, blocked: exhausted } = await dispatchBatch(runtime, lane, batch);
       counters.batches++;
       if (exhausted) blocked = true;
-      if (processed) await options.onGate?.(gate);
+      if (processed || gate.ownerCursor) await options.onGate?.(gate);
       // A short batch means the queue is draining: settle completed campaigns before this lane stops.
-      if (blocked || batch.length < lane.options.batchSize) { await flushFinishing(runtime, lane); return; }
+      if (blocked || batch.length < lane.options.batchSize && (!gate.ownerCursor || gate.nextAllowedAt>=Date.now()+MAX_PRE_SEND_MS || dailyRemaining(gate)<=0)) { await flushFinishing(runtime, lane); return; }
       if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; await flushFinishing(runtime, lane); return; }
       batch = await lease();
     }

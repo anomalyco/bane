@@ -1,7 +1,7 @@
 # Local/self-hosted infrastructure. Production may use external Postgres and S3 instead.
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
     environment:
       POSTGRES_USER: bane
       POSTGRES_DB: bane
@@ -14,7 +14,9 @@ services:
       timeout: 2s
       retries: 15
   storage:
-    image: minio/minio:latest
+    # L11: no mutable tag. MinIO no longer publishes anonymous community images (minio/minio on
+    # Docker Hub and quay.io both answer 401), so name an image you build or mirror, by digest.
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE to a digest-pinned MinIO image (name@sha256:...)}
     command: server /data
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID}

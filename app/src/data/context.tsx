@@ -2,7 +2,8 @@ import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffe
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
-import { ApiError, type Identity, type BaneApi } from './types'
+import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
+import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
@@ -33,7 +34,24 @@ export function useOnboardingStage() {
 }
 function invitationError(error: unknown) {
   if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for a different email address. Ask for a new invitation.'
-  return `Couldn’t accept the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
+  return `Couldn’t open the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
+}
+const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+// Shown before anything changes. The slug tells apart workspaces that share a name. An account whose
+// only way in is this invitation has no workspace yet (M9): cancelling signs it out instead.
+function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
+  return <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
+    <h2>Join {invitation.workspaceName}?</h2>
+    <p>You were invited{email ? <> as <bdi>{email}</bdi></> : null}. {firstWorkspace ? 'Your account has no workspace yet. Nothing changes until you join; cancelling signs you out.' : 'Nothing changes until you join; you stay in your current workspace if you cancel.'}</p>
+    <dl className="invitation-facts">
+      <dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi> <code>{invitation.workspaceSlug}</code></dd>
+      <dt>Invited by</dt><dd><bdi>{invitation.inviterName}</bdi> <code>{invitation.inviterEmail}</code></dd>
+      <dt>Role</dt><dd>{roleLabel[invitation.role]}</dd>
+      <dt>Expires</dt><dd>{expiry.format(new Date(invitation.expiresAt))}</dd>
+    </dl>
+    {error ? <Alert tone="danger">{invitationError(error)}</Alert> : null}
+    <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
+  </div></main>
 }
 export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
   // The docs are public: they render signed out, and /v1/me only adds the workspace's context.
@@ -48,27 +66,35 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [invitation, setInvitation] = useState(() => client.mode === 'demo' || publicRoute ? null : new URLSearchParams(window.location.search).get('invitation'))
-  const accept = useQuery({
+  function clearInvitation() {
+    const url = new URL(window.location.href)
+    url.searchParams.delete('invitation')
+    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
+    setInvitation(null)
+  }
+  // An invitation link only opens a review. Joining, and switching to the workspace, wait for the
+  // recipient's own click: a link alone must never move someone into another workspace.
+  const review = useQuery({
     queryKey: ['invitation', invitation], enabled: Boolean(invitation), retry: false, staleTime: Infinity, gcTime: Infinity,
-    queryFn: async () => {
-      try {
-        const { workspaceId } = await request<{ workspaceId: string }>(`/v1/workspaces/invitations/${encodeURIComponent(invitation!)}/accept`, { method: 'POST', body: {} })
-        selectWorkspace(workspaceId)
-        toast('Invitation accepted', 'success')
-      } catch (error) {
-        // Signed out: keep the link so sign-in returns here and accepts it.
-        if (error instanceof ApiError && error.status === 401) return 'signed-out'
-        setNotice(invitationError(error))
+    queryFn: async ({ signal }) => {
+      try { return await workspaceApi.reviewInvitation(invitation!, signal) }
+      catch (error) {
+        // Signed out: keep the link so sign-in returns here to review it.
+        if (error instanceof ApiError && error.status === 401) return null
+        throw error
       }
-      const url = new URL(window.location.href)
-      url.searchParams.delete('invitation')
-      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
-      setInvitation(null)
-      return 'done'
+    },
+  })
+  const join = useMutation({
+    mutationFn: async (pending: WorkspaceInvitationPreview) => {
+      const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
+      await switchWorkspace(workspaceId)
+      clearInvitation()
+      toast(`Joined ${pending.workspaceName}`, 'success')
     },
   })
   const identity = useQuery({
-    queryKey: ['identity'], enabled: client.mode !== 'demo' && (!invitation || accept.isFetched),
+    queryKey: ['identity'], enabled: client.mode !== 'demo',
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
@@ -86,9 +112,17 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       return result
     },
   })
+  useEffect(() => {
+    if (!invitation) return
+    if (review.error) { setNotice(invitationError(review.error)); clearInvitation() }
+    // Already a member (an account whose only way in was this invitation joins at sign-in): nothing to confirm or switch.
+    else if (review.data?.status === 'accepted') clearInvitation()
+    else if (review.data === null && identity.data) { setNotice('Couldn’t open the invitation. Follow the link again.'); clearInvitation() }
+  }, [invitation, review.error, review.data, identity.data])
   async function switchWorkspace(id: string, path?: string) {
     const previous = selectedWorkspace()
-    if (id === previous) return
+    // A first-time invitee has no identity yet, so a remembered ID equal to the joined workspace still loads it.
+    if (id === previous && cache.getQueryData(['identity'])) return
     await cache.cancelQueries()
     selectWorkspace(id)
     let next: Identity
@@ -162,9 +196,20 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     if (multiTenant) await loadHome()
     return multiTenant
   } })
-  const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
+  const authResult = new URLSearchParams(window.location.search).get('auth')
+  // not_approved: a verified Google account outside the invite list. The API has already saved it as an access request.
+  const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
+    : authResult === 'error' ? <Alert tone="danger">Google sign-in didn’t finish. It may have been cancelled; try again.</Alert>
+    : notice ? <Alert tone="danger">{notice}</Alert>
+    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited Google account to review it. You join only after you confirm.</Alert>
+  // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
+  // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
+  const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
+  const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
-    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
+    {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
+    : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>
         {authNotice}

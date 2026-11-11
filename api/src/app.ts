@@ -1,17 +1,18 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { MiddlewareHandler } from 'hono';
-import { bodyLimit } from 'hono/body-limit';
+import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
 import { ApiError, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
-import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
+import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections';
+type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats';
 function routeGroupFor(pathname: string): RouteGroup | null {
+  if (pathname === '/v1/public/stats') return 'public-stats';
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
@@ -62,6 +63,7 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'mailbox': return (await import('./mailbox.js')).registerMailbox;
       case 'workspaces': return (await import('./workspaces.js')).registerWorkspaces;
       case 'provider-connections': return (await import('./provider-connections.js')).registerProviderConnections;
+      case 'public-stats': return (await import('./public-stats.js')).registerPublicStats;
     }
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
@@ -73,7 +75,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
     app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Secure-bane.session_token', description: 'Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin.' });
   } else {
     const rawOpenapi = app.openapi;
     app.openapi = ((route, handler, hook) => allowPath && !allowPath(route.path) ? app : rawOpenapi({ ...route, hide: true }, handler, hook)) as typeof app.openapi;
@@ -98,31 +100,37 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
     if (!wake && !dispatch) return;
     const nudge = async (runtime: Runtime) => {
-      if (wake) try { await runtime.wake?.(wakeJobs, c.req.path.startsWith('/v1/webhooks/') ? 'webhook' : undefined); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
+      if (wake) try { await runtime.wake?.(wakeJobs, actor?.wakeJobPool ?? (/^\/v1\/(?:inbound\/)?webhooks\//.test(c.req.path) ? 'webhook' : undefined)); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const [region, { count, priority }] of targets) {
         try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
   });
-  const apiLimit = bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } });
-  const snsLimit = bodyLimit({ maxSize: 512 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'SNS envelope exceeds the 512 KiB limit.'); } });
-  app.use('*', (c, next) => (c.req.method === 'POST' && c.req.path === '/v1/events/ses' ? snsLimit : apiLimit)(c, next));
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (c.req.path.startsWith('/v1/inbound/')) return next();
+    // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
+    if (c.req.path === '/v1/public/stats') return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
+    // Reviewing that invitation before joining authenticates the same way and changes nothing.
+    if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
     // Provider redirects cannot carry a workspace header. This route authenticates the Google
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
-    if (c.req.path === '/v1/events/ses') {
-      // Only SNS ingress needs trusted topic/account bindings; unknown topics are checked fresh in the handler.
-      if (c.req.method === 'POST' && !c.env.config.multiTenant) c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));
-      return next();
-    }
+    if (c.req.path === '/v1/events/ses') return next();
     return authenticate(c, next);
+  });
+  app.use('*', async (c, next) => {
+    // MCP has its own streaming reader after OAuth; inbound authenticates its
+    // own scoped keys. Unknown routes and public forms are not upload routes.
+    if (c.req.path!=='/mcp' && !c.req.path.startsWith('/v1/inbound/')) {
+      const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
+      await boundRequestBody(c,c.req.path==='/v1/events/ses'?512*1024:matched && c.get('actor')?undefined:64*1024);
+    }
+    await next();
   });
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.
@@ -162,7 +170,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
-  app.get('/health', c => c.json({ status: 'ok', service: 'bane', multiTenant: c.env.config.multiTenant }));
+  app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));
+  app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
   app.get('/llms.txt', async c => { const { doc, createLlmsText } = await loadDocs(); return markdown(c, createLlmsText(doc)); });
@@ -178,15 +187,15 @@ export async function createOpenApiApp(): Promise<App> {
   const [
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
-    { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp },
+    { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats },
   ] = await wrapModuleLoad(() => Promise.all([
     import('./mcp-auth.js'), import('./google-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
-    import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'),
+    import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'),
   ]));
   registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
-  registerWorkspaces(full); registerProviderConnections(full); registerMcp(full);
+  registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full);
   return full;
 }
 

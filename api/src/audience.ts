@@ -154,23 +154,17 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
       SELECT ${counts},(SELECT count(*)::int FROM captured) AS captured,(SELECT coalesce(sum(recipient_bytes),0) FROM captured) AS bytes FROM audience_snapshot`);
     return checkedSnapshot(rows[0]!);
   }
-  // Hyperdrive ends any statement after 60 seconds, so a large audience (up to 2,000,000 contacts) is captured
-  // in several bounded statements inside the caller's transaction: matching contacts are staged in 16 contact-ID
-  // ranges, ordered once, then inserted in ordinal chunks. Each contact is evaluated exactly once.
-  await db.execute(sql`SET LOCAL work_mem = '256MB'`);
+  // One MVCC statement snapshot for membership, consent and properties, even under
+  // READ COMMITTED. Never paginate the live audience over independent snapshots.
+  if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275812,1) OR pg_try_advisory_xact_lock(275812,2)`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Large audience captures are busy; retry the launch.',undefined,true);
+  await db.execute(sql`SET LOCAL work_mem = '64MB'`);
   // A launch that fails after this point and is retried inside the same transaction (tests) must not trip over its own staging tables.
-  await db.execute(sql`DROP TABLE IF EXISTS audience_snapshot, audience_ordered; CREATE TEMP TABLE audience_snapshot (rank integer NOT NULL, id text NOT NULL, recipient jsonb NOT NULL, eligible boolean NOT NULL, suppressed boolean NOT NULL) ON COMMIT DROP`);
-  const bounds = ['', ...'123456789abcdef'.split('').map(digit => `con_${digit}`), null];
-  let staged = 0;
-  for (let index = 0; index < bounds.length - 1; index++) {
-    const lower = bounds[index]!, upper = bounds[index + 1];
-    const chunk = await db.execute(sql`INSERT INTO audience_snapshot (rank,id,recipient,eligible,suppressed)
-      ${matched(and(sql`${contacts.id} >= ${lower}`, upper ? sql`${contacts.id} < ${upper}` : undefined))}`);
-    staged += chunk.rowCount ?? 0;
-    if (staged > 2000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
-  }
+  await db.execute(sql`DROP TABLE IF EXISTS pg_temp.audience_snapshot, pg_temp.audience_ordered`);
+  const staged=await db.execute(sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS ${matched()} LIMIT 2000001`);
+  if ((staged.rowCount??0)>2000000) throw new ApiError(422,'AUDIENCE_LIMIT_EXCEEDED','Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   // One sort assigns the send order (priority, then contact ID) and the running size used for the 1 GiB cap.
   await db.execute(sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS ${ordered}`);
+  await db.execute(sql`CREATE UNIQUE INDEX ON audience_ordered(ordinal); ANALYZE audience_ordered`);
   const [{ eligibleRows }] = (await db.execute<{ eligibleRows: number }>(sql`SELECT count(*)::int AS "eligibleRows" FROM audience_ordered`)).rows as [{ eligibleRows: number }];
   for (let from = 0; from < eligibleRows; from += 200000) {
     await db.execute(sql`INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)

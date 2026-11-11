@@ -8,6 +8,10 @@ export type MxReport = {
   expected: { type: 'MX'; name: string; value: string; priority: number };
   records: { priority: number; host: string; provider: string | null }[];
   providers: string[];
+  /** The CNAME target when `state` is cname: an MX can't coexist with a CNAME (RFC 1034). */
+  target?: string;
+  /** Mail for the name may be split: several MX records, or another host at the same or better preference than SES. */
+  split?: boolean;
   message: string;
   checkedAt: string;
 };
@@ -113,7 +117,7 @@ export const mailAttachments = pgTable('mail_attachments', {
 export const mailReceipts = pgTable('mail_receipts', {
   workspaceId: text('workspace_id').notNull(), sesMessageId: text('ses_message_id').notNull(),
   region: text('region').notNull(), bucket: text('bucket').notNull(), objectKey: text('object_key').notNull(), recipients: jsonb('recipients').$type<string[]>().notNull(),
-  notification: jsonb('notification').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'processed' | 'failed'>().notNull().default('pending'),
+  notification: jsonb('notification').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'held' | 'processed' | 'failed'>().notNull().default('pending'),
   recoveryAttempts:smallint('recovery_attempts').notNull().default(0),lastRecoveredAt:ts('last_recovered_at'),
   error: text('error'), createdAt: ts('created_at').notNull().defaultNow(), processedAt: ts('processed_at'),
 }, t => [primaryKey({ columns: [t.workspaceId, t.sesMessageId] })]);
@@ -144,7 +148,7 @@ export const mailboxWebhooks = pgTable('mailbox_webhooks', {
 
 export const mailboxWebhookDeliveries = pgTable('mailbox_webhook_deliveries', {
   id: text('id').primaryKey(), ...scope(), webhookId: text('webhook_id').notNull(), eventSeq: bigint('event_seq', { mode: 'number' }).notNull(),
-  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'delivered' | 'failed'>().notNull().default('pending'),
+  generation:integer('generation').notNull().default(0),payload: jsonb('payload').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'delivered' | 'failed' | 'paused'>().notNull().default('pending'),
   attemptCount: integer('attempt_count').notNull().default(0), lastStatusCode: integer('last_status_code'), lastError: text('last_error'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });

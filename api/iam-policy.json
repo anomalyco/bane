@@ -40,12 +40,13 @@
     {
       "Sid": "SendFromAccountIdentities",
       "Effect": "Allow",
-      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Action": "ses:SendEmail",
       "Resource": [
-        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*",
+        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/?*.??*",
         "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-*",
         "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:template/*"
-      ]
+      ],
+      "Condition": {"StringEquals": {"ses:ApiVersion": "2"}}
     },
     {
       "Sid": "ApplyPerMessageTracking",
@@ -65,8 +66,6 @@
       "Action": [
         "ses:DescribeActiveReceiptRuleSet",
         "ses:DescribeReceiptRuleSet",
-        "ses:CreateReceiptRuleSet",
-        "ses:SetActiveReceiptRuleSet",
         "ses:CreateReceiptRule",
         "ses:UpdateReceiptRule",
         "ses:DeleteReceiptRule"
@@ -90,8 +89,9 @@
     {
       "Sid": "ReadWriteMailboxObjects",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:PutObjectTagging", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::bane-*-mail-*/*"
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:PutObjectTagging"],
+      "Resource": "arn:aws:s3:::bane-*-mail-*/*",
+      "Condition": {"StringEquals": {"s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID"}}
     },
     {
       "Sid": "ProvisionBaneFeedbackTopics",

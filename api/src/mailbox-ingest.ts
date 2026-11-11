@@ -1,13 +1,14 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
+import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
-import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageBinding } from './mailbox-setup.js';
+import { mailboxS3, receivedAttachmentKey, STAGING_PREFIX, workspacePrefix, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
@@ -230,10 +231,43 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
   return false;
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
-function withinLineLimit(raw: Uint8Array) {
-  let lines = raw.byteLength > 0 && raw[raw.byteLength - 1] !== 10 ? 1 : 0;
-  for (let i = 0; i < raw.byteLength; i++) if (raw[i] === 10 && ++lines > PARSE_LINE_LIMIT) return false;
-  return lines <= PARSE_LINE_LIMIT;
+const HEADER_LINES = 256, MIME_DEPTH = 12, MIME_PARSE_MS = 1000;
+function withinMimeLimits(raw: Uint8Array) {
+  let lines = 0, start = 0, headers = true, headerBytes = 0, headerLines = 0;
+  const boundaries: string[] = [];
+  const declared = new Set<string>();
+  while (start < raw.length) {
+    const lf = raw.indexOf(10, start), end = lf < 0 ? raw.length : lf;
+    if (++lines > PARSE_LINE_LIMIT) return false;
+    const length = end-start-(end>start && raw[end-1] === 13 ? 1 : 0);
+    // Conservative preflight of possible RFC 2046 delimiters, without decoding
+    // headers or bodies. Parser-side limits below remain authoritative for
+    // noncanonical syntax, attached messages and transfer encodings.
+    let matched = false;
+    if (declared.size && raw[start]===45 && raw[start+1]===45 && length>=3 && length<=76) {
+      const delimiter=String.fromCharCode(...raw.subarray(start+2,start+length)).trimEnd();
+      const closing=delimiter.endsWith('--'), key=closing?delimiter.slice(0,-2):delimiter;
+      const index=boundaries.lastIndexOf(key);
+      if (declared.has(key)) {
+        if (index>=0) boundaries.length=index+(closing?0:1);
+        else if (!closing && boundaries.push(key)>MIME_DEPTH) return false;
+        headers=!closing; matched=true;
+      }
+    }
+    if (!matched && headers) {
+      headers = length>0;
+      if (headers && (++headerLines>HEADER_LINES || (headerBytes+=end-start+1)>HEADER_LIMIT)) return false;
+      if (headers && length<=1024 && [32,9,67,99].includes(raw[start]!)) {
+        const field=String.fromCharCode(...raw.subarray(start,start+length));
+        if (/^(?:content-type:|[ \t])/i.test(field)) {
+          const boundary=/(?:;|^[ \t])\s*boundary\s*=\s*(?:"([^"\r\n]{1,70})"|([^;\s]{1,70}))/i.exec(field);
+          if (boundary) declared.add((boundary[1]??boundary[2])!);
+        }
+      }
+    }
+    start = end + 1;
+  }
+  return true;
 }
 function countEscaped(value: string | undefined, count: number) {
   if (!value) return count;
@@ -269,12 +303,15 @@ function countHeaderEscaped(msg: Email, count: number) {
 }
 type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
 type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
-const escapeBudgetStore = new AsyncLocalStorage<{ count: number }>();
+const mimeBudget = () => ({ count: 0, headerLines: 0, lines: 0, deadline: performance.now() + MIME_PARSE_MS });
+const escapeBudgetStore = new AsyncLocalStorage<ReturnType<typeof mimeBudget>>();
 const postalProto = PostalMime.prototype as unknown as {
   parse?: (this: unknown, buf: unknown) => Promise<Email>;
+  processLine?: (this: { currentNode: { state: string } }, line: Uint8Array, br: Uint8Array, final: boolean) => Promise<void>;
   renderTextContent?: (this: InternalParser) => void;
 };
 const origParse = postalProto.parse;
+const origLine = postalProto.processLine;
 const origRenderTextContent = postalProto.renderTextContent;
 let escapeGuardWarned = false;
 function warnMissingEscapeGuard() {
@@ -299,11 +336,22 @@ const guardedRenderTextContent = function (this: InternalParser) {
 };
 const escapeGuardInstalled = (() => {
   try {
-    if (typeof origParse !== 'function' || typeof origRenderTextContent !== 'function') return false;
+    if (typeof origParse !== 'function' || typeof origLine !== 'function' || typeof origRenderTextContent !== 'function') return false;
     const probe = new PostalMime() as unknown as Partial<InternalParser>;
     if (!(probe.textTypes instanceof Set) || !(probe.textMap instanceof Map)) return false;
     postalProto.parse = function (buf: unknown) {
-      return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run({ count: 0 }, () => origParse.call(this, buf));
+      return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run(mimeBudget(), () => origParse.call(this, buf));
+    };
+    // Use the parser's own boundary recognition, including decoded nested mail.
+    // Give workerd a scheduling point; its clock does not advance in pure JS.
+    postalProto.processLine = async function (line, br, final) {
+      const budget = escapeBudgetStore.getStore();
+      if (budget) {
+        if (this.currentNode.state === 'header' && line.length && ++budget.headerLines > HEADER_LINES) throw new RangeError('MIME header count');
+        if (++budget.lines % 512 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        if (performance.now() >= budget.deadline) throw new RangeError('MIME parse deadline');
+      }
+      return origLine.call(this, line, br, final);
     };
     postalProto.renderTextContent = guardedRenderTextContent;
     return true;
@@ -314,44 +362,74 @@ const escapeGuardInstalled = (() => {
 if (!escapeGuardInstalled) warnMissingEscapeGuard();
 export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
 export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
-  if (raw.byteLength > PARSE_LIMIT || !withinLineLimit(raw)) return null;
+  const budget = mimeBudget();
+  if (raw.byteLength > PARSE_LIMIT || !withinMimeLimits(raw)) return null;
   if (!isPostalMimeEscapeGuardInstalled()) {
     warnMissingEscapeGuard();
     if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;
   }
-  try { return await escapeBudgetStore.run({ count: 0 }, () => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' })); }
+  try {
+    const mail = await escapeBudgetStore.run(budget, () => PostalMime.parse(raw, {
+      attachmentEncoding: 'arraybuffer', maxHeadersSize: HEADER_LIMIT, maxNestingDepth: MIME_DEPTH,
+      maxRfc822NestingDepth: 4, maxPartCount: 200, maxForwardedAddresses: 256,
+    }));
+    return performance.now() < budget.deadline ? mail : null;
+  }
   catch { return null; }
 }
 
-const ingestJob: JobHandler = async (runtime, payload, job) => {
+const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
-  const [read] = await runtime.db.select({receipt:mailReceipts,binding:runtime.config.multiTenant ? storageBinding(scope.workspaceId,sql`mail_receipts.region`,sql`mail_receipts.bucket`) : sql<null>`NULL`}).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
-  const receipt=read?.receipt;
-  if (!receipt || receipt.status !== 'pending') return;
+  const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config.multiTenant,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
+  if(!receipt)return;
   const notification = receipt.notification as ReceivedNotification;
-  const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,read!.binding);
+  const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
   const rawKey=workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
+  const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
+  const spam=verdicts.spam!=='PASS';
+  const quarantine=verdicts.virus!=='PASS'?'MAILBOX_VIRUS_QUARANTINED':spam && receipt.spamPolicy==='quarantine'?'MAILBOX_SPAM_QUARANTINED':null;
+  if(quarantine){
+    try {
+      const {CopyObjectCommand}=await loadIngestS3();
+      await s3.send(new CopyObjectCommand({Bucket:receipt.bucket,Key:'quarantine/'+sesMessageId,CopySource:`${receipt.bucket}/${sourceKey}`,CopySourceIfMatch:receipt.notification.stagingEtag as string|undefined,TaggingDirective:'REPLACE'}));
+      log('warn',{code:quarantine,workspaceId:scope.workspaceId,virus:verdicts.virus??'missing',spam:verdicts.spam??'missing'});
+      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),eq(mailReceipts.status,'pending')));
+      return;
+    } finally {s3.destroy();}
+  }
+  const readStarted=performance.now();
   let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;
   try {
-    copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined);
+    copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
+      reserveMime(size);
+      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE),
+        policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
+        debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=(SELECT bytes FROM policy)
+          ON CONFLICT(workspace_id) DO UPDATE SET bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
+          WHERE (CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END)+excluded.bytes<=(SELECT bytes FROM policy) RETURNING 1),
+        charged AS (UPDATE mail_receipts SET reserved_bytes=${size} WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND EXISTS(SELECT FROM debit) RETURNING 1)
+        SELECT EXISTS(SELECT FROM charged UNION ALL SELECT FROM r WHERE reserved_bytes=${size}) AS ok,${size}::bigint<=bytes AND EXISTS(SELECT FROM r WHERE reserved_bytes IS NULL) AS fits FROM policy`);
+      if(!reserved.rows[0]?.ok){
+        if(reserved.rows[0]?.fits) throw new JobDeferred(new Date((Math.floor(Date.now()/3600000)+1)*3600000).toISOString());
+        throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
+      }
+    });
   } catch (error) {
     s3.destroy();
-    if (error instanceof ModuleLoadError || error instanceof ApiError) throw error;
+    if (error instanceof JobDeferred || error instanceof ModuleLoadError || error instanceof ApiError) throw error;
     if (error instanceof Error && ['NoSuchKey','NotFound'].includes(error.name)) throw new ApiError(404,'RAW_MESSAGE_MISSING','The staging object is missing.');
     if (error instanceof Error && error.name==='AccessDenied') throw new ApiError(403,'MAILBOX_RAW_ACCESS_DENIED','Access to the mailbox object was denied.');
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
   }
-  const {bytes:raw,sizeBytes}=copied;
+  const rawMs=performance.now()-readStarted,{bytes:raw,sizeBytes}=copied;
   const email = copied.large ? null : await parseInboundMime(raw);
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
-  const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
-  const spam = verdicts.spam === 'FAIL' || verdicts.virus === 'FAIL';
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
   const inReplyTo = normalizeMessageId(email?.inReplyTo);
   const references = messageIdList(email?.references);
@@ -367,10 +445,15 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const skipAttachments = (email?.attachments.length ?? 0) > MAX_ATTACHMENTS;
   if (skipAttachments) log('warn', { code: 'MAILBOX_ATTACHMENTS_SKIPPED', count: email!.attachments.length, limit: MAX_ATTACHMENTS });
   try {
+    // Stable on retry. Reopening a processed receipt strictly grows its envelope, so a
+    // cleanup already tagging the old batch can never touch the newly published keys.
+    const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients])) : null;
+    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`)));
+    if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${receipt.bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
     for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);
       const attachmentId = `matt_${(await digest(`${messageRowId}:${index}`)).slice(0, 32)}`;
-      const key = `${workspacePrefix(scope.workspaceId,'att')}${messageRowId}/${attachmentId}`;
+      const key = keys[index]!;
       const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(part.mimeType) ? part.mimeType : 'application/octet-stream';
       const { PutObjectCommand } = await loadIngestS3();
       await s3.send(new PutObjectCommand({ Bucket: receipt.bucket, Key: key, Body: new Uint8Array(bytes), ContentType: contentType }));
@@ -382,9 +465,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
   } finally { s3.destroy(); }
 
-  const runnable = await runtime.db.transaction(async tx => {
-    await tx.execute(sql`INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(${scope.workspaceId},'ingest'),(${scope.workspaceId},'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false`);
-    return storeIncoming(tx,{
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,{
         id: messageRowId, ...scope, direction: 'inbound', region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
          fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
@@ -392,9 +473,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: receipt.bucket, rawKey,
         verdicts, spam, automated: automated(email, raw, from.address), status,
       },attachments,verifiedFrom,!receipt.notification.stagingEtag);
-  });
-  log('info', { code: 'MAILBOX_MESSAGE_INGESTED', status, bytes:sizeBytes, attachments: attachments.length });
-  if (runnable > 0) try { await runtime.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
+  log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
+  if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
 
 /** Re-queues receipts whose ingest job was lost (for example after a failed attempt ceiling). Hourly. */
@@ -423,15 +503,22 @@ export async function mailboxHourly(runtime: Runtime) {
   }
 }
 
-// One MIME working set per isolate, even across overlapping queue drains. Never share request I/O:
-// another job stays in Postgres and JobDeferred returns its attempt rather than waiting in memory.
-let ingestActive = false;
+// Keep the aggregate parser input at the old single-message ceiling; larger streaming
+// copies need the whole budget for the multipart Bcc scrub. Never wait on another request.
+let mimeBytes=0;
+const inProgress=new Set<string>();
 export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
-  if (ingestActive) throw new JobDeferred(new Date(Date.now() + 2_000).toISOString());
-  ingestActive = true;
-  try { await ingestJob(runtime, payload, job); }
+  let reserved=0;
+  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]);
+  if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());
+  inProgress.add(key);
+  try { await ingestJob(runtime,payload,job,size=>{
+    const bytes=Math.min(PARSE_LIMIT,Math.max(256*1024,size));
+    if(mimeBytes+bytes>PARSE_LIMIT)throw new JobDeferred(new Date(Date.now()+2000).toISOString());
+    mimeBytes+=bytes;reserved=bytes;
+  }); }
   catch (error) {
-    if (error instanceof ModuleLoadError) throw error;
+    if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
     if (job.attempts<MAX_ATTEMPTS) {
       // A transport disconnect need not have a SQLSTATE or SDK error code. Only explicit permanent errors settle early.
       if (!(error instanceof ApiError)) throw new ApiError(503,'MAILBOX_INGEST_UNAVAILABLE','Mailbox ingestion temporarily unavailable.',undefined,true);
@@ -441,5 +528,5 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,[r
     const code=error instanceof ApiError ? (error.code==='MAILBOX_ATTACHMENT_UPLOAD_FAILED'?'ATTACHMENT_UPLOAD_FAILED':error.code) : 'MAILBOX_INGEST_FAILED';
     await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),eq(mailReceipts.status,'pending')));
     log('error',{code,workspaceId:job.workspaceId,jobId:job.id});
-  } finally { ingestActive = false; }
+  } finally { mimeBytes-=reserved;inProgress.delete(key); }
 } };

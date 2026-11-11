@@ -109,6 +109,9 @@ export function reputationAlertText(input: { region: string; metric: Metric; lev
 const deliver: JobHandler = async (runtime, payload) => {
   const url = runtime.config.reputationAlertUrl;
   if (!url) return;
+  if(payload.code==='SES_IDENTITY_QUOTA_EXHAUSTED'){
+    const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:`SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.`}),redirect:'manual',signal:AbortSignal.timeout(5000)});await r.body?.cancel();if(!r.ok)throw new ApiError(503,'REPUTATION_ALERT_FAILED','Quota alert delivery failed.',undefined,true);return;
+  }
   const { region, metric, level, previous, value } = payload;
   if (typeof region !== 'string' || !(metric === 'bounceRate' || metric === 'complaintRate') || !LEVELS.includes(level as Level) || !LEVELS.includes(previous as Level) || typeof value !== 'number') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid reputation alert job.');
   const text = reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl });

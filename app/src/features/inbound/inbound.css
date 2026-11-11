@@ -82,6 +82,10 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .inbound-recipients-review { display: grid; gap: 2px; }
 .inbound-recipients { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: var(--space-8); margin: 0; color: var(--color-text); }
 .inbound-recipients__label { color: var(--color-muted); }
+.inbound-recipients__list { display: flex; flex-wrap: wrap; gap: 0 var(--space-12); min-width: 0; }
+.inbound-recipient { display: inline-flex; gap: var(--space-6); min-width: 0; overflow-wrap: anywhere; }
+.inbound-recipient__address { font-weight: 500; }
+.inbound-recipients-review > p.inbound-recipients__warning { color: var(--color-warning); }
 .inbound-recipients-review > p.mailbox-composer__to:not(.inbound-recipients) { margin: 0; }
 .mailbox-composer .ui-field { gap: var(--space-4); }
 .mailbox-composer__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }

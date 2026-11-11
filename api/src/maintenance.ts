@@ -12,6 +12,7 @@ const RETENTION_BUDGET_MS = 4 * 60_000;
 
 export async function checkHostedHealth(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
+  await runtime.db.execute(sql`SELECT refresh_hosted_minute_tiers()`);
   const result = await runtime.db.execute(pauseHostedSending(sql`WITH counts AS (
     SELECT pc.id,pc.workspace_id,pc.resumed_at,sum(h.accepted) AS sends,
       sum(h.bounces) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS bounces,
@@ -32,6 +33,11 @@ export async function checkHostedHealth(runtime: Runtime) {
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
   try { await checkHostedHealth(runtime); } catch { log('error', { code: 'HOSTED_HEALTH_CHECK_FAILED', message: 'Continuing retention; the next hourly check will retry.' }); }
   const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
+  // A durable daily election prevents two reconcilers from applying the same
+  // snapshot difference. Dispatch continues adding deltas while this runs.
+  await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
+    VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
+    WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth(),reconcile_asset_usage(),reconcile_ingest_turns() FROM elected`);
   if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
   const cutoff = sql`now() - interval '30 days'`;
   // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.
@@ -45,7 +51,19 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   };
   const batch = (table: SQL, where: SQL) => () => sql`WITH gone AS (DELETE FROM ${table} WHERE ctid IN (SELECT ctid FROM ${table} WHERE ${where} LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone`;
   // Never erase contacts, consent, suppression, drafts, idempotency keys or active scheduled work.
+  await drain('expired_uploads',()=>sql`WITH expired AS (DELETE FROM sending_upload_reservations WHERE id IN
+    (SELECT id FROM sending_upload_reservations WHERE expires_at<=now() ORDER BY expires_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
+    cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-cleanup:'||id,'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM expired)
+    SELECT count(*)::int AS n FROM expired`);
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
+  // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
+  await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
+  for (const table of ['auth_verification','oauth_client_assertion','oauth_access_token','auth_session']) {
+    await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
+  }
+  // Do not cascade away an unexpired access token when its refresh token expires first.
+  await drain('oauth_refresh_token',batch(sql`oauth_refresh_token`,sql`expires_at <= now() AND NOT EXISTS
+    (SELECT FROM oauth_access_token a WHERE a.refresh_id=oauth_refresh_token.id AND a.expires_at>now())`));
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
   if (runtime.config.multiTenant) {
@@ -84,6 +102,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
       SELECT r.review_id, r.ordinal FROM sending_review_recipients r
       JOIN sending_campaign_reviews v ON v.id = r.review_id
       WHERE v.created_at < ${cutoff}
+        AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE (e.review_id,e.review_ordinal)=(r.review_id,r.ordinal))
         AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
           AND (c.updated_at >= ${cutoff} OR ${campaignActive()} OR c.review_id = v.id))
       LIMIT ${RETENTION_BATCH}
@@ -93,6 +112,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     WHERE l.owner_type = 'review' AND l.owner_id = v.id AND l.workspace_id = v.workspace_id
       AND v.created_at < ${cutoff}
       AND NOT EXISTS (SELECT 1 FROM sending_review_recipients r WHERE r.review_id = v.id)
+      AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE e.review_id = v.id)
       AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
         AND (${campaignActive()} OR c.review_id = v.id))`);
   await drain('operation_delivery_attempts', batch(sql`operation_delivery_attempts`, sql`created_at < ${cutoff}`));

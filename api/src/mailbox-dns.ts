@@ -30,23 +30,36 @@ export const expectedMx = (domain: string, region: string): MxReport['expected']
 const provider = (host: string) => PROVIDERS.find(([pattern]) => pattern.test(host))?.[1] ?? null;
 
 type DohAnswer = { name: string; type: number; data: string };
-async function resolve(name: string, type: 'MX' | 'CNAME'): Promise<{ status: number; answers: DohAnswer[] }> {
-  const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000) });
+// `signal` lets a caller share one time budget across several lookups; alone, each lookup gets 5 seconds.
+async function resolve(name: string, type: 'MX' | 'CNAME' | 'NS', signal?: AbortSignal): Promise<{ status: number; answers: DohAnswer[] }> {
+  const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: 'application/dns-json' }, signal: signal ?? AbortSignal.timeout(5000) });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`DNS_HTTP_${response.status}`); }
   const body = await response.json() as { Status?: number; TC?: boolean; Answer?: DohAnswer[] };
   return { status: body.TC ? -1 : body.Status ?? -1, answers: (body.Answer ?? []).filter(rr=>rr.name.toLowerCase().replace(/\.$/,'')===name) };
 }
 
+/** True when `name` has NS records of its own (a delegated zone), false when it has none, null when DNS failed. */
+export async function delegatedZone(name: string, signal?: AbortSignal): Promise<boolean | null> {
+  try {
+    const ns = await resolve(name, 'NS', signal);
+    return ns.status === 0 || ns.status === 3 ? ns.status === 0 && ns.answers.some(answer => answer.type === 2) : null;
+  } catch { return null; }
+}
+
 /** Reads public MX/CNAME records over DNS-over-HTTPS and classifies who receives the domain's mail. Read-only. */
-export async function checkMx(domain: string, region: string): Promise<MxReport> {
+export async function checkMx(domain: string, region: string, signal?: AbortSignal): Promise<MxReport> {
   const expected = expectedMx(domain, region);
   const base = { expected, checkedAt: new Date().toISOString() };
   let mx: { status: number; answers: DohAnswer[] };
-  try { mx = await resolve(domain, 'MX'); }
+  try { mx = await resolve(domain, 'MX', signal); }
   catch { return { ...base, state: 'error', records: [], providers: [], message: 'DNS lookup failed. Retry the check.' }; }
   if (mx.status !== 0 && mx.status !== 3) return { ...base, state: 'error', records: [], providers: [], message: `DNS lookup returned status ${mx.status}. Retry the check.` };
   // DoH follows a CNAME at the name and reports it in the answer; an MX cannot coexist with it.
-  if (mx.answers.some(answer => answer.type === 5)) return { ...base, state: 'cname', records: [], providers: [], message: `${domain} is a CNAME, so it cannot also have an MX record. Use a different subdomain for inbound mail.` };
+  const cname = mx.answers.find(answer => answer.type === 5);
+  if (cname) {
+    const target = cname.data.trim().replace(/\.$/, '').toLowerCase();
+    return { ...base, state: 'cname', records: [], providers: [], target, message: `${domain} is a CNAME to ${target}, so it can’t also have an MX record (RFC 1034). Use a different subdomain for inbound mail.` };
+  }
   const records = mx.answers.filter(answer => mx.status===0 && answer.type === 15).map(answer => {
     const [priority, host = ''] = answer.data.trim().split(/\s+/);
     const name = host.replace(/\.$/, '').toLowerCase();
@@ -57,9 +70,17 @@ export async function checkMx(domain: string, region: string): Promise<MxReport>
   if (records.length === 1 && !records[0]!.host) return { ...base, state: 'null_mx', records, providers, message: `${domain} publishes a null MX, which tells senders it accepts no mail. Replace it with ${expected.value}.` };
   const ours = records.filter(record => record.host === expected.value);
   if (ours.length === records.length) return { ...base, state: 'active', records, providers, message: 'MX points to Amazon SES in this region. Mail is being received.' };
-  if (ours.length) return { ...base, state: 'mixed', records, providers, message: `MX also lists ${providers.filter(p => p !== 'Amazon SES').join(', ')}. Some mail may go there instead. Remove the other MX records.` };
+  const others = records.filter(record => record.host !== expected.value), named = [...new Set(others.map(record => record.provider ?? record.host))].join(', ');
+  if (ours.length) {
+    // Senders try the lowest preference first: another host at the same or a lower value takes part of the mail; a higher one is a backup.
+    const best = Math.min(...ours.map(record => record.priority));
+    return others.some(record => record.priority <= best)
+      ? { ...base, state: 'mixed', records, providers, split: true, message: `MX also lists ${named} at the same or a better priority than Amazon SES, so mail for ${domain} is split between them. Remove the other MX records.` }
+      : { ...base, state: 'mixed', records, providers, message: `MX also lists ${named} as a backup, so some mail may go there instead. Remove the other MX records.` };
+  }
   if (records.every(record => /^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com$/.test(record.host))) return { ...base, state: 'wrong_region', records, providers, message: `MX points to Amazon SES in another region. Change it to ${expected.value}.` };
-  return { ...base, state: 'conflict', records, providers, message: `${providers.join(', ')} currently receives mail for ${domain}. Changing the MX record moves all of its mail to Bane; use a subdomain to keep the existing mailboxes.` };
+  const split = records.length > 1;
+  return { ...base, state: 'conflict', records, providers, ...(split ? { split } : {}), message: `${providers.join(', ')} currently receives mail for ${domain}${split ? ` through ${records.length} MX records` : ''}. Changing the MX record moves all of its mail to Bane; use a subdomain to keep the existing mailboxes.` };
 }
 
 export const mxBlocksEnable = (report: MxReport) => ['conflict', 'mixed', 'wrong_region', 'null_mx', 'cname'].includes(report.state);

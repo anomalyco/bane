@@ -63,10 +63,18 @@ async function serve(app: App, request: Request, runtime: Runtime, actor: Actor,
   let accepting = true;
   let parsedBody: unknown;
   let requestId: string | number | null = null;
-  if (request.method === 'POST' && request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() === 'application/json') {
+  if (request.method === 'POST') {
+    // Every POST body is read here, under the byte limit, before the SDK sees it. The SDK
+    // would otherwise parse other media types itself and run each element of a JSON-RPC
+    // batch, so one request could fan out into thousands of tool runs (M1).
+    if (request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
+      await request.body?.cancel();
+      return rpcError(415, -32000, 'Unsupported Media Type: Content-Type must be application/json.');
+    }
     try {
       parsedBody = JSON.parse(await boundedText(request, INPUT_LIMIT));
       if (object(parsedBody) && (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')) requestId = typeof parsedBody.id === 'string' ? redact(parsedBody.id) : parsedBody.id;
+      if (Array.isArray(parsedBody)) return rpcError(400, -32600, 'JSON-RPC batches are not supported; send one request per HTTP call.');
       inspect(parsedBody);
     } catch (error) {
       return rpcError(error instanceof Failure && error.code === 'SIZE_LIMIT_EXCEEDED' ? 413 : 400, error instanceof SyntaxError ? -32700 : -32602, error instanceof SyntaxError ? 'Request body is not valid JSON.' : 'Request exceeds byte or structural limits.', requestId);

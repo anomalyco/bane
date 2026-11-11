@@ -29,6 +29,7 @@ import { realDestination } from './hosted-sending.js';
 import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
 import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
+import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -59,7 +60,14 @@ const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusC
 const dnsState = z.enum(['pending','verified']);
 const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc']), status:dnsState, note:z.string().optional() });
 const dmarcSchema=z.object({status:z.enum(['missing','invalid','none','quarantine','reject']),record:z.string().nullable(),source:z.string().nullable().describe('Domain publishing the effective TXT record; may be the organizational domain.'),adkim:z.enum(['r','s']),aspf:z.enum(['r','s']),alignment:z.object({dkim:z.boolean(),spf:z.boolean()})}).nullable().describe('Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.');
-const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), dmarc:dmarcSchema, ready: z.boolean(), sending:dnsState, receiving:dnsState, mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord) }).openapi('DomainReadiness');
+const receivingIssueSchema = z.object({
+  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','claimed','delegated','mx_missing','wrong_region','null_mx','proof_stale','identity_stale']).describe('cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.'),
+  host: z.string(), blocking: z.boolean().describe('True when receiving there cannot work until DNS or the choice changes.'), message: z.string(),
+  provider: z.string().nullable().optional(), target: z.string().nullable().optional().describe('The existing CNAME target.'), suggestion: z.string().nullable().optional().describe('A free subdomain to use instead.'),
+}).openapi('ReceivingIssue');
+const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), dmarc:dmarcSchema, ready: z.boolean(), sending:dnsState, receiving:dnsState, mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord),
+  releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
+  receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const settingsSchema = z.object({ name: z.string() }).openapi('WorkspaceSettings');
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
@@ -68,12 +76,16 @@ const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQ
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
-async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>): Promise<T> {
+async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
   const sesv2 = await loadOperationsSesv2();
   try { return await operation(sesv2); } catch (error) {
     if (error instanceof ModuleLoadError || error instanceof ApiError) throw error;
     const provider = error as { name?: string; $metadata?: { httpStatusCode?: number } };
     const name = provider?.name ?? '', status = provider?.$metadata?.httpStatusCode;
+    if (creatingIdentity && name==='LimitExceededException') {
+      log('error',{code:'SES_IDENTITY_QUOTA_EXHAUSTED',operation:'CreateEmailIdentity',message:'Request additional regional SES identity capacity.'});
+      throw new ApiError(409,'SES_IDENTITY_QUOTA_EXHAUSTED','The regional SES identity quota is full. An account operator must request a quota increase before adding another domain.');
+    }
     if (status === 403 || /AccessDenied|Unauthorized|InvalidClientTokenId|UnrecognizedClient|ExpiredToken/.test(name)) throw new ApiError(403, 'SES_ACCESS_DENIED', 'AWS denied the SES operation. Check deployment credentials and IAM permissions.');
     if (status === 429 || /TooManyRequests|Throttl|LimitExceeded/.test(name)) throw new ApiError(429, 'SES_RATE_LIMITED', 'The SES control-plane quota was exceeded. Retry after a short delay.', undefined, true);
     if (status === 404 || name === 'NotFoundException') throw new ApiError(404, 'SES_IDENTITY_NOT_FOUND', 'The requested identity does not exist in this SES region.');
@@ -97,17 +109,29 @@ export function webhookUrl(runtime: Pick<Runtime, 'config'>, value: string) {
   if (own.includes(host)) throw new ApiError(422, 'INVALID_WEBHOOK_URL', 'Webhook endpoints cannot point back at this installation.', 'url');
   return url.toString();
 }
+const hookTimeouts=new Map<string,{count:number;until:number}>();
 /** The one outbound transport for sending and inbound webhooks: no redirects, five-second budget, response bodies discarded. */
 export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string) {
+  const key=await digest(binding+'\n'+url),prior=hookTimeouts.get(key);
+  if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString());
   const custom = await readWebhookHeaders(runtime, encryptedHeaders, binding);
   const merged = new Headers();
   for (const { name, value } of custom.headers) if (!reservedHeader.test(name)) merged.set(name, value);
   for (const [name, value] of Object.entries(headers)) merged.set(name, value);
   merged.set('Content-Type', 'application/json');
   const init = { method: 'POST' as const, headers: Object.fromEntries(merged), body, signal: AbortSignal.timeout(5000) };
-  if (runtime.webhookFetch) return runtime.webhookFetch(url, init);
-  const result = await fetch(url, { ...init, redirect: 'manual' }); await result.body?.cancel();
-  return { status: result.status };
+  try {
+    const result=runtime.webhookFetch?await runtime.webhookFetch(url,init):await fetch(url,{...init,redirect:'manual'});
+    if(result instanceof Response) await result.body?.cancel();
+    hookTimeouts.delete(key);return {status:result.status};
+  }catch(error){
+    if(init.signal.aborted || error instanceof Error && error.name==='TimeoutError'){
+      const last=hookTimeouts.get(key), count=1+(last && last.until>Date.now()?last.count:0);
+      if(!last && hookTimeouts.size>=1024)hookTimeouts.delete(hookTimeouts.keys().next().value!);
+      hookTimeouts.set(key,{count,until:Date.now()+30000});
+    }
+    throw error;
+  }
 }
 async function encryptionKey(value: string) {
   if (!/^[0-9a-f]{64}$/i.test(value)) throw new ApiError(503, 'ENCRYPTION_NOT_CONFIGURED', 'A 32-byte hexadecimal encryption key is required.');
@@ -212,12 +236,13 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'bane:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
+type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
+type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
-    dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
+    dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN domain_sending_bindings b ON b.domain_id=d.id AND b.connection_id=dc.connection_id AND b.region=d.region
@@ -235,6 +260,10 @@ async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=
   return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
 const dnsUnavailable = () => new ApiError(503,'DOMAIN_DNS_UNAVAILABLE','DNS did not return a definitive answer. Verification will retry.',undefined,true);
+async function identityQuotaAlert(runtime:Runtime,region:string,account:string,error:unknown){
+  if(!(error instanceof ApiError) || error.code!=='SES_IDENTITY_QUOTA_EXHAUSTED')return;
+  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('identity-quota:'||${account}::text||':'||${region}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${runtime.config.workspaceId},jsonb_build_object('code','SES_IDENTITY_QUOTA_EXHAUSTED','region',${region}::text)) ON CONFLICT DO NOTHING`);
+}
 async function txtProof(name: string, token: string) {
   try {
     const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'manual' }); // Workers reject 'error'; a 3xx fails !r.ok below.
@@ -292,7 +321,11 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
   return report;
 }
 const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
-type ClaimRow = DomainRef & ClaimState & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean} };
+type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean };
+const hour=3600_000;
+const proofTime=(at:Date|string|null|undefined)=>at?new Date(at).getTime():0;
+const proofUntil=(row:ProofTimes)=>Math.min(proofTime(row.receiving_proved_at)+72*hour,row.receiving_proof_missed_at?proofTime(row.receiving_proof_missed_at)+48*hour:Infinity);
+const observeProof=(positive:boolean)=>sql`receiving_proved_at=CASE WHEN ${positive} THEN now() ELSE receiving_proved_at END,receiving_proof_missed_at=CASE WHEN NOT ${positive} THEN coalesce(receiving_proof_missed_at,now()) END`;
 const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='verified' || row.sending_state==='lost';
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
 function derivedReadiness(row: ClaimRow): Readiness {
@@ -302,12 +335,29 @@ function derivedReadiness(row: ClaimRow): Readiness {
   if (row.sending_state==='failed') report.verificationStatus='FAILED';
   else if (!held && report.verificationStatus==='SUCCESS') report.verificationStatus='PENDING';
   report.receiving=state(row.receiving_state==='active' || row.receiving_state==='lost');
-  report.dns=report.dns.map(r=>r.purpose==='receiving' ? {...r,status:state(row.receiving_host!==null)} : r);
+  // Receiving: never suggest the root unless it already routes here or the owner chose it (an MX pasted at the root
+  // would take the domain's existing mail), and never one of Bane's own names. DNS checks refine this to a free host.
+  const ses=facts?.ses, chosen=facts?.receivingChoice ?? null;
+  const rootActive=row.receiving_host===row.name || chosen===row.name || (facts?.mx?.expected.name===row.name && facts.mx.state==='active');
+  const receivingName=(name:string)=>row.receiving_host ?? (chosen && !baneRecordUse(chosen,row.name,ses) ? chosen : (name===row.name && !rootActive) || baneRecordUse(name,row.name,ses) ? defaultReceivingHost(row.name,ses) : name);
+  report.dns=report.dns.map(r=>r.purpose==='receiving' ? {...r,name:receivingName(r.name),status:state(row.receiving_host!==null)} : r);
+  const shown=report.dns.find(r=>r.purpose==='receiving')?.name;
+  report.receivingIssue=(row.receiving_host ? baneRecordIssue(row.receiving_host,row.name,ses,row.region,null) : null) ?? (facts?.issue && facts.issue.host===shown ? facts.issue : null);
+  if(row.receiving_host && report.receiving==='verified'){
+    const deadline=Math.min(proofUntil(row),proofTime(row.receiving_identity_at)+96*hour),blocking=deadline<=Date.now();
+    const stale=!!row.receiving_proof_missed_at || proofTime(row.receiving_proved_at)<Date.now()-24*hour;
+    if(stale || proofTime(row.receiving_identity_at)<Date.now()-48*hour){
+      report.receivingIssue={code:stale?'proof_stale':'identity_stale',host:row.receiving_host,blocking,message:`${stale?'Recheck the ownership TXT record':'Recheck the SES domain identity'}. ${blocking?'New mail is held until verification succeeds.':`New mail will be held after ${new Date(deadline).toISOString()} if verification does not succeed.`}`};
+      if(blocking)report.receiving='pending';
+    }
+  }
   if (facts?.adopted) report.dns=[]; // No DNS setup is authorized by send-only operator attestation.
+  if (row.created_at!==undefined && row.ever_proven===false && !held) report.releasesAt=new Date(new Date(row.created_at).getTime()+72*3600_000).toISOString();
+  else if (row.ever_proven!==undefined) report.releasesAt=null;
   return report;
 }
 const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.pool_tenant_name??(row.connection.managed_tenant?mxResourceName(wid):`bane-${wid}`), ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
-type ReceivingObservation={mx:MxReport;note?:string};
+
 // The caller holds the claim lock. Only a full identity check can change eligibility; an MX-only
 // observation may change routing but can never grant ownership or qualify an unverified SES identity.
 async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:IdentityFacts['ses'],observation:ReceivingObservation|undefined,evidence:Pick<ClaimEvidence,'sending'|'sendingRevoked'|'identityVerified'|'proven'|'unavailable'|'definitive'>,dmarc=row.identity?.dmarc) {
@@ -315,42 +365,67 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
   // Mixed MX is unsuitable for new setup, but it is not evidence that an already-verified record vanished.
   let observed=observation ? (observation.mx.state==='active' || (observation.mx.state==='mixed' && observation.mx.expected.name===row.receiving_host) ? observation.mx.expected.name : null) : undefined;
   let note=observation ? observation.note ?? null : row.identity?.note ?? null;
+  let issue=observation ? observation.issue : row.identity?.issue ?? null;
+  // Never route mail on a name Bane publishes for another purpose (custom MAIL FROM, ownership TXT, DKIM).
+  const reserved=observed && observed!==row.receiving_host ? baneRecordIssue(observed,row.name,ses,row.region,null) : null;
+  if (reserved) { issue=reserved; observed=null; }
   if (observed && observed!==row.receiving_host) {
-    // A workspace may claim both example.com and reply.example.com. Never route one address twice.
-    const owner=(await db.execute<{name:string}>(sql`SELECT name FROM domain_claims dc WHERE workspace_id=${wid} AND receiving_host=${observed} AND name<>${row.name} LIMIT 1`)).rows[0];
-    if (owner) { note=`${observed} already receives mail through ${owner.name}.`; observed=null; }
+    // One receiving host routes for one claim: a workspace may claim both example.com and reply.example.com, and
+    // another workspace may hold the host too. Never route one address twice (domain_claims_receiving_host enforces it).
+    const owner=(await db.execute<{name:string;own:boolean}>(sql`SELECT name,workspace_id=${wid} AS own FROM domain_claims dc WHERE receiving_host=${observed} AND NOT (workspace_id=${wid} AND name=${row.name}) LIMIT 1`)).rows[0];
+    if (owner) { issue=takenIssue(observed,owner,null); note=issue.message; observed=null; }
   }
-  const next=transitionClaim(row,{...evidence,regionReceives:row.claim_scope!=='account' && (byo || row.pool_receiving),observedHost:observed,byo});
-  const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
-  // Managed sending identities confer no receiving rights (including Virginia). Only a
-  // separately reviewed receiving binding may change that projection in phase 2.
-  if (row.connection.legacy===false) {
-    await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported,adopted:row.identity?.adopted},null);
-    return next;
-  }
-  await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx,note,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
+  // A host another workspace has claimed (in any scope) or delegated to its own name servers is never routed here.
+  if (observed && issue?.host===observed && (issue.code==='claimed' || issue.code==='delegated')) observed=null;
+  const transition=(host:string|null|undefined)=>{
+    const n=transitionClaim(row,{...evidence,regionReceives:row.claim_scope!=='account' && (byo || row.pool_receiving),observedHost:host,byo});
+    if(!evidence.proven && n.receiving_host && n.receiving_host!==row.receiving_host){n.receiving_host=null;n.receiving_state='pending';n.receiving_lost_since=null;}
+    // Grace preserves an existing, still MX-bound host only. It cannot activate another host,
+    // revive a disconnected claim, or overrule a negative SES observation.
+    if(!evidence.proven && evidence.identityVerified && !evidence.definitive && !evidence.unavailable && row.claim_scope!=='account' && (byo || row.pool_receiving) && row.receiving_host && host===row.receiving_host && ['active','lost'].includes(row.receiving_state) && proofUntil(row)>Date.now()) {
+      n.receiving_state='active';n.receiving_host=row.receiving_host;n.receiving_lost_since=null;
+    }
+    return n;
+  };
+  let next=transition(observed);
+  const ref={name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region};
+  const apply=async()=>{
+    // Managed sending identities confer no receiving rights (including Virginia). Only a
+    // separately reviewed receiving binding may change that projection in phase 2.
+    if (row.connection.legacy===false) return applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported,adopted:row.identity?.adopted},null);
+    const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
+    await applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx,note,issue,receivingChoice:row.identity?.receivingChoice ?? null,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
+  };
+  if (next.receiving_host && next.receiving_host!==row.receiving_host) {
+    // Two claims can both read a host as free above and then race to route it; the unique indexes decide. The loser
+    // reports host_taken on the domain instead of failing the job (the savepoint keeps the transaction usable).
+    await db.execute(sql`SAVEPOINT receiving_host_claim`);
+    try { await apply(); await db.execute(sql`RELEASE SAVEPOINT receiving_host_claim`); }
+    catch (e) {
+      if (!receivingHostConflict(e)) throw e;
+      await db.execute(sql`ROLLBACK TO SAVEPOINT receiving_host_claim`);
+      const host=next.receiving_host;
+      const owner=(await db.execute<{name:string;own:boolean}>(sql`SELECT name,workspace_id=${wid} AS own FROM domain_claims WHERE receiving_host=${host} AND NOT (workspace_id=${wid} AND name=${row.name}) LIMIT 1`)).rows[0];
+      issue=takenIssue(host,owner ?? {own:false,name:''},null); note=issue.message; observed=null;
+      next=transition(null);
+      await apply();
+    }
+  } else await apply();
+  if (row.connection.legacy===false) return next;
   if (byo && (next.receiving_host!==row.receiving_host || (next.receiving_state==='pending' && next.receiving_host))) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,wid,row.region);
   return next;
 }
-async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
-  const mx=await checkMx(row.name,row.region);
-  if (mx.state==='error') throw dnsUnavailable();
-  if (mx.state==='mixed' && row.receiving_host===row.name) return {mx,note:mx.message};
-  const host=`reply.${row.name}`;
-  if (mx.state==='active' && row.receiving_host!==host) return {mx};
-  const reply=await checkMx(host,row.region);
-  if (reply.state==='error') throw dnsUnavailable();
-  if (reply.state==='mixed' && row.receiving_host===host) return {mx:reply,note:reply.message};
-  // A working reply host stays selected even if the root MX subsequently disappears or changes.
-  if (mx.state==='active' || mx.state==='missing') return reply.state==='active'?{mx:reply}:{mx};
-  const reason=mx.state==='cname'?'is a CNAME':mx.state==='null_mx'?'publishes a null MX':`already routes mail to ${mx.records.map(r=>r.host).filter(h=>h!==mx.expected.value).join(', ')}`;
-  return {mx:reply,note:`${row.name} ${reason}. Keep its DNS and publish this MX on ${host} instead.`};
-}
+const receivingHostConflict=(error:unknown)=>{
+  const e=((error as {cause?:unknown})?.cause ?? error) as {code?:string;constraint?:string};
+  return e?.code==='23505' && ['domain_claims_receiving_host','domain_claims_routing','mailbox_domains_receiving_host'].includes(e.constraint ?? '');
+};
+// Same DNS checks for "Check MX now" (domain.verify), the hourly sweep (domain.mx) and an explicit choice; see receiving-host.ts.
+const receivingMx=(db:DbExecutor,row:HostedDomain,wid:string):Promise<ReceivingObservation>=>observeReceiving(db,row,wid,dnsUnavailable);
 const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFacts['ses'] => ({ VerificationStatus: identity.VerificationStatus, VerifiedForSendingStatus: identity.VerifiedForSendingStatus, DkimAttributes: identity.DkimAttributes, MailFromAttributes: identity.MailFromAttributes });
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
 async function ensureIdentity(client: Awaited<ReturnType<typeof getSes>>, name: string, token: string,installation?:string,regionalByo=false) {
   try {
-    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})));
+    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})),true);
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
@@ -519,7 +594,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
     const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
     const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? ownershipTxt(row.name,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return null;}),
-      scopedImport || row.connection.legacy===false ? undefined : receivingMx(row),scopedImport ? ownershipTxt(row.name,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
+      scopedImport || row.connection.legacy===false ? undefined : receivingMx(runtime.db,row,job.workspaceId),scopedImport ? ownershipTxt(row.name,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
     if (shared && report.ready && row.connection.tenant_state!=='ready') {
@@ -553,6 +628,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
           if (trusted && !await exclusive()) defer(5000);
         }
       }
+      await db.execute(sql`UPDATE domain_claims SET ${observeProof(positive)}, receiving_identity_at=CASE WHEN ${current.connection.legacy===false} THEN receiving_identity_at WHEN ${identityVerified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
       return saveObservation(db,current,job.workspaceId,sesFacts(identity),observation,{sending:report.ready,sendingRevoked:current.identity?.imported && !report.ready,identityVerified,proven:positive},dmarc);
     });
     if (!outcome || (outcome.sending_state==='verified' && report.mailFromStatus!=='PENDING' && outcome.receiving_state!=='lost')) return; // MX-only upkeep owns receiving changes after sending verifies.
@@ -576,7 +652,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     } else if (e instanceof ApiError && e.code==='DOMAIN_DNS_UNAVAILABLE') {
       // Transport failures never count as evidence against a working domain.
       defer(Math.min(3_600_000,30_000*2**Math.min(poll,7)),nextPoll);
-    } else if (!(e instanceof ApiError) || !e.retryable) throw e;
+    } else if (!(e instanceof ApiError) || !e.retryable) {await identityQuotaAlert(runtime,row.region,row.connection.aws_account_id,e);throw e;}
   }
   defer(backoff(poll),nextPoll);
 };
@@ -588,15 +664,29 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
   // A definitive missing/invalid/ambiguous answer must still replace it.
-  const [observation,dmarc]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;})]);
+  const [observation,dmarc,proof]=await Promise.all([checkReceiving ? receivingMx(runtime.db,row,job.workspaceId) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;}), row.connection.kind==='shared' && (checkReceiving || row.receiving_host) ? ownershipTxt(row.name,row.token) : undefined]);
   if(!observation && dmarc===undefined) throw dnsUnavailable();
+  // A sending promotion to Virginia doesn't move the existing Ohio ingress. Re-attest the
+  // original account/host in Ohio; a successful Virginia SES read is not evidence for it.
+  let retainedIdentity:boolean|undefined;
+  if(row.connection.kind==='shared' && row.connection.legacy===false && row.receiving_host && row.region!=='us-east-2'){
+    const due=await runtime.db.execute(sql`SELECT FROM domain_claims dc JOIN mailbox_domains m ON m.workspace_id=dc.workspace_id AND m.domain_id=${row.id} AND m.region='us-east-2' AND m.status='active' AND m.receiving_host=dc.receiving_host WHERE dc.workspace_id=${job.workspaceId} AND dc.token=${row.token} AND coalesce(dc.receiving_identity_at,'-infinity')<now()-interval '24 hours'`);
+    if(due.rowCount){
+      if(!(await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before) VALUES('domain.verify:platform',clock_timestamp()+interval '1 second') ON CONFLICT(workspace_id) DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount)throw new JobDeferred(new Date(Date.now()+1500).toISOString());
+      const client=await getSes({...runtime,config:{...runtime.config,regions:['us-east-2']}},'us-east-2',{...row.connection,identitySession:{name:row.name,purpose:'verify'}});
+      try{const identity=await sesCall(({GetEmailIdentityCommand})=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));retainedIdentity=identity.VerificationStatus==='SUCCESS' && !!ownsIdentity(identity,row.token);}
+      catch(e){if(!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND')throw e;retainedIdentity=false;}
+    }
+  }
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
     if (!current?.identity || current.token!==row.token || current.receiving_host!==row.receiving_host) return;
     assertSharedAccount(runtime,current.connection);
+    if(proof!==undefined) await db.execute(sql`UPDATE domain_claims SET ${observeProof(proof)} WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
+    if(retainedIdentity!==undefined)await db.execute(sql`UPDATE domain_claims SET receiving_identity_at=CASE WHEN ${retainedIdentity} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
     // Never grant receiving rights (notably to a Virginia sending binding) from a DMARC check.
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
-    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:current.identity.proven},dmarc);
+    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:proof??current.identity.proven},dmarc);
   });
   if(dmarc===undefined) throw dnsUnavailable(); // Retry after committing any independent MX change.
 };
@@ -630,7 +720,7 @@ export function registerOperations(app: App) {
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
     if (c.env.config.multiTenant) {
-      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
+      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
         .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
         .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
         .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
@@ -673,6 +763,7 @@ export function registerOperations(app: App) {
       }
       catch(e) {
         if (e instanceof ModuleLoadError) throw e;
+        await identityQuotaAlert(runtime,row.region,claim.connection.aws_account_id,e);
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
@@ -708,6 +799,9 @@ export function registerOperations(app: App) {
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
+        // The receiving host's MX points to inbound-smtp; a MAIL FROM subdomain needs its own MX to feedback-smtp. One name can't hold both.
+        const receivingHost=current.receiving_host ?? derivedReadiness(current).dns.find(r=>r.purpose==='receiving')?.name;
+        if (receivingHost===mailFromDomain) throw new ApiError(409,'MAIL_FROM_RECEIVING_CONFLICT',`${mailFromDomain} is ${row.name}’s receiving host, so its MX points to inbound-smtp.${row.region}.amazonaws.com. A custom MAIL FROM subdomain needs its own MX to feedback-smtp.${row.region}.amazonses.com. Use another subdomain, such as email.${row.name}.`);
         const client=await getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,{...current.connection,identitySession:{name:row.name,purpose:'mailFrom'}});
         if (current.identity?.imported) throw new ApiError(409,'IMPORTED_IDENTITY_READ_ONLY','Manage this imported identity’s MAIL FROM settings in AWS.');
         const identity=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
@@ -724,7 +818,50 @@ export function registerOperations(app: App) {
     await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
     return c.json(await domainReadiness(c.env, row), 200);
   });
+  app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
+    description:'Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.',
+    request:{params:IdParams,body:json(z.object({host:domainName.nullable(),confirm:z.boolean().default(false)}).strict().openapi('ChooseReceivingHost'))},
+    responses:{200:response(domainSchema),...errors}}),async c=>{
+    const a=actor(c,'manage'); if (!c.env.config.multiTenant) return notFound('Endpoint');
+    const {host,confirm}=c.req.valid('json'), domainId=c.req.valid('param').id;
+    // DNS is read before the row lock; the locked write is fenced on the claim token.
+    const row=await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain'); allowedDomain(a,row.name);
+    if (host!==null && host!==row.name && !host.endsWith(`.${row.name}`)) throw new ApiError(422,'RECEIVING_HOST_INVALID',`Use ${row.name} or one of its subdomains.`,'host');
+    if (row.receiving_host && host!==row.receiving_host) throw new ApiError(409,'RECEIVING_HOST_ACTIVE',`${row.receiving_host} already receives mail for ${row.name}. Remove its MX record first; you can choose another host once it stops resolving.`,'host');
+    let facts:Partial<IdentityFacts>={receivingChoice:null,issue:null};
+    if (host!==null) {
+      const {mx,issue}=await inspectReceivingHost(c.env.db,row,a.workspaceId,host,dnsUnavailable);
+      if (issue?.code==='cname') throw new ApiError(409,'RECEIVING_HOST_CNAME',issue.message,'host');
+      if (issue?.code==='bane_record') throw new ApiError(409,'RECEIVING_HOST_RESERVED',issue.message,'host');
+      if (issue?.code==='host_taken') throw new ApiError(409,'RECEIVING_HOST_TAKEN',issue.message,'host');
+      if (issue?.code==='claimed') throw new ApiError(409,'RECEIVING_HOST_CLAIMED',issue.message,'host');
+      if (issue?.code==='delegated') throw new ApiError(409,'RECEIVING_HOST_DELEGATED',issue.message,'host');
+      if (issue && ['foreign_mx','split','wrong_region','null_mx'].includes(issue.code) && !confirm)
+        throw new ApiError(409,'RECEIVING_HOST_IN_USE',`Move mail for ${host}? ${issue.message} Send confirm: true to choose it anyway.`,'host');
+      facts={receivingChoice:host,mx,issue};
+    }
+    const saved=await c.env.db.transaction(async db=>{
+      const current=await hostedDomain(db,a.workspaceId,domainId,true);
+      if (!current || current.token!==row.token || (current.receiving_host && host!==current.receiving_host)) throw new ApiError(409,'DOMAIN_CHANGED','The domain changed while its DNS was checked. Try again.',undefined,true);
+      const identity:IdentityFacts={...(current.identity ?? identityOnly({VerificationStatus:'PENDING'})),...facts,...(host===null ? {mx:current.identity?.mx?.expected.name===current.receiving_host ? current.identity?.mx ?? null : null} : {})};
+      await db.execute(sql`UPDATE domain_claims SET identity=${JSON.stringify(identity)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${current.name} AND token=${current.token}`);
+      return derivedReadiness({...current,identity});
+    });
+    return c.json(saved,200);
+  });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
+  // The guarantee is the server's, not the dashboard's: no recipient or content is accepted, only the domain.
+  app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/test-send',operationId:'sendDomainTestEmail',tags:['Domains'],security:dashboardSecurity,
+    description:'Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.',
+    request:{params:IdParams},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
+    const a=actor(c,'send');
+    if (a.credential!=='dashboard' || !a.email) throw new ApiError(403,'DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.');
+    const [row]=await c.env.db.select({name:domains.name}).from(domains).where(and(scoped(domains,a),eq(domains.id,c.req.valid('param').id)));
+    if (!row) return notFound('Domain');
+    allowedDomain(a,row.name);
+    const { admitTestEmail }=await wrapModuleLoad(() => import('./sending.js'));
+    return c.json(await admitTestEmail(c,a,row.name,a.email),202);
+  });
   const dnsSetup='/v1/domains/{id}/dns-setup';
   const dnsGroup=`(${groupIds.join('|')})`;
   app.openapi(createRoute({method:'get',path:dnsSetup,operationId:'getDomainDnsSetup',tags:['Domains'],security:dashboardSecurity,
@@ -802,7 +939,12 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
-    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) }).returning();
+    const values = { ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) };
+    const [row] = await c.env.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(140913,hashtext(${a.workspaceId}))`);
+      if ((await tx.execute(sql`SELECT 1 FROM operation_webhooks WHERE workspace_id=${a.workspaceId} OFFSET 9 LIMIT 1`)).rowCount) throw new ApiError(409,'WEBHOOK_LIMIT_REACHED','A workspace can have at most 10 operation webhook endpoints (including paused endpoints).');
+      return tx.insert(webhooks).values(values).returning();
+    });
     return c.json(await metadata(c.env, row!, a), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
@@ -813,7 +955,7 @@ export function registerOperations(app: App) {
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const row = await c.env.db.transaction(async tx => {
       const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).for('update'); if (!locked) return notFound('Webhook');
-      const [updated] = await tx.update(webhooks).set({ ...body, encryptedHeaders: await encryptWebhookHeaders(c.env, headers, secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
+      const [updated] = await tx.update(webhooks).set({ ...body, encryptedHeaders: await encryptWebhookHeaders(c.env, headers ?? (body.url && body.url !== locked.url ? [] : undefined), secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
       if (locked.paused && body.paused === false) {
         const paused = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, current.id), eq(deliveries.status, 'paused'))).for('update');
         for (const delivery of paused) {
@@ -862,21 +1004,41 @@ export function registerOperations(app: App) {
 
 const snsSchema = z.object({ Type: z.enum(['Notification', 'SubscriptionConfirmation', 'UnsubscribeConfirmation']), MessageId: z.string().min(1).max(200), TopicArn: z.string().min(1).max(300), Message: z.string().max(262144), Timestamp: z.string().datetime(), SignatureVersion: z.enum(['1', '2']), Signature: z.string().min(1).max(4096), SigningCertURL: z.string().url().max(2048), Subject: z.string().max(1000).optional(), SubscribeURL: z.string().url().max(4096).optional(), Token: z.string().max(4096).optional() }).openapi('SnsSignedEnvelope');
 type SnsEnvelope = z.infer<typeof snsSchema>;
-function snsHost(runtime: Runtime, envelope: SnsEnvelope) {
-  if (!runtime.config.snsTopicArns.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'The SNS topic is not configured for this deployment.');
-  const match = /^arn:aws:sns:([a-z0-9-]+):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
+function snsHost(envelope: SnsEnvelope) {
+  const match = /^arn:aws:sns:([a-z]{2}(?:-[a-z]+)+-\d):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
   if (!match) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only registered standard AWS regional SNS topics are supported.');
   return { host: `sns.${match[1]}.amazonaws.com`, region: match[1]! };
 }
 function trustedSnsUrl(value: string, host: string, certificate: boolean) {
   const url = new URL(value);
-  if (url.protocol !== 'https:' || url.hostname !== host || url.port || url.username || url.password || url.hash || (certificate ? !/^\/SimpleNotificationService-[a-zA-Z0-9_-]+\.pem$/.test(url.pathname) || Boolean(url.search) : url.pathname !== '/')) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS certificate or subscription URL is not trusted.');
+  if (url.protocol !== 'https:' || url.hostname !== host || url.port || url.username || url.password || url.hash || (certificate ? !/^\/SimpleNotificationService-[0-9a-fA-F]{32}\.pem$/.test(url.pathname) || value !== `https://${host}${url.pathname}` : url.pathname !== '/')) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS certificate or subscription URL is not trusted.');
   return url;
 }
 // Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
 const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
-async function verifySns(runtime: Runtime, envelope: SnsEnvelope, certificateTimeout=10000) {
-  const trusted = snsHost(runtime, envelope);
+const missingCertificates=new Map<string,number>();
+// Node has no edge rate-limit binding. Reserve a miss synchronously, before I/O;
+// at capacity refuse new miss buckets rather than evicting a live peer's budget.
+const certMissPeers = new Map<string, { count: number; until: number }>();
+function allowLocalCertMiss(peer: string) {
+  const now = Date.now();
+  for (const [key, bucket] of certMissPeers) {
+    if (bucket.until > now) break;
+    certMissPeers.delete(key);
+  }
+  const bucket = certMissPeers.get(peer);
+  if (bucket) {
+    if (bucket.count >= 60) return false;
+    bucket.count++;
+    return true;
+  }
+  if (certMissPeers.size >= 4096) return false;
+  certMissPeers.set(peer, { count: 1, until: now + 60_000 });
+  return true;
+}
+async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
+  const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
+  const trusted = snsHost(envelope);
   const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
   const signature = Buffer.from(envelope.Signature, 'base64');
   if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
@@ -886,11 +1048,20 @@ async function verifySns(runtime: Runtime, envelope: SnsEnvelope, certificateTim
   const cached = snsCertificates.get(url.href);
   let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
   if (!cert) {
+    if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
+    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw new ApiError(429, 'SNS_CERTIFICATE_RATE_LIMITED', 'Too many SNS certificate lookups from this connection. Retry after one minute.', undefined, true);
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
     try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(certificateTimeout) }); } catch (error) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', errorType: error instanceof Error ? error.name : 'Unknown', stack: error instanceof Error ? error.stack?.split('\n').slice(1, 7).join('\n') : undefined }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
-    if (!res.ok) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); await res.body?.cancel(); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    if (!res.ok) {
+      await res.body?.cancel();
+      if(res.status===404 || res.status===410){
+        if(missingCertificates.size>=256)missingCertificates.delete(missingCertificates.keys().next().value!);
+        missingCertificates.set(url.href,Date.now()+60000);throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
+      }
+      log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true);
+    }
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
     try { cert = new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
   }
@@ -949,6 +1120,10 @@ function registerPublicEvents(app: App) {
     let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
     const envelope = parsed.data;
+    // Prove AWS signed this exact topic before looking up its tenant. A valid
+    // signature is NOT topic authorization: all binding checks below still apply.
+    // Both entry points overwrite this header with the socket/edge peer (IPv6 /64).
+    const trusted = await verifySns(envelope, c.env, c.req.header('x-bane-client-ip') ?? 'unknown');
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     let stack: Awaited<ReturnType<typeof import('./provider-connections.js').byoStackTopic>>;
     let binding:TopicBinding|undefined;
@@ -957,8 +1132,11 @@ function registerPublicEvents(app: App) {
       binding=stack ? undefined : await sendingTopic(c.env,envelope.TopicArn,envelope.Type==='SubscriptionConfirmation');
       if (!stack && !binding) throw new ApiError(403,'SNS_TOPIC_NOT_ALLOWED','This SNS topic is not registered for the account and region.');
       c.env={...c.env,config:{...c.env.config,snsTopicArns:[envelope.TopicArn],inboundTopicArns:binding?.inbound?[envelope.TopicArn]:[]}};
-    } else if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
-    const trusted = await verifySns(c.env, envelope, stack ? 3000 : undefined);
+    } else {
+      c.env = await resolveRegionRuntime(c.env, { cacheMs: 30_000 });
+      if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
+      if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'The SNS topic is not configured for this deployment.');
+    }
     if (envelope.Type !== 'Notification') {
       if (envelope.Type === 'SubscriptionConfirmation') {
         const url = trustedSnsUrl(envelope.SubscribeURL!, trusted.host, false);
@@ -999,12 +1177,14 @@ function registerPublicEvents(app: App) {
     // Mailbox receipt notifications arrive on a separate Bane-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
       const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
-      if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
+      if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
     verifySesAccount(c.env, message, envelope.TopicArn);
+    if (binding?.kind==='byo' && c.env.allowFeedbackTopic && !await c.env.allowFeedbackTopic(envelope.TopicArn))
+      throw new ApiError(503,'FEEDBACK_TOPIC_BUSY','Feedback for this topic is temporarily rate limited; retry.',undefined,true);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
-    const item = { ...payload, message: message as Record<string, unknown> };
+    const item = { ...payload, topicKind:binding?.kind, message: message as Record<string, unknown> };
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
     // ingested in batches by the feedback consumer; nothing here touches the database or the jobs table.
     if (c.env.feedback) {
@@ -1154,7 +1334,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
     const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'Bane-Webhooks/1.0', ...(delivery.synthetic ? { 'Bane-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
-  } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
+  } catch (e) { if(e instanceof JobDeferred)throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < WEBHOOK_ATTEMPTS;
   const records = sql`attempt AS (INSERT INTO operation_delivery_attempts(id,workspace_id,delivery_id,status_code,error,duration_ms)
     SELECT ${id('wha')},${job.workspaceId},${delivery.delivery_id},${statusCode}::int,${error}::text,${Date.now()-start}::int FROM settled),
@@ -1251,9 +1431,11 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       }
       if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
       outcomes[entry.index] = { ok: true };
-      log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
     }
-    if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
+    try {
+      if(results.some(r=>r.recovery)) await runtime.wake?.(1);
+      if(results[0]?.hooks) await runtime.wake?.(results[0].hooks,'webhook');
+    }catch{log('warn',{code:'QUEUE_WAKE_FAILED',message:'Feedback recovery and webhook jobs remain durable.'});}
   };
   await persist(group);
   // Subscription changes include separate consent audit records; preserve their input order.

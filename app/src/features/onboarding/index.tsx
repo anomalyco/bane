@@ -1,16 +1,18 @@
 import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
-import { Alert, Button, ErrorState, Field, Input, SectionHeader, useToast } from '../../components/ui'
+import { Alert, Button, ErrorState, ErrorText, Field, Input, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { WorkspaceSwitcher } from '../../components/WorkspaceSwitcher'
 import { useApi, useApiMutation, useApiQuery, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
-import { agentStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
-import { DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
+import { agentStep, finishedStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
+import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
 import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from '../docs/agent-setup'
+import { FirstSend } from '../docs/first-send'
+import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 
@@ -26,7 +28,7 @@ async function retrying<T>(run: () => Promise<T>) {
   }
 }
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
-const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Try again.'
+const message = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
 
 // A ready connection opens the add-domain step, then lifts the gate.
 function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnection | null>) {
@@ -69,8 +71,8 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
 
 type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'admin' | 'error'
 const viewRank: Record<View, number> = { loading: 0, admin: 0, error: 0, choose: 1, connect: 2, domain: 3, imported: 3, records: 4, agent: 5 }
-const hostedSteps = ['Choose', 'Add domain', 'Connect your agent']
-const awsSteps = ['Choose', 'Connect AWS', 'Add domain', 'Connect your agent']
+const hostedSteps = ['Choose', 'Add domain', 'First email']
+const awsSteps = ['Choose', 'Connect AWS', 'Add domain', 'First email']
 // The loader and a failed load sit in step 1, so the indicator is already in place when the choice appears.
 function stepOf(view: View, aws: boolean, choosingDomain: boolean) {
   if (view === 'loading' && choosingDomain) return aws ? 3 : 2
@@ -163,10 +165,10 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const imported = importedCount(connection.data)
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
     ready={stage.step === 'domain'}
-    onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, null)} />
+    onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, finishedStep)} />
   let view: View, content: ReactNode
   if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
-  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, null)} /> }
+  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, finishedStep)} /> }
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
@@ -240,8 +242,8 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through Bane. Nothing to set up.</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price">$0.11 per 1,000 emails</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-body">Send through Bane’s Amazon SES. No AWS account needed; you add a few DNS records.</span>
+        <span className="onboarding-option-foot"><span className="onboarding-option-price">New senders start with a daily limit</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
@@ -250,7 +252,7 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
-    {error ? <Alert tone="danger">{connectionError(error)}</Alert> : null}
+    {error ? <Alert tone="danger">{connectionError(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}</Alert> : null}
   </div>
 }
 
@@ -356,8 +358,6 @@ function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count:
   </div>
 }
 
-const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
-
 type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; onAdded: (id: string) => void; onFinish: () => void }
 // Before the connection is ready, a valid domain waits and is added as soon as it is.
 function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdded, onFinish }: AddDomainProps) {
@@ -365,10 +365,12 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
   const client = useQueryClient()
   const create = useApiMutation((api, name: string) => api.domains.create({ regionId: '', name }), undefined, true)
   const [invalid, setInvalid] = useState('')
-  const value = draft.trim().toLowerCase()
+  // A pasted URL or address still works: https://www.acme.com/pricing becomes acme.com.
+  const value = normalizeDomain(draft)
   async function add() {
-    if (!domainPattern.test(value)) { setInvalid('Enter a domain like acme.com, without https:// or a path.'); return }
+    if (!domainPattern.test(value)) { setInvalid('Enter a domain like acme.com.'); return }
     setInvalid('')
+    if (value !== draft) onDraftChange(value)
     if (!ready) { onQueuedChange(true); return }
     try {
       const domain = await create.mutateAsync(value)
@@ -385,7 +387,7 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
     <form className="onboarding-inline-form onb-rise" style={rise(2)} onSubmit={event => { event.preventDefault(); void add() }} noValidate>
       <div className="onboarding-field onboarding-field--domain">
         {/* The hint line is always there: the live preview, the queued note or an error take turns in it. */}
-        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)} hint={queued ? `${value} is added as soon as sending is ready.` : <>You’ll send as <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></>}>
+        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? <ErrorText error={create.error} /> : undefined)} hint={queued ? `${value} is added as soon as sending is ready.` : <>You’ll send as <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></>}>
           <Input id="onboarding-domain" autoFocus autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
         </Field>
       </div>
@@ -423,6 +425,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
       <span className="sr-only" role="status">{verified ? `${current.name} is verified. Continuing to the last step.` : ''}</span>
     </div>
     <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided setup={dns.setup} /></div>
+    <div className="onb-rise" style={rise(2)}><DnsWaitNote domain={current} /></div>
     <div className="onboarding-actions">
       <p className="muted">{verified ? 'All set.' : 'Records can take a few minutes to show up.'}</p>
       <Button variant="primary" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
@@ -433,30 +436,45 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
 // Same length as a real key (bane_ and 64 hex digits), so the reveal takes exactly the reserved space.
 const keyPlaceholder = `bane_${'0'.repeat(64)}`
 
-// Last step: everything a coding agent needs. Domain verification keeps running in the background.
+// Last step: a key, the first send (curl, SDK or a test button), then everything a coding agent needs.
+// Domain verification keeps running in the background. The key is least-privilege by default.
+type KeyScope = 'send' | 'manage'
 function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => void }) {
   const identity = useSession()?.identity
   const origin = usePublicOrigin()
   const domain = useDomain(domainId)
-  const create = useApiMutation((api, _: void) => api.keys.create({ name: 'Coding agent', permission: 'manage', domains: [] }))
+  const [scope, setScope] = useState<KeyScope>('send')
+  const create = useApiMutation((api, input: { scope: KeyScope; domain: string | null }) => api.keys.create(input.scope === 'send'
+    ? { name: input.domain ? `Send from ${input.domain}` : 'Send only', permission: 'send', domains: input.domain ? [input.domain] : [] }
+    : { name: 'Coding agent', permission: 'manage', domains: [] }))
   const [secret, setSecret] = useState<string | null>(null)
-  async function createKey() {
-    try { setSecret((await create.mutateAsync(undefined)).secret) } catch { /* Shown inline. */ }
-  }
   // A removed domain still leaves a useful prompt without domain details.
   const missing = domain.error instanceof ApiError && domain.error.status === 404
+  const current = domain.data ?? null
+  async function createKey() {
+    try { setSecret((await create.mutateAsync({ scope, domain: current?.name ?? null })).secret) } catch { /* Shown inline. */ }
+  }
   if (domain.isPending) return <BootLoader inline />
   if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
-  const prompt = agentPrompt({ origin, domain: domain.data ?? null, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true })
+  const prompt = agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true })
+  const scopes = [
+    { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
+    { value: 'manage', label: 'Full access' },
+  ]
+  const scopeHint = scope === 'send' ? `Sends email and campaigns from ${current?.name ?? 'your domains'} only, and uploads their attachments. It can’t read logs or contacts, or change keys, domains or settings. Best for an app.` : 'Sends, reads logs and manages domains, receiving, keys and settings. A coding agent needs this to set up receiving for you.'
   return <div className="onboarding onboarding--agent">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title">Connect your agent</h1>
-      <p className="onboarding-lead">Give your coding agent these three things. You can find them again in Docs.</p>
+      <h1 className="onboarding-title">Send your first email</h1>
+      <p className="onboarding-lead">Create a key, then send with cURL, the SDK or your coding agent. You can find all of this again in Docs.</p>
     </div>
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">
         <SectionHeader title="API key" />
-        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? message(create.error) : <>Store it as <code>BANE_API_KEY</code> in your project’s environment. It’s shown once.</>}</p>
+        <div className="onboarding-key-scope" inert={!!secret}>
+          <Tabs label="Key access" value={scope} onValueChange={value => setScope(value as KeyScope)} items={scopes} />
+          <p className="muted developer-copy">{scopeHint}</p>
+        </div>
+        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : <>Store it as <code>BANE_API_KEY</code> in your project’s environment. It’s shown once.</>}</p>
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
           <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
@@ -464,11 +482,12 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         </div>
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>
-      <div className="onb-rise" style={rise(2)}><AgentPrompt prompt={prompt} /></div>
-      <div className="onb-rise" style={rise(3)}><McpSetup /></div>
+      <div className="onb-rise" style={rise(2)}><FirstSend domain={current} apiKey={secret} title="Send with cURL or the SDK" /></div>
+      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} /></div>
+      <div className="onb-rise" style={rise(4)}><McpSetup /></div>
     </div>
     <div className="onboarding-actions">
-      <p className="muted">{domain.data?.status === 'verified' ? 'Your domain is verified and ready to send.' : 'Your domain keeps verifying in the background.'}</p>
+      <p className="muted">{current?.status === 'verified' ? 'Your domain is verified and ready to send.' : 'Your domain keeps verifying in the background.'}</p>
       <Button variant="primary" onClick={onFinish}>Go to dashboard<ArrowRight size={16} aria-hidden /></Button>
     </div>
   </div>

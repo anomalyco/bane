@@ -1,5 +1,7 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { S3Client } from '@aws-sdk/client-s3';
+import { serialize, type DefaultTreeAdapterMap } from 'parse5';
+import { boundedHtmlFragment } from './bounded-html.js';
 import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
@@ -8,7 +10,7 @@ import { regionalSending, unverifiedSender, verifiedClaim } from './domain-claim
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
-import { assertMailboxKey,readableMailboxKey,workspacePrefix, mailboxS3 } from './mailbox-setup.js';
+import { assertMailboxKey,readableMailboxKey,sentAttachmentKey, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
 import { decodeBase64 } from './outbound-content.js';
@@ -41,7 +43,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
     } else if(item.id.startsWith('matt_')){
       const [{ GetObjectCommand }, { storeAttachmentBytes }] = await wrapModuleLoad(() => Promise.all([import('@aws-sdk/client-s3'), import('./sending.js')]));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
-        .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id)));
+        .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`coalesce(${mailMessages.verdicts}->>'virus',CASE WHEN ${mailMessages.direction}='outbound' THEN 'PASS' END)='PASS'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
       const s3=await mailboxS3(runtime,scope.workspaceId,file.region,file.file.bucket);
       let bytes:Uint8Array;
@@ -116,20 +118,21 @@ export type OutgoingMessage = {
 /** Enforces per-mailbox limits and loop guards. Caller holds the mailbox row lock. */
 async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
   const limits = sendLimitsFor(message.mailbox);
-  const counts = await tx.execute<{ hour: number; day: number }>(sql`SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour, count(*)::int AS day
+  const counts = await tx.execute<{ hour: number; day: number; thread:number; recent:string[][] }>(sql`SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour, count(*)::int AS day,
+    coalesce(jsonb_agg(jsonb_path_query_array("to"||cc||bcc,'$[*].address')) FILTER (WHERE created_at>now()-interval '1 hour'),'[]') AS recent,
+    (SELECT count(*)::int FROM mail_messages WHERE direction='outbound' AND sender_mailbox_id=${message.mailbox.id} AND thread_id=${message.threadId??null} AND created_at>now()-interval '10 minutes') AS thread
     FROM mail_messages WHERE sender_mailbox_id = ${message.mailbox.id} AND direction = 'outbound' AND created_at > now() - interval '1 day'`);
   const { hour, day } = counts.rows[0]!;
   if (hour >= limits.perHour) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perHour} messages per hour.`, undefined, true);
   if (day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
   const recipients = [...message.to, ...message.cc, ...message.bcc];
-  const recent = await tx.select({ to: mailMessages.to, cc: mailMessages.cc, bcc: mailMessages.bcc }).from(mailMessages).where(and(eq(mailMessages.senderMailboxId, message.mailbox.id), eq(mailMessages.direction, 'outbound'), gte(mailMessages.createdAt, sql`now() - interval '1 hour'`))).limit(limits.perHour);
+  const { recent,thread }=counts.rows[0]!;
   for (const recipient of recipients) {
-    const sent = recent.filter(row => [...row.to, ...row.cc, ...row.bcc].some(item => item.address === recipient)).length;
+    const sent = recent.filter(row=>row.includes(recipient)).length;
     if (sent >= limits.perRecipientPerHour) throw new ApiError(429, 'RECIPIENT_SEND_LIMIT', `This mailbox already sent ${sent} messages to ${recipient} in the last hour. This guards against reply loops.`, undefined, true);
   }
   if (message.threadId) {
-    const [thread] = await tx.select({ count: sql<number>`count(*)::int` }).from(mailMessages).where(and(eq(mailMessages.threadId, message.threadId), eq(mailMessages.senderMailboxId, message.mailbox.id), gte(mailMessages.createdAt, sql`now() - interval '10 minutes'`)));
-    if (thread!.count >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${thread!.count} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
+    if (thread >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${thread} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
   }
 }
 
@@ -166,7 +169,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
-    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:`${workspacePrefix(message.scope.workspaceId,'att')}${messageRowId}/${attachmentId}`};
+    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
   }));
   const references = referencesHeader(message.references);
   const headers = [
@@ -232,7 +235,7 @@ export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, 
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,
     attachments: files, inReplyTo, references, headers: rest,
   });
-  if (runnable) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);
+  if (runnable) {actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);actor.wakeJobPool='webhook';}
   return { id: message.sendingEmailId!, status: 'queued' as const, simulated: isSimulatedSes(runtime), mailboxMessageId: message.id, threadId: message.threadId };
 }
 
@@ -264,21 +267,91 @@ export async function replyParentId(db: DbExecutor, original: MessageRow) {
   throw new ApiError(409, 'REPLY_TARGET_NOT_ACCEPTED', 'The original outbound email has no provider Message-ID. Wait for acceptance or reply to an earlier received message.');
 }
 
-// Received HTML can contain URL schemes the sending pipeline rejects (data:, javascript:). Neutralize them instead of failing the forward.
-export function safeForwardHtml(html: string) {
-  return html.replace(/<(script|style|iframe|object|embed)[\s\S]*?<\/\1>/gi, '')
-    .replace(/\s(href|src|background|action|poster|cite|longdesc|data|formaction)\s*=\s*("([^"]*)"|'([^']*)'|[^\s>]+)/gi, (match, name: string, _quoted, doubleValue?: string, singleValue?: string) => {
-      const value = (doubleValue ?? singleValue ?? match.split('=').slice(1).join('=')).trim().replace(/^["']|["']$/g, '');
-      return /^(?:https?:|mailto:|tel:|cid:|#|\/)/i.test(value.replace(/[\x00-\x20]/g, '')) ? match : ` ${name}="#"`;
-    })
-    .replace(/\s(srcset|imagesrcset|ping|archive)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+// Received HTML quoted into a reply is rebuilt from an allow-list (L7): parsed with parse5, only
+// formatting elements and attributes survive, URLs keep safe schemes, and the result is
+// re-serialized, so unclosed tags, event handlers and comments cannot reach the outgoing message.
+const QUOTE_DROP = new Set(['script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'noscript', 'noembed', 'noframes', 'template', 'title', 'head', 'meta', 'link', 'base', 'svg', 'math', 'input', 'button', 'select', 'textarea', 'option', 'optgroup', 'datalist', 'audio', 'video', 'source', 'track', 'canvas', 'map', 'area', 'param', 'xmp', 'plaintext', 'dialog', 'portal']);
+const QUOTE_KEEP = new Set(['a', 'abbr', 'address', 'article', 'b', 'bdi', 'bdo', 'big', 'blockquote', 'br', 'caption', 'center', 'cite', 'code', 'col', 'colgroup', 'dd', 'del', 'dfn', 'div', 'dl', 'dt', 'em', 'figcaption', 'figure', 'font', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'i', 'img', 'ins', 'kbd', 'li', 'main', 'mark', 'nav', 'ol', 'p', 'pre', 'q', 's', 'samp', 'section', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'tt', 'u', 'ul', 'var', 'wbr']);
+const QUOTE_ATTRIBUTES = new Set(['align', 'valign', 'bgcolor', 'color', 'width', 'height', 'border', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'dir', 'lang', 'title', 'alt', 'face', 'size', 'start', 'type', 'span', 'nowrap', 'style']);
+const QUOTE_STYLE = /^(?:color|background-color|font(?:-family|-size|-style|-weight|-variant)?|text-(?:align|decoration|transform|indent)|line-height|letter-spacing|word-(?:spacing|break|wrap)|white-space|vertical-align|direction|(?:margin|padding)(?:-(?:top|right|bottom|left))?|border(?:-(?:top|right|bottom|left))?(?:-(?:width|style|color))?|border-(?:collapse|spacing|radius)|(?:max-|min-)?(?:width|height)|display|list-style-type|table-layout)$/;
+function quoteStyle(value: string) {
+  const kept = value.split(';').flatMap(declaration => {
+    const at = declaration.indexOf(':'), property = declaration.slice(0, at).trim().toLowerCase(), candidate = declaration.slice(at + 1).trim();
+    return at > 0 && QUOTE_STYLE.test(property) && candidate && !/[\\{}<>@]|\/\*|url\s*\(|expression|javascript|behavior|binding|image-set|var\s*\(/i.test(candidate) ? [`${property}:${candidate}`] : [];
+  });
+  return kept.length ? kept.join(';') : null;
+}
+function quoteUrl(value: string, image: boolean) {
+  const url = value.replace(/[\x00-\x20\x7f]/g, '');
+  return (image ? /^(?:https?:|cid:)/i : /^(?:https?:|mailto:|tel:|#)/i).test(url) ? value.trim() : null;
+}
+// N6: the HTML tree builder re-opens formatting elements and clones them, so a few KB of received
+// HTML can grow by N x M nodes, and nesting makes its scope checks quadratic. Every quote is bounded
+// before and during parsing; over any bound the caller quotes the escaped plain text instead.
+const QUOTE_MAX_INPUT = 256 * 1024; // Characters of received HTML.
+const QUOTE_MAX_ATTRIBUTES = 512 * 1024; // Attribute characters visited, cloned elements included.
+class QuoteBudgetExceeded extends Error {}
+const HTML_NS = 'http://www.w3.org/1999/xhtml';
+function cleanAttributes(tag: string, attrs: QuoteElement['attrs'], spend: (n: number) => void) {
+  return attrs.flatMap(({ name, value, prefix }) => {
+    spend(name.length + value.length);
+    if (prefix) return [];
+    const attribute = name.toLowerCase();
+    if ((tag === 'a' && attribute === 'href') || (tag === 'img' && attribute === 'src')) { const url = quoteUrl(value, tag === 'img'); return url ? [{ name: attribute, value: url }] : []; }
+    if (!QUOTE_ATTRIBUTES.has(attribute)) return [];
+    if (attribute === 'style') { const style = quoteStyle(value); return style ? [{ name: attribute, value: style }] : []; }
+    return [{ name: attribute, value }];
+  });
+}
+// Iterative and post-order, so any depth the parser produced costs no call stack. Children are
+// cleaned before their parent splices unwrapped (html, body, form, unknown) elements into place.
+function cleanQuoteNodes(root: QuoteParent, spend: (n: number) => void): void {
+  const order: QuoteParent[] = [], stack = [{parent: root, depth: 0}];
+  while (stack.length) {
+    const {parent, depth} = stack.pop()!;
+    // Formatting repair can move whole subtrees. Check the final tree before
+    // unwrapping nodes or passing it to parse5's recursive serializer.
+    if (depth > 256) throw new QuoteBudgetExceeded();
+    order.push(parent);
+    for (const node of parent.childNodes) if ('tagName' in node && node.namespaceURI === HTML_NS && !QUOTE_DROP.has(node.tagName.toLowerCase())) stack.push({parent:node, depth:depth+1});
+  }
+  for (let i = order.length - 1; i >= 0; i--) {
+    const parent = order[i]!, next: QuoteNode[] = [];
+    for (const node of parent.childNodes) {
+      if (node.nodeName === '#text') { next.push(node); continue; }
+      if (!('tagName' in node)) continue; // Comments (including Outlook conditional HTML) and doctypes.
+      const tag = node.tagName.toLowerCase();
+      if (QUOTE_DROP.has(tag) || node.namespaceURI !== HTML_NS) continue;
+      if (!QUOTE_KEEP.has(tag)) { for (const child of node.childNodes) { child.parentNode = parent; next.push(child); } continue; }
+      node.attrs = cleanAttributes(tag, node.attrs, spend);
+      next.push(node);
+    }
+    parent.childNodes = next;
+  }
+}
+type QuoteParent = DefaultTreeAdapterMap['parentNode'];
+type QuoteNode = DefaultTreeAdapterMap['childNode'];
+type QuoteElement = DefaultTreeAdapterMap['element'];
+/** Allow-listed copy of received HTML for a reply quote, or null when it exceeds the quote bounds. */
+export function safeForwardHtml(html: string): string | null {
+  if (html.length > QUOTE_MAX_INPUT) return null;
+  const fragment = boundedHtmlFragment(html);
+  if (!fragment) return null;
+  let attributes = 0;
+  try {
+    cleanQuoteNodes(fragment, n => { attributes += n; if (attributes > QUOTE_MAX_ATTRIBUTES) throw new QuoteBudgetExceeded(); });
+    return serialize(fragment);
+  } catch (error) {
+    if (error instanceof QuoteBudgetExceeded) return null;
+    throw error;
+  }
 }
 
 /** Copies delivery status and the SES Message-ID from the sending pipeline onto outbound mailbox messages and emits events. Every minute. */
 export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
-  const result=await runtime.db.execute<{n:number;queued:number}>(sql`WITH batch AS MATERIALIZED (
+  const result=await runtime.db.execute<{n:number;queued:number;scanned:number}>(sql`WITH dirty AS (DELETE FROM mail_outbound_sync WHERE id IN (SELECT id FROM mail_outbound_sync ORDER BY due,id LIMIT ${limit} FOR UPDATE SKIP LOCKED) RETURNING id), batch AS MATERIALIZED (
     SELECT m.id,m.status AS previous,e.status,e.provider_id,e.error_code,e.suppression_reason,e.region FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id AND e.workspace_id=m.workspace_id
-    WHERE m.direction='outbound' AND m.status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') AND (e.status<>m.status OR (e.provider_id IS NOT NULL AND m.message_id IS NULL)) ORDER BY m.created_at,m.id LIMIT ${limit} FOR UPDATE OF m SKIP LOCKED
+    JOIN dirty ON dirty.id=m.id WHERE m.direction='outbound' AND m.status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') AND (e.status<>m.status OR (e.provider_id IS NOT NULL AND m.message_id IS NULL)) ORDER BY m.id FOR UPDATE OF m
   ), changed AS (UPDATE mail_messages m SET status=b.status,error_code=b.error_code,suppression_reason=b.suppression_reason,message_id=coalesce(m.message_id,b.provider_id||'@'||CASE b.region WHEN 'us-east-1' THEN 'email' ELSE b.region END||'.amazonses.com'),ses_message_id=coalesce(m.ses_message_id,b.provider_id),updated_at=now() FROM batch b WHERE m.id=b.id RETURNING m.*,b.previous
   ), ids AS (INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT workspace_id,message_id,id,thread_id FROM changed WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
   ), updates AS (SELECT c.*,e.type,e.ord FROM changed c CROSS JOIN LATERAL (VALUES
@@ -286,8 +359,10 @@ export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
     (CASE WHEN status IN ('accepted','sent') THEN 'message.sent' WHEN status IN ('delivered','bounced','complained','delayed') THEN 'message.'||status WHEN status IN ('rejected','rendering_failed','suppressed','canceled') THEN 'message.failed' END,2)) e(type,ord)
     WHERE c.sender_mailbox_id IS NOT NULL AND c.status<>c.previous AND e.type IS NOT NULL
   ), ${mailboxEventCtes(sql`SELECT workspace_id,type,sender_mailbox_id AS mailbox_id,thread_id,id AS message_id,row_number() OVER(ORDER BY id,ord) AS ord,jsonb_strip_nulls(jsonb_build_object('subject',subject,'status',CASE WHEN ord=2 THEN status END,'errorCode',CASE WHEN ord=2 THEN error_code END,'suppressionReason',CASE WHEN ord=2 THEN suppression_reason END)) AS data FROM updates`)}
-  SELECT (SELECT count(*)::int FROM changed) AS n,(SELECT count(*)::int FROM queued) AS queued`);
-  const {n,queued}=result.rows[0]!;
-  if (queued) try { await runtime.wake?.(queued); } catch { /* Webhook jobs are durable. */ }
+  , continuation AS (INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'sync:'||gen_random_uuid(),'default','mailbox.syncOutbound','{}' WHERE (SELECT count(*) FROM dirty)=${limit})
+  SELECT (SELECT count(*)::int FROM changed) AS n,(SELECT count(*)::int FROM dirty) AS scanned,(SELECT count(*)::int FROM queued) AS queued`);
+  const {n,queued,scanned}=result.rows[0]!;
+  if (queued) try { await runtime.wake?.(queued,'webhook'); } catch { /* Durable. */ }
+  if (scanned===limit) try {await runtime.wake?.(1);}catch{/* Durable continuation. */}
   return n;
 }

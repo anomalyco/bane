@@ -15,7 +15,7 @@
     },
     {
       "Effect": "Allow", "Resource": "*",
-      "Action": ["ses:DescribeActiveReceiptRuleSet", "ses:CreateReceiptRule", "ses:UpdateReceiptRule"],
+      "Action": "ses:DescribeActiveReceiptRuleSet",
       "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2" } }
     },
     {
@@ -32,9 +32,8 @@
       "Effect": "Allow",
       "Action": [
         "ses:CreateTenantResourceAssociation",
-        "ses:GetConfigurationSet", "ses:GetConfigurationSetEventDestinations", "ses:CreateConfigurationSetEventDestination",
-        "ses:UpdateConfigurationSetEventDestination", "ses:PutConfigurationSetSuppressionOptions",
-        "sns:ListTagsForResource", "sns:SetTopicAttributes", "sns:ListSubscriptionsByTopic"
+        "ses:GetConfigurationSet", "ses:GetConfigurationSetEventDestinations",
+        "sns:ListTagsForResource", "sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic"
       ],
       "Resource": [
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-transactional",
@@ -43,49 +42,29 @@
       ]
     },
     {
-      "Effect": "Allow", "Action": ["sns:GetSubscriptionAttributes", "sns:SetSubscriptionAttributes"],
-      "Resource": "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback"
-    },
-    {
-      "Effect": "Allow", "Action": ["ses:CreateConfigurationSet", "ses:TagResource", "sns:CreateTopic", "sns:TagResource"],
-      "Resource": [
-        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-transactional",
-        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-marketing",
-        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback"
-      ],
-      "Condition": {
-        "StringEquals": { "aws:RequestTag/bane:installation-id": "bane:pool", "aws:RequestTag/bane:purpose": "ses-feedback" },
-        "ForAllValues:StringEquals": { "aws:TagKeys": ["bane:installation-id", "bane:purpose"] }
-      }
-    },
-    {
-      "Effect": "Allow", "Action": ["sns:CreateTopic", "sns:TagResource"], "Resource": "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound",
-      "Condition": {
-        "StringEquals": { "aws:RequestTag/bane:installation-id": "bane:pool", "aws:RequestTag/bane:purpose": "mailbox-inbound" },
-        "ForAllValues:StringEquals": { "aws:TagKeys": ["bane:installation-id", "bane:purpose"] }
-      }
+      "Effect": "Allow", "Action": "sns:GetSubscriptionAttributes",
+      "Resource": ["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback", "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound"]
     },
     {
       "Effect": "Allow", "Action": "sns:Subscribe",
-      "Resource": ["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback", "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound"],
+      "Resource": "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback",
       "Condition": { "StringEquals": { "sns:Protocol": "https", "sns:Endpoint": "https://bane.mx/v1/events/ses" } }
     },
     {
-      "Effect": "Allow", "Action": "s3:CreateBucket", "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
-      "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2", "s3:LocationConstraint": "us-east-2" }, "StringEqualsIfExists": { "s3:x-amz-object-ownership": "BucketOwnerEnforced" } }
+      "Effect": "Allow", "Action": ["s3:GetBucketPolicy", "s3:GetBucketPublicAccessBlock", "s3:GetLifecycleConfiguration"], "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2", "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID" } }
     },
     {
       "Effect": "Deny", "Action": ["s3:GetObject", "s3:Put*", "s3:ListBucket", "s3:AbortMultipartUpload"], "Resource": "*",
       "Condition": { "StringNotEquals": { "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID" } }
     },
     {
-      "Effect": "Allow", "Action": ["s3:PutBucketTagging", "s3:PutBucketPublicAccessBlock", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:GetObject", "ses:GetEmailIdentity", "sns:GetTopicAttributes"],
+      "Effect": "Allow", "Action": ["s3:GetObject", "ses:GetEmailIdentity"],
       "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}},
       "Resource": [
-        "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
         "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/staging/?*",
         "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/workspaces/ws_????????????????????????????????/raw/?*.eml",
-        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*", "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback"
+        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*"
       ]
     },
     {
@@ -95,6 +74,7 @@
       ],
       "Resource": [
         "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/workspaces/ws_????????????????????????????????/att/msg_????????????????????????????????/matt_????????????????????????????????",
+        "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2/workspaces/ws_????????????????????????????????/att/msg_????????????????????????????????/????????????????????????????????????????????????????????????????/matt_????????????????????????????????",
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:tenant/bane-ws_????????????????????????????????/*", "arn:aws:ses:us-east-2:aws:reputation-policy/strict"
       ], "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}}
     },

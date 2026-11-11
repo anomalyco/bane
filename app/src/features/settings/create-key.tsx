@@ -153,6 +153,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
             {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
             {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
             {purpose === 'manage' && !allDomains && <p className="ui-field__hint">Limited to domains, it can’t manage keys, inbound or settings.</p>}
+            {!allDomains && <p className="ui-field__hint">Sends and email logs are limited to these domains. Contacts, lists, templates and campaigns stay workspace-wide.</p>}
             {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
             {domainError && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError}</p>}
           </fieldset>}

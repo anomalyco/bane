@@ -1,5 +1,5 @@
 import { request } from './live'
-import type { WorkspaceInvitation, WorkspaceMember, WorkspaceMembership, WorkspaceRole } from './types'
+import type { WorkspaceInvitation, WorkspaceInvitationPreview, WorkspaceMember, WorkspaceMembership, WorkspaceRole } from './types'
 
 // Multi-tenant workspace administration. Only reachable when /v1/me reports multiTenant.
 const current = '/v1/workspaces/current'
@@ -13,5 +13,8 @@ export const workspaceApi = {
   invitations: async (signal?: AbortSignal) => (await request<{ data: WorkspaceInvitation[] }>(`${current}/invitations`, { signal })).data,
   invite: (input: { email: string; role: WorkspaceRole }) => request<WorkspaceInvitation>(`${current}/invitations`, { method: 'POST', body: input }),
   revokeInvitation: (id: string) => request(`${current}/invitations?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // The invitation the signed-in recipient followed. Reading it changes nothing; only accept joins.
+  reviewInvitation: (id: string, signal?: AbortSignal) => request<WorkspaceInvitationPreview>(`/v1/workspaces/invitations/${encodeURIComponent(id)}`, { signal }),
+  acceptInvitation: (id: string) => request<{ workspaceId: string }>(`/v1/workspaces/invitations/${encodeURIComponent(id)}/accept`, { method: 'POST', body: {} }),
 }
 export const roleLabel: Record<WorkspaceRole, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' }

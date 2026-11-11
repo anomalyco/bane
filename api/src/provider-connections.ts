@@ -8,6 +8,7 @@ import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
+import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
 import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
@@ -22,6 +23,14 @@ const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), st
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
 export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant,
   sendingPause: z.object({ at: z.iso.datetime(), reason: z.string() }).nullable().describe('Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.'),
+  sendingLimit: z.object({
+    cap: z.number().int().nullable().describe('Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit.'),
+    used: z.number().int().describe('Recipients charged in the current rolling 24 hours. Simulator addresses are free.'),
+    resetAt: z.iso.datetime().nullable().describe('When capacity next frees up or the limit changes.'),
+    nextCap: z.number().int().nullable().describe('The next limit for a new workspace, or null once it has the mature limit.'),
+    nextCapAt: z.iso.datetime().nullable().describe('When nextCap applies.'),
+  }).nullable().optional().describe('Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
+  domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
 }).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
 
@@ -72,8 +81,19 @@ async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null}>(sql`SELECT kind, region, state, tenant_state, paused_at, pause_reason FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
-  return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null } : null;
+  // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; allowance: HostedAllowance | null}>(sql`
+    SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason,
+      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id) AS domains,
+      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost')) AS verified_domains,
+      CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
+    FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
+  if (!row) return null;
+  const iso = (value: string | null | undefined) => value ? new Date(value).toISOString() : null;
+  const allowance = row.allowance;
+  return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
+    sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
+    domains: { total: row.domains, verified: row.verified_domains } };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
@@ -88,15 +108,16 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = 
 // so a crashed isolate's attempt can be retried without a DB transaction spanning AWS calls.
 type Pool = { sending: boolean; receiving: boolean; aws_account_id: string;legacy_names:boolean };
 async function getPool(runtime: Runtime, region: string) {
-  return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, ${poolReceives()} AS receiving, aws_account_id,legacy_names FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
+  return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, (${poolReceives()} AND coalesce(receiving_checked_at,'-infinity')>now()-interval '1 day') AS receiving, aws_account_id,legacy_names FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
 }
 async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof platformIdentity>>, region: string) {
   await Promise.all([loadSetupSdk(), loadMailboxSetupSdk()]);
   const account=principal.account;
   const lease = new Date(Date.now() + 180_000).toISOString();
-  const result = await runtime.db.execute<Pick<Pool,'sending'>>(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
-    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE NOT (${poolSends(sql`provider_pool_regions`)} AND ${poolReceives(sql`provider_pool_regions`)})
-      AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING ${poolSends(sql`provider_pool_regions`)} AS sending`);
+  const fresh=sql`(${poolReceives(sql`provider_pool_regions`)} AND coalesce(provider_pool_regions.receiving_checked_at,'-infinity')>now()-interval '1 day')`;
+  const result = await runtime.db.execute<Pick<Pool,'sending'|'receiving'>>(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
+    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE provider_pool_regions.legacy_names AND NOT (${poolSends(sql`provider_pool_regions`)} AND ${fresh})
+      AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING ${poolSends(sql`provider_pool_regions`)} AS sending,${fresh} AS receiving`);
   if (!result.rowCount) {
     const pool = await getPool(runtime, region);
     if (pool?.aws_account_id !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
@@ -106,6 +127,20 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
   const owned = sql`region=${region} AND lease_until=${lease}::timestamptz`;
   try {
     const scoped = { ...runtime, config: { ...runtime.config, awsAccountId: account, sesFeedbackUrl: undefined } };
+    // Independent checkpoints. Sending sandbox/feedback failures cannot skip receiving, and
+    // waiting for an inbound confirmation must not block a healthy outbound pool either.
+    let receiveFailure: unknown;
+    if (!result.rows[0]!.receiving) try {
+      const bucket=await preparePoolReceiving(scoped,region,account,async(_account,_bucket,arn)=>{
+        if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
+      });
+      if (!(await runtime.db.execute(setPoolState(owned,'receiving_state',sql`,inbound_bucket=${bucket},receiving_checked_at=now()`))).rowCount) throw busy();
+    } catch(e) {
+      receiveFailure=e;
+      // A simultaneous outbound failure can be the one that escapes this run.
+      // Keep the receiving resource/operator action visible independently.
+      if (e instanceof ApiError && e.code==='POOL_RECEIVING_DRIFT') log('warn',{operation:'shared-receiving-setup',region,code:e.code,message:e.message});
+    }
     if (!result.rows[0]!.sending) {
       const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, verifiedPoolPrincipal:principal, connectionSetup: true, registerTopic: async (_account, arn) => {
         if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
@@ -113,11 +148,8 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
       checkProvisioned(report, true, runtime.config.allowSesSandbox);
       if (!(await runtime.db.execute(setPoolState(owned,'sending_state'))).rowCount) throw busy();
     }
-    const bucket=await preparePoolReceiving(scoped,region,account,async(_account,_bucket,arn)=>{
-      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
-    });
-    if (!(await runtime.db.execute(setPoolState(owned,'receiving_state',sql`,inbound_bucket=${bucket},lease_until=NULL`))).rowCount) throw busy();
-  } catch (e) { await runtime.db.execute(sql`UPDATE provider_pool_regions SET lease_until=NULL WHERE ${owned}`); throw e; }
+    if(receiveFailure) throw receiveFailure;
+  } finally { await runtime.db.execute(sql`UPDATE provider_pool_regions SET lease_until=NULL WHERE ${owned}`); }
 }
 const busy = () => new ApiError(409, 'CONNECTION_BUSY', 'Connection setup is already in progress. Retry shortly.', undefined, true);
 function uniqueAccount(error: unknown) {
@@ -286,7 +318,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
         try { await ensureTenant(runtime, row.workspace_id, row.id); }
         catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-tenant-setup', region, connectionId: row.id, code: awsError(e).code }); }
       }
-    } catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-pool-setup', region, code: awsError(e).code }); }
+    } catch (e) { if (e instanceof ModuleLoadError) throw e; const error=awsError(e); log('warn', { operation: 'shared-pool-setup', region, code: error.code, ...(error.code==='POOL_SENDING_DRIFT'?{message:error.message}:{}) }); }
   }
 }
 async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {

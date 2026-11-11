@@ -19,6 +19,7 @@ export interface Actor {
   dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };
   // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).
   wakeJobs?: number;
+  wakeJobPool?: 'webhook';
 }
 export interface Storage {
   // Identity for reusable immutable bytes only, never pending request-bound I/O.
@@ -42,8 +43,10 @@ export interface Config {
   platformAccount?: string;
   regionalSending?: boolean;
   trustedPool?: boolean;
+  receivingRedrive?:boolean;
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
+  hostedScreen?: boolean;
   placementShadow?: boolean;
   placementDblZone?: string;
   byoTemplateUrl?: string;
@@ -74,12 +77,12 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
+export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared' };
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   // Workers' public egress guards connect-time DNS; Node instead pins the checked IP in TLS.
   placementEdge?: { probesPerJob:number };
-  wake?: (readyJobs?: number, immediate?: 'webhook') => Promise<void>;
+  wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
@@ -87,6 +90,9 @@ export interface Runtime {
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
+  allowFeedbackTopic?: (arn:string)=>Promise<boolean>;
+  allowSnsCertMiss?: (peer: string) => Promise<boolean>;
+  jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
@@ -94,11 +100,12 @@ export interface Runtime {
 }
 export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number }>;
 export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type ClaimedWebhook = { delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
+  ingest?:import('./mailbox-ingest-input.js').IngestInput|null;
   webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
 
 export class ApiError extends Error {
@@ -205,6 +212,9 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
   return getSesSync(runtime, selectedRegion, connection, runClients);
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
+  // Sample routine successes at the source, NOT whole invocations. A sampled-out
+  // request can still emit every error and the minute and batch metrics stay exact.
+  if(level==='info' && (fields.status===200 || fields.status===202 || ['JOB_COMPLETED','QUEUE_WAKE','QUEUE_WAKE_COALESCED','JOB_DEFERRED'].includes(String(fields.code))) && Math.random()>=0.01)return;
   // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
   console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
 }
@@ -224,9 +234,11 @@ export function applySecurityHeaders(headers: Headers): Headers {
 export function secureResponse(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: applySecurityHeaders(new Headers(response.headers)) });
 }
+// HTTPS installations name auth cookies `__Host-bane.*`; plain-HTTP local development uses `bane.*`.
+export const HOST_COOKIE = '__Host-bane.';
 export function hasSessionCookie(headers: Headers): boolean {
   const cookie = headers.get('cookie');
-  return Boolean(cookie && /(?:^|;\s*)(?:__Secure-)?bane\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
+  return Boolean(cookie && /(?:^|;\s*)(?:__Host-)?bane\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.
@@ -235,14 +247,40 @@ export function publicFailureBucket(path: string, status: number, headers?: Head
   if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
   return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';
 }
-export async function publicFailureAllowed(runtime: Runtime, bucket: 'auth' | 'unsubscribe', peer: string): Promise<boolean> {
-  const keyId = `public:${bucket}:${peer}`;
-  const budget = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-    VALUES (${runtime.config.workspaceId}, ${keyId}, date_trunc('minute', now()), 1)
-    ON CONFLICT (workspace_id, key_id) DO UPDATE SET
-      used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, 41) ELSE 1 END,
-      window_start = excluded.window_start RETURNING used`);
-  return budget.rows[0]!.used <= 40;
+export function admissionPeer(address: string): string {
+  if (!address.includes(':')) return address;
+  try {
+    const canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+    const mapped = /^::ffff:([\da-f]+):([\da-f]+)$/.exec(canonical);
+    if (mapped) return mapped.slice(1).flatMap(v => [parseInt(v,16) >>> 8, parseInt(v,16) & 255]).join('.');
+    const [left, right] = canonical.split('::');
+    const a = left ? left.split(':') : [], b = right ? right.split(':') : [];
+    return [...a, ...Array(8-a.length-b.length).fill('0'), ...b].slice(0,4).join(':') + '::';
+  } catch { return 'unknown'; }
+}
+
+// Identity entry has a request budget; authenticated API routes have a failure
+// budget. Check completed failures before dispatch, never charge concurrency.
+const failureCounts = new Map<string, number>();
+let failureMinute = 0;
+export async function guardPublicRequest(path: string, headers: Headers, peer: string, work: () => Promise<Response>) {
+  const entry = /^\/(?:api\/auth|\.well-known)(?:\/|$)/.test(path);
+  const lane = entry ? 'identity-entry' : publicFailureBucket(path, 401, headers);
+  if (!lane) return work();
+  const minute = Math.floor(Date.now()/60000);
+  if (minute !== failureMinute) { failureCounts.clear(); failureMinute = minute; }
+  const key = `${lane}:${peer}`;
+  // At capacity, rely on edge admission for unknown peers. Never share either
+  // a penalty or an in-flight reservation between unrelated credentials.
+  if (!failureCounts.has(key) && failureCounts.size >= 4096) return work();
+  const count = failureCounts.get(key) ?? 0;
+  if (count >= 40) return publicFailureDenied();
+  if(entry) failureCounts.set(key,count+1);
+  const response=await work();
+  if(!entry && minute===failureMinute && publicFailureBucket(path,response.status,headers) && (failureCounts.has(key) || failureCounts.size<4096)) {
+    failureCounts.set(key,Math.min(40,(failureCounts.get(key)??0)+1));
+  }
+  return response;
 }
 // All credentials and image-producing routes share one atomic workspace counter.
 export async function chargeRenderBudget(c: Ctx, workspaceId: string) {

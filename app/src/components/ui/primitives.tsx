@@ -124,7 +124,7 @@ export function SectionHeader({ title, actions }: { title: ReactNode; actions?: 
 function statusTone(status: string): Tone {
   const value = status.trim().toLowerCase().replaceAll(' ', '_');
   if (['delivered', 'sent', 'done', 'active', 'verified', 'enabled', 'subscribed', 'healthy', 'connected', 'completed', 'success', 'production'].includes(value)) return 'success';
-  if (['pending', 'preparing', 'scheduled', 'sending', 'paused', 'queued', 'warning', 'verifying', 'bounced', 'deferred', 'delivery_delayed', 'sandbox', 'probation', 'issue'].includes(value)) return 'warning';
+  if (['pending', 'preparing', 'scheduled', 'sending', 'paused', 'queued', 'warning', 'verifying', 'bounced', 'deferred', 'delivery_delayed', 'sandbox', 'probation', 'issue', 'attention'].includes(value)) return 'warning';
   if (['failed', 'complaint', 'error', 'rejected', 'suppressed', 'shutdown'].includes(value)) return 'danger';
   return 'neutral';
 }
@@ -140,8 +140,13 @@ export function EmptyState({ title, description, action, headingAs: Heading = 'h
 export function LoadingState({ rows = 5 }: { rows?: number }) {
   return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;
 }
+// API errors carry plain-language `text` and a `reference` (code and request ID) shown as secondary detail.
+export function ErrorText({ error, fallback = 'Something went wrong. Please try again.' }: { error: unknown; fallback?: string }) {
+  if (error instanceof Error && 'text' in error && 'reference' in error) return <><span>{String(error.text)}</span><span className="ui-error-reference">{String(error.reference)}</span></>;
+  return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
+}
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
-  return <div className="ui-error-state"><Alert tone="danger" title="Could not load this content">{error instanceof Error ? error.message : typeof error === 'string' ? error : 'Something went wrong. Please try again.'}</Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
+  return <div className="ui-error-state"><Alert tone="danger" title="Could not load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;

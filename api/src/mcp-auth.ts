@@ -123,21 +123,55 @@ function deniedToken(runtime: Runtime) {
     status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${originOf(runtime)}/.well-known/oauth-protected-resource/mcp", scope="bane:read"` },
   });
 }
+const invalidJws=new Map<string,number>();
+type PublicKeySet = Awaited<ReturnType<ReturnType<typeof createAuth>['api']['getJwks']>>;
+type KeySnapshot = { issuer: string; keys: Map<string, PublicKeySet['keys'][number]>; expires: number; refreshAfter: number };
+const keySnapshots = new WeakMap<object, KeySnapshot>();
+async function verificationKey(runtime: Runtime, kid: string) {
+  const scope = runtime.jwksCacheScope ?? runtime.db, issuer = issuerOf(runtime), now = Date.now();
+  let entry = keySnapshots.get(scope);
+  if (!entry || entry.issuer !== issuer) {
+    entry = { issuer, keys: new Map(), expires: 0, refreshAfter: 0 };
+    keySnapshots.set(scope, entry);
+  }
+  if (entry.expires > now && entry.keys.has(kid)) return entry.keys.get(kid);
+  if (now >= entry.refreshAfter) {
+    // Reserve the next read before awaiting it. Cache only completed public keys,
+    // never an adapter or a pending DB query belonging to another Worker request.
+    entry.refreshAfter = now + 60_000;
+    const jwks = await createAuth(runtime, { mcp: true }).api.getJwks();
+    entry.keys = new Map(jwks.keys.flatMap(key => key.kid ? [[key.kid, key] as const] : []));
+    entry.expires = now + 300_000;
+  }
+  if (entry.expires <= now) throw new Error('No current MCP verification keys');
+  return entry.keys.get(kid);
+}
 export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor) => Promise<Response>): Promise<Response> {
   const authorization = parseAccessTokenAuthorization(request.headers.get('authorization'));
   if (!authorization?.token || authorization.scheme === 'Unknown' || authorization.token.length > 16 * 1024) return deniedToken(runtime);
+  const parts=/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{86})$/.exec(authorization.token);
+  if(!parts) return deniedToken(runtime);
+  let kid: string;
+  try {
+    const h=JSON.parse(Buffer.from(parts[1]!,'base64url').toString()),p=JSON.parse(Buffer.from(parts[2]!,'base64url').toString());
+    if(h.alg!=='ES256' || typeof h.kid!=='string' || !h.kid || typeof p.sub!=='string' || typeof p.exp!=='number') return deniedToken(runtime);
+    kid=h.kid;
+  } catch {return deniedToken(runtime);}
+  const fingerprint=await digest(issuerOf(runtime)+'\n'+authorization.token);
+  if((invalidJws.get(fingerprint)??0)>Date.now())return deniedToken(runtime);
   let actor: Actor;
   try {
-    const auth = createAuth(runtime, { mcp: true });
-    // The MCP convenience wrapper fetches its own public JWKS URL. Avoid a
-    // Worker self-fetch (and an unnecessary network hop) using the same exported
-    // verifier with request-local keys. Never cache a Workers adapter globally.
-    const jwks = await auth.api.getJwks();
-    const claims = await verifyJwsAccessToken(authorization.token, { jwksFetch: async () => jwks,
+    const key = await verificationKey(runtime, kid);
+    if (!key) return deniedToken(runtime);
+    const claims = await verifyJwsAccessToken(authorization.token, { jwksFetch: async () => ({keys: [key]}),
       verifyOptions: { issuer: issuerOf(runtime), audience: resourceOf(runtime), algorithms: ['ES256'], typ: 'at+jwt', requiredClaims: ['sub', 'exp', 'iat', 'client_id'] },
     }).catch(() => null);
-    if (!claims) return deniedToken(runtime);
+    if (!claims) {
+      if(invalidJws.size>=1024)invalidJws.delete(invalidJws.keys().next().value!);
+      invalidJws.set(fingerprint,Date.now()+30000);return deniedToken(runtime);
+    }
     try {
+      const auth = createAuth(runtime, { mcp: true });
       await enforceDpopBinding({ payload: claims, authorization, proofJwt: request.headers.get('dpop'), method: request.method, url: request.url,
         replayStore: createDpopReplayStore((await auth.$context).internalAdapter),
       });

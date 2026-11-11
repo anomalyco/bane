@@ -22,24 +22,26 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
       WHERE c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND c.region=s.region AND c.aws_account_id=split_part(s.topic_arn,':',5) AND r.topic_arn=s.topic_arn AND r.bucket=s.bucket` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions r WHERE r.workspace_id=${runtime.config.workspaceId} AND r.region=s.region AND r.topic_arn=s.topic_arn AND r.bucket=s.bucket`}) b
     WHERE NOT s.fenced OR s.binding_workspace IS NOT DISTINCT FROM b.wid
   ), env AS (SELECT b.*,addr,split_part(addr,'@',2) AS host FROM bound b CROSS JOIN jsonb_array_elements_text(b.recipients) e(addr)), matched AS MATERIALIZED (
-    SELECT e.bucket,e.mid,m.workspace_id,e.addr FROM env e JOIN mailbox_domains m ON ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=e.region AND (e.wid=m.workspace_id OR e.kind='shared')
+    SELECT e.bucket,e.mid,m.workspace_id,e.addr FROM env e CROSS JOIN LATERAL (SELECT * FROM mailbox_domains m WHERE ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=e.region AND (e.wid=m.workspace_id OR e.kind='shared') OFFSET 0) m
     WHERE ${replay?sql`e.expires_at>now() AND (e.owners->e.addr) ? m.workspace_id` : sql`NOT EXISTS (SELECT FROM mail_receipt_holds h WHERE h.bucket=e.bucket AND h.ses_message_id=e.mid AND h.binding_workspace IS NOT DISTINCT FROM e.wid AND h.topic_arn=e.topic_arn AND h.recipients ? e.addr AND (h.expires_at<=now() OR NOT (h.owners->e.addr) ? m.workspace_id))`} AND ${hosted ? sql`EXISTS (
       SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.receiving_host=e.host AND ${claimReceives()}
       JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=e.kind AND c.region=m.region AND ${connectionReady(sql`c`)} AND c.aws_account_id=split_part(e.topic_arn,':',5)
+      AND dc.receiving_proved_at>now()-interval '72 hours' AND dc.receiving_identity_at>now()-interval '96 hours'
+      AND (dc.receiving_proof_missed_at IS NULL OR dc.receiving_proof_missed_at>now()-interval '48 hours') AND (dc.receiving_lost_since IS NULL OR dc.receiving_lost_since>now()-interval '2 hours')
       WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.created_at<=e.at AND dc.created_at<=e.at AND (d.region=m.region OR
         (c.kind='shared' AND m.region='us-east-2' AND m.status='active' AND EXISTS
           (SELECT FROM domain_sending_bindings sb WHERE sb.domain_id=d.id AND sb.connection_id=c.id AND sb.region=d.region))))` : sql`m.status IN ('provisioning','waiting_for_mx','active') AND (m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
   ), groups AS (SELECT bucket,mid,workspace_id,jsonb_agg(DISTINCT addr ORDER BY addr) AS recipients FROM matched GROUP BY 1,2,3),
   receipts AS (INSERT INTO mail_receipts AS r(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification)
     SELECT g.workspace_id,s.mid,s.region,s.bucket,'workspaces/'||g.workspace_id||'/raw/'||s.mid||'.eml',g.recipients,s.notification FROM groups g JOIN source s USING(bucket,mid)
-    ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status='pending',processed_at=NULL
-    WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients RETURNING workspace_id,ses_message_id
-  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts RETURNING 1),
+    ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status=CASE WHEN r.status='held' THEN 'held' ELSE 'pending' END,processed_at=NULL
+    WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients AND jsonb_array_length(r.recipients||excluded.recipients)<=200 RETURNING workspace_id,ses_message_id,status
+  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' RETURNING 1),
   unmatched AS (SELECT e.bucket,e.mid,jsonb_agg(DISTINCT e.addr ORDER BY e.addr) AS recipients ${replay?sql``:sql`,jsonb_object_agg(e.addr,setup.owners) AS owners`} FROM env e
     ${replay?sql``:sql`JOIN LATERAL (SELECT jsonb_agg(wid) AS owners FROM (
-      SELECT m.workspace_id AS wid FROM mailbox_domains m WHERE (e.wid=m.workspace_id OR e.kind='shared') AND m.region=e.region AND e.host IN (m.name,m.receiving_host)
+      SELECT m.workspace_id AS wid FROM mailbox_domains m WHERE (e.wid=m.workspace_id OR e.kind='shared') AND m.region=e.region AND (m.name=e.host OR m.receiving_host=e.host)
       ${hosted?sql`UNION SELECT dc.workspace_id FROM domain_claims dc JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=e.kind AND c.aws_account_id=split_part(e.topic_arn,':',5)
-        WHERE e.host IN (dc.name,dc.receiving_host) AND (e.wid=dc.workspace_id OR e.kind='shared') AND dc.claim_scope<>'account'`:sql``}) candidates) setup ON setup.owners IS NOT NULL`}
+        WHERE (dc.name=e.host OR dc.receiving_host=e.host) AND (e.wid=dc.workspace_id OR e.kind='shared') AND dc.claim_scope<>'account'`:sql``}) candidates) setup ON setup.owners IS NOT NULL`}
     WHERE NOT EXISTS(SELECT FROM matched m WHERE m.bucket=e.bucket AND m.mid=e.mid AND m.addr=e.addr) GROUP BY 1,2),
   held AS (${replay ? sql`UPDATE mail_receipt_holds h SET recipients=coalesce(u.recipients,CASE WHEN b.bucket IS NULL THEN h.recipients ELSE '[]'::jsonb END),next_check=now()+interval '50 minutes',
     status=CASE WHEN h.expires_at<=now() THEN 'failed' WHEN u.mid IS NULL AND b.bucket IS NOT NULL THEN 'released' ELSE 'held' END,
@@ -49,6 +51,7 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
     ON CONFLICT(bucket,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(h.recipients||excluded.recipients) v(a)),
       notification=CASE WHEN excluded.notification ? 'stagingEtag' THEN h.notification ELSE excluded.notification END,owners=excluded.owners||h.owners,status='held'
     WHERE h.binding_workspace IS NOT DISTINCT FROM excluded.binding_workspace AND h.topic_arn=excluded.topic_arn AND h.expires_at>now() AND NOT h.recipients @> excluded.recipients RETURNING 1`})
+  ${replay?sql``:sql`, ignored AS (INSERT INTO mail_ignored_staging(bucket,ses_message_id) SELECT b.bucket,b.mid FROM bound b WHERE NOT EXISTS(SELECT FROM groups) AND NOT EXISTS(SELECT FROM unmatched) ON CONFLICT DO NOTHING)`}
   SELECT EXISTS(SELECT FROM bound) AS trusted,(SELECT count(*)::int FROM queued) AS n,(SELECT count(*)::int FROM held) AS held,(SELECT count(*)::int FROM source) AS seen`);
   return result.rows[0]!;
 }

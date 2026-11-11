@@ -102,7 +102,10 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, jwksCacheScope: env.HYPERDRIVE,
+      allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
+      allowFeedbackTopic:async arn=>(await env.ADMISSION.limit({key:`feedback:${arn}`})).success, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
       // be consumed before a later coalesced commit; callback delivery never waits here.
@@ -141,12 +144,11 @@ export default {
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-Bane-Environment') && !request.headers.has('X-OpenSend-Environment')) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      const body = request.method === 'HEAD' ? null : JSON.stringify({ status: 'ok', service: 'bane', multiTenant });
-      return fastSecure(new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId, 'server-timing': 'runtime;dur=0.0' } }));
+      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(pathname) && pathname !== '/health') {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
@@ -154,13 +156,12 @@ export default {
       deps = await loadHttpDeps();
       const { app, core } = deps;
       const admissionStarted = performance.now();
-      const address = request.headers.get('CF-Connecting-IP') ?? '127.0.0.1';
+      const address = core.admissionPeer(request.headers.get('CF-Connecting-IP') ?? '127.0.0.1');
       const peer = await core.digest(address);
-      // SNS publishes from a small IP pool at the full send rate; its requests are authenticated by
-      // signature verification in the handler, so the per-address admission gate does not apply.
+      // SNS shares egress IPs across subscriptions. This byte-bounded route
+      // verifies the signature before looking up a topic or queuing feedback.
       const feedbackIngress = pathname === '/v1/events/ses' && request.method === 'POST';
-      const gate = feedbackIngress ? { success: true } : await env.ADMISSION.limit({ key: `bane:default:${peer}` });
-      if (!gate.success) return core.admissionDenied();
+      if (!feedbackIngress && !(await env.ADMISSION.limit({ key: `bane:default:${peer}` })).success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
       headers.delete('x-opensend-client-ip');
@@ -168,11 +169,8 @@ export default {
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
-        : await withRuntime(env, async runtime => {
-          const result = await app.fetch(new Request(request, { headers }), runtime);
-          const failureBucket = core.publicFailureBucket(pathname, result.status, request.headers);
-          return failureBucket && !await core.publicFailureAllowed(runtime, failureBucket, peer) ? core.publicFailureDenied() : result;
-        }, 1, ctx);
+        : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
+          app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');
@@ -200,12 +198,15 @@ export default {
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
         const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
-        for (const [index, message] of messages.entries()) settleFeedbackMessage(message, outcomes[index]);
-        core.log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
+        let retiredUnmatched=0;
+        for (const [index, message] of messages.entries()) if(settleFeedbackMessage(message, outcomes[index])==='retired_unmatched') retiredUnmatched++;
+        const failed=outcomes.filter(outcome=>!outcome.ok).length-retiredUnmatched, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
+        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, retiredUnmatched, oldestMs });
       });
       return;
     }
-    if (batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'bane-work')) {
+    const hooks = batch.queue === env.WEBHOOK_QUEUE_NAME, pool = hooks ? 'webhooks' : 'work';
+    if (!hooks && batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'bane-work')) {
       core.log('error', { code: 'UNKNOWN_QUEUE', queue: batch.queue });
       batch.retryAll();
       return;
@@ -215,15 +216,15 @@ export default {
       // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
       // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
-      const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }), 45000);
+      const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
     }, concurrency);
     batch.ackAll();
   },
   async scheduled(controller, env) {
     const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
-    const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }] = await core.wrapModuleLoad(() => Promise.all([
-      import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'),
+    const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
+      import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'), import('./public-stats.js'),
     ]));
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     await withRuntime(env, async runtime => {
@@ -239,11 +240,22 @@ export default {
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
+      // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
+      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
+        const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
+        try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
+          const alarm=(name==='feedback-dlq' && m.backlogCount>0) || oldestMs>60000;
+          core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
+        }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
+      }));
+      await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
       // Minute cron: recover orchestration jobs whose wake was lost.
-      await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));
-      await reconcileSharedConnections(runtime);
+      await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
+      if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
+      // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
+      await publicStatsTick(runtime);
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

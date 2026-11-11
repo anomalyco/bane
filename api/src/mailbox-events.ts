@@ -1,7 +1,7 @@
 import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
 import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
-import { mailboxEvents, mailboxWebhookDeliveries, mailboxWebhooks } from './db/mailbox.js';
-import { MAX_ATTEMPTS } from './jobs.js';
+import { mailboxEvents } from './db/mailbox.js';
+import { inboundHookClaim,JobDeferred,WEBHOOK_ATTEMPTS,retryDatabaseFailures } from './jobs.js';
 
 export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
@@ -9,11 +9,6 @@ export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | nu
 
 export const eventView = (row: typeof mailboxEvents.$inferSelect) => ({ id: `mev_${row.seq}`, cursor: String(row.seq), type: row.type as MailboxEventType, createdAt: new Date(row.createdAt).toISOString(), addressId: row.mailboxId, threadId: row.threadId, messageId: row.messageId, data: row.data });
 export const webhookSecretBinding = (workspaceId: string, webhookId: string) => `${workspaceId}:live:mailbox:${webhookId}`;
-
-function subscribed(endpoint: typeof mailboxWebhooks.$inferSelect, { type, addressId }: Record<string, unknown>) {
-  return typeof type === 'string' && endpoint.eventTypes.includes(type) && (endpoint.mailboxIds === null ||
-    (type !== 'message.stored' && typeof addressId === 'string' && endpoint.mailboxIds.includes(addressId)));
-}
 
 // Both ingest and outbound sync append the same immutable event and webhook snapshots. Take the
 // workspace lanes in a consistent order before allocating sequence numbers, so cursors never skip a commit.
@@ -30,6 +25,17 @@ export function mailboxEventCtes(source:SQL) {
       AND h.event_types ? e.type RETURNING id,workspace_id
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries RETURNING 1)`;
 }
+
+const fanout:JobHandler=retryDatabaseFailures(async(runtime,payload,job)=>{
+  // Snapshot endpoint IDs at commit, not at expansion: a new subscription never receives historical mail.
+  const records=sql`deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload)
+    SELECT 'mwd_'||gen_random_uuid(),e.workspace_id,h.id,e.seq,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',e.data)
+    FROM settled CROSS JOIN jsonb_each(${JSON.stringify(payload)}::jsonb) s(seq,hooks) JOIN mailbox_events e ON e.workspace_id=${job.workspaceId} AND e.seq=s.seq::bigint
+    JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND h.id IN (SELECT jsonb_array_elements_text(s.hooks))
+    ON CONFLICT(webhook_id,event_seq) DO NOTHING RETURNING id,workspace_id),
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries)`;
+  if(job.recordWithSettlement)job.recordWithSettlement(records);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${records} SELECT 1`);
+});
 
 export async function recordEvents(tx: DbExecutor, workspaceId: string, items: MailboxEventInput[]): Promise<number> {
   if (!items.length) return 0;
@@ -54,34 +60,36 @@ export async function latestCursor(db: DbExecutor, workspaceId: string, scope: E
 
 const loadWebhookOps = lazyModule(() => import('./operations.js'));
 const webhookJob: JobHandler = async (runtime, payload, job) => {
-  const [delivery] = await runtime.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, job.workspaceId), eq(mailboxWebhookDeliveries.id, String(payload.deliveryId))));
-  if (!delivery || delivery.status === 'delivered') return;
-  const [endpoint] = await runtime.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, job.workspaceId), eq(mailboxWebhooks.id, delivery.webhookId)));
-  const where = eq(mailboxWebhookDeliveries.id, delivery.id);
-  if (!endpoint) { await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'ENDPOINT_DELETED', updatedAt: new Date().toISOString() }).where(where); return; }
-  // The subscription may have narrowed since this delivery was queued.
-  if (!subscribed(endpoint, delivery.payload)) {
-    await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'SUBSCRIPTION_CHANGED', updatedAt: new Date().toISOString() }).where(where); return;
-  }
+  const delivery=job.webhook!==undefined?job.webhook:(await runtime.db.execute<import('./core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT ${job.id}::text AS id,${job.workspaceId}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify(payload)}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0];
+  if(!delivery)return;
   const { decrypt, hmac, postWebhook, webhookUrl } = await loadWebhookOps();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
-    const url = webhookUrl(runtime, endpoint.url);
-    const binding = webhookSecretBinding(job.workspaceId, endpoint.id), secret = await decrypt(runtime, endpoint.encryptedSecret, binding);
-    const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000)), eventId = String(delivery.payload.id);
+    const url = webhookUrl(runtime, delivery.url);
+    const binding = webhookSecretBinding(job.workspaceId, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);
+    const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000)), eventId = delivery.event_id;
     const signature = await hmac(secret, `${eventId}.${timestamp}.${body}`);
-    const result = await postWebhook(runtime, url, { 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'Bane-Webhooks/1.0' }, body, endpoint.encryptedHeaders, binding);
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'Bane-Webhooks/1.0' }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
-  } catch (e) { if (e instanceof ModuleLoadError) throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
-  const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
-  await runtime.db.update(mailboxWebhookDeliveries).set({ attemptCount: sql`${mailboxWebhookDeliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: new Date().toISOString() }).where(where);
+  } catch (e) { if (e instanceof ModuleLoadError || e instanceof JobDeferred) throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
+  const retry = Boolean(error) && retryable && job.attempts < WEBHOOK_ATTEMPTS;
+  const record=sql`recorded AS (UPDATE mailbox_webhook_deliveries d SET attempt_count=attempt_count+1,status=${!error?'delivered':retry?'pending':'failed'},last_status_code=${statusCode}::int,last_error=${error}::text,updated_at=now() FROM settled WHERE d.id=${delivery.delivery_id} AND d.workspace_id=${job.workspaceId} AND d.generation=${delivery.generation} AND d.status='pending')`;
+  if(job.recordWithSettlement)job.recordWithSettlement(record);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${record} SELECT 1`);
   if (error) throw new ApiError(503, error, 'Mailbox webhook delivery failed; it will be retried.', undefined, retry);
 };
 
 export async function pruneMailboxEvents(runtime: Runtime) {
-  await runtime.db.execute(sql`WITH expired AS (DELETE FROM mailbox_events WHERE created_at < now() - interval '30 days')
-    DELETE FROM mailbox_webhook_deliveries WHERE created_at < now() - interval '30 days' AND status <> 'pending'`);
+  await runtime.db.execute(sql`WITH expired AS (DELETE FROM mailbox_events WHERE seq IN (SELECT seq FROM mailbox_events WHERE created_at<now()-interval '30 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
+    ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
+    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed','paused') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
   log('info', { code: 'MAILBOX_EVENTS_PRUNED' });
 }
 
-export const mailboxEventJobs: Record<string, JobHandler> = { 'mailbox.webhook': webhookJob };
+const resumeDeliveries:JobHandler=async(runtime,payload,job)=>{
+  const result=await runtime.db.execute(sql`WITH hook AS MATERIALIZED (SELECT id FROM mailbox_webhooks WHERE workspace_id=${job.workspaceId} AND id=${String(payload.hook)} AND NOT paused FOR SHARE),
+    page AS (SELECT d.id FROM mailbox_webhook_deliveries d JOIN hook ON hook.id=d.webhook_id WHERE d.workspace_id=${job.workspaceId} AND d.status='paused' AND d.created_at>=now()-interval '30 days' ORDER BY d.id LIMIT 100 FOR UPDATE OF d),
+    resumed AS (UPDATE mailbox_webhook_deliveries d SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() FROM page WHERE d.id=page.id RETURNING d.*)
+    INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`);
+  if(result.rowCount===100)throw new JobDeferred(new Date().toISOString());
+};
+export const mailboxEventJobs: Record<string, JobHandler> = { 'mailbox.webhook': retryDatabaseFailures(webhookJob),'mailbox.fanout':fanout,'mailbox.resumeDeliveries':retryDatabaseFailures(resumeDeliveries) };

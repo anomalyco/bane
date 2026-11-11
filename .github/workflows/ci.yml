@@ -31,8 +31,14 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
+      - &bun-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('*/bun.lock', '.github/s3-fixture/bun.lock') }}
       - run: for pkg in api sdk app mcp; do (cd "$pkg" && bun install --frozen-lockfile); done
-      - run: (cd api && bun run check) && (cd sdk && bun run build) && (cd mcp && bun run check && bun run build)
+      # docs:check compiles the regenerated SDK; the MCP build already checks its types.
+      - run: (cd api && bun run check) && (cd mcp && bun run build)
       - name: Type-check the live SDK CLI probe
         working-directory: api
         run: ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --lib ES2023,DOM,DOM.Iterable --types node scripts/e2e-upload-cli.ts
@@ -81,6 +87,30 @@ jobs:
           args=(); if [[ $ALLOWED == true ]]; then args+=(--allow-breaking); fi
           node api/scripts/check-api-contract.mjs "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" "${args[@]}"
 
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      # M6: fail on any high or critical advisory in a locked dependency (runtime and tooling alike;
+      # bun audit reads bun.lock). Fix by upgrading or a patch-level override in that package.json.
+      # An ignore must name the advisory, why it cannot reach Bane, and what removes it.
+      - name: Audit locked dependencies for high and critical advisories
+        run: |
+          set -euo pipefail
+          # app: happy-dom is the Node entry of @tiptap/html; the dashboard bundle resolves its browser
+          # entry (no happy-dom in app/dist). @tiptap/html's peer range ^20 excludes the fixed 21.0.4.
+          for pkg in api app sdk mcp; do
+            args=(--audit-level=high)
+            case $pkg in app) args+=(--ignore=GHSA-834v-8h66-3h79 --ignore=GHSA-c8p4-j97h-3vg8);; esac
+            echo "::group::bun audit $pkg"; (cd "$pkg" && bun audit "${args[@]}"); echo '::endgroup::'
+          done
+
   acceptance:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -101,10 +131,9 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
-      - run: cd api && bun install --frozen-lockfile
+      - *bun-cache
       # The stdio MCP acceptance test starts ../mcp/src/server.ts, which needs the MCP package's dependencies.
-      - run: cd mcp && bun install --frozen-lockfile
-      - run: cd .github/s3-fixture && bun install --frozen-lockfile
+      - run: for pkg in api mcp .github/s3-fixture; do (cd "$pkg" && bun install --frozen-lockfile); done
       - name: Run all acceptance tests with isolated database and object storage
         run: bash ../.github/scripts/acceptance.sh
         working-directory: api

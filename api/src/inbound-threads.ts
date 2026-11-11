@@ -128,14 +128,16 @@ async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: 
   } finally { if(!client)s3.destroy(); }
 }
 async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect, files: (typeof mailAttachments.$inferSelect)[]) {
+  const rawExpiresAt=row.rawKey?new Date(Math.min(Date.parse(row.createdAt),Date.parse(row.receivedAt))+90*86400000).toISOString():null;
   const bucket = row.rawBucket ?? files[0]?.bucket, region = row.region;
   if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
-  if (!region || !bucket) return { rawUrl: null, urls: files.map(() => null) };
+  // Only outbound copies have no SES receiving scan by design.
+  if (!region || !bucket || (row.verdicts.virus ?? (row.direction==='outbound'?'PASS':null))!=='PASS') return { rawUrl: null,rawExpiresAt, urls: files.map(() => null) };
   const client = await mailboxS3(runtime, row.workspaceId, region, bucket);
   try {
     if (files.some(f => f.sourceId)) await archiveMailboxFiles(runtime, row.workspaceId, row.id, client);
     const link = async (kind:'att'|'raw', key:string, filename:string) => (await signedUrl(runtime, row.workspaceId, kind, region, bucket, key, filename, undefined, client)).url;
-    return { rawUrl: row.rawKey ? await link('raw', row.rawKey, `${row.id}.eml`) : null, urls: await Promise.all(files.map(f => link('att', f.storageKey, f.filename))) };
+    return {rawExpiresAt, rawUrl: row.rawKey && rawExpiresAt && Date.parse(rawExpiresAt)>Date.now() ? await link('raw', row.rawKey, `${row.id}.eml`) : null, urls: await Promise.all(files.map(f => link('att', f.storageKey, f.filename))) };
   } finally { client.destroy(); }
 }
 
@@ -167,8 +169,9 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   function messageScope(c: Ctx, delivery?: string) {
     const v=access(c,'read');
     if (delivery!=='true') return v;
-    const credential=c.get('actor')?.credential;
-    if (credential!=='dashboard' && !(credential==='apiKey' && v.admin)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a dashboard session or an unrestricted live manage API key.');
+    const actor=c.get('actor'),credential=actor?.credential;
+    // A dashboard member reads only addressed mail, like a non-admin key (L1).
+    if (!(credential==='dashboard' && actor?.role!=='member') && !(credential==='apiKey' && v.admin)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
     return {...v,admin:true};
   }
   const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});
@@ -184,7 +187,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const last=rows[q.limit-1];return c.json({data:rows.slice(0,q.limit).map(({at,fromName,fromAddress,...row})=>({...row,receivedAt:timestamp(at),from:{name:fromName,address:fromAddress}})),nextCursor:rows.length>q.limit&&last?encodeCursor(last.at,last.id):null},200);
   });
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
-  const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.string())}).partial();
+  const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.string())}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
     request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
@@ -193,9 +196,9 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
       const {row,addresses,addressIds,isRead}=result;
       const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-      const {rawUrl,urls}=await deliveryLinks(c.env,row,files);
+      const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,row,files);
       return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,html:q.includeHtml==='true'?row.html:null,
-        attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
+        rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
     }
     const [row] = await c.env.db.select({...messageFields,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
@@ -205,7 +208,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
     request:{params:z.object({messageId:Id,attachmentId:Id}),query:AddressFilter},responses:{200:response(z.object({url:z.string(),expiresAt:z.string()}).openapi('InboundAttachmentDownload')),...errors}}),async c=>{
     const v=access(c,'read'),p=c.req.valid('param'),q=c.req.valid('query');
-    const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),accessible(v,q)));
+    const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),sql`coalesce(${messages.verdicts}->>'virus',CASE WHEN ${messages.direction}='outbound' THEN 'PASS' END)='PASS'`,accessible(v,q)));
     if (!file?.region) throw new ApiError(404,'NOT_FOUND','Attachment was not found.');
     return c.json(await signedUrl(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined),200);
   });
@@ -242,7 +245,7 @@ export function assertInboundRecipients(expected: Recipients, resolved: Recipien
 export async function wakeMailboxSend(c: Ctx, actor: Actor, runnable: number) {
   for (const [region, { count, priority }] of actor.dispatchTargets ?? []) { try { await c.env.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority); } catch { /* The dispatcher polls queued mail. */ } }
   actor.dispatchTargets?.clear();
-  if (runnable) try { await c.env.wake?.(runnable); } catch { /* durable */ }
+  if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
 }
 export async function queueInboundThreadMessage(c: Ctx, actor: Actor, prepare: (db: DbExecutor) => Promise<Omit<OutgoingMessage, 'actor'>>) {
   let runnable = 0,prepared:Omit<OutgoingMessage,'actor'>|undefined;

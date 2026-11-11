@@ -49,6 +49,38 @@ export type ConnectionSummary = {
         at: string;
         reason: string;
     } | null;
+    /**
+     * Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.
+     */
+    sendingLimit?: {
+        /**
+         * Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit.
+         */
+        cap: number | null;
+        /**
+         * Recipients charged in the current rolling 24 hours. Simulator addresses are free.
+         */
+        used: number;
+        /**
+         * When capacity next frees up or the limit changes.
+         */
+        resetAt: string | null;
+        /**
+         * The next limit for a new workspace, or null once it has the mature limit.
+         */
+        nextCap: number | null;
+        /**
+         * When nextCap applies.
+         */
+        nextCapAt: string | null;
+    } | null;
+    /**
+     * Domains claimed in this workspace and how many can send.
+     */
+    domains?: {
+        total: number;
+        verified: number;
+    };
 } | null;
 
 export type AgentToken = {
@@ -375,7 +407,7 @@ export type SendEmailInput = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Defaults to the installation’s persisted default region when omitted.
+     * Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -404,7 +436,7 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
-     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured.
+     * Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES.
      */
     screen?: boolean;
     /**
@@ -441,7 +473,7 @@ export type BatchSendEmailItem = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Defaults to the installation’s persisted default region when omitted.
+     * Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -470,7 +502,7 @@ export type BatchSendEmailItem = {
         value: string;
     }>;
     /**
-     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured.
+     * Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES.
      */
     screen?: boolean;
 };
@@ -1155,6 +1187,34 @@ export type DomainReadiness = {
         status: 'pending' | 'verified';
         note?: string;
     }>;
+    /**
+     * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
+     */
+    releasesAt?: string | null;
+    /**
+     * Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.
+     */
+    receivingIssue?: {
+        /**
+         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
+         */
+        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
+        host: string;
+        /**
+         * True when receiving there cannot work until DNS or the choice changes.
+         */
+        blocking: boolean;
+        message: string;
+        provider?: string | null;
+        /**
+         * The existing CNAME target.
+         */
+        target?: string | null;
+        /**
+         * A free subdomain to use instead.
+         */
+        suggestion?: string | null;
+    } | null;
 };
 
 export type CreateDomain = {
@@ -1167,6 +1227,17 @@ export type CreateDomain = {
 
 export type ConfigureDomainMailFrom = {
     mailFromDomain: string;
+};
+
+export type ChooseReceivingHost = {
+    host: string | null;
+    confirm?: boolean;
+};
+
+export type TestEmailQueued = {
+    id: string;
+    status: 'queued';
+    simulated: boolean;
 };
 
 export type DomainDnsSetup = {
@@ -1516,6 +1587,10 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type InboundScanPolicy = {
+    spam: 'store' | 'quarantine';
+};
+
 export type InboundDomainList = {
     data: Array<InboundDomain>;
 };
@@ -1583,6 +1658,14 @@ export type InboundMxReport = {
     providers: Array<string>;
     message: string;
     checkedAt: string;
+    /**
+     * The existing CNAME target when state is cname.
+     */
+    target?: string;
+    /**
+     * Mail for the name may be split across several MX hosts.
+     */
+    split?: boolean;
 } | null;
 
 export type EnableInboundDomain = {
@@ -1881,6 +1964,7 @@ export type InboundMessageDetail = InboundMessage & {
     region?: string | null;
     spam?: boolean;
     rawUrl?: string | null;
+    rawExpiresAt?: string | null;
     sentAt?: string | null;
     sizeBytes?: number | null;
     headers?: Array<{
@@ -2163,7 +2247,7 @@ export type InboundWebhookDelivery = {
     id: string;
     webhookId: string;
     eventId: string;
-    status: 'pending' | 'delivered' | 'failed';
+    status: 'pending' | 'delivered' | 'failed' | 'paused';
     attemptCount: number;
     lastStatusCode: number | null;
     lastError: string | null;
@@ -2198,6 +2282,18 @@ export type WorkspaceInvitation = {
 export type InviteWorkspaceMember = {
     email: string;
     role: 'owner' | 'admin' | 'member';
+};
+
+export type WorkspaceInvitationPreview = {
+    id: string;
+    workspaceId: string;
+    workspaceName: string;
+    workspaceSlug: string;
+    inviterName: string;
+    inviterEmail: string;
+    role: 'owner' | 'admin' | 'member';
+    expiresAt: string;
+    status: 'pending' | 'accepted';
 };
 
 export type ProviderConnection = {
@@ -2319,6 +2415,41 @@ export type CreateConnection = {
     kind: 'shared' | 'byo';
     region?: string;
     awsAccountId?: string;
+};
+
+export type PublicStats = {
+    /**
+     * The end of the last whole UTC hour the figures cover. They change at most once an hour; responses are cached for up to 60 seconds.
+     */
+    generatedAt: string;
+    /**
+     * False until at least 10 workspaces have sent mail in the last 30 days. Every figure is then null and regions is empty, so the figures never describe a single customer.
+     */
+    available: boolean;
+    /**
+     * Emails Amazon SES accepted in the last 30 whole days of hours, rounded to two significant figures (to the nearest 10 below 100). Simulated, suppressed and rejected mail is excluded. Email history is kept for 30 days, so there is no all-time total.
+     */
+    acceptedLast30Days: number | null;
+    /**
+     * Emails Amazon SES accepted in the last whole UTC hour, rounded the same way. The last entry of acceptedHourly.
+     */
+    acceptedLastHour: number | null;
+    /**
+     * Accepted emails per whole UTC hour over the last 24 hours, oldest first, rounded. Null for an hour in which fewer than 3 workspaces sent.
+     */
+    acceptedHourly: Array<number | null>;
+    /**
+     * delivered ÷ (delivered + bounced) for emails created in the last 30 days, each email counted once, to three decimals. Null without outcomes.
+     */
+    deliveryRate: number | null;
+    /**
+     * Median time from API acceptance to Amazon SES acceptance for the most recent 5,000 direct, unscheduled sends in the last 24 whole hours, to the nearest 10 ms. Null without samples from at least 3 workspaces.
+     */
+    medianSendLatencyMs: number | null;
+    /**
+     * AWS regions that accepted mail in the last 30 days. Hosted installations list only their shared sending regions.
+     */
+    regions: Array<string>;
 };
 
 export type ListMcpConnectionsData = {
@@ -8068,6 +8199,132 @@ export type ConfigureDomainMailFromResponses = {
 
 export type ConfigureDomainMailFromResponse = ConfigureDomainMailFromResponses[keyof ConfigureDomainMailFromResponses];
 
+export type ChooseReceivingHostData = {
+    body: ChooseReceivingHost;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}/receiving-host';
+};
+
+export type ChooseReceivingHostErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ChooseReceivingHostError = ChooseReceivingHostErrors[keyof ChooseReceivingHostErrors];
+
+export type ChooseReceivingHostResponses = {
+    /**
+     * Success
+     */
+    200: DomainReadiness;
+};
+
+export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
+
+export type SendDomainTestEmailData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}/test-send';
+};
+
+export type SendDomainTestEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SendDomainTestEmailError = SendDomainTestEmailErrors[keyof SendDomainTestEmailErrors];
+
+export type SendDomainTestEmailResponses = {
+    /**
+     * Success
+     */
+    202: TestEmailQueued;
+};
+
+export type SendDomainTestEmailResponse = SendDomainTestEmailResponses[keyof SendDomainTestEmailResponses];
+
 export type GetDomainDnsSetupData = {
     body?: never;
     path: {
@@ -9654,6 +9911,128 @@ export type ConfigureRegionAutoValidationResponses = {
 };
 
 export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];
+
+export type GetInboundScanPolicyData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/policy';
+};
+
+export type GetInboundScanPolicyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundScanPolicyError = GetInboundScanPolicyErrors[keyof GetInboundScanPolicyErrors];
+
+export type GetInboundScanPolicyResponses = {
+    /**
+     * Success
+     */
+    200: InboundScanPolicy;
+};
+
+export type GetInboundScanPolicyResponse = GetInboundScanPolicyResponses[keyof GetInboundScanPolicyResponses];
+
+export type UpdateInboundScanPolicyData = {
+    body: InboundScanPolicy;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/policy';
+};
+
+export type UpdateInboundScanPolicyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundScanPolicyError = UpdateInboundScanPolicyErrors[keyof UpdateInboundScanPolicyErrors];
+
+export type UpdateInboundScanPolicyResponses = {
+    /**
+     * Success
+     */
+    200: InboundScanPolicy;
+};
+
+export type UpdateInboundScanPolicyResponse = UpdateInboundScanPolicyResponses[keyof UpdateInboundScanPolicyResponses];
 
 export type ListInboundDomainsData = {
     body?: never;
@@ -11891,6 +12270,70 @@ export type RotateInboundWebhookSecretResponses = {
 
 export type RotateInboundWebhookSecretResponse = RotateInboundWebhookSecretResponses[keyof RotateInboundWebhookSecretResponses];
 
+export type RetryInboundWebhookDeliveryData = {
+    body?: never;
+    path: {
+        id: string;
+        deliveryId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}/deliveries/{deliveryId}/retry';
+};
+
+export type RetryInboundWebhookDeliveryErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RetryInboundWebhookDeliveryError = RetryInboundWebhookDeliveryErrors[keyof RetryInboundWebhookDeliveryErrors];
+
+export type RetryInboundWebhookDeliveryResponses = {
+    /**
+     * Success
+     */
+    202: InboundOk;
+};
+
+export type RetryInboundWebhookDeliveryResponse = RetryInboundWebhookDeliveryResponses[keyof RetryInboundWebhookDeliveryResponses];
+
 export type ListInboundWebhookDeliveriesData = {
     body?: never;
     path: {
@@ -12594,6 +13037,69 @@ export type UpdateWorkspaceMemberResponses = {
 
 export type UpdateWorkspaceMemberResponse = UpdateWorkspaceMemberResponses[keyof UpdateWorkspaceMemberResponses];
 
+export type GetWorkspaceInvitationData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/workspaces/invitations/{id}';
+};
+
+export type GetWorkspaceInvitationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetWorkspaceInvitationError = GetWorkspaceInvitationErrors[keyof GetWorkspaceInvitationErrors];
+
+export type GetWorkspaceInvitationResponses = {
+    /**
+     * Success
+     */
+    200: WorkspaceInvitationPreview;
+};
+
+export type GetWorkspaceInvitationResponse = GetWorkspaceInvitationResponses[keyof GetWorkspaceInvitationResponses];
+
 export type AcceptWorkspaceInvitationData = {
     body?: never;
     path: {
@@ -13223,3 +13729,36 @@ export type VerifyConnectionResponses = {
 };
 
 export type VerifyConnectionResponse = VerifyConnectionResponses[keyof VerifyConnectionResponses];
+
+export type GetPublicStatsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/public/stats';
+};
+
+export type GetPublicStatsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetPublicStatsError = GetPublicStatsErrors[keyof GetPublicStatsErrors];
+
+export type GetPublicStatsResponses = {
+    /**
+     * Success
+     */
+    200: PublicStats;
+};
+
+export type GetPublicStatsResponse = GetPublicStatsResponses[keyof GetPublicStatsResponses];

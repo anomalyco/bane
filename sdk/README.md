@@ -12,14 +12,14 @@ This package uses ESM and the Fetch API. Use it on your server; never ship a Ban
 
 ## Send an email
 
-Set `BANE_API_KEY` to a Bane API key. Replace the example base URL with your deployment's public URL.
+Set `BANE_API_KEY` to a Bane API key (a **Send only** key restricted to your domain is enough). The sender's domain must be verified in your workspace: add it under **Domains**, publish its DNS records and wait for **Verified**.
 
 ```ts
 import { createClient } from '@banemx/sdk/client';
 import { sendEmail, getEmail } from '@banemx/sdk';
 
 const client = createClient({
-  baseUrl: 'https://mail.example.com',
+  baseUrl: 'https://bane.mx',
   auth: scheme => scheme.scheme === 'bearer' ? process.env.BANE_API_KEY : undefined,
 });
 
@@ -27,7 +27,6 @@ const result = await sendEmail({
   client,
   headers: { 'Idempotency-Key': 'order-4821-receipt' },
   body: {
-    region: 'us-east-1',
     from: 'receipts@example.com',
     to: ['recipient@example.com'],
     subject: 'Your receipt',
@@ -43,13 +42,17 @@ const message = await getEmail({
 });
 ```
 
+**Base URL and region.** On hosted Bane use `https://bane.mx` and leave `region` out: each sender domain is bound to one sending region, and a different `region` fails with `SENDER_REGION_MISMATCH`. Self-hosted installations use their own public URL as `baseUrl`; pass `region` only to choose between the SES regions that installation has enabled (it defaults to the installation's default region).
+
+**Testing.** Send to `success@simulator.amazonses.com`, `bounce@simulator.amazonses.com` or `complaint@simulator.amazonses.com` to exercise each outcome without reaching a real inbox. Simulator addresses don't count against hosted sending limits; read the current limit from `GET /v1/me` (`connection.sendingLimit`).
+
 The auth callback supplies the API key only to the bearer scheme; dashboard cookie authentication is not needed for SDK calls. Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
 
 ## A support inbox with tracked replies
 
 An **address** routes mail and authorizes a sender. A **message** is one email; a **thread** is the conversation you read and reply to. Unrelated emails to the same address start separate threads. Adding an address to a later message does not reveal earlier messages to its key.
 
-1. Enable receiving on a verified domain (`POST /v1/inbound/domains/{id}/enable`), publish the returned MX, then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-bane).
+1. Publish the receiving MX record listed for a verified domain (`GET /v1/domains/{id}`, the record with `purpose: "receiving"`). Hosted Bane suggests `reply.<domain>` so the domain's existing mailboxes keep working, and turns receiving on once the record resolves; self-hosted installations enable it first with `POST /v1/inbound/domains/{id}/enable`. Then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-bane).
 2. Subscribe with `POST /v1/inbound/webhooks`, for example `{"url":"https://example.com/support-hook","eventTypes":["message.received"],"addressIds":["mbx_…"]}`. Allowlist the exact HTTPS host, verify the raw-body signature and timestamp, and deduplicate the event `id`. Store `threadId` with the ticket; `messageId` identifies the individual message. Issue a scoped `read`/`send` key with `POST /v1/inbound/keys` and the relevant `addressIds`.
 3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in Bane for the receiving region, while address keys may only use their own addresses. Bane sets `In-Reply-To` and `References`. `202` means queued, not delivered.
 
@@ -120,13 +123,13 @@ Single sends, each item in a batch, and inbound thread creation and reply accept
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
 
 ```sh
+export BANE_TOKEN='bane_agent_…'   # read from the environment, never from the command line
 npx --yes @banemx/sdk upload ./invite.ics \
-  --api https://mail.example.com \
-  --token 'bane_agent_…' \
+  --api https://bane.mx \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
 ```
 
-Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as `cid:logo`. Other supported files are regular attachments. The command prints attachment metadata as JSON and never prints the token.
+Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as `cid:logo`. Other supported files are regular attachments. The command prints attachment metadata as JSON and never prints the token. The API URL must be HTTPS (HTTP only on loopback), and the upload never follows a redirect.
 
 Generated per-recipient content can use the same raw upload path without writing a temporary file:
 
@@ -134,7 +137,7 @@ Generated per-recipient content can use the same raw upload path without writing
 import { uploadAttachmentBytes } from '@banemx/sdk/upload';
 
 const attachment = await uploadAttachmentBytes({
-  apiUrl: 'https://mail.example.com',
+  apiUrl: 'https://bane.mx',
   token: temporaryAgentToken,
   filename: 'invite.ics',
   contentType: 'text/calendar; method=REQUEST; charset=utf-8',

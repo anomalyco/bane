@@ -21,7 +21,8 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
     if (type.startsWith('operation.') || type.startsWith('domain.')) return (await import('./operations.js')).operationJobs[type];
     if (type === 'ses.provision' || type === 'ses.discover') return (await import('./ses-regions.js')).sesRegionJobs[type];
     if (type === 'reputation.alert') return (await import('./reputation-alerts.js')).reputationAlertJobs[type];
-    if (type === 'mailbox.webhook') return (await import('./mailbox-events.js')).mailboxEventJobs[type];
+    if (type === 'mailbox.webhook' || type==='mailbox.fanout' || type==='mailbox.resumeDeliveries') return (await import('./mailbox-events.js')).mailboxEventJobs[type];
+    if (type === 'mailbox.syncOutbound') return async runtime=>{await (await import('./mailbox-send.js')).syncOutboundMessages(runtime);};
     if (type === 'mailbox.reconcile' || type === 'maintenance.domainDns') return (await import('./mailbox-setup.js')).mailboxSetupJobs[type];
     if (type.startsWith('mailbox.')) return (await import('./mailbox-ingest.js')).mailboxIngestJobs[type];
     if (type === 'hosted.trusted') return (await import('./trusted-pool.js')).trustedProvision;
@@ -32,7 +33,7 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
   });
 }
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
-export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, resolveJobHandler, limit, concurrency, maxDurationMs); }
+export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, pool: import('./jobs.js').JobPool='all') { return processJobs(runtime, resolveJobHandler, limit, concurrency, maxDurationMs,pool); }
 type Partition = { region: string; accountId?: string; kind?: 'shared' | 'byo' };
 export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = false): Promise<Partition[]> {
   // Recover once per sweep, even if a disconnected account has no queued mail. A stale attempt may
@@ -48,7 +49,7 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
     const canceled=await runtime.db.execute<{n:number}>(sql`WITH disabled AS MATERIALIZED (
     SELECT q.id FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id
     CROSS JOIN LATERAL (SELECT e.id FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=r.region AND e.status='queued'
-      AND e.snapshot#>>'{binding,connection}'=r.connection_id AND (e.campaign_id IS NULL OR EXISTS (
+      AND coalesce(e.snapshot#>>'{binding,connection}',(SELECT v.draft#>>'{binding,connection}' FROM sending_campaign_reviews v WHERE v.id=e.review_id AND v.workspace_id=e.workspace_id))=r.connection_id AND (e.campaign_id IS NULL OR EXISTS (
         SELECT 1 FROM sending_campaigns p WHERE p.workspace_id=e.workspace_id AND p.id=e.campaign_id FOR NO KEY UPDATE OF p SKIP LOCKED))
       LIMIT 1000 FOR UPDATE OF e SKIP LOCKED) q
     WHERE NOT r.legacy AND r.sending_state='disabled' LIMIT 1000
@@ -59,7 +60,8 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   }
   const recovery = recoverInterrupted ? sql`WITH stale AS (
     UPDATE sending_emails SET status='acceptance_unknown', error_code='INTERRUPTED_PROVIDER_ATTEMPT', lease_until=NULL, updated_at=now()
-    WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING ${terminalColumns}
+    WHERE status='attempting' AND id IN (SELECT id FROM sending_emails WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes'
+      ORDER BY attempt_started_at,id LIMIT 1000 FOR UPDATE SKIP LOCKED) RETURNING ${terminalColumns}
   ), ${terminalEvents(sql`SELECT * FROM stale`)}, finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale`)})` : sql``;
   const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
@@ -76,8 +78,8 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   await wakeWebhooks(runtime,result!.n); return result!.partitions;
 }
 /** Jobs plus due mail for every account/region, in this process. Node runners and tests use this. */
-export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true, priorityWake?: EventTarget) {
-  let processed = await drainJobs(runtime, limit, concurrency, maxDurationMs);
+export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true, priorityWake?: EventTarget, pool: import('./jobs.js').JobPool='all') {
+  let processed = await drainJobs(runtime, limit, concurrency, maxDurationMs,pool);
   const partitions = await dispatchPartitions(runtime, recoverInterrupted);
   if (!partitions.length) return processed;
   const { initialGate, runDispatcher } = await loadDispatcher();

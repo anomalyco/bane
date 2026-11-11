@@ -14,7 +14,9 @@ const config = rotation ?? migrationSettings(process.env);
 const client = new Client(postgresConnection(process.env.DATABASE_URL));
 await client.connect();
 try {
+  await client.query("SET lock_timeout='10s'");
   await client.query('SELECT pg_advisory_lock(78291344)');
+  await client.query('RESET lock_timeout');
   // Before workspaces existed (migration 038), installations had one internal namespace: never silently
   // strand an older tenant. Once the workspaces table exists, other workspaces are legitimate data.
   const workspacesTable = await client.query("SELECT to_regclass('public.workspaces') AS t, to_regclass('opensend_migrations') IS NOT NULL AND to_regclass('bane_migrations') IS NOT NULL AS ambiguous");
@@ -55,6 +57,29 @@ try {
     if (previous.rowCount) {
       if (previous.rows[0]!.checksum !== hash) throw new Error(`MIGRATION_CHANGED: ${name} differs from the applied migration. Add a new migration instead.`);
       continue;
+    }
+    // Marked files contain one restartable concurrent index build per line. Separate query
+    // messages matter: sending all the DDL together creates an implicit transaction in pg.
+    if(source.startsWith('-- bane:no-transaction\n')) {
+      await client.query("SET lock_timeout='2s'; SET statement_timeout='10min'");
+      for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {
+        const match=/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);
+        if(!match)throw new Error(`Invalid online index statement in ${name}`);
+        const idx=match[1]!;
+        for(let attempt=1;;attempt++) {
+          try {
+            if((await client.query('SELECT FROM pg_index WHERE indexrelid=to_regclass($1) AND NOT indisvalid',[idx])).rowCount)await client.query(`DROP INDEX CONCURRENTLY "${idx}"`);
+            await client.query(statement); break;
+          } catch(error) {
+            if((error as {code?:string}).code!=='55P03' || attempt>=5) throw error;
+            log('warn',{code:'INDEX_LOCK_RETRY',migration:name,index:idx,attempt});
+            await new Promise(resolve=>setTimeout(resolve,attempt*250));
+          }
+        }
+      }
+      await client.query('INSERT INTO bane_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
+      await client.query('RESET lock_timeout; RESET statement_timeout');
+      log('info',{code:'MIGRATION_APPLIED',migration:name});continue;
     }
     await client.query('BEGIN');
     try {

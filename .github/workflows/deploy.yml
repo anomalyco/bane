@@ -81,13 +81,27 @@ jobs:
 
       - id: stage
         name: Pick the stage from the branch
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
-          case "$REF_NAME" in
-            dev|production) echo "stage=$REF_NAME" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::Deploy runs from dev or production, not $REF_NAME."; exit 1 ;;
+          case "$GITHUB_REF" in
+            refs/heads/dev|refs/heads/production) echo "stage=${GITHUB_REF#refs/heads/}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Deploy runs from the dev or production branch, not $GITHUB_REF."; exit 1 ;;
           esac
+
+      # Check the triggering commit, not workflow_run's default-branch SHA or
+      # a production rollback's explicitly authorized ancestor. Reuse this
+      # live check in each privileged job (including on failed-job reruns).
+      - &stage-tip
+        name: Require the triggering commit to still be the stage branch tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+          [[ $tip =~ ^[0-9a-f]{40}$ ]]
+          if [[ $tip != "$EXPECTED_SHA" ]]; then
+            echo "::error::Deployment stopped: $GITHUB_REF_NAME advanced from $EXPECTED_SHA to $tip."
+            exit 1
+          fi
 
       - id: pin
         name: Pin the commit to deploy
@@ -98,7 +112,7 @@ jobs:
           INPUT_REF: ${{ inputs.ref }}
           EVENT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF ]]; then
+          if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF && $INPUT_REF != production ]]; then
             ref=$(jq -rn --arg ref "$INPUT_REF" '$ref | @uri')
             sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
           else
@@ -113,7 +127,7 @@ jobs:
       # deploy is pinned separately.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -166,30 +180,42 @@ jobs:
         name: Decide whether Pulumi has work
         env:
           EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
           SHA: ${{ steps.pin.outputs.sha }}
+          STAGE: ${{ steps.stage.outputs.stage }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ $EVENT == workflow_dispatch ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
             echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # A push knows the previous tip. A workflow_run does not, so compare
-          # the first parent; merges of PRs are the usual shape on dev.
-          base=${BEFORE:-$SHA^}
-          if [[ ! $base =~ ^[0-9a-f]{40}$ || $base =~ ^0+$ ]] || ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-            base=$SHA^
+          # N12: compare against the commit the last applied Pulumi run deployed, not the previous
+          # tip or first parent. A superseded run stops at its tip check, so the next run would
+          # otherwise skip the infrastructure change it carried. Applied means that run's Pulumi
+          # and Worker jobs both succeeded (a preview skips the Worker job); anything else runs Pulumi.
+          repo="repos/$GITHUB_REPOSITORY"; base=
+          runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?branch=$STAGE&status=success&per_page=30" |
+            jq -r --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.head_repository.full_name == $repo) | [.id, .display_title] | @tsv')
+          while IFS=$'\t' read -r id title; do
+            [[ $title =~ ^Deploy\ $STAGE\ ([0-9a-f]{40})$ ]] || continue
+            applied=${BASH_REMATCH[1]}
+            if gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100" |
+              jq -e --arg p "Pulumi $STAGE" --arg d "Deploy $STAGE $applied" '[.jobs[] | select((.name == $p or .name == $d) and .conclusion == "success")] | length == 2' >/dev/null; then
+              base=$applied; break
+            fi
+          done <<< "$runs"
+          if [[ -z $base ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$base" "$SHA"; then
+            echo 'pulumi=true' >> "$GITHUB_OUTPUT"
+            echo "No applied Pulumi commit is an ancestor of $SHA; running Pulumi." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          if git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-            changed=$(git diff --name-only "$base" "$SHA")
-          else
-            changed=$(git show --name-only --format= "$SHA")
-          fi
-          if grep -Eq '^(infra/pulumi/|infra/aws-shared/|\.github/workflows/(deploy|pulumi)\.yml$)' <<< "$changed"; then
+          changed=$(git diff --name-only "$base" "$SHA")
+          # Pulumi also reads the shared mail-control documents and the receiving-set check.
+          if grep -Eq '^(infra/pulumi/|infra/aws-shared/|api/src/mail-controls\.ts$|\.github/scripts/receiving-rule-set\.sh$|\.github/workflows/(deploy|pulumi)\.yml$)' <<< "$changed"; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
           else
             echo 'pulumi=false' >> "$GITHUB_OUTPUT"
-            echo 'No infrastructure changes; skipping Pulumi.' >> "$GITHUB_STEP_SUMMARY"
+            echo "No infrastructure changes since the last applied commit $base; skipping Pulumi." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   pulumi:
@@ -219,6 +245,8 @@ jobs:
             echo 'Production deploys are frozen. Set PROD_DEPLOY_ENABLED=true to release.' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      - *stage-tip
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -318,6 +346,17 @@ jobs:
         working-directory: infra/pulumi
         run: bun install --frozen-lockfile
 
+      - name: Verify the operator-activated Ohio receiving set
+        if: steps.guard.outputs.skip != 'true' && !inputs.preview
+        run: |
+          case "$STAGE" in production) account=009882681002;; dev) account=905840579680;; *) exit 1;; esac
+          aws configure set profile.receiving-bootstrap.role_arn "arn:aws:iam::$account:role/bane-deploy"
+          aws configure set profile.receiving-bootstrap.credential_source Environment
+          # --profile (rather than AWS_PROFILE) suppresses ambient credentials as final credentials.
+          bash .github/scripts/receiving-rule-set.sh "$account" receiving-bootstrap
+
+      - *stage-tip
+
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
@@ -348,6 +387,7 @@ jobs:
       STAGE: ${{ needs.authorize.outputs.stage }}
     steps:
       - *unfrozen
+      - *stage-tip
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -355,26 +395,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/build-release
-
-      - id: slot
-        name: Check the dev tip after acquiring the deployment slot and building
-        if: needs.authorize.outputs.stage == 'dev'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ needs.authorize.outputs.sha }}
-        run: |
-          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)
-          [[ $tip =~ ^[0-9a-f]{40}$ ]]
-          if [[ $tip != "$SHA" ]]; then
-            echo "Skipped deployment: $SHA was superseded by dev at $tip before migration." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'current=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - id: slot-production
-        name: Production deploys the pinned commit
-        if: needs.authorize.outputs.stage == 'production'
-        run: echo 'current=true' >> "$GITHUB_OUTPUT"
 
       # The environment picks the stage and its variables. No variable or secret
       # name carries a stage prefix: both stages set AUTH_ALLOWED_*, and each
@@ -408,7 +428,6 @@ jobs:
 
       - name: Mint a short-lived Cloudflare token
         id: cloudflare
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         uses: ./.github/actions/cloudflare-token
 
       - name: Fetch the stage secrets
@@ -427,8 +446,9 @@ jobs:
             E2E_API_KEY,bane/dev/E2E_API_KEY
           parse-json-secrets: false
 
+      - *stage-tip
+
       - run: bun run migrate
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         working-directory: api
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
@@ -436,8 +456,9 @@ jobs:
           DEFAULT_SES_REGION: us-east-2
           MULTI_TENANT: 'true'
 
+      - *stage-tip
+
       - name: Deploy the Worker
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
@@ -446,11 +467,10 @@ jobs:
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 
       - name: Health check
-        if: steps.slot.outputs.current == 'true' || steps.slot-production.outputs.current == 'true'
         run: bash .github/scripts/health.sh "$PUBLIC_URL"
 
       - name: Live dev E2E
-        if: needs.authorize.outputs.stage == 'dev' && steps.slot.outputs.current == 'true'
+        if: needs.authorize.outputs.stage == 'dev'
         id: e2e
         working-directory: api
         timeout-minutes: 5

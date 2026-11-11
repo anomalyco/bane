@@ -8,14 +8,17 @@ export const realDestination = (address: string) => !address.toLowerCase().endsW
 export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string[] = []) =>
   [to].flat().concat(cc, bcc).filter(realDestination).length;
 
-export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean };
+export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null };
 // The current UTC hour plus the preceding 23 buckets. The same statement as admission,
 // independent of how many envelopes or destinations were admitted in those hours.
-export function hostedAllowance(config: Config, wid: string, incoming: number, marketing = 0) {
+// `read` is for display (GET /v1/me): the same figures from hosted_allowance_read, which takes no row locks.
+// Admission keeps hosted_allowance, which locks the policy rows FOR SHARE against a concurrent pause or cap change.
+export function hostedAllowance(config: Config, wid: string, incoming: number, marketing = 0, read = false) {
   if (!config.multiTenant) return sql<HostedAllowance | null>`NULL`;
-  const { firstWeek, secondWeek, mature } = config.hostedSendCaps;
-  return sql<HostedAllowance | null>`(SELECT allowance FROM hosted_allowance(${wid},${incoming},${marketing},${firstWeek},${secondWeek},${mature},${config.dispatch.dailyHeadroomPercent}))`;
+  const { firstWeek, secondWeek, mature } = config.hostedSendCaps, fn = read ? sql`hosted_allowance_read` : sql`hosted_allowance`;
+  return sql<HostedAllowance | null>`(SELECT allowance FROM ${fn}(${wid},${incoming},${marketing},${firstWeek},${secondWeek},${mature},${config.dispatch.dailyHeadroomPercent}))`;
 }
+const count = (value: number) => value.toLocaleString('en-US');
 export function assertHostedAllowance(allowance: HostedAllowance | null, incoming: number, marketing = 0) {
   if (!allowance) return;
   if (allowance.pauseReason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', allowance.pauseReason);
@@ -24,6 +27,6 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
   if (incoming && (incoming + allowance.used > allowance.cap || reserved)) {
     const resetAt = allowance.resetAt ? new Date(allowance.resetAt).toISOString() : undefined;
     const retryable = incoming <= allowance.cap && marketing <= allowance.marketingCap;
-    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted sending is limited to ${allowance.cap} recipients per rolling 24 hours.${reserved ? ` Marketing stops at ${allowance.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` The next capacity change is at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''}`, undefined, retryable, resetAt);
+    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted sending is limited to ${allowance.cap} recipients per rolling 24 hours; ${count(allowance.used)} are used.${reserved ? ` Marketing stops at ${allowance.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''} Simulator addresses (@simulator.amazonses.com) don't count.`, undefined, retryable, resetAt);
   }
 }

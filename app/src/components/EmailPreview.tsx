@@ -3,6 +3,7 @@ import type { AttachmentApi } from '../data/types';
 import { useApi } from '../data/context';
 import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
 import DOMPurify from 'dompurify';
+import { Alert, Button } from './ui';
 
 export function htmlToText(html: string): string {
   const clean = DOMPurify.sanitize(html, { FORBID_TAGS: ['style', 'script'] });
@@ -29,8 +30,22 @@ export function isTrackingPixel(image: Element): boolean {
   return /(?:^|;)(?:display:none|visibility:hidden|opacity:0(?:;|$)|max-height:0)/.test(style);
 }
 
-export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; attachmentApi?: AttachmentApi; respectStyles?: boolean; remoteImages?: boolean };
-export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false }: EmailPreviewProps) {
+// Rough check for the "Load images" prompt only; the sanitizer and the frame's CSP decide what loads.
+const REMOTE_IMAGE = /<img\b[^>]*\ssrc\s*=\s*["']?\s*https?:|url\(\s*["']?\s*(?:https?:)?\/\/|\sbackground\s*=\s*["']?\s*https?:/i;
+/**
+ * Received mail: remote images (and CSS backgrounds) stay blocked until the reader asks, so a
+ * sender can't learn when, or from which address, a message was opened (L14).
+ */
+export function ReceivedEmailPreview(props: Omit<EmailPreviewProps, 'remoteImages'>) {
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const load = loadedFor === props.html;
+  const remote = useMemo(() => REMOTE_IMAGE.test(props.html), [props.html]);
+  return <>{remote && !load && <Alert tone="info">Remote images are hidden so the sender can’t tell when you open this message. <Button variant="ghost" size="sm" onClick={() => setLoadedFor(props.html)}>Load images</Button></Alert>}<EmailPreview {...props} remoteImages={load} /></>;
+}
+
+/** inlineImages maps a received message's Content-IDs to its signed https attachment links. */
+export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; attachmentApi?: AttachmentApi; respectStyles?: boolean; remoteImages?: boolean; inlineImages?: Record<string, string> };
+export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false, inlineImages }: EmailPreviewProps) {
   const api = useApi();
   const attachmentApi = providedAttachmentApi ?? api.attachments;
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
@@ -49,7 +64,12 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     })).then(sources => { if (!controller.signal.aborted) setFonts(sources); }).catch(() => { /* Use the font stack's fallback if local fonts are unavailable. */ });
     return () => controller.abort();
   }, []);
-  const needed = useMemo(() => cidImageSources(html), [html]);
+  // Content-ID → signed link, applied only to exact img[src] matches after sanitizing (L15).
+  const inlineKey = JSON.stringify(inlineImages ?? {});
+  const inline = useMemo(() => new Map(Object.entries(JSON.parse(inlineKey) as Record<string, string>).flatMap(([id, url]): [string, URL][] => {
+    try { const parsed = new URL(url); return parsed.protocol === 'https:' ? [[`cid:${id}`, parsed]] : []; } catch { return []; }
+  })), [inlineKey]);
+  const needed = useMemo(() => new Set([...cidImageSources(html)].filter(id => !inline.has(`cid:${id}`))), [html, inline]);
   useEffect(() => {
     const controller = new AbortController();
     setError('');
@@ -68,7 +88,8 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
       WHOLE_DOCUMENT: true,
       USE_PROFILES: { html: true },
       ADD_TAGS: ['style'],
-      ALLOWED_URI_REGEXP: remoteImages ? /^(?:https:\/\/[^\s"'<>]+$|cid:[a-zA-Z0-9_.@-]{1,120}$|data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/=]+$)/i : /^(?:cid:[a-zA-Z0-9_.@-]{1,120}$|data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/=]+$)/i,
+      // DOMPurify's default URI rule: a custom ALLOWED_URI_REGEXP also strips ordinary values such as
+      // width="1", which hid tracking pixels from isTrackingPixel. Image sources are checked below.
       FORBID_TAGS: ['script', 'iframe', 'frame', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'video', 'audio', 'source', 'link', 'base', 'meta'],
       FORBID_ATTR: ['href', 'srcset', 'ping', 'action', 'formaction', 'target', 'download', 'autofocus', 'xlink:href', 'background'],
     });
@@ -76,14 +97,15 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     email.querySelectorAll('style[data-bane-fonts], style[data-opensend-fonts]').forEach(style => style.remove());
     email.querySelectorAll('[src]').forEach(element => {
       const source = element.getAttribute('src') ?? '';
-      const owned = element.tagName === 'IMG' ? sources?.get(source) : undefined;
+      const owned = element.tagName === 'IMG' ? sources?.get(source) ?? inline.get(source)?.href : undefined;
       if (owned) element.setAttribute('src', owned);
       else if (remoteImages && element.tagName === 'IMG' && /^https?:\/\//i.test(source) && isTrackingPixel(element)) element.remove();
       else if (element.tagName !== 'IMG' || !(isRasterDataUrl(source) || (remoteImages && /^https:\/\//i.test(source)))) element.removeAttribute('src');
     });
     const csp = email.createElement('meta');
     csp.httpEquiv = 'Content-Security-Policy';
-    csp.content = `default-src 'none'; style-src 'unsafe-inline'; img-src data:${remoteImages ? ' https:' : ''}; font-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'`;
+    const inlineOrigins = [...new Set([...inline.values()].map(url => url.origin))].join(' ');
+    csp.content = `default-src 'none'; style-src 'unsafe-inline'; img-src data:${remoteImages ? ' https:' : inlineOrigins ? ` ${inlineOrigins}` : ''}; font-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'`;
     email.head.prepend(csp);
     const referrer = email.createElement('meta');
     referrer.name = 'referrer';
@@ -96,7 +118,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'} :where(img) { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
-  }, [html, sources, fonts, respectStyles, remoteImages]);
+  }, [html, sources, fonts, respectStyles, remoteImages, inline]);
   return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
 }
 export default EmailPreview;
