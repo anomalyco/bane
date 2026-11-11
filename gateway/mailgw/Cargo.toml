@@ -1,0 +1,22 @@
+[package]
+name = "mailgw"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mailgw-core = { path = "../core" }
+anyhow = "1"
+chrono = "0.4"
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+imap = "2.4"
+native-tls = "0.2"

@@ -1,0 +1,18 @@
+[workspace]
+members = ["core", "mailgw"]
+exclude = ["fuzz"]
+resolver = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+dbg_macro = "deny"
+expect_used = "deny"
+let_underscore_must_use = "deny"
+panic = "deny"
+todo = "deny"
+unwrap_used = "deny"
