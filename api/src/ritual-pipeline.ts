@@ -240,8 +240,13 @@ export async function ritualPipeline(
           .filter((b, i, all) => all.findIndex((x) => x.ritual === b.ritual) === i)
           .slice(0, 3);
   });
-  const opted = (a: string, route: string | null) =>
-    (p.evaluateDomains.includes(a.split('@')[1])&&active('domain:'+a.split('@')[1])) || (!!route && p.evaluateRoutes.includes(route)&&active('route:'+route));
+  // Either opt-in is sufficient. Distinguish never opted in from an opt-in that
+  // still exists in the plan but can no longer authorize evaluation.
+  const optIn = (a:string,route:string|null) => {
+    const domain=a.split('@')[1], keys=[...(p.evaluateDomains.includes(domain)?['domain:'+domain]:[]),...(route&&p.evaluateRoutes.includes(route)?['route:'+route]:[])];
+    return keys.find(k=>!owner(k))??keys.find(active)??keys[0];
+  };
+  const inputsFor=(ir:RitualIR,opt:string|undefined)=>[...(ir.lists??[]).map(l=>'list:'+l.name),...(opt&&Object.keys(ir.omens).length?[opt]:[])];
   const lists=Object.fromEntries(Object.entries(p.senderLists).filter(([name])=>active('list:'+name)));
   let answers: Record<string, number> = recorded ?? {},
     steps = 0,
@@ -269,11 +274,15 @@ export async function ritualPipeline(
     let failed=false;
     const fail=(why:string)=>{failed=true;d.junk=true;d.refs=[];d.actions={};d.bodies={};d.labels=['ritual-error'];d.warnings.push(why);};
     const execute = (ir: RitualIR, key: string, kind: string,binding:Config['attachments'][number]) => {
-      const deps=['ritual:'+key,bindingKey(binding),...(ir.lists??[]).map(l=>'list:'+l.name),...(Object.keys(ir.omens).length?['domain:'+r.address.split('@')[1],'route:'+r.route]:[])];
-      const grants=[...new Set(deps.filter(active).map(owner).filter((id):id is string=>id!==null))];
+      const opt=optIn(r.address,r.route), deps=['ritual:'+key,bindingKey(binding),...inputsFor(ir,opt)];
+      if(deps.some(k=>!active(k))){
+        const error='A sender list or Omen opt-in required by this ritual lost receiving approval.';
+        fail(error);if(preview)trace.push({recipient:r.address,kind,key,scores:{},steps:0,lines:[],error,actions:[]});return false;
+      }
+      const grants=[...new Set(deps.map(owner).filter((id):id is string=>id!==null))];
       const scores: Record<string, number | boolean> = Object.create(null);
       for (const [name, e] of Object.entries(ir.omens)) {
-        const enabled = opted(r.address, r.route),
+        const enabled = !!opt,
           n = enabled && Object.hasOwn(answers, e.prompt) ? answers[e.prompt] : undefined;
         const fallback = enabled ? e.onError : e.type === 'boolean' ? false : 0;
         if (n === undefined) {
@@ -339,9 +348,9 @@ export async function ritualPipeline(
   const prompts = [
     ...new Set(
       selected.flatMap((bindings, i) => {
-        const a = base.recipients[i].address;
-        return !changes[a].dropped && opted(a, base.recipients[i].route)
-          ? bindings.flatMap((b) => Object.values(p.rituals[b.ritual].omens).map((e) => e.prompt))
+        const a = base.recipients[i].address,opt=optIn(a,base.recipients[i].route);
+        return !changes[a].dropped && opt && active(opt)
+          ? bindings.map(b=>p.rituals[b.ritual]).filter(ir=>inputsFor(ir,opt).every(active)).flatMap(ir=>Object.values(ir.omens).map(e=>e.prompt))
           : [];
       }),
     ),

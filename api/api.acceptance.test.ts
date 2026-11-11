@@ -2557,6 +2557,24 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('N-L1: human guards fail to junk when an input loses its grant, not when an independent input is available',async t=>{
+    await simulatedSesFixture(t,async({db,local,request})=>{
+      const {token,consentId}=await oauthGrant(t,db,writableScope,request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      const boxes:string[]=[];for(let n=0;n<3;n++)boxes.push(ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201).address);
+      const rituals=[{key:'listed',source:'export default function route(email){if(lists.has("deny",email.from.address)) block()}'},{key:'scored',source:'export default function route(email){const r=omens(email,{q:"Is review needed?"});if(r.q>0.5) block()}'},{key:'other',source:'export default function route(email){label("human")}'}];
+      const config={rituals,attachments:rituals.map((r,i)=>({ritual:r.key,target:boxes[i]})),senderLists:{deny:['system@example.invalid']}};
+      ok(await local('PUT','/v1/rituals',config));
+      const saved=ok(await request('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'applyRituals',arguments:{confirm:true,body:{...config,senderLists:{deny:['fixture@example.net']},evaluateDomains:[boxes[0].split('@')[1]]}}}},rpcHeaders)).result;
+      assert.equal(saved.isError,false,redact(saved));
+      const dry=async()=>ok(await local('POST','/v1/rituals/test',{mime:`From: fixture@example.net\r\nTo: ${boxes.join(', ')}\r\nSubject: fixture\r\n\r\nfixture`,scores:{'Is review needed?':1}})).recipients;
+      const active=await dry();assert.deepEqual(active.map((r:Json)=>r.dropped),[true,true,false]);
+      ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
+      const inactive=await dry();for(const r of inactive.slice(0,2)){assert.equal(r.junk,true);assert.deepEqual(r.labels,['ritual-error']);assert.match(r.warnings.join(' '),/lost receiving approval/);}
+      assert.deepEqual(inactive[2].labels,['human']);assert.equal(inactive[2].junk,false);
+    });
+  });
+
   test('R2: disabled OAuth client cancels queued sends from descendant keys, not independent keys',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,request,run})=>{
       const {originAllowed}=await import('./src/sending.js');
