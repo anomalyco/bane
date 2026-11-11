@@ -7,6 +7,8 @@ import { formattedSender } from './sending.js';
 // gambling ad set as a workspace name in an invitation). The dispatcher decides what to do with the score.
 
 const MAX_BODY = 8000;
+const MAX_SCREEN_BYTES = 24 * 1024;
+const MAX_CHUNKS = 4;
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 const DEADLINE_MS = 500;
@@ -54,11 +56,32 @@ function sample(s: string, budget: number) {
   return [s.slice(0,head), ...[...starts].sort((a,b)=>a-b).map(i=>s.slice(i,i+width))].join('…');
 }
 const tooLarge = () => new ApiError(422,'CONTENT_TOO_LARGE_TO_SCREEN','Shorten the message so Hosted sending can screen it.');
+// Repeat link signals and a little preceding context in each window. Split on
+// UTF-8 boundaries; a clean result is meaningful only after the last window.
+function completeBodies(content: string, links: string) {
+  const bytes = Buffer.from(content), prefix = links ? links+'\n' : '';
+  if (bytes.length > MAX_SCREEN_BYTES || Buffer.byteLength(links) > 1000) throw tooLarge();
+  const bodies: string[] = [], width = MAX_BODY - Buffer.byteLength(prefix);
+  let start = 0;
+  do {
+    if (bodies.length === MAX_CHUNKS) throw tooLarge();
+    let end = Math.min(bytes.length, start + width);
+    while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+    bodies.push(prefix + bytes.toString('utf8', start, end));
+    if (end === bytes.length) break;
+    start = end - 256;
+    while ((bytes[start]! & 0xc0) === 0x80) start--;
+  } while (true);
+  return bodies;
+}
 function host(value: string) {
   try { return new URL(value.startsWith('//') ? 'https:'+value : value).hostname.toLowerCase(); } catch { return ''; }
 }
 async function body(snapshot: EmailSnapshot, required: boolean) {
-  const plain=copy(snapshot.text), raw=copy(snapshot.raw), hosts=new Set<string>(), mismatches=new Set<string>();
+  // Preserve order and repetitions in mandatory input; deduplicating sentences
+  // could change the meaning or make an over-limit message appear to fit.
+  const project=required ? (s='')=>normalize(s).replace(/\s+/g,' ').trim() : copy;
+  const plain=project(snapshot.text), raw=project(snapshot.raw), hosts=new Set<string>(), mismatches=new Set<string>();
   let rendered='';
   if (snapshot.html) {
     const { boundedHtmlFragment, flatScreenText } = await import('./bounded-html.js');
@@ -68,6 +91,7 @@ async function body(snapshot: EmailSnapshot, required: boolean) {
     const fragment = boundedHtmlFragment(html);
     const nodes = (fragment?.childNodes ?? []).slice().reverse().map(node=>({node,anchor:''})), text:string[]=[];
     if (!fragment) {
+      if (required) throw tooLarge();
       const flat = normalize(flatScreenText(html));
       text.push(flat);
       for (const m of flat.matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
@@ -93,19 +117,22 @@ async function body(snapshot: EmailSnapshot, required: boolean) {
       const children='childNodes' in node ? node.childNodes : [];
       for (let i=children.length-1;i>=0;i--) nodes.push({node:children[i]!,anchor});
     }
-    rendered=copy(text.join('\n'));
+    rendered=project(text.join('\n'));
   }
-  if(required && new TextEncoder().encode([rendered,plain,raw].filter(Boolean).join('\n')).length>24*1024) throw tooLarge();
   const signals=[...mismatches,...hosts], joined=signals.slice(0,60).join('\n');
   if(required && (signals.length>60 || joined.length>1000)) throw tooLarge();
   const links=joined.slice(0,1000);
+  const words=(v:string)=>new Set(v.toLowerCase().match(/[\p{L}\p{N}]+/gu));
+  function overlap(text:string, html:string) {
+    const a=words(text), b=words(html), common=[...a].filter(w=>b.has(w)).length;
+    return a.size && b.size ? common/(a.size+b.size-common) : undefined;
+  }
+  if (required) return { bodies:completeBodies([rendered,plain,raw].filter(Boolean).join('\n'),links), textHtmlOverlap:overlap(plain,rendered) };
+  // Optional, advisory screens retain their existing single-request budget.
   const available=MAX_BODY-links.length-3;
   const renderedBudget=available-Math.min(1600,plain.length)-Math.min(1000,raw.length);
   const html=sample(rendered,renderedBudget), text=sample(plain,available-html.length-Math.min(1000,raw.length));
-  const words=(v:string)=>new Set(v.toLowerCase().match(/[\p{L}\p{N}]+/gu));
-  const a=words(text), b=words(html), common=[...a].filter(w=>b.has(w)).length;
-  return {body:[links,html,text,sample(raw,available-html.length-text.length)].filter(Boolean).join('\n'),
-    textHtmlOverlap:a.size && b.size ? common/(a.size+b.size-common) : undefined};
+  return {bodies:[[links,html,text,sample(raw,available-html.length-text.length)].filter(Boolean).join('\n')],textHtmlOverlap:overlap(text,html)};
 }
 async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
   // The deadline includes reading the response body. Never retry inside a send lease.
@@ -144,7 +171,15 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
   // Concurrent copies share one request; failures are not cached so the next copy retries.
   let pending=flights.get(runtime.storage);if(!pending){pending=new Map();flights.set(runtime.storage,pending);}
   const existing=pending.get(key);if(existing)return existing;
-  const lookup=body(snapshot,required).then(({body,textHtmlOverlap})=>evaluate(settings.endpoint,settings.apiKey,settings.model,{email:{from:copy(from).slice(0,100),kind:snapshot.kind,subject:copy(snapshot.subject).slice(0,200),body},signals:{recipients,textHtmlOverlap}}));pending.set(key,lookup);
+  const lookup=body(snapshot,required).then(async ({bodies,textHtmlOverlap})=>{
+    const sender=copy(from), subject=copy(snapshot.subject);
+    let highest: ScreenResult | undefined;
+    for (const body of bodies) {
+      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,{email:{from:required?sender:sender.slice(0,100),kind:snapshot.kind,subject:required?subject:subject.slice(0,200),body},signals:{recipients,textHtmlOverlap}});
+      if (!highest || result.spam>highest.spam) highest=result;
+    }
+    return highest!;
+  });pending.set(key,lookup);
   try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
     while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;
   }finally{pending.delete(key);}

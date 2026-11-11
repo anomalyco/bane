@@ -6972,14 +6972,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const screened=await screenSnapshot(runtime,{...s,fromName:'Maria @ Acme',html},true);assert.equal(screened?.spam,.99);assert.ok(!bodies.at(-1)!.includes('not-rendered'));
       }
       const calls=bodies.length;await assert.rejects(screenSnapshot(runtime,{...s,kind:'marketing',html:'a'.repeat(40000)},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
-      assert.equal(bodies.length,calls);t.diagnostic('Jev coverage: seven sampled markers visible, one over-limit refused before classification');
-      for (const [label,prefix] of [['depth','<div>'.repeat(80_000)],['elements','<br>'.repeat(21_000)]]) {
-        const html=prefix+'<a href="https://link.fixture.invalid">Sample&#77;arker</a>';
-        const start=performance.now(), result=await screenSnapshot(runtime,{...s,html},true), ms=performance.now()-start;
-        assert.equal(result?.spam,.99);assert.match(bodies.at(-1)!,/link\.fixture\.invalid/);assert.ok(bodies.at(-1)!.length<=8000);
-        assert.ok(ms<1000,`Screening the over-${label} projection took ${ms}ms`);
-        t.diagnostic(`Hosted screen (${label}): ${html.length} bytes, ${ms.toFixed(1)}ms`);
+      assert.equal(bodies.length,calls);
+      const wide='<p '+Array.from({length:257},(_,i)=>`data-note-${i}`).join(' ')+'>Notes</p>';
+      for (const html of [wide,'<div>'.repeat(257),...(BENCH?['<br>'.repeat(21_000)]:[])]) {
+        await assert.rejects(screenSnapshot(runtime,{...s,html},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
       }
+      assert.equal(bodies.length,calls,'A partial tree must never reach the required classifier');
+      const positions=BENCH?Array.from({length:221},(_,i)=>100*i):[0,7995,15350,22000];
+      for (const offset of positions) {
+        const start:number=bodies.length,html=`<p>${'x'.repeat(offset)}SampleMarker${'y'.repeat(22000-offset)}</p>`;
+        assert.equal((await screenSnapshot(runtime,{...s,html},true))?.spam,.99);
+        assert.ok(bodies.length-start<=4 && bodies.slice(start).every(b=>Buffer.byteLength(b)<=8000));
+      }
+      t.diagnostic(`Required screen: ${positions.length}/${positions.length} neutral markers classified; over-budget trees refused without a classifier call`);
     }));
   });
 
