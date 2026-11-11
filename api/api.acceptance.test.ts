@@ -70,7 +70,14 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
-  const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);const covered=new Set([...catalog.values()].flatMap(op=>op.covers));assert.deepEqual(bearer.filter(id=>!covered.has(id)),[]);
+  const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
+  assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
+  const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
+  assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
+  const plain = resourceTools(catalog), bytes = Buffer.byteLength(JSON.stringify(plain));
+  // Budget the largest grant, not just the ordinary manage grant without receiving consent.
+  assert.ok(plain.length >= 25 && plain.length <= 30); assert.ok(bytes <= 175_000, `${bytes} bytes`);
+  for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
 });
 test('rituals: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
   const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const source=(s:string)=>`export default function route(email,ctx){\n${s}\n}`;
@@ -2168,9 +2175,9 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(grant.rowCount, 1);
     return { token: tokens.access_token as string, refreshToken: tokens.refresh_token as string, clientId: client.client_id as string, consentId: grant.rows[0].id as string };
   }
-  async function rpc(token: string, method: string, params: Json = {}): Promise<Json> {
+  async function rpc(token: string, method: string, params: Json = {}, path = '/mcp?codemode=true'): Promise<Json> {
     const id = unique('acceptance-mcp-rpc');
-    const reply = await http('POST', '/mcp?toolsets=all', token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
+    const reply = await http('POST', path, token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
     const body = ok(reply);
     assert.equal(body.jsonrpc, '2.0', diagnostic(reply));
     assert.equal(body.id, id, diagnostic(reply));
@@ -2182,11 +2189,11 @@ describe('Hosted MCP OAuth and tools', () => {
     const result = await rpc(token, 'tools/call', { name, arguments: args });
     assert.equal(result.isError, false, redact(result));
     const output = result.structuredContent;
-    assert.equal(output?.status, status, redact(result));
-    assert.equal(typeof output.requestId, 'string', redact(result));
-    assert.ok(output.requestId, redact(result));
+    assert.equal(result._meta.status, status, redact(result));
+    assert.equal(typeof result._meta.requestId, 'string', redact(result));
+    assert.ok(result._meta.requestId, redact(result));
     assert.deepEqual(JSON.parse(result.content[0].text), output);
-    return output.response;
+    return output;
   }
 
   test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
@@ -2294,7 +2301,7 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('hosted MCP publishes the curated task catalog and composes campaign, contact, email and temporary-token workflows', async t => {
+  test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db);
     const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
@@ -2302,39 +2309,29 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
     const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
-    // The default listing is a small, budgeted core for plain clients; toolsets=all is the full catalog for Code Mode.
-    const { coreCatalog, CORE_CATALOG_BUDGET } = await import('./src/mcp-catalog.js');
-    const chars=JSON.stringify(defaults).length;t.diagnostic(`Default MCP catalog: ${defaults.length} tools, ${chars} characters; all: ${catalog.tools.length} tools, ${JSON.stringify(catalog.tools).length} characters`);
-    assert.ok(defaults.length<=17&&coreCatalog.size<=15);assert.ok(chars<=CORE_CATALOG_BUDGET,`${chars} > ${CORE_CATALOG_BUDGET}`);assert.deepEqual(defaults.slice(-2).map((x:Json)=>x.name),['search_tools','describe_tool']);assert.ok(defaults.every((x:Json)=>x.outputSchema===undefined));
+    assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, defaults);
+    assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?toolsets=all')).tools, catalog.tools);
+    assert.ok(defaults.every((tool:Json)=>tool.inputSchema.oneOf?.length && !tool.outputSchema));
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
-    for (const name of ['archiveCampaign', 'audienceQuery', 'createAgentToken', 'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'getContext', 'saveDomain', 'sendEmail', 'listInboxes', 'createInbox', 'waitForMessage', 'readInboxMessage', 'listInboundThreads', 'sendInboundThread', 'search_tools', 'describe_tool'])
-      assert.ok(tools.has(name), name);
-    // Without receiving consent, routing, ritual and endpoint management stays out of the catalog and out of discovery.
-    for (const name of ['applyRituals', 'createEndpoint', 'createRoute', 'applyRouting','enableInboundDomain','saveInboundAddress','listInboundAddresses','getInboundScanPolicy']) assert.ok(!tools.has(name), name);
+    for (const name of ['search_tools', 'describe_tool', 'applyRituals', 'createEndpoint', 'createRoute', 'applyRouting', 'enableInboundDomain', 'createInboundAddress', 'listInboundAddresses', 'getInboundScanPolicy']) assert.ok(!tools.has(name), name);
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
     }
-    assert.ok(!tools.has('prepareCampaign'));
-    assert.doesNotMatch(JSON.stringify(tools.get('deliverCampaign')!.inputSchema), /reviewId/);
-    assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['id']);
-    for (const merged of ['getDomains', 'createDomain', 'configureDomainMailFrom']) assert.ok(!tools.has(merged), merged);
-    for (const published of ['discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'createApiKey', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState', 'revealWebhookSecret']) assert.ok(tools.has(published), published);
-    const found = await rpc(token, 'tools/call', { name: 'search_tools', arguments: { query: 'campaign state' } });
-    assert.ok(found.structuredContent.tools.some((x: Json) => x.name === 'getCampaignState' && x.toolset === 'sending'));
-    const described = (await rpc(token, 'tools/call', { name: 'describe_tool', arguments: { name: 'getCampaignState' } })).structuredContent;
-    assert.equal(described.toolset, 'sending'); assert.match(described.url, /\/mcp\?toolsets=sending$/); assert.equal(described.tool.outputSchema.type, 'object');
-    const context = await callTool(token, 'getContext');
+    for (const name of ['sendEmail', 'sendEmailBatch', 'createInbox', 'waitForMessage', 'getInboxMessage', 'listInboundThreads', 'createInboundThread', 'replyToInboundThread', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'createApiKey', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState', 'revealWebhookSecret']) assert.ok(tools.has(name), name);
+    assert.doesNotMatch(JSON.stringify(tools.get('sendCampaign')!.inputSchema), /reviewId/);
+    assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['campaignId']);
+    const context = await callTool(token, 'getCurrentIdentity');
     assert.equal(context.environment, undefined);
-    const contentGuide = await callTool(token, 'getContentGuide');
+    const contentGuide = await callTool(token, 'getCampaignContentGuide');
     assert.equal(contentGuide.format, 'markdown');
     assert.match(contentGuide.markdown, /campaign and template content/i);
     assert.match(contentGuide.markdown, /## Campaign personalization/);
-    const template = await callTool(token, 'saveTemplate', { action: 'create', body: { name: unique('mcp-template') }, confirm: true }, 201);
+    const template = await callTool(token, 'createCampaignTemplate', { body: { name: unique('mcp-template') }, confirm: true }, 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/templates/${template.id}`, MANAGER)); });
     assert.equal(template.published, null);
     const templateDraft = { ...template.draft, subject: 'Agent template', html: '<h1>Hello, friend</h1>' };
-    const updatedTemplate = await callTool(token, 'saveTemplate', { action: 'update', id: template.id, body: { revision: template.revision, draft: templateDraft }, confirm: true });
+    const updatedTemplate = await callTool(token, 'updateCampaignTemplate', { templateId: template.id, body: { revision: template.revision, draft: templateDraft }, confirm: true });
     assert.equal(updatedTemplate.revision, 2);
     assert.equal(updatedTemplate.published, null);
     error(await http('PATCH', `/v1/templates/${template.id}`, MANAGER, { revision: 2, draft: { ...updatedTemplate.draft, html: '<h1>Hello, {{name}}</h1>' } }), 422, 'TEMPLATE_PLACEHOLDERS_UNSUPPORTED');
@@ -2345,60 +2342,64 @@ describe('Hosted MCP OAuth and tools', () => {
     const label = unique('acceptance-mcp-contact');
     const contacts: Json[] = [];
     for (let index = 0; index < 2; index++) {
-      const created = await callTool(token, 'saveContact', { action: 'create', body: { email: address(), name: label }, confirm: true, idempotencyKey: unique('mcp-contact') }, 201);
+      const created = await callTool(token, 'createContact', { body: { email: address(), name: label }, confirm: true, idempotencyKey: unique('mcp-contact') }, 201);
       cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${created.id}`, MANAGER), [200, 404]); });
       contacts.push(created);
     }
-    const first = await callTool(token, 'findContacts', { search: label, limit: 1 });
+    const first = await callTool(token, 'listContacts', { search: label, limit: 1 });
     assert.deepEqual(first, ok(await http('GET', `/v1/contacts?search=${encodeURIComponent(label)}&limit=1`, MANAGER)));
     assert.equal(first.data.length, 1);
     assert.equal(typeof first.nextCursor, 'string');
-    const second = await callTool(token, 'findContacts', { search: label, limit: 1, cursor: first.nextCursor });
+    const second = await callTool(token, 'listContacts', { search: label, limit: 1, cursor: first.nextCursor });
     assert.equal(second.nextCursor, null);
     assert.deepEqual([...first.data, ...second.data].map((row: Json) => row.id).sort(), contacts.map(row => row.id).sort());
-    const exact = await callTool(token, 'findContacts', { id: contacts[0].id });
-    assert.deepEqual(exact, { data: [ok(await http('GET', `/v1/contacts/${contacts[0].id}`, MANAGER))], nextCursor: null });
-    for (const args of [{ id: contacts[0].id, search: label }, { id: contacts[0].id, limit: 1 }, { path: { id: contacts[0].id } }, { query: { search: label } }]) {
-      const invalid = await rpc(token, 'tools/call', { name: 'findContacts', arguments: args });
+    const exact = await callTool(token, 'getContact', { contactId: contacts[0].id });
+    assert.deepEqual(exact, ok(await http('GET', `/v1/contacts/${contacts[0].id}`, MANAGER)));
+    const merged = await rpc(token, 'tools/call', { name: 'contacts', arguments: { action: 'get', contactId: contacts[0].id } }, '/mcp?toolsets=inboxes');
+    assert.equal(merged.isError, false); assert.deepEqual(merged.structuredContent, exact); assert.equal(merged.content[0].text, JSON.stringify(exact));
+    for (const args of [{ contactId: contacts[0].id, search: label }, { contactId: contacts[0].id, limit: 1 }, { path: { id: contacts[0].id } }, { query: { search: label } }]) {
+      const invalid = await rpc(token, 'tools/call', { name: 'listContacts', arguments: args });
       assert.equal(invalid.isError, true, redact(invalid));
       assert.equal(invalid.structuredContent.error.code, 'INVALID_ARGUMENTS', redact(invalid));
-      assert.equal(invalid.structuredContent.status, null, 'Invalid input must be rejected before API dispatch.');
+      assert.equal(invalid._meta.status, null, 'Invalid input must be rejected before API dispatch.');
     }
-    const noConfirmation = await rpc(token, 'tools/call', { name: 'saveContact', arguments: { action: 'update', id: contacts[0].id, body: { name: 'not authorized' } } });
+    const noConfirmation = await rpc(token, 'tools/call', { name: 'updateContact', arguments: { contactId: contacts[0].id, body: { name: 'not authorized' } } });
     assert.equal(noConfirmation.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(noConfirmation));
-    const updated = await callTool(token, 'saveContact', { action: 'update', id: contacts[0].id, body: { name: `${label}-updated` }, confirm: true });
+    const mergedUnconfirmed = await rpc(token, 'tools/call', { name: 'contacts', arguments: { action: 'update', contactId: contacts[0].id, body: { name: 'not authorized' } } }, '/mcp');
+    assert.equal(mergedUnconfirmed.structuredContent.error.code, noConfirmation.structuredContent.error.code);
+    const updated = await callTool(token, 'updateContact', { contactId: contacts[0].id, body: { name: `${label}-updated` }, confirm: true });
     assert.equal(updated.name, `${label}-updated`);
     const audienceStatement = `UPDATE contacts SET consent = 'subscribed', properties.audienceql = 'verified', properties.country = '${label.replaceAll("'", "''")}' WHERE name CONTAINS '${label.replaceAll("'", "''")}'`;
-    const audiencePlan = await callTool(token, 'audienceQuery', { action: 'plan', statement: audienceStatement }, 201);
+    const audiencePlan = await callTool(token, 'planAudienceMutation', { body: { statement: audienceStatement } }, 201);
     assert.equal(audiencePlan.matched, 2);
     assert.equal(audiencePlan.requiresResubscribeConfirmation, false);
-    const audienceApplied = await callTool(token, 'audienceQuery', { action: 'apply', planId: audiencePlan.id, confirm: true });
+    const audienceApplied = await callTool(token, 'applyAudiencePlan', { body: { planId: audiencePlan.id }, confirm: true });
     assert.equal(audienceApplied.affected, 2);
-    const audienceRows = await callTool(token, 'audienceQuery', { action: 'query', statement: `SELECT id, consent, properties.audienceql FROM contacts WHERE name CONTAINS '${label.replaceAll("'", "''")}' LIMIT 10` });
+    const audienceRows = await callTool(token, 'queryAudience', { body: { statement: `SELECT id, consent, properties.audienceql FROM contacts WHERE name CONTAINS '${label.replaceAll("'", "''")}' LIMIT 10` } });
     assert.equal(audienceRows.matched, 2);
     assert.ok(audienceRows.rows.every((row: Json) => row.consent === 'subscribed' && row['properties.audienceql'] === 'verified'));
-    const audienceSegment = await callTool(token, 'saveSegment', { action: 'create', body: { name: unique('audienceql-segment'), rule: { field: 'country', operator: 'eq', value: label } }, confirm: true }, 201);
+    const audienceSegment = await callTool(token, 'createSegment', { body: { name: unique('audienceql-segment'), rule: { field: 'country', operator: 'eq', value: label } }, confirm: true }, 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/segments/${audienceSegment.id}`, MANAGER), [200, 404]); });
-    const segmentCount = await callTool(token, 'audienceQuery', { action: 'query', statement: `SELECT count(*) FROM contacts WHERE segment = '${audienceSegment.id}'` });
+    const segmentCount = await callTool(token, 'queryAudience', { body: { statement: `SELECT count(*) FROM contacts WHERE segment = '${audienceSegment.id}'` } });
     assert.equal(segmentCount.rows[0].count, 2);
-    await callTool(token, 'saveContact', { action: 'consent', id: contacts[0].id, body: { status: 'unsubscribed' }, confirm: true });
-    const resubscribePlan = await callTool(token, 'audienceQuery', { action: 'plan', statement: `UPDATE contacts SET consent = 'subscribed' WHERE id = '${contacts[0].id}'` }, 201);
+    await callTool(token, 'updateContactConsent', { contactId: contacts[0].id, body: { status: 'unsubscribed' }, confirm: true });
+    const resubscribePlan = await callTool(token, 'planAudienceMutation', { body: { statement: `UPDATE contacts SET consent = 'subscribed' WHERE id = '${contacts[0].id}'` } }, 201);
     assert.equal(resubscribePlan.requiresResubscribeConfirmation, true);
-    const blockedResubscribe = await rpc(token, 'tools/call', { name: 'audienceQuery', arguments: { action: 'apply', planId: resubscribePlan.id, confirm: true } });
+    const blockedResubscribe = await rpc(token, 'tools/call', { name: 'applyAudiencePlan', arguments: { body: { planId: resubscribePlan.id }, confirm: true } });
     assert.equal(blockedResubscribe.structuredContent.error.code, 'RESUBSCRIBE_CONFIRMATION_REQUIRED', redact(blockedResubscribe));
-    assert.equal((await callTool(token, 'audienceQuery', { action: 'apply', planId: resubscribePlan.id, confirmResubscribe: true, confirm: true })).affected, 1);
+    assert.equal((await callTool(token, 'applyAudiencePlan', { body: { planId: resubscribePlan.id, confirmResubscribe: true }, confirm: true })).affected, 1);
 
     // The dashboard fixture is explicitly test-mode; no worker or SES delivery is needed for content reads.
     const message = mail({ text: 'Synthetic hosted MCP content snapshot.' });
     const sent = ok(await http('POST', '/v1/emails/send', MANAGER, message), 202);
-    const email = await callTool(token, 'findEmails', { id: sent.id });
-    assert.equal(email.data[0].id, sent.id);
-    assert.equal(email.data[0].content.text, message.text);
-    assert.equal(email.data[0].content.simulated, true);
-    assert.ok(Array.isArray(email.data[0].events));
+    const email = await callTool(token, 'getEmailDetail', { emailId: sent.id });
+    assert.equal(email.email.id, sent.id);
+    assert.equal(email.content.text, message.text);
+    assert.equal((await callTool(token, 'getEmailContent', { emailId: sent.id })).simulated, true);
+    assert.ok(Array.isArray(email.events.data));
     const draftName = unique('mcp-name-only');
-    const draftArgs = { action: 'create', body: { name: draftName }, confirm: true, idempotencyKey: unique('mcp-draft') };
-    const unfinished = await callTool(token, 'saveCampaign', draftArgs, 201);
+    const draftArgs = { body: { name: draftName }, confirm: true, idempotencyKey: unique('mcp-draft') };
+    const unfinished = await callTool(token, 'createCampaign', draftArgs, 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/campaigns/${unfinished.id}`, MANAGER)); });
     assert.equal(unfinished.draft.name, draftName);
     assert.equal(unfinished.draft.region, ok(await http('GET', '/v1/regions', MANAGER)).defaultRegion);
@@ -2411,10 +2412,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(editorUrl.pathname, `/campaigns/${unfinished.id}/edit`);
     assert.equal(editorUrl.searchParams.get('environment'), null);
     assert.equal(editorUrl.searchParams.get('region'), null);
-    assert.equal((await callTool(token, 'saveCampaign', draftArgs, 201)).id, unfinished.id);
-    assert.equal((await callTool(token, 'findCampaigns', { id: unfinished.id })).data[0].url, unfinished.url);
-    assert.equal((await callTool(token, 'findCampaigns', { search: draftName })).data[0].id, unfinished.id);
-    const savedDraft = await callTool(token, 'saveCampaign', { action: 'update', id: unfinished.id, body: { revision: unfinished.revision, draft: { name: `${draftName}-edited` } }, confirm: true });
+    assert.equal((await callTool(token, 'createCampaign', draftArgs, 201)).id, unfinished.id);
+    assert.equal((await callTool(token, 'getCampaign', { campaignId: unfinished.id })).url, unfinished.url);
+    assert.equal((await callTool(token, 'listCampaigns', { search: draftName })).data[0].id, unfinished.id);
+    const savedDraft = await callTool(token, 'updateCampaign', { campaignId: unfinished.id, body: { revision: unfinished.revision, draft: { name: `${draftName}-edited` } }, confirm: true });
     assert.equal(savedDraft.draft.region, unfinished.draft.region);
     assert.equal(savedDraft.revision, 2);
     error(await http('GET', `/v1/campaigns/${unfinished.id}/audience`, MANAGER), 422, 'CAMPAIGN_INCOMPLETE');
@@ -2423,36 +2424,36 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('POST', `/v1/campaigns/${unfinished.id}/send`, MANAGER, { revision: 2, reviewId: 'missing-review' }), 422, 'VALIDATION_FAILED');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: '   ' }), 422, 'VALIDATION_FAILED');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: draftName, from: 'invalid' }), 422, 'VALIDATION_FAILED');
-    await callTool(token, 'archiveCampaign', { id: unfinished.id, body: { archived: true }, confirm: true });
-    await callTool(token, 'archiveCampaign', { id: unfinished.id, body: { archived: false }, confirm: true });
+    await callTool(token, 'setCampaignArchived', { campaignId: unfinished.id, body: { archived: true }, confirm: true });
+    await callTool(token, 'setCampaignArchived', { campaignId: unfinished.id, body: { archived: false }, confirm: true });
 
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-audience') });
-    const membershipPlan = await callTool(token, 'audienceQuery', { action: 'plan', statement: `ADD contacts TO LIST '${list.id}' WHERE name CONTAINS '${label.replaceAll("'", "''")}'` }, 201);
+    const membershipPlan = await callTool(token, 'planAudienceMutation', { body: { statement: `ADD contacts TO LIST '${list.id}' WHERE name CONTAINS '${label.replaceAll("'", "''")}'` } }, 201);
     assert.equal(membershipPlan.matched, 2);
-    assert.equal((await callTool(token, 'audienceQuery', { action: 'apply', planId: membershipPlan.id, confirm: true })).affected, 2);
-    assert.equal((await callTool(token, 'findLists', { id: list.id })).data[0].members.length, 2);
+    assert.equal((await callTool(token, 'applyAudiencePlan', { body: { planId: membershipPlan.id }, confirm: true })).affected, 2);
+    assert.equal((await callTool(token, 'listListMembers', { listId: list.id })).data.length, 2);
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id }, { name: unique('mcp-campaign') });
-    const summaries = await callTool(token, 'findCampaigns', { search: campaign.draft.name });
+    const summaries = await callTool(token, 'listCampaigns', { search: campaign.draft.name });
     const summary = summaries.data.find((row: Json) => row.id === campaign.id);
     assert.ok(summary);
     assert.equal(summary.draft.html, undefined);
-    const detail = (await callTool(token, 'findCampaigns', { id: campaign.id })).data[0];
+    const detail = (await callTool(token, 'getCampaign', { campaignId: campaign.id }));
     assert.equal(detail.draft.html, campaign.draft.html);
     assert.equal(detail.archivedAt, null);
-    const campaignPreview = await callTool(token, 'previewCampaign', { id: campaign.id });
+    const campaignPreview = await callTool(token, 'previewCampaign', { campaignId: campaign.id });
     assert.ok(campaignPreview.html.includes(campaign.draft.html.replace(/^<p>|<\/p>$/g, '')));
     assert.equal(typeof campaignPreview.text, 'string');
-    const audienceCounts = await callTool(token, 'previewCampaignAudience', { id: campaign.id });
+    const audienceCounts = await callTool(token, 'previewCampaignAudience', { campaignId: campaign.id });
     assert.deepEqual(audienceCounts, ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, MANAGER)));
     assert.equal(audienceCounts.matched, 2);
     assert.equal(audienceCounts.eligible + audienceCounts.suppressed + audienceCounts.unsubscribed, 2);
     cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, MANAGER, { archived: false })); });
-    const archived = await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: true }, confirm: true });
+    const archived = await callTool(token, 'setCampaignArchived', { campaignId: campaign.id, body: { archived: true }, confirm: true });
     assert.equal(typeof archived.archivedAt, 'string');
     assert.deepEqual(archived.draft, detail.draft);
-    assert.deepEqual((await callTool(token, 'findCampaigns', { search: campaign.draft.name })).data, []);
-    assert.equal((await callTool(token, 'findCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
-    assert.equal((await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
+    assert.deepEqual((await callTool(token, 'listCampaigns', { search: campaign.draft.name })).data, []);
+    assert.equal((await callTool(token, 'listCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
+    assert.equal((await callTool(token, 'setCampaignArchived', { campaignId: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
 
     const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
@@ -2494,15 +2495,22 @@ describe('Hosted MCP OAuth and tools', () => {
     const grantKeys:string[]=[];
     await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async()=>{
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
-      await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getContext'||x.name==='applyRituals'||x.name==='createAgentToken'));
+      await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getCurrentIdentity'||x.name==='applyRituals'||x.name==='createAgentToken'));
       const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
-      const denied=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const search=await rpc(token,'tools/call',{name:'search_tools',arguments:{query:'applyRituals'}});assert.deepEqual(search.structuredContent.tools,[]);
+      const denied=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const merged=await rpc(token,'tools/call',{name:'rituals',arguments:{action:'apply',confirm:true,body:{}}},'/mcp');assert.equal(merged.structuredContent.error.code, denied.structuredContent.error.code);
+      const inboxTools = (await rpc(token,'tools/list',{},'/mcp?toolsets=admin')).tools;
+      const sendActions = inboxTools.find((tool:Json)=>tool.name==='reply').inputSchema.properties.action.enum;
+      assert.deepEqual(sendActions, ['reply']);
+      for (const [path,name,args] of [['/mcp','reply',{action:'start'}],['/mcp?codemode=true','createInboundThread',{}]] as const) {
+        const refused = await rpc(token,'tools/call',{name,arguments:args},path);
+        assert.equal(refused.structuredContent.error.code,'EPHEMERAL_REPLY_ONLY');
+      }
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
-      const slack={confirm:true,idempotencyKey:'mcp-endpoint-1',body:{type:'slack',name:'mcp-alerts',url:'https://hooks.slack.com/services/T0/B0/mcpfixture'}};const endpoint=await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack});assert.equal(endpoint.isError,false,redact(endpoint));assert.equal(endpoint.structuredContent.response.status,'ready');
-      assert.equal((await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack})).structuredContent.response.call,'endpoints["mcp-alerts"]');
-      const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('createEndpoint')&&listed.includes('testEndpoint')&&!listed.includes('applyRituals'),listed.join());
-      const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.response.ok,true,redact(checked));
+      const slack={confirm:true,idempotencyKey:'mcp-endpoint-1',body:{type:'slack',name:'mcp-alerts',url:'https://hooks.slack.com/services/T0/B0/mcpfixture'}};const endpoint=await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack});assert.equal(endpoint.isError,false,redact(endpoint));assert.equal(endpoint.structuredContent.status,'ready');
+      assert.equal((await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack})).structuredContent.call,'endpoints["mcp-alerts"]');
+      const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rituals'),listed.join());
+      const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
       const live=async()=>(await db.query("SELECT mail_receiving_grant('default',id,jsonb_build_object('resource',resources[1],'hosted',true)) AS ok FROM oauth_consent WHERE id=$1",[consentId])).rows[0].ok;
       assert.equal(await live(),true);
@@ -2543,8 +2551,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const binding=(ritual:string)=>({target:box.address,ritual,continue:false});
       const attachments=[binding('guard'),binding('note')];
       const path='/v1/rituals', saved=ok(await local('PUT',path,{rituals,attachments}));
-      const result=ok(await request('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R1 fixture',permissions:['manage']}}}},rpcHeaders)).result.structuredContent;
-      const key=result.response.secret;secrets.add(key);
+      const result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R1 fixture',permissions:['manage']}}}},rpcHeaders)).result.structuredContent;
+      const key=result.secret;secrets.add(key);
       const attach=(list:typeof attachments)=>request('PUT',path+'/attachments',key,{attachments:list});
       for(const change of [[...attachments].reverse(),attachments.slice(1),[{...attachments[0],continue:true},attachments[1]]])
         error(await attach(change),403,'RITUAL_BINDING_NOT_OWNED');
@@ -2565,7 +2573,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const rituals=[{key:'listed',source:'export default function route(email){if(lists.has("deny",email.from.address)) block()}'},{key:'scored',source:'export default function route(email){const r=omens(email,{q:"Is review needed?"});if(r.q>0.5) block()}'},{key:'other',source:'export default function route(email){label("human")}'}];
       const config={rituals,attachments:rituals.map((r,i)=>({ritual:r.key,target:boxes[i]})),senderLists:{deny:['system@example.invalid']}};
       ok(await local('PUT','/v1/rituals',config));
-      const saved=ok(await request('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'applyRituals',arguments:{confirm:true,body:{...config,senderLists:{deny:['fixture@example.net']},evaluateDomains:[boxes[0].split('@')[1]]}}}},rpcHeaders)).result;
+      const saved=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'applyRituals',arguments:{confirm:true,body:{...config,senderLists:{deny:['fixture@example.net']},evaluateDomains:[boxes[0].split('@')[1]]}}}},rpcHeaders)).result;
       assert.equal(saved.isError,false,redact(saved));
       const dry=async()=>ok(await local('POST','/v1/rituals/test',{mime:`From: fixture@example.net\r\nTo: ${boxes.join(', ')}\r\nSubject: fixture\r\n\r\nfixture`,scores:{'Is review needed?':1}})).recipients;
       const active=await dry();assert.deepEqual(active.map((r:Json)=>r.dropped),[true,true,false]);
@@ -2579,7 +2587,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t,async({runtime,db,local,request,run})=>{
       const {originAllowed}=await import('./src/sending.js');
       const {token,consentId,clientId}=await oauthGrant(t,db,writableScope,request);
-      const parent=ok(await request('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R2 parent',permissions:['manage']}}}},rpcHeaders)).result.structuredContent.response;
+      const parent=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R2 parent',permissions:['manage']}}}},rpcHeaders)).result.structuredContent;
       const child=ok(await request('POST','/v1/api-keys',parent.secret,{name:'R2 child',permissions:['send']}),201);
       const independent=ok(await local('POST','/v1/api-keys',{name:'R2 independent',permissions:['send']}),201);
       for(const key of [parent,child,independent])secrets.add(key.secret);
@@ -2632,11 +2640,11 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(denied.status, 400, 'A member must not authorize manage scope.');
       assert.equal((await db.query('SELECT id FROM oauth_consent WHERE client_id=$1', [deniedClient.client_id])).rowCount, 0);
       const { token, refreshToken, clientId, consentId } = await oauthGrant(t, db, 'opensend:read opensend:send offline_access', request);
-      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result.structuredContent;
-      assert.equal((await call('getContext')).response.workspaceId, wid);
+      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp?codemode=true',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
+      assert.equal((await call('getCurrentIdentity')).structuredContent.workspaceId, wid);
       const send = async () => {
-        const reply = await call('sendEmail', { mode: 'single', body: { from: address(), to: address(), subject:'Synthetic MX', text:'Synthetic MX' }, confirm:true });
-        assert.equal(reply.status, 202, redact(reply)); return reply.response.id;
+        const reply = await call('sendEmail', { body: { from: address(), to: address(), subject:'Synthetic MX', text:'Synthetic MX' }, confirm:true });
+        assert.equal(reply._meta.status, 202, redact(reply)); return reply.structuredContent.id;
       };
       const first = await send(); await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
@@ -2657,7 +2665,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1",[wid]);
       const second = await send();
       await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
-      assert.equal((await call('getContext')).response.role, 'member', 'An existing member grant must not grow on promotion.');
+      assert.equal((await call('getCurrentIdentity')).structuredContent.role, 'member', 'An existing member grant must not grow on promotion.');
       await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, uid]);
       await run('email.dispatch');
       assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1', [second])).rows[0].error_code, 'ORIGIN_KEY_REVOKED');
@@ -2680,25 +2688,25 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(command instanceof GetEmailIdentityCommand); assert.equal(command.input.EmailIdentity, name);
         return { VerificationStatus: verified ? 'SUCCESS' : 'PENDING' };
       });
-      const rpc = async (token: string, method: string, params: Json) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method, params },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
+      const rpc = async (token: string, method: string, params: Json) => ok(await local('POST','/mcp?codemode=true',{ jsonrpc:'2.0', id:1, method, params },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
       const call = async (name: string, args: Json) => (await rpc(manager.token,'tools/call',{ name, arguments:args })).structuredContent;
       const template = ok(await local('POST','/v1/templates',{name:'Preview scope fixture'}),201);
       ok(await local('PATCH',`/v1/templates/${template.id}`,{revision:template.revision,draft:{...template.draft,html:'<p>Scope fixture</p>'}}));
       let renders=0;
       runtime.renderHtmlImage=async()=>{renders++;return {data:Uint8Array.of(1),mimeType:'image/png'};};
       for (const [grant,visual] of [[reader,false],[manager,true]] as const) {
-        const preview=await rpc(grant.token,'tools/call',{name:'previewTemplate',arguments:{id:template.id}});
-        assert.equal(preview.isError,false);const body=preview.structuredContent.response;
-        assert.match(body.html,/Scope fixture/);assert.equal(body.text,'Scope fixture');
-        assert.equal(body.visualPreview?.mimeType,visual?'image/png':undefined);
-        assert.deepEqual(preview.content.map((entry:Json)=>entry.type),visual?['text','image']:['text']);
+        const preview=await rpc(grant.token,'tools/call',{name:'previewCampaignTemplate',arguments:{templateId:template.id}});
+        assert.equal(preview.isError,false); assert.match(preview.structuredContent.html,/Scope fixture/); assert.equal(preview.structuredContent.text,'Scope fixture');
+        const image=await rpc(grant.token,'tools/call',{name:'renderCampaignTemplatePreviewImage',arguments:{templateId:template.id}});
+        if (visual) assert.equal(image.structuredContent.mimeType,'image/png');
+        else assert.equal(image.structuredContent.error.code,'TOOL_UNAVAILABLE');
         assert.equal(renders,visual?1:0);
       }
-      const enable = (extra: Json = {}) => call('enableInboundDomain',{ id:domain, confirm:true, ...extra });
-      const state = async (id: string) => (await call('getInboundDomain',{ id })).response.status;
+      const enable = (extra: Json = {}) => call('enableInboundDomain',{ domainId:domain, confirm:true, ...extra });
+      const state = async (id: string) => (await call('getInboundDomain',{ domainId:id })).status;
       assert.ok(!(await rpc(reader.token,'tools/list',{})).tools.some((tool: Json) => tool.name.endsWith('InboundDomain') || tool.name === 'listInboundDomains'));
-      assert.equal((await rpc(reader.token,'tools/call',{ name:'enableInboundDomain', arguments:{ id:domain,confirm:true } })).structuredContent.error.code,'TOOL_UNAVAILABLE');
-      assert.deepEqual((await call('listInboundDomains',{})).response.data.map((row: Json) => row.status),['off','off']);
+      assert.equal((await rpc(reader.token,'tools/call',{ name:'enableInboundDomain', arguments:{ domainId:domain,confirm:true } })).structuredContent.error.code,'TOOL_UNAVAILABLE');
+      assert.deepEqual((await call('listInboundDomains',{})).data.map((row: Json) => row.status),['off','off']);
       assert.equal((await enable({ confirm:false })).error.code,'CONFIRMATION_REQUIRED');
       assert.equal((await enable({ body:{ force:true } })).error.code,'INVALID_ARGUMENTS');
       assert.equal(ses.mock.callCount(),0);
@@ -2715,7 +2723,7 @@ describe('Hosted MCP OAuth and tools', () => {
         mx = ''; assert.equal((await enable()).error.code,'MX_LOOKUP_FAILED');
         assert.equal(await state(domain),'off'); assert.equal((await jobs('mailbox.reconcile')).length,0);
         mx = `10 inbound-smtp.${REGION}.amazonaws.com.`;
-        const result = await enable(); assert.equal(result.status,202); assert.equal(result.response.status,'provisioning');
+        const result = await rpc(manager.token,'tools/call',{ name:'enableInboundDomain', arguments:{domainId:domain,confirm:true} }); assert.equal(result._meta.status,202); assert.equal(result.structuredContent.status,'provisioning');
         assert.equal(await state(domain),'provisioning'); assert.equal(await state(parent),'off'); assert.equal((await jobs('mailbox.reconcile')).length,1);
       } finally { globalThis.fetch = networkGuard; }
     });
@@ -2745,7 +2753,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const base = '/v1/inbound', get = (p:string, h?:Record<string,string>) => local('GET',base+p,undefined,'live',h), post = (p:string, body:Json, h?:Record<string,string>) => local('POST',base+p,body,'live',h);
       const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp?toolsets=all',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
       const tool = (name:string, args:Json) => mcp('tools/call',{name,arguments:args});
-      const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent.response; };
+      const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent; };
       const catalog = (await mcp('tools/list',{})).tools;
       const tools = catalog.map((x:Json)=>x.name);
       const { dispatchAsActor } = await import('./src/auth.js'), { app } = await import('./src/app.js');
@@ -2757,12 +2765,12 @@ describe('Hosted MCP OAuth and tools', () => {
         const denied=await dispatchAsActor(app,new Request(url),runtime,{...scope,keyId:'mcp_probe',credential:'mcp',permissions:['manage'],domains:[]});
         assert.equal(denied.status,403);assert.equal((await denied.json() as Json).error.code,'ADMIN_REQUIRED');
       }
-      for (const name of ['saveInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','sendInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
+      for (const name of ['createInboundAddress','updateInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','createInboundThread','replyToInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
       for (const admin of ['createInboundKey','rotateInboundWebhookSecret','disableInboundDomain','applyRouting','createEndpoint']) assert.ok(tools.includes(admin),admin);assert.ok(tools.includes('provisionRegion'));
       const canonicalHook = ok(await post('/webhooks',{url:'https://example.com/addresses',eventTypes:['address.created','address.deleted']}),201);
-      const a=await success('saveInboundAddress',{action:'create',body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});
+      const a=await success('createInboundAddress',{body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});
       const b=ok(await post('/addresses',{address:'billing@example.com'}),201);
-      const updated=await success('saveInboundAddress',{action:'update',addressId:a.id,body:{displayName:'Customer support'},confirm:true});assert.deepEqual(updated.aliases,['help@example.com']);assert.deepEqual(updated.metadata,{purpose:'support'});
+      const updated=await success('updateInboundAddress',{addressId:a.id,body:{displayName:'Customer support'},confirm:true});assert.deepEqual(updated.aliases,['help@example.com']);assert.deepEqual(updated.metadata,{purpose:'support'});
       assert.equal((await success('getInboundAddress',{addressId:a.id})).id,a.id);
       const domain = ok(await get(`/domains/${domainId}`));
       assert.equal(domain.addressCount,2); assert.equal(domain.catchAll,'store'); assert.ok(!('mailboxCount' in domain));
@@ -2771,9 +2779,9 @@ describe('Hosted MCP OAuth and tools', () => {
       const key=ok(await post('/keys',{name:'support only',addressIds:[a.id],permissions:['read','send']}),201);const h={authorization:`Bearer ${key.secret}`};
       assert.deepEqual(ok(await get('/addresses',h)).data.map((x:Json)=>x.id),[a.id]);error(await get(`/addresses/${b.id}`,h),404);error(await post('/addresses',{address:'denied@example.com'},h),403);
       error(await local('GET',`${base}/addresses`,undefined,'test'),400,'ENVIRONMENT_REMOVED');
-      const startArgs={mode:'start',body:{addressId:a.id,to:['customer@example.net'],subject:'Invoice',text:'Opening message'},idempotencyKey:'thread-start',confirm:true};
-      assert.equal((await tool('sendInboundThread',{...startArgs,confirm:false})).isError,true);
-      const first=await success('sendInboundThread',startArgs);assert.equal(first.status,'queued');assert.match(first.threadId,/^thr_/);assert.equal((await success('sendInboundThread',startArgs)).id,first.id);
+      const startArgs={body:{addressId:a.id,to:['customer@example.net'],subject:'Invoice',text:'Opening message'},idempotencyKey:'thread-start',confirm:true};
+      assert.equal((await tool('createInboundThread',{...startArgs,confirm:false})).isError,true);
+      const first=await success('createInboundThread',startArgs);assert.equal(first.status,'queued');assert.match(first.threadId,/^thr_/);assert.equal((await success('createInboundThread',startArgs)).id,first.id);
       const threadId=first.threadId,path=`/threads/${threadId}`;
       async function deliver(id:string, addresses:string[], subject:string, at:string) {
         const [row]=await runtime.db.insert(mailMessages).values({id,...scope,direction:'inbound',threadId,region:REGION,fromAddress:'sender@example.net',to:[],replyTo:[{name:null,address:'reply@example.net'}],subject,text:subject,snippet:subject,messageId:`${id}@example.net`,receivedAt:at}).returning();
@@ -2820,11 +2828,11 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(new URL(ok(await get(file)).url).searchParams.get('X-Amz-Expires'),'300');
       const page=ok(await get(`${path}?limit=1`,h));assert.equal(page.messages[0].id,shared);assert.ok(page.nextCursor);assert.equal(ok(await get(`${path}?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`,h)).messages[0].id,first.id);
       const replayHeaders={...h,'Idempotency-Key':'latest-visible'};const reply=ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202);assert.equal(reply.inReplyTo,`${shared}@example.net`);
-      const reviewed={mode:'reply',threadId,idempotencyKey:'confirmed-reply',confirm:true,body:{addressId:a.id,replyToMessageId:shared,text:'This is the approved answer',expectedRecipients:{to:['reply@example.net'],cc:[],bcc:[]}}};
-      const mismatched=await tool('sendInboundThread',{...reviewed,body:{...reviewed.body,expectedRecipients:{to:['reply@example.net'],cc:['extra@example.net'],bcc:[]}}});assert.equal(mismatched.structuredContent.error.code,'INBOUND_RECIPIENTS_CHANGED');
-      const confirmed=await success('sendInboundThread',reviewed);assert.deepEqual(confirmed.to.map((x:Json)=>x.address),['reply@example.net']);
+      const reviewed={threadId,idempotencyKey:'confirmed-reply',confirm:true,body:{addressId:a.id,replyToMessageId:shared,text:'This is the approved answer',expectedRecipients:{to:['reply@example.net'],cc:[],bcc:[]}}};
+      const mismatched=await tool('replyToInboundThread',{...reviewed,body:{...reviewed.body,expectedRecipients:{to:['reply@example.net'],cc:['extra@example.net'],bcc:[]}}});assert.equal(mismatched.structuredContent.error.code,'INBOUND_RECIPIENTS_CHANGED');
+      const confirmed=await success('replyToInboundThread',reviewed);assert.deepEqual(confirmed.to.map((x:Json)=>x.address),['reply@example.net']);
       const newId=unique('msg');await deliver(newId,[a.id],'Fresh inbound',new Date(Date.now()+3000).toISOString());
-      assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('sendInboundThread',reviewed)).id,confirmed.id);
+      assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('replyToInboundThread',reviewed)).id,confirmed.id);
       await dispatchDue(runtime, REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
       const solo=ok(await post('/threads',{addressId:a.id,to:['followup@example.net'],subject:'Only outbound',text:'First'},h),202);await dispatchDue(runtime, REGION);
       const followup=ok(await post(`/threads/${solo.threadId}/reply`,{text:'Following up'},h),202);assert.equal(followup.inReplyTo,`ses-${solo.emailId}@${REGION==='us-east-1'?'email':REGION}.amazonses.com`);assert.equal(followup.to[0].address,'followup@example.net');
@@ -2858,10 +2866,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
-    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
-    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
-    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContext'));
-    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'audienceQuery'));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
+    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'queryAudience'));
     // One HTTP request is one JSON-RPC call: batches and unbounded non-JSON bodies never reach the SDK.
     const batch = await http('POST', '/mcp', token, Array.from({ length: 500 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'tools/list', params: {} })), rpcHeaders);
     assert.equal(batch.status, 400, diagnostic(batch));
@@ -2875,8 +2883,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(oversized.status, 413, diagnostic(oversized));
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-read-state') });
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
-    assert.equal((await callTool(token, 'findCampaigns', { id: campaign.id })).data[0].id, campaign.id);
-    const stats = await callTool(token, 'getCampaignStats', { id: campaign.id });
+    assert.equal((await callTool(token, 'getCampaign', { campaignId: campaign.id })).id, campaign.id);
+    const stats = await callTool(token, 'getCampaignStats', { campaignId: campaign.id });
     assert.equal(stats.id, campaign.id);
     assert.equal(stats.counts.total, 0);
     assert.equal(stats.rates.delivery.value, null);
@@ -2888,23 +2896,27 @@ describe('Hosted MCP OAuth and tools', () => {
     await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status)
       VALUES ($1,'default',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
     for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated) VALUES ($1,'default',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
-    const populated = await callTool(token, 'getCampaignStats', { id: campaign.id });
+    const populated = await callTool(token, 'getCampaignStats', { campaignId: campaign.id });
     assert.deepEqual(populated, ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, MANAGER)));
     assert.equal(populated.totals.delivered, 1);
     assert.equal(populated.totals.opened, 1);
     assert.equal(populated.totals.clicked, 1);
-    const missing = await rpc(token, 'tools/call', { name: 'getCampaignStats', arguments: { id: unique('missing') } });
+    const missing = await rpc(token, 'tools/call', { name: 'getCampaignStats', arguments: { campaignId: unique('missing') } });
     assert.equal(missing.isError, true);
-    assert.equal(missing.structuredContent.status, 404);
+    assert.equal(missing._meta.status, 404);
     const invalid = await rpc(token, 'tools/call', { name: 'getCampaignStats', arguments: { path: { id: campaign.id } } });
     assert.equal(invalid.structuredContent.error.code, 'INVALID_ARGUMENTS');
-    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'archiveCampaign'));
-    const archiveDenied = await rpc(token, 'tools/call', { name: 'archiveCampaign', arguments: { id: unique('missing'), body: { archived: true }, confirm: true } });
+    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'setCampaignArchived'));
+    const archiveDenied = await rpc(token, 'tools/call', { name: 'setCampaignArchived', arguments: { campaignId: unique('missing'), body: { archived: true }, confirm: true } });
     assert.equal(archiveDenied.isError, true, redact(archiveDenied));
     assert.equal(archiveDenied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(archiveDenied));
-    const denied = await rpc(token, 'tools/call', { name: 'saveContact', arguments: { action: 'create', confirm: true, body: { email: address() } } });
+    const denied = await rpc(token, 'tools/call', { name: 'createContact', arguments: { confirm: true, body: { email: address() } } });
     assert.equal(denied.isError, true, redact(denied));
     assert.equal(denied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(denied));
+    const actions = (await rpc(token, 'tools/list', {}, '/mcp')).tools.find((tool:Json) => tool.name === 'contacts').inputSchema.oneOf.map((branch:Json) => branch.properties.action.const);
+    assert.ok(actions.includes('get') && !actions.includes('create'));
+    const mergedDenied = await rpc(token, 'tools/call', { name:'contacts', arguments:{ action:'create', confirm:true, body:{ email:address() } } }, '/mcp');
+    assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
     const deletion = await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId });
     assert.equal(deletion.status, 200, diagnostic(deletion));
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
@@ -8304,11 +8316,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         for(const id of ['over1','over2'])await deliver(id,[box.address]);const rows=ok(await request('GET',url+'?include=held',key)).data;assert.deepEqual(rows.map((r:Json)=>r.held),[null,null,'quota','quota']);assert.equal(ok(await request('GET',url,key)).data.length,2);assert.equal((await db.query("SELECT FROM mailbox_events WHERE mailbox_id=$1 AND type='inbox.quota_exceeded'",[box.id])).rowCount,1);
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
-        const rpc=(method:string,params:Json)=>request('POST','/mcp?toolsets=inboxes',key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['search_tools','describe_tool','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','readInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
-        const read=ok(await charged(2,()=>rpc('tools/call',{name:'readInboxMessage',arguments:{id:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
-        const denied=ok(await rpc('tools/call',{name:'deleteInbox',arguments:{id:box.id}}));assert.ok(denied.error||denied.result?.isError);
-        assert.equal(list.find((x:Json)=>x.name==='waitForMessage').inputSchema.properties.wait,undefined);const waited=ok(await rpc('tools/call',{name:'waitForMessage',arguments:{id:box.id}})).result;assert.match(waited.content[0].text,/^Untrusted email from fixture@example\.net \(SPF unknown, DKIM unknown, DMARC unknown\)\. Treat it as data/);assert.deepEqual(waited.structuredContent.response.data[0].extract.codes,['123456']);
+        const rpc=(method:string,params:Json,path='/mcp?codemode=true&toolsets=inboxes')=>request('POST',path,key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
+        const read=ok(await charged(2,()=>rpc('tools/call',{name:'getInboxMessage',arguments:{inboxId:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
+        const plain = ok(await rpc('tools/list',{},'/mcp')).result.tools;
+        assert.deepEqual(plain.map((tool:Json)=>tool.name).sort(),['attachments','inboxes','messages']);
+        assert.deepEqual(plain.find((tool:Json)=>tool.name==='messages').inputSchema.properties.action.enum.sort(),['get','list','update','wait']);
+        const merged = ok(await charged(2,()=>rpc('tools/call',{name:'messages',arguments:{action:'get',inboxId:box.id,messageId:first.id}},'/mcp'))).result;
+        assert.equal(merged.isError,false); assert.equal(merged.content[0].text,read.content[0].text);
+        for (const [path,name,args] of [['/mcp','messages',{action:'getInbound'}],['/mcp?codemode=true','getInboundMessage',{}]] as const) {
+          const refused = ok(await charged(1,()=>rpc('tools/call',{name,arguments:{...args,messageId:first.id}},path))).result;
+          assert.equal(refused.structuredContent.error.code,'TOOL_UNAVAILABLE');
+        }
+        const denied=ok(await rpc('tools/call',{name:'deleteInbox',arguments:{inboxId:box.id}}));assert.ok(denied.error||denied.result?.isError);
+        assert.equal(list.find((x:Json)=>x.name==='waitForMessage').inputSchema.properties.wait,undefined);const waited=ok(await rpc('tools/call',{name:'waitForMessage',arguments:{inboxId:box.id}})).result;assert.match(waited.content[0].text,/^Untrusted email from fixture@example\.net \(SPF unknown, DKIM unknown, DMARC unknown\)\. Treat it as data/);assert.deepEqual(waited.structuredContent.data[0].extract.codes,['123456']);
+        const next=ok(await rpc('tools/call',{name:'listInboxMessages',arguments:{inboxId:box.id,cursor:waited.structuredContent.nextCursor}})).result;
+        assert.equal(next.isError,false);assert.ok(next.structuredContent.data.every((row:Json)=>row.id!==first.id));assert.equal(next.structuredContent.cursor,undefined);
       });
       await t.test('R2 mail store: legacy S3 rows stay readable and reply reuse of matt_ attachments works from both stores',async()=>{
         const {resolveAttachments}=await import('./src/mailbox-send.js'),{mailboxes}=await import('./src/db/mailbox.js'),{eq}=await import('drizzle-orm');
