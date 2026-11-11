@@ -92,6 +92,7 @@ export interface Runtime {
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   allowFeedbackTopic?: (arn:string)=>Promise<boolean>;
   allowSnsCertMiss?: (peer: string) => Promise<boolean>;
+  allowMalformedSns?: (peer: string) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
@@ -263,8 +264,15 @@ export function admissionPeer(address: string): string {
 // budget. Check completed failures before dispatch, never charge concurrency.
 const failureCounts = new Map<string, number>();
 let failureMinute = 0;
+export function allowMalformedSns(peer: string) {
+  const minute=Math.floor(Date.now()/60000);
+  if(minute!==failureMinute){failureCounts.clear(); failureMinute=minute;}
+  const key=`malformed-sns:${peer}`, count=failureCounts.get(key)??0;
+  if(count>=40 || (!count && failureCounts.size>=4096)) return false;
+  failureCounts.set(key,count+1); return true;
+}
 export async function guardPublicRequest(path: string, headers: Headers, peer: string, work: () => Promise<Response>) {
-  const entry = /^\/(?:api\/auth|\.well-known)(?:\/|$)/.test(path);
+  const entry = /^\/(?:api\/auth|\.well-known)(?:\/|$)/.test(path) || path==='/mcp/login' || path==='/mcp/consent';
   const lane = entry ? 'identity-entry' : publicFailureBucket(path, 401, headers);
   if (!lane) return work();
   const minute = Math.floor(Date.now()/60000);
@@ -272,7 +280,7 @@ export async function guardPublicRequest(path: string, headers: Headers, peer: s
   const key = `${lane}:${peer}`;
   // At capacity, rely on edge admission for unknown peers. Never share either
   // a penalty or an in-flight reservation between unrelated credentials.
-  if (!failureCounts.has(key) && failureCounts.size >= 4096) return work();
+  if (!failureCounts.has(key) && failureCounts.size >= 4096) return entry ? publicFailureDenied() : work();
   const count = failureCounts.get(key) ?? 0;
   if (count >= 40) return publicFailureDenied();
   if(entry) failureCounts.set(key,count+1);

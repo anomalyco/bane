@@ -27,6 +27,7 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
+const loadBoundedHtml = lazyModule(() => import('./bounded-html.js'));
 const loadCampaignBlocks = lazyModule(() => import('./campaign-blocks.js'));
 const loadOpsUnsub = lazyModule(() => import('./operations.js'));
 const loadSendingSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
@@ -544,9 +545,9 @@ function validateUrl(value: string) {
   try { url = new URL(normalized, 'https://template.invalid/'); } catch { throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML contains an invalid URL.'); }
   if (!['http:', 'https:', 'mailto:', 'tel:', 'cid:'].includes(url.protocol)) throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML URLs must use HTTP(S), mailto, tel, CID, or relative references.');
 }
-function inspectHtml(source: string, parse: HtmlParser, template = false) {
+function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], template = false) {
   const safe: { start: number; end: number }[] = [];
-  const stack: { node: DefaultTreeAdapterMap['node']; unsafe: boolean }[] = [{ node: parse(source, { sourceCodeLocationInfo: true }), unsafe: false }];
+  const stack: { node: DefaultTreeAdapterMap['node']; unsafe: boolean }[] = [{ node: root, unsafe: false }];
   while (stack.length) {
     const { node, unsafe } = stack.pop()!;
     const element = 'tagName' in node ? node : undefined;
@@ -593,7 +594,7 @@ function validateInterpolationTemplate(source: string | undefined, html: boolean
   if (unsupported.includes('{{')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
   if (html) {
     if (!parse) throw new Error('HTML parser required');
-    inspectHtml(source, parse, true);
+    inspectHtml(source, parse(source, {sourceCodeLocationInfo:true}), true);
   }
 }
 function interpolate(source: string | undefined, values: Record<string, unknown>, html: boolean, templateValidated = false, parse?: HtmlParser): string | undefined {
@@ -611,10 +612,11 @@ function interpolate(source: string | undefined, values: Record<string, unknown>
   if (result.length + source.length - offset > MAX_BODY) throw new ApiError(413, 'RENDERED_CONTENT_TOO_LARGE', 'A personalized body part exceeds 512 KiB characters. Reduce the content or repeated substitutions.');
   return result + source.slice(offset);
 }
-function validateHtmlUrls(html: string | undefined, parse?: HtmlParser) {
+async function validateHtmlUrls(html: string | undefined) {
   if (html) {
-    if (!parse) throw new Error('HTML parser required');
-    inspectHtml(html, parse);
+    const root = (await loadBoundedHtml()).boundedHtmlFragment(html, 'document');
+    if (!root) throw new ApiError(422,'CONTENT_TOO_LARGE_TO_SCREEN','Simplify the HTML so it can be validated safely.','html');
+    inspectHtml(html, root);
   }
 }
 export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
@@ -664,7 +666,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
   sesHeaders(snapshot.headers.length + (input.kind==='marketing' ? 2 : 0));
   for (const row of rows) sesAttachment(row);
   if (route.binding) snapshot.binding=route.binding;
-  if (!htmlValidated && snapshot.html) validateHtmlUrls(snapshot.html, await loadParse5());
+  if (!htmlValidated && snapshot.html) await validateHtmlUrls(snapshot.html);
   if (input.template) {
     if (runtime.config.multiTenant && connection?.kind !== 'byo') throw new ApiError(422, 'SHARED_STORED_TEMPLATE_UNSUPPORTED', 'AWS-stored templates require a bring-your-own AWS connection. Use explicit content on shared sending.', 'template');
     // Preserve native SES semantics in both HTML and plaintext; callers own context-specific escaping.
@@ -761,9 +763,9 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   let prepError:unknown,cost=0,marketing=0,expanded=0;
   for(const [i,m] of mails.entries()){
     const snapshot=structuredSnapshot({...m,region:m.region??''});let token:{hash:string;email:string}|undefined;
+    if(snapshot.html) await validateHtmlUrls(snapshot.html);
     try {
       sesHeaders(snapshot.headers.length+(m.kind==='marketing'?2:0));distinctAttachmentIds(m.attachments);
-      if(snapshot.html)validateHtmlUrls(snapshot.html,await loadParse5());
       if(m.kind==='marketing'){
         // Only the token/hash and destination come from local preparation. Every DB
         // row (including this token) gets its workspace from the authenticated key.
@@ -829,6 +831,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   const assetIds = [...new Set(mails.flatMap(mail => mail.attachments))];
   if (c.env.config.multiTenant && mails.every(m => !m.template) && !assetIds.some(id => id.includes('\0'))) return atomicAdmission(c,input,{actor:a});
+  for (const mail of mails) if (mail.html) await validateHtmlUrls(mail.html);
   const data = mails.map(() => ({ id: id('email'), status: 'queued' as const, simulated: isSimulatedSes(c.env) }));
   const receipt = batch ? { data } : data[0]!;
   const mx = c.env.config.multiTenant, simulated = isSimulatedSes(c.env);
@@ -876,7 +879,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       validateAttachmentRows(mail.attachments, attached);
       const link = mail.kind === 'marketing' ? await (await loadOpsUnsub()).createUnsubscribeLink(c.env, a.workspaceId, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
       const route=state.routes?.[hosts[i]!];
-      const snapshot = await prepare(runtime, db, a, { ...mail, region }, false, attached, true, false, link?.url, route?.connection ?? state.connection ?? undefined);
+      const snapshot = await prepare(runtime, db, a, { ...mail, region }, false, attached, true, true, link?.url, route?.connection ?? state.connection ?? undefined);
       if (route) snapshot.binding=route.binding;
       if (batch) {
         expandedBytes += Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
@@ -1008,6 +1011,7 @@ export function registerSending(app: App) {
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
     if (replyAddressId) {
       if (a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use unrestricted manage permission, or start a thread with a scoped inbound key.');
+      if (input.html) await validateHtmlUrls(input.html);
       const { finishMailboxArchive, trackedAttachments, queueTrackedMailboxSend } = await wrapModuleLoad(() => import('./mailbox-send.js'));
       let files:Awaited<ReturnType<typeof trackedAttachments>>=[];
       const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, replyAddressId, input, input.replyAddressId ? 'replyAddressId' : 'replyMailboxId',files),undefined,input.attachments.length ? async()=>{files=await trackedAttachments(c.env,a,replyAddressId,input);} : undefined);
@@ -1795,7 +1799,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     validateInterpolationTemplate(review.rendered.html, true, parse);
     validateInterpolationTemplate(review.rendered.text, false);
     const htmlStatic = !review.rendered.html?.includes('{{');
-    if (htmlStatic) validateHtmlUrls(review.rendered.html, parse);
+    if (htmlStatic) await validateHtmlUrls(review.rendered.html);
     const messageStatic = ![review.draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
     let cursor = campaign.prepared, bytes = 0;
     const started = Date.now(), prepared: { ordinal: number; hash: string; subject: string; bytes: number }[] = [];
@@ -1916,9 +1920,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const allowance = buffer!.hosted;
     let hostedUntil: string | null = null;
     if (allowance && allowance.marketingCap !== null && !campaign.simulated) {
-      let left = allowance.marketingCap - allowance.used;
-      const blocked = recipients.findIndex(r => hostedCost(r.recipient.email) > 0 && --left < 0);
-      if (blocked >= 0) {
+      const blocked = Math.max(0, allowance.marketingCap - allowance.used);
+      if (blocked < recipients.length) {
         hostedUntil = allowance.nextChangeAt;
         if (blocked === 0) {
           await db.execute(holdCampaign(ref, 'hosted_daily_quota', hostedUntil));

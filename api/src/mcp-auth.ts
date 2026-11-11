@@ -6,7 +6,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, like, ne, sql } from 'drizzle-orm';
 import { actor, ApiError, digest, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
-import { currentGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin } from './google-auth.js';
+import { currentGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin, reserveSignIn } from './google-auth.js';
 import { workspaces } from './db/workspaces.js';
 import { agentTokens } from './db/core.js';
 import { authAccount, authUser } from './db/google-auth.js';
@@ -394,6 +394,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     if (member?.role === 'member' && requested.includes('bane:manage')) return page('Administrator approval required', '<p>Reconnect requesting read or send access instead of manage access.</p>');
     const action = form?.get('action');
     if (action === 'signin') {
+      await reserveSignIn(runtime,request.headers);
       const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
       const result = await auth.handler(new Request(`${issuerOf(runtime)}/sign-in/social`, { method: 'POST', headers,
         body: JSON.stringify({ provider: 'google', callbackURL: `${originOf(runtime)}/mcp/consent?${query}`, errorCallbackURL: `${originOf(runtime)}/?auth=error` }),

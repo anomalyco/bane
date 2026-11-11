@@ -7,7 +7,7 @@ import { jwt } from 'better-auth/plugins';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, exists, gt, inArray, ne, sql } from 'drizzle-orm';
-import { HOST_COOKIE, hasSessionCookie, isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
+import { HOST_COOKIE, digest, hasSessionCookie, isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 import { workspaceMembers } from './db/workspaces.js';
@@ -15,6 +15,11 @@ import { onboardNewUser, pendingInvitation, WorkspaceRole } from './workspaces.j
 import { ConnectionSummary, connectionSummary } from './provider-connections.js';
 
 const day = 24 * 60 * 60;
+export async function reserveSignIn(runtime:Runtime, headers: Headers) {
+  const peer=await digest(headers.get('x-bane-client-ip') ?? 'unknown'); // overwritten at both ingress adapters
+  const {rows:[slot]}=await runtime.db.execute<{ok:boolean}>(sql`SELECT reserve_auth_state(${peer}) AS ok`);
+  if (!slot?.ok) throw new ApiError(429,'AUTH_STATE_LIMIT','Too many pending sign-ins. Wait before retrying.',undefined,true);
+}
 // Every cookie Better Auth sets for the dashboard and MCP sign-in flows.
 const AUTH_COOKIES = ['session_token', 'session_data', 'account_data', 'dont_remember', 'state', 'oauth_state'] as const;
 
@@ -327,6 +332,7 @@ export function registerGoogleAuth(app: App) {
     if (path === '/sign-in/social') {
       const input = SignIn.safeParse(await c.req.raw.clone().json().catch(() => null));
       if (!input.success) throw new ApiError(422, 'AUTH_INPUT_INVALID', 'Use Google browser sign-in without custom scopes or identity fields.');
+      await reserveSignIn(c.env,c.req.raw.headers);
     }
     if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work))) return c.json(null);
     const started = performance.now();

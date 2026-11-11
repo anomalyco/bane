@@ -237,12 +237,12 @@ const claimTag = 'bane:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
-type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
+type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
-    dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
+    dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,dc.dns_first,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN domain_sending_bindings b ON b.domain_id=d.id AND b.connection_id=dc.connection_id AND b.region=d.region
@@ -321,7 +321,7 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
   return report;
 }
 const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
-type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean };
+type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean; dns_first?:boolean };
 const hour=3600_000;
 const proofTime=(at:Date|string|null|undefined)=>at?new Date(at).getTime():0;
 const proofUntil=(row:ProofTimes)=>Math.min(proofTime(row.receiving_proved_at)+72*hour,row.receiving_proof_missed_at?proofTime(row.receiving_proof_missed_at)+48*hour:Infinity);
@@ -331,6 +331,10 @@ const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='ve
 function derivedReadiness(row: ClaimRow): Readiness {
   const facts=row.identity, held=sends(row);
   const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note,facts?.dmarc);
+  if(row.dns_first && !row.ever_proven){
+    if(!report.dns.some(record=>record.name===`_bane.${row.name}`)) report.dns.unshift({name:`_bane.${row.name}`,type:'TXT',value:row.token,purpose:'sending',status:'pending'});
+    report.dnsUnavailableReason='Publish the ownership TXT record first. DKIM records follow after DNS proof.';
+  }
   report.verified=held; report.ready=held; report.sending=state(held);
   if (row.sending_state==='failed') report.verificationStatus='FAILED';
   else if (!held && report.verificationStatus==='SUCCESS') report.verificationStatus='PENDING';
@@ -441,6 +445,7 @@ function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string
     const current=await hostedDomain(db,wid,domainId,true);
     if (current && current.token===token && !current.expired && !current.identity?.adopted) {
       assertSharedAccount(runtime,current.connection);
+      if (current.dns_first && !current.ever_proven) return null;
       const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
       const pooled=current.connection.kind==='shared' && runtime.config.trustedPool;
       const identity=await ensureIdentity(client,current.name,token,pooled?POOL_INSTALLATION:current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo || pooled);
@@ -551,6 +556,19 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
   };
   const scoped={...runtime,config:{...runtime.config,workspaceId:job.workspaceId,regions:[row.region]}};
   try {
+    if(row.dns_first && !row.ever_proven) {
+      if(!await ownershipTxt(row.name,row.token)) defer(backoff(poll),nextPoll);
+      await runtime.db.transaction(async db=>{
+        await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(substring(${row.name} FROM '[^.]+\\.[^.]+$'),84912))`);
+        const elected=await db.execute(sql`UPDATE domain_claims dc SET ever_proven=true WHERE token=${row.token} AND connection_id=${row.connection.id} AND NOT domain_claim_expired(dc) RETURNING token`);
+        if (!elected.rowCount) return;
+        // Only remove a superseded, tag-matching *platform* identity in the
+        // same account and region. Never adopt by name or delete BYO resources.
+        const losers=await db.execute<{workspace_id:string;token:string;connection:HostedDomain['connection']}>(sql`SELECT dc.workspace_id,dc.token,to_jsonb(pc) AS connection FROM domain_claims dc JOIN domain_sending_bindings b USING(workspace_id,name,connection_id) JOIN regional_connections pc ON pc.id=b.connection_id AND pc.region=b.region WHERE dc.superseded AND NOT dc.dns_first AND dc.name=${row.name} AND pc.kind='shared' AND pc.region=${row.region} AND pc.aws_account_id=${row.connection.aws_account_id} FOR UPDATE OF dc`);
+        for(const loser of losers.rows){await deleteClaimIdentity(runtime,loser.workspace_id,{...row,...loser});await releaseClaim(db,loser.workspace_id,loser);}
+      });
+      defer(1000,nextPoll); // reload the winning token/binding before creating SES resources
+    }
     if (row.connection.kind==='byo' && row.connection.legacy===false && !await byoEnabled(runtime,job.workspaceId)) defer(300_000);
     await Promise.all([
       preloadSesTransport(runtime.config.multiTenant),
@@ -755,11 +773,10 @@ export function registerOperations(app: App) {
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
       // The reservation already queued the verify job, which creates the identity itself if this request dies here.
-      let identity: Partial<GetEmailIdentityCommandOutput>|undefined;
+      let identity: Partial<GetEmailIdentityCommandOutput>|null|undefined;
       try {
         const client=await getSes(runtime,row.region,claim.connection);
-        const pooled=claim.connection.kind==='shared' && c.env.config.trustedPool;
-        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token,pooled?POOL_INSTALLATION:c.env.config.regionalSending && (claim.connection.kind==='shared' || claim.connection.legacy_names===false)?claim.connection.id:undefined,pooled));
+        identity=await recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client);
       }
       catch(e) {
         if (e instanceof ModuleLoadError) throw e;
@@ -767,6 +784,7 @@ export function registerOperations(app: App) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
+      if (identity===null) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection,dns_first:true}),201);
       if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
@@ -1016,6 +1034,9 @@ function trustedSnsUrl(value: string, host: string, certificate: boolean) {
 }
 // Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
 const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
+// Only a valid signature may pin a signer. Unverified candidates, 404s and
+// peer throttles never replace these entries. Drop expired certificates only.
+const verifiedSigners = new Map<string, X509Certificate>();
 const missingCertificates=new Map<string,number>();
 // Node has no edge rate-limit binding. Reserve a miss synchronously, before I/O;
 // at capacity refuse new miss buckets rather than evicting a live peer's budget.
@@ -1036,20 +1057,23 @@ function allowLocalCertMiss(peer: string) {
   certMissPeers.set(peer, { count: 1, until: now + 60_000 });
   return true;
 }
-async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
-  const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
-  const trusted = snsHost(envelope);
-  const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
-  const signature = Buffer.from(envelope.Signature, 'base64');
-  if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
-  const fields = envelope.Type === 'Notification' ? ['Message', 'MessageId', ...(envelope.Subject !== undefined ? ['Subject'] : []), 'Timestamp', 'TopicArn', 'Type'] : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
-  const values = envelope as Record<string, unknown>;
-  if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
-  const cached = snsCertificates.get(url.href);
-  let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
-  if (!cert) {
-    if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
-    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw new ApiError(429, 'SNS_CERTIFICATE_RATE_LIMITED', 'Too many SNS certificate lookups from this connection. Retry after one minute.', undefined, true);
+// Public certificates rotate infrequently. Reserve synchronously after the
+// prefix check and before fetch; never queue waiters or share request I/O.
+const certMissLimited = () => new ApiError(429, 'SNS_CERTIFICATE_RATE_LIMITED', 'Too many SNS certificate lookups. Retry after one minute.', undefined, true);
+export class SnsCertMissBudget {
+  private starts: number[] = [];
+  private active = 0;
+  constructor(private readonly clock = () => performance.now()) {}
+  async run<T>(lookup: () => Promise<T>) {
+    const now=this.clock();
+    while (this.starts.length && this.starts[0]! <= now - 60_000) this.starts.shift();
+    if (this.active >= 4 || this.starts.length >= 96) throw certMissLimited();
+    this.active++; this.starts.push(now);
+    try { return await lookup(); } finally { this.active--; }
+  }
+}
+const isolateCertMissBudget = new SnsCertMissBudget();
+async function fetchSnsCert(url: URL, certificateTimeout: number) {
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
@@ -1063,15 +1087,36 @@ async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) 
       log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true);
     }
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
-    try { cert = new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
+    try { return new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
+}
+async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
+  const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
+  const trusted = snsHost(envelope);
+  const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
+  const signature = Buffer.from(envelope.Signature, 'base64');
+  if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
+  const fields = envelope.Type === 'Notification' ? ['Message', 'MessageId', ...(envelope.Subject !== undefined ? ['Subject'] : []), 'Timestamp', 'TopicArn', 'Type'] : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
+  const values = envelope as Record<string, unknown>;
+  if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
+  const cached = snsCertificates.get(url.href);
+  const pinned = verifiedSigners.get(url.href);
+  let cert = pinned && Date.parse(pinned.validTo)>Date.now() ? pinned : cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
+  if (!cert) {
+    if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
+    if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw certMissLimited();
+    cert=await isolateCertMissBudget.run(() => fetchSnsCert(url,certificateTimeout));
   }
   if (Date.now() < Date.parse(cert.validFrom) || Date.now() > Date.parse(cert.validTo) || cert.publicKey.asymmetricKeyType !== 'rsa') throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is expired or invalid.');
-  if (!cached || cached.expiresAt <= Date.now()) {
+  if (cert !== pinned && (!cached || cached.expiresAt <= Date.now())) {
     if (snsCertificates.size >= 8) snsCertificates.delete(snsCertificates.keys().next().value!);
     snsCertificates.set(url.href, { cert, expiresAt: Math.min(Date.now() + 300000, Date.parse(cert.validTo)) });
   }
   const canonical = fields.map(field => `${field}\n${values[field]}\n`).join('');
   if (!verify(envelope.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1', Buffer.from(canonical), cert.publicKey, signature)) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature verification failed.');
+  if (cert !== pinned) {
+    for(const [key,value] of verifiedSigners) if(Date.parse(value.validTo)<=Date.now()) verifiedSigners.delete(key);
+    verifiedSigners.set(url.href,cert);
+  }
   return trusted;
 }
 function verifySesAccount(runtime: Runtime, message: unknown, topicArn: string) {
