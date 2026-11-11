@@ -139,9 +139,22 @@
   --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 4%), 0 8px 16px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
+  /* Sender score grades: one flat fill and ink per grade. */
+  --grade-aplus: #13804A; --grade-aplus-ink: #FFFFFF;
+  --grade-a: #2EAF5A; --grade-a-ink: #FFFFFF;
+  --grade-b: #3B5CF6; --grade-b-ink: #FFFFFF;
+  --grade-c: #E7AF36; --grade-c-ink: #2B1F00;
+  --grade-d: #EE7B30; --grade-d-ink: #FFFFFF;
+  --grade-f: #D92E3C; --grade-f-ink: #FFFFFF;
 }
 
 :root[data-theme='dark'] {
+  --grade-aplus: #3DD68C; --grade-aplus-ink: #062414;
+  --grade-a: #6BD586; --grade-a-ink: #0A2412;
+  --grade-b: #A2BCFF; --grade-b-ink: #10183A;
+  --grade-c: #F2CF76; --grade-c-ink: #2B1F00;
+  --grade-d: #F59A5B; --grade-d-ink: #2A1305;
+  --grade-f: #F17471; --grade-f-ink: #2A0A0A;
   color-scheme: dark;
   --color-deep: #080808;
   --color-canvas: #080808;
