@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { mailObjectsFor } from './mail-objects.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
@@ -386,7 +387,11 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
-  const rawKey=workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
+  const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
+  const r2 = runtime.config.multiTenant && receipt.binding?.kind==='shared' && runtime.mailR2?.write;
+  const bucket = r2 ? `r2:${runtime.mailR2!.name}` : receipt.bucket;
+  const objects=mailObjectsFor(runtime,scope.workspaceId,bucket,s3);
+  const rawKey=r2 ? `d/${scope.workspaceId}/${messageRowId}.eml` : workspacePrefix(scope.workspaceId,'raw')+sesMessageId+'.eml';
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
   const quarantine=verdicts.virus!=='PASS'?'MAILBOX_VIRUS_QUARANTINED':spam && receipt.spamPolicy==='quarantine'?'MAILBOX_SPAM_QUARANTINED':null;
@@ -415,7 +420,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         if(reserved.rows[0]?.fits) throw new JobDeferred(new Date((Math.floor(Date.now()/3600000)+1)*3600000).toISOString());
         throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
       }
-    });
+    }, r2 ? objects : undefined);
   } catch (error) {
     s3.destroy();
     if (error instanceof JobDeferred || error instanceof ModuleLoadError || error instanceof ApiError) throw error;
@@ -427,7 +432,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const email = copied.large ? null : await parseInboundMime(raw);
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
-  const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
+
   const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
@@ -447,17 +452,16 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   try {
     // Stable on retry. Reopening a processed receipt strictly grows its envelope, so a
     // cleanup already tagging the old batch can never touch the newly published keys.
-    const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients])) : null;
-    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`)));
-    if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${receipt.bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
+    const batch=email?.attachments.length && !skipAttachments ? await digest(JSON.stringify([messageRowId,receipt.createdAt,receipt.recipients,...(r2?[bucket]:[])])) : null;
+    const keys=await Promise.all((skipAttachments?[]:email?.attachments??[]).map(async(_,i)=>{const id=`matt_${(await digest(`${messageRowId}:${i}`)).slice(0,32)}`;return r2 ? `a/${scope.workspaceId}/${messageRowId}/${batch}/${id}` : receivedAttachmentKey(scope.workspaceId,messageRowId,batch!,id)}));
+    if(keys.length)await runtime.db.execute(sql`INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) VALUES(${batch},${scope.workspaceId},${sesMessageId},${bucket},${receipt.region},${messageRowId},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(keys)}::jsonb))) ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour'`);
     for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);
       const attachmentId = `matt_${(await digest(`${messageRowId}:${index}`)).slice(0, 32)}`;
       const key = keys[index]!;
       const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(part.mimeType) ? part.mimeType : 'application/octet-stream';
-      const { PutObjectCommand } = await loadIngestS3();
-      await s3.send(new PutObjectCommand({ Bucket: receipt.bucket, Key: key, Body: new Uint8Array(bytes), ContentType: contentType }));
-      attachments.push({ id: attachmentId, ...scope, messageId: messageRowId, filename: (part.filename ?? `attachment-${index + 1}`).slice(0, 255), contentType, sizeBytes: bytes.byteLength, contentId: normalizeMessageId(part.contentId), disposition: part.disposition === 'inline' || part.related ? 'inline' as const : 'attachment' as const, sha256: hex(await crypto.subtle.digest('SHA-256', bytes)), bucket: receipt.bucket, storageKey: key });
+      await objects.put(key, new Uint8Array(bytes), contentType);
+      attachments.push({ id: attachmentId, ...scope, messageId: messageRowId, filename: (part.filename ?? `attachment-${index + 1}`).slice(0, 255), contentType, sizeBytes: bytes.byteLength, contentId: normalizeMessageId(part.contentId), disposition: part.disposition === 'inline' || part.related ? 'inline' as const : 'attachment' as const, sha256: hex(await crypto.subtle.digest('SHA-256', bytes)), bucket, storageKey: key });
     }
   } catch (error) {
     if (error instanceof ModuleLoadError) throw error;
@@ -470,7 +474,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
          fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
-        headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: receipt.bucket, rawKey,
+        headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: bucket, rawKey,
         verdicts, spam, automated: automated(email, raw, from.address), status,
       },attachments,verifiedFrom,!receipt.notification.stagingEtag);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });

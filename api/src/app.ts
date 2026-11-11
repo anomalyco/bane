@@ -25,7 +25,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
   if (pathname === '/v1/regions' || pathname.startsWith('/v1/regions/')) return 'ses-regions';
-  if (pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
+  if (pathname.startsWith('/v1/objects/') || pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
   if (pathname === '/v1/connection' || pathname.startsWith('/v1/connection/')) return 'provider-connections';
   return null;
@@ -88,7 +88,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
-    c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
+    c.header('x-request-id', requestId); if (!c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
@@ -109,7 +109,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   });
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
-    if (c.req.path.startsWith('/v1/inbound/')) return next();
+    if (c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
     if (c.req.path === '/v1/public/stats') return next();
     // Joining requires a verified session, not an existing membership. This endpoint

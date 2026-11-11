@@ -458,7 +458,9 @@ function registerAddresses(app: App) {
   });
 }
 
+import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
+  registerMailObjects(app);
   app.use('/v1/inbound/*', mailboxAuth);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');

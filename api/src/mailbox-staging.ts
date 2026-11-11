@@ -95,7 +95,10 @@ export const cleanCandidates:JobHandler=async(runtime)=>{
   const {rows:[snapshot]}=await runtime.db.execute<{missing:string[]}>(sql`SELECT ARRAY(SELECT key FROM unnest(${sql.param(u.keys)}::text[]) key WHERE NOT EXISTS(SELECT FROM mail_attachments WHERE workspace_id=${u.workspace_id} AND message_id=${u.message_id} AND bucket=${u.bucket} AND storage_key=key)) AS missing WHERE ${terminal}`);
   if(!snapshot)throw new JobDeferred(new Date().toISOString());
   const missing=snapshot.missing;
-  if(missing.length){
+  if(missing.length && u.bucket.startsWith('r2:')){
+    const {mailObjectsFor}=await import('./mail-objects.js');
+    await mailObjectsFor(runtime,u.workspace_id,u.bucket).delete(missing.slice(0,8));
+  } else if(missing.length){
     const s3=await mailboxS3(runtime,u.workspace_id,u.region,u.bucket);
     try {const {PutObjectTaggingCommand}=await loadS3Staging();const signal=AbortSignal.timeout(10000);
       for(const key of missing.slice(0,8)){assertMailboxKey(u.workspace_id,key,'att');await s3.send(new PutObjectTaggingCommand({Bucket:u.bucket,Key:key,Tagging:{TagSet:[{Key:'bane-kind',Value:'orphan'}]}}),{abortSignal:signal}).catch(e=>{if(e?.name!=='NoSuchKey')throw e;});}

@@ -10,7 +10,8 @@ import { regionalSending, unverifiedSender, verifiedClaim } from './domain-claim
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
-import { assertMailboxKey,readableMailboxKey,sentAttachmentKey, mailboxS3 } from './mailbox-setup.js';
+import { mailObjectsFor } from './mail-objects.js';
+import { readableMailboxKey,sentAttachmentKey, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
 import { decodeBase64 } from './outbound-content.js';
@@ -41,17 +42,19 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
       const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},decodeBase64(item.content,'attachments')));
     } else if(item.id.startsWith('matt_')){
-      const [{ GetObjectCommand }, { storeAttachmentBytes }] = await wrapModuleLoad(() => Promise.all([import('@aws-sdk/client-s3'), import('./sending.js')]));
+      const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
         .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`coalesce(${mailMessages.verdicts}->>'virus',CASE WHEN ${mailMessages.direction}='outbound' THEN 'PASS' END)='PASS'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
-      const s3=await mailboxS3(runtime,scope.workspaceId,file.region,file.file.bucket);
+      const s3=file.file.bucket.startsWith('r2:') ? undefined : await mailboxS3(runtime,scope.workspaceId,file.region,file.file.bucket);
       let bytes:Uint8Array;
       try {
         if(file.file.sourceId) await archiveMailboxFiles(runtime,scope.workspaceId,file.file.messageId,s3);
-        const key=await readableMailboxKey(runtime,scope.workspaceId,file.region,file.file.bucket,file.file.storageKey,'att',runtime.db,s3);
-        const object=await s3.send(new GetObjectCommand({Bucket:file.file.bucket,Key:key}));bytes=await object.Body!.transformToByteArray();
-      } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3.destroy();}
+        const key=!s3 ? file.file.storageKey : await readableMailboxKey(runtime,scope.workspaceId,file.region,file.file.bucket,file.file.storageKey,'att',runtime.db,s3);
+        const store=mailObjectsFor(runtime,scope.workspaceId,file.file.bucket,s3);
+        if(file.file.sizeBytes>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','The attachment is too large.');
+        const object=await store.get(key);if(!object)throw new Error('Missing attachment');bytes=new Uint8Array(await new Response(object).arrayBuffer());
+      } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3?.destroy();}
       out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
     } else {
       const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.id,item.id)));
@@ -72,13 +75,14 @@ export async function archiveMailboxFiles(runtime:Runtime,wid:string,messageId:s
   if(!rows.length)return;
   const {region,file:first}=rows[0]!;
   if(!region || rows.some(r=>r.file.bucket!==first.bucket))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Inconsistent storage binding.');
-  const [{ PutObjectCommand }, { verifiedAttachment }, s3] = await Promise.all([wrapModuleLoad(() => import('@aws-sdk/client-s3')), wrapModuleLoad(() => import('./sending.js')), client ? Promise.resolve(client) : mailboxS3(runtime,wid,region,first.bucket)]);
+  const {verifiedAttachment}=await wrapModuleLoad(()=>import('./sending.js'));
+  const s3=first.bucket.startsWith('r2:') ? undefined : client ?? await mailboxS3(runtime,wid,region,first.bucket);
+  const objects=mailObjectsFor(runtime,wid,first.bucket,s3);
   try {for(const {file,source} of rows){
-    assertMailboxKey(wid,file.storageKey,'att');
     if(!ownsUpload(wid,source) || source.checksum!==file.sha256)throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Invalid archive source.');
     const bytes=await verifiedAttachment(runtime,source);
-    await s3.send(new PutObjectCommand({Bucket:file.bucket,Key:file.storageKey,ContentType:file.contentType,Body:bytes}));
-  }} finally{if(!client)s3.destroy();}
+    await objects.put(file.storageKey,bytes,file.contentType);
+  }} finally{if(!client)s3?.destroy();}
   await runtime.db.execute(sql`WITH copied AS (UPDATE mail_attachments SET source_attachment_id=NULL WHERE workspace_id=${wid} AND message_id=${messageId} AND source_attachment_id IS NOT NULL RETURNING id)
     DELETE FROM sending_attachment_links l USING copied c WHERE l.workspace_id=${wid} AND l.owner_type='mailbox' AND l.owner_id=c.id`);
 }
@@ -156,7 +160,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   message = { ...message, mailbox: current };
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   await enforceLimits(tx, message);
-  const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN p.inbound_bucket ELSE r.bucket END FROM provider_connections c
+  const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN ${runtime.mailR2?.write ? sql`${'r2:'+runtime.mailR2.name}::text` : sql`p.inbound_bucket`} ELSE r.bucket END FROM provider_connections c
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND ${connectionReady(sql`c`)})` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
@@ -169,7 +173,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
-    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
+    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:domain.bucket!.startsWith('r2:') ? `a/${message.scope.workspaceId}/${messageRowId}/sent/${attachmentId}` : sentAttachmentKey(message.scope.workspaceId,messageRowId,attachmentId)};
   }));
   const references = referencesHeader(message.references);
   const headers = [

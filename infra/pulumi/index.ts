@@ -53,6 +53,12 @@ new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, j
   ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"], // ENAM; creation-only.
 });
 
+const mail = new cf.R2Bucket("mail", { accountId: cloudflareAccountId, name: `${stage.prefix}-mail`, jurisdiction: "default", location: "ENAM" }, { provider: cloudflare, protect: true });
+new cf.R2BucketLifecycle("mail-retention", { accountId: cloudflareAccountId, bucketName: mail.name, rules: [
+  ...[["default-raw-90d","d/",90], ["ephemeral-safety-45d","e/",45]].map(([id,prefix,days]) => ({id:String(id),enabled:true,conditions:{prefix:String(prefix)},deleteObjectsTransition:{condition:{type:"Age",maxAge:Number(days)*86400}}})),
+  {id:"abort-multipart-1d",enabled:true,conditions:{prefix:""},abortMultipartUploadsTransition:{condition:{type:"Age",maxAge:86400}}},
+]}, {provider: cloudflare, protect:true});
+
 // The Hyperdrive config is not managed here. Cloudflare never returns origin.password, and
 // Pulumi fails to import the resource because the read state lacks that required property.
 

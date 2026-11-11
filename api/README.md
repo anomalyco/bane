@@ -164,6 +164,8 @@ Attachments belong in a **private** S3/R2 bucket. Set the bucket, region, endpoi
 
 On upgrade, dashboard users sign in again and theme/workspace preferences reset once. Existing API keys, scoped OAuth grants, signed webhook secrets, and published domain-ownership proofs continue to work. New proof records use `_bane`; do not replace an existing `_opensend` record just to rename it.
 
+Hosted received mail can use private Cloudflare R2 storage: `MAIL` is distinct from sending uploads. `BANE_MAIL_STORE=r2` switches only new shared-pool writes; unset it to resume S3 writes. Keep the binding for existing downloads. SES staging (3 days) and quarantine (30 days) remain in S3. Non-inbox raw mail still expires after 90 days; extracted attachments do not expire. BYO and self-hosted mail stays in its configured S3 bucket.
+
 ## Cloudflare
 
 Hosted `BANE_*` configuration variables accept the corresponding `MX_*` names as fallbacks. Set the new names for all new deployments.
