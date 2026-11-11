@@ -80,7 +80,7 @@
 }
 
 /* Sidebar (pitch): the score card spans the sidebar's full inner width at the bottom. */
-.sidebar-footer > .score-side, .score-side-placeholder { margin-inline: calc(-1 * var(--space-12)); }
+.sidebar-footer > :is(.score-side, .score-card), .score-side-placeholder { margin-inline: calc(-1 * var(--space-12)); }
 .score-side-placeholder { height: 56px; }
 
 /* B: split sidebar. Setup steps sit between navigation and the score card until setup is done. */
@@ -95,3 +95,32 @@
 .sidebar-steps a[data-current] { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
 .sidebar-steps a[data-done] > span:nth-child(2) { text-decoration: line-through; text-decoration-color: var(--color-border-strong); }
 .sidebar-steps .setup-rail__mark { width: 18px; height: 18px; font-size: 10px; }
+
+/* A, pass 2: a denser rhythm. Console-style facts (hairline above, label row, value with its own series),
+   a shorter chart, seven email rows at the shared 53px, and a tighter detail column. */
+.page-surface > .ui-page-header:has(+ .ov-split--dense) { margin-bottom: var(--space-16); }
+.ov-split--dense { grid-template-columns: minmax(0, 1fr) 312px; gap: var(--space-32); }
+.ov-split--dense .ov-split__main { gap: var(--space-20); }
+.ov-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-24); margin: 0; }
+.ov-facts > div { min-width: 0; padding-top: var(--space-12); border-top: 1px solid var(--color-border); }
+.ov-facts dt { display: flex; justify-content: space-between; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
+.ov-facts dd { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-12); margin: var(--space-4) 0 0; min-width: 0; }
+.ov-facts__value { font-size: 24px; line-height: 28px; font-weight: 500; letter-spacing: -.035em; white-space: nowrap; }
+.ov-spark { flex: none; width: 76px; height: 24px; }
+.ov-spark rect { fill: var(--color-layer-3); }
+.ov-spark--sent rect { fill: color-mix(in srgb, var(--color-accent) 70%, transparent); }
+.ov-spark--delivered rect { fill: color-mix(in srgb, var(--color-text) 28%, transparent); }
+.ov-spark--bounces rect { fill: var(--color-warning-marker); }
+.ov-spark--complaints rect { fill: var(--color-danger-marker); }
+.ov-spark rect.ov-spark__zero { fill: var(--color-layer-3); }
+.ov-split--dense .ov-chart__head { margin-bottom: var(--space-4); }
+.ov-split--dense .ov-chart .activity-chart { height: 196px; }
+.ov-split--dense .ov-chart .ui-empty-state { padding-block: var(--space-24); }
+.ov-latest .ui-section-header { margin-bottom: var(--space-4); }
+.ov-latest__subject { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-split--dense .ov-split__aside { gap: var(--space-20); }
+.ov-split--dense .ov-split__aside > * + * { padding-top: var(--space-16); }
+.ov-split--dense .next-steps a { min-height: 36px; }
+.ov-split--dense .setup-rail { gap: var(--space-8); }
+.ov-split--dense .setup-rail li { padding-block: 6px; }
+@media (max-width: 1200px) { .ov-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

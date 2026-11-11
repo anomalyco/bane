@@ -79,26 +79,48 @@ function Campaigns({ data }: { data: Overview }) {
   </section>
 }
 
-// The five latest emails, each a link into Logs.
-function LatestEmails() {
+// The latest emails, each a link into Logs.
+function LatestEmails({ count = 5 }: { count?: number }) {
   const navigate = useNavigate()
-  const emails = useApiQuery(['emails', 'overview-latest'], (api, signal) => api.emails.list({ page: 1, pageSize: 5 }, signal), { interval: 60_000 })
+  const emails = useApiQuery(['emails', 'overview-latest', count], (api, signal) => api.emails.list({ page: 1, pageSize: count }, signal), { interval: 60_000 })
   if (!emails.data?.items.length) return null
-  return <section className="ov-campaigns"><SectionHeader title="Latest emails" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>Logs <ArrowUpRight size={16} /></Button>} />
+  return <section className="ov-campaigns ov-latest"><SectionHeader title="Latest emails" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>Logs <ArrowUpRight size={16} /></Button>} />
     <DataTable className="ov-table" rows={emails.data.items} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${encodeURIComponent(row.id)}`)} columns={[
-      { key: 'status', label: 'Status', width: 120, render: row => <StatusBadge status={row.status} /> },
-      { key: 'subject', label: 'Subject', render: row => <span>{row.subject}<span className="muted"> · {row.to}</span></span> },
-      { key: 'time', label: 'Created · UTC', width: 140, align: 'right', render: row => <span className="muted">{time(row.sentAt)}</span> },
+      { key: 'status', label: 'Status', width: 116, render: row => <StatusBadge status={row.status} /> },
+      { key: 'subject', label: 'Subject', render: row => <span className="ov-latest__subject">{row.subject}<span className="muted"> · {row.to}</span></span> },
+      { key: 'stream', label: 'Stream', width: 116, render: row => <span className="muted">{label(row.stream)}</span> },
+      { key: 'time', label: 'UTC', width: 88, align: 'right', render: row => <span className="muted">{time(row.sentAt)}</span> },
     ]} />
   </section>
+}
+
+// Direction A, pass 2: four compact facts (Console's hero facts), each with its own series as tiny bars.
+function Spark({ values, tone }: { values: number[]; tone: 'sent' | 'delivered' | 'bounces' | 'complaints' }) {
+  const max = Math.max(1, ...values), slot = 100 / Math.max(1, values.length)
+  return <svg className={`ov-spark ov-spark--${tone}`} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+    {values.map((value, i) => <rect key={i} className={value ? undefined : 'ov-spark__zero'} x={i * slot + slot * .18} width={slot * .64} y={24 - Math.max(value ? 2 : 1, value / max * 24)} height={Math.max(value ? 2 : 1, value / max * 24)} />)}
+  </svg>
+}
+function Facts({ data }: { data: Overview }) {
+  const points = data.points
+  const facts = [
+    { key: 'emails', title: 'Emails', value: number(data.sent), aside: delta(data) ?? '', series: points.map(p => p.sent), tone: 'sent' as const },
+    { key: 'delivered', title: 'Delivered', value: rate(data.delivered, data.sent), aside: number(data.delivered), series: points.map(p => p.delivered), tone: 'delivered' as const },
+    { key: 'bounced', title: 'Bounced', value: rate(data.bounced, data.sent), aside: number(data.bounced), series: points.map(p => p.bounced), tone: 'bounces' as const, warn: data.sent > 0 && data.bounced / data.sent >= 0.05 },
+    { key: 'complaints', title: 'Complaints', value: rate(data.complaints, data.sent), aside: number(data.complaints), series: points.map(p => p.complaints), tone: 'complaints' as const, warn: data.sent > 0 && data.complaints / data.sent >= 0.001 },
+  ]
+  return <dl className="ov-facts">{facts.map(fact => <div key={fact.key}>
+    <dt><span>{fact.title}</span><span className="muted">{fact.aside}</span></dt>
+    <dd><span className={`ov-facts__value${fact.warn ? ' text-warning' : ''}`}>{fact.value}</span><Spark values={fact.series} tone={fact.tone} /></dd>
+  </div>)}</dl>
 }
 
 // A: split. The right column holds what to do: setup while it's unfinished, then the score and next steps.
 function OverviewA({ view }: { view: View }) {
   const setup = useSetupSteps()
   const next = useNextSteps()
-  return <div className="ov-split">
-    <div className="ov-split__main"><Body view={view}>{data => <><Numbers data={data} /><Chart view={view} data={data} />{data.recentCampaigns.length ? <Campaigns data={data} /> : <LatestEmails />}</>}</Body></div>
+  return <div className="ov-split ov-split--dense">
+    <div className="ov-split__main"><Body view={view}>{data => <><Facts data={data} /><Chart view={view} data={data} /><LatestEmails count={7} />{data.recentCampaigns.length > 0 && <Campaigns data={data} />}</>}</Body></div>
     <aside className="ov-split__aside" aria-label="Status">
       {setup && <SetupRail steps={setup.steps} current={setup.current} />}
       <ReportCard variant="column" />
