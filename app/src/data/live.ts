@@ -1,6 +1,6 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
-import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage } from './types'
+import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, SenderScore } from './types'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The dashboard's selected workspace (multi-tenant installations only). Sent with every request.
@@ -140,6 +140,7 @@ export function createLiveApi(): BaneApi {
       updateAutoValidation: (region, stream, mode, signal) => call(`/regions/${idPath(region)}/auto-validation`, 'PUT', { stream, mode, confirm: true }, signal),
     },
     workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
+    senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal) },
     overview: { get: async (input, signal) => {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
       const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
