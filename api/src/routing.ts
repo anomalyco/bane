@@ -126,13 +126,24 @@ const listRoutes = async (tx: DbExecutor, w: string) =>
   (await tx.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} ORDER BY match`)).rows;
 const currentVersion = async (tx: DbExecutor, w: string) =>
   (await tx.execute<{ v: number }>(sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS v`)).rows[0]!.v;
-/** Routes as they were at version v: the latest audited state of each route at or before it. */
-const historical = async (tx: DbExecutor, w: string, v: number) =>
-  (
-    await tx.execute<{ r: Route }>(
-      sql`SELECT r FROM (SELECT DISTINCT ON(resource_id) after AS r FROM mail_routing_audit WHERE workspace_id=${w} AND version<=${v} ORDER BY resource_id,version DESC) h WHERE r IS NOT NULL ORDER BY r->>'match'`,
-    )
-  ).rows.map((r) => r.r);
+/** Read one bounded slice of immutable identities and their version's diff in the same snapshot.
+ * The first change AFTER v contains the exact before-image, even after older audit deltas expire. */
+async function versionPage(tx:DbExecutor,w:string,v:number,offset:number,size:number){
+  if(v===0)return {routes:[] as Route[],diff:[] as z.infer<typeof RoutingDiff>[],nextCursor:null};
+  const manifest=(await tx.execute<{routes:Route[];diff:z.infer<typeof RoutingDiff>[];more:boolean}>(sql`
+    SELECT cardinality(route_ids)>${offset+size} OR cardinality(changed_ids)>${offset+size} AS more,
+      coalesce((SELECT jsonb_agg(coalesce(change.before,to_jsonb(live)) ORDER BY ord) FROM unnest(route_ids[${offset+1}:${offset+size}]) WITH ORDINALITY ids(ref,ord)
+        LEFT JOIN LATERAL (SELECT a.before FROM mail_routing_audit a WHERE a.workspace_id=${w} AND a.resource_id=ref AND a.version>${v} ORDER BY a.version LIMIT 1) change ON true
+        LEFT JOIN LATERAL (SELECT ${columns} FROM mail_routes r WHERE r.workspace_id=${w} AND r.id=ref) live ON change.before IS NULL),'[]') AS routes,
+      coalesce((SELECT jsonb_agg(jsonb_build_object('before',a.before,'after',a.after) ORDER BY ord) FROM unnest(changed_ids[${offset+1}:${offset+size}]) WITH ORDINALITY ids(ref,ord)
+        JOIN mail_routing_audit a ON a.workspace_id=${w} AND a.version=${v} AND a.resource_id=ref),'[]') AS diff
+    FROM mail_routing_versions WHERE workspace_id=${w} AND version=${v} AND created_at>=now()-interval '1 year'`)).rows[0];
+  if(!manifest)throw fail(410,'VERSION_EXPIRED','This version is no longer retained (one year or 256 versions).');
+  return {routes:manifest.routes,diff:manifest.diff,nextCursor:manifest.more?String(offset+size):null};
+}
+async function historical(tx:DbExecutor,w:string,v:number){
+  const routes:Route[]=[];let next:string|null='0';do{const page=await versionPage(tx,w,v,Number(next),256);routes.push(...page.routes);next=page.nextCursor;}while(next);return routes;
+}
 /** Opts a workspace into the routed store without changing routing (the version stays the same). */
 export const enableRouting = (tx: DbExecutor, w: string) =>
   tx.execute(sql`INSERT INTO mail_routing_state(workspace_id) VALUES(${w}) ON CONFLICT DO NOTHING`);
@@ -236,6 +247,7 @@ async function save(
   after: Route[],
   { dryRun = false, lenient = false, note = '' } = {},
 ) {
+  if(after.length>10000)throw fail(422,'ROUTE_LIMIT','A workspace supports at most 10,000 routes.');
   checkRoutes(after);
   const previous = new Map(before.map((r) => [r.id, r])),
     kept = new Set(after.map((r) => r.id));
@@ -280,6 +292,10 @@ async function save(
     sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
   );
   const who = c.get('actor');
+  await tx.execute(sql`INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,note)
+    VALUES(${w},${next},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(after.map(r=>r.id).sort())}::jsonb)),ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(diff.map(d=>(d.before??d.after)!.id).sort())}::jsonb)),${who.credential??'apiKey'},${who.keyId},${note||null})`);
+  // At most one retired manifest on a normal write; its audit rows share the same transaction.
+  await tx.execute(sql`DELETE FROM mail_routing_versions WHERE workspace_id=${w} AND version<=${next-256}`);
   await tx.execute(
     sql`INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note) SELECT ${w},${next},coalesce(before->>'id',after->>'id'),before,after,${who.credential ?? 'apiKey'},${who.keyId},${c.get('requestId')},${note || null} FROM jsonb_to_recordset(${JSON.stringify(diff)}::jsonb) x(before jsonb,after jsonb)`,
   );
@@ -563,8 +579,8 @@ export function registerRouting(app: App) {
         q = c.req.valid('query');
       const rows = (
         await c.env.db.execute<z.infer<typeof RoutingVersion>>(
-          sql`SELECT version,min(created_at)::text AS "createdAt",jsonb_build_object('type',min(actor_type),'id',min(actor_id)) AS actor,count(*)::int AS changes,max(note) AS note FROM mail_routing_audit
-            WHERE workspace_id=${w} ${q.cursor ? sql`AND version<${Number(q.cursor) || 0}` : sql``} GROUP BY version ORDER BY version DESC LIMIT ${q.limit + 1}`,
+          sql`SELECT version,created_at::text AS "createdAt",jsonb_build_object('type',actor_type,'id',actor_id) AS actor,cardinality(changed_ids) AS changes,note FROM mail_routing_versions
+            WHERE workspace_id=${w} AND created_at>=now()-interval '1 year' ${q.cursor ? sql`AND version<${Number(q.cursor) || 0}` : sql``} ORDER BY version DESC LIMIT ${q.limit + 1}`,
         )
       ).rows;
       return c.json({ data: rows.slice(0, q.limit), nextCursor: rows.length > q.limit ? String(rows[q.limit - 1]!.version) : null }, 200);
@@ -578,19 +594,14 @@ export function registerRouting(app: App) {
       operationId: 'getRoutingVersion',
       summary: 'Read a routing version',
       description: 'The routes as they were at version v, and what that version changed.',
-      request: { params: VersionParam },
-      responses: { 200: response(RoutingConfig.extend({ diff: z.array(RoutingDiff) }).openapi('RoutingVersionDetail')), ...errors },
+      request: { params: VersionParam,query:Page.extend({cursor:z.string().regex(/^\d{1,5}$/).optional()}) },
+      responses: { 200: response(RoutingConfig.extend({ diff: z.array(RoutingDiff),nextCursor:z.string().nullable() }).openapi('RoutingVersionDetail')), ...errors },
     }),
     async (c) => {
       const w = workspace(c),
         v = c.req.valid('param').v;
       if (v > (await currentVersion(c.env.db, w))) throw fail(404, 'NOT_FOUND', `Version ${v} does not exist yet. List versions with GET /v1/routing/versions.`);
-      const diff = (
-        await c.env.db.execute<z.infer<typeof RoutingDiff>>(
-          sql`SELECT before,after FROM mail_routing_audit WHERE workspace_id=${w} AND version=${v} ORDER BY resource_id`,
-        )
-      ).rows;
-      return c.json({ version: v, routes: await historical(c.env.db, w, v), diff }, 200);
+      const q=c.req.valid('query');return c.json({version:v,...await versionPage(c.env.db,w,v,Number(q.cursor??0),q.limit)},200);
     },
   );
   app.openapi(

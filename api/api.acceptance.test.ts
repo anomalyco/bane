@@ -8056,6 +8056,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(versions.data.map((v: Json) => v.version), [version + 2, version + 1]);
         assert.equal(versions.nextCursor, String(version + 1));
       });
+      await t.test('routing M6: version pages survive expired ancestors; restore refuses pruned history',async()=>{
+        const current=await call('GET','/v1/routing');const proof=await call('GET',`/v1/routing/versions/${current.version}?limit=1`);assert.equal(proof.routes.length,1);assert.ok(proof.nextCursor);const next=await call('GET',`/v1/routing/versions/${current.version}?limit=1&cursor=${proof.nextCursor}`);assert.notEqual(next.routes[0].id,proof.routes[0].id);
+        await db.query("UPDATE mail_routing_versions SET created_at=now()-interval '366 days' WHERE workspace_id=$1 AND version=1",[wid]);await db.query('SELECT mail_prune_route_versions()');assert.equal((await db.query('SELECT FROM mail_routing_audit WHERE workspace_id=$1 AND version=1',[wid])).rowCount,0);
+        error(await local('POST','/v1/routing/versions/1/restore',{}),410,'VERSION_EXPIRED');const retained=await call('GET',`/v1/routing/versions/${current.version}?limit=100`);assert.deepEqual(retained.routes.map((r:Json)=>r.id).sort(),current.routes.map((r:Json)=>r.id).sort());
+      });
       await t.test('routing: deleted or expired destinations fall back to keep, with a trace warning', async () => {
         await call('PATCH', '/v1/routing/routes/support', { to: [box.id] });
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 second' WHERE id=$1", [box.id]);

@@ -64,6 +64,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   // Do not cascade away an unexpired access token when its refresh token expires first.
   await drain('oauth_refresh_token',batch(sql`oauth_refresh_token`,sql`expires_at <= now() AND NOT EXISTS
     (SELECT FROM oauth_access_token a WHERE a.refresh_id=oauth_refresh_token.id AND a.expires_at>now())`));
+  await runtime.db.execute(sql`SELECT mail_prune_route_versions()`);
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
   if (runtime.config.multiTenant) {
