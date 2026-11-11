@@ -16,13 +16,13 @@ import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
-import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
+import { claimName, domainName, platformDomainOwner, platformHost, releaseConnectionClaims, releasedClaimCleanup, reserveClaim, reservedPlatformName } from './domain-claims.js';
 import { loadRegistries } from './domain-registry.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { dmarcView, localDmarc, observeDmarc, type DmarcObservation } from './dmarc.js';
 import { forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoEnabled } from './byo-pilot.js';
-import { awsError, feedbackUrl, mxOwnerTag, mxResourceName, POOL_INSTALLATION } from './ses-setup.js';
+import { awsError, claimTenantName, feedbackUrl, mxOwnerTag, POOL_INSTALLATION } from './ses-setup.js';
 import type { RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
@@ -320,6 +320,10 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
   if (stored?.status!=='active') report.receiving='pending';
   return report;
 }
+// The operator-adopted platform domain (scripts/adopt-platform-domain.ts) receives on its Ohio connection while its
+// workspace stays configured. Every other adoption is send-only.
+const platformClaim = (config:Config,wid:string,row:{name:string;identity:IdentityFacts|null;connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}}) =>
+  !!row.identity?.adopted && row.connection.kind==='shared' && row.connection.legacy!==false && platformDomainOwner(config,wid) && row.name===platformHost(config.publicUrl);
 const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
 type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean; dns_first?:boolean };
 const hour=3600_000;
@@ -355,12 +359,14 @@ function derivedReadiness(row: ClaimRow): Readiness {
       if(blocking)report.receiving='pending';
     }
   }
-  if (facts?.adopted) report.dns=[]; // No DNS setup is authorized by send-only operator attestation.
+  // No DNS setup is authorized by a send-only operator attestation. The adopted platform domain also receives: it
+  // shows only its receiving MX, since its DKIM records predate the claim and the attestation replaces the TXT.
+  if (facts?.adopted) report.dns=facts.receivingChoice || row.receiving_state!=='off' ? report.dns.filter(r=>r.purpose==='receiving') : [];
   if (row.created_at!==undefined && row.ever_proven===false && !held) report.releasesAt=new Date(new Date(row.created_at).getTime()+72*3600_000).toISOString();
   else if (row.ever_proven!==undefined) report.releasesAt=null;
   return report;
 }
-const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.pool_tenant_name??(row.connection.managed_tenant?mxResourceName(wid):`bane-${wid}`), ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
+const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:claimTenantName(row.connection,wid), ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
 
 // The caller holds the claim lock. Only a full identity check can change eligibility; an MX-only
 // observation may change routing but can never grant ownership or qualify an unverified SES identity.
@@ -398,7 +404,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
     // separately reviewed receiving binding may change that projection in phase 2.
     if (row.connection.legacy===false) return applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported,adopted:row.identity?.adopted},null);
     const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
-    await applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx,note,issue,receivingChoice:row.identity?.receivingChoice ?? null,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
+    await applyClaim(db,ref,next,{ses,dmarc,proven:evidence.proven,mx,note,issue,receivingChoice:row.identity?.receivingChoice ?? null,imported:row.identity?.imported,adopted:row.identity?.adopted},mx?.expected.name ?? expectedMx(row.name,row.region).name);
   };
   if (next.receiving_host && next.receiving_host!==row.receiving_host) {
     // Two claims can both read a host as free above and then race to route it; the unique indexes decide. The loser
@@ -600,7 +606,22 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       // Runtime IAM intentionally denies membership reads/writes on these ARNs. An SES send
       // requires the pinned tenant; only the migration operator can attest membership anew.
       const verified=matchesAdoption(identity,row.identity.adopted.fingerprint);
-      if (!verified) await runtime.db.execute(sql`UPDATE domain_claims SET sending_state='pending',lost_since=NULL WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
+      if (!platformClaim(runtime.config,job.workspaceId,row)) {
+        if (!verified) await runtime.db.execute(sql`UPDATE domain_claims SET sending_state='pending',lost_since=NULL WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
+        return;
+      }
+      // The platform domain also receives. The operator's attestation, which SES keeps current by checking the
+      // platform's own DKIM records, stands in for the claim tag and the _bane TXT; the MX checks are the ordinary
+      // ones. A drifted identity stops sending and receiving until the operator attests it again.
+      const identityVerified=identity.VerificationStatus==='SUCCESS', ses=sesFacts(identity);
+      const [dmarc,observation]=await Promise.all([observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return null;}),receivingMx(runtime.db,row,job.workspaceId)]);
+      await runtime.db.transaction(async db=>{
+        const current=await hostedDomain(db,job.workspaceId,row.id,true);
+        if (!current?.identity?.adopted || current.token!==row.token || current.expired) return;
+        if (current.receiving_host!==row.receiving_host) defer(5000); // Never replace a newer MX observation with this one.
+        await db.execute(sql`UPDATE domain_claims SET ${observeProof(verified)},receiving_identity_at=CASE WHEN ${identityVerified} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${current.connection.id}`);
+        await saveObservation(db,current,job.workspaceId,ses,observation,{sending:verified && sends(current),sendingRevoked:!verified,identityVerified,proven:verified},dmarc);
+      });
       return;
     }
     else if (!(row.connection.kind==='byo' && row.identity?.imported) && !ownsIdentity(identity,row.token)) throw unavailableDomain();
@@ -682,7 +703,8 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
   // A definitive missing/invalid/ambiguous answer must still replace it.
-  const [observation,dmarc,proof]=await Promise.all([checkReceiving ? receivingMx(runtime.db,row,job.workspaceId) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;}), row.connection.kind==='shared' && (checkReceiving || row.receiving_host) ? ownershipTxt(row.name,row.token) : undefined]);
+  // An adopted claim never publishes a _bane TXT: its proof is the operator's attestation, renewed by domain.verify.
+  const [observation,dmarc,proof]=await Promise.all([checkReceiving ? receivingMx(runtime.db,row,job.workspaceId) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;}), row.connection.kind==='shared' && !row.identity.adopted && (checkReceiving || row.receiving_host) ? ownershipTxt(row.name,row.token) : undefined]);
   if(!observation && dmarc===undefined) throw dnsUnavailable();
   // A sending promotion to Virginia doesn't move the existing Ohio ingress. Re-attest the
   // original account/host in Ohio; a successful Virginia SES read is not evidence for it.
@@ -704,7 +726,9 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
     if(retainedIdentity!==undefined)await db.execute(sql`UPDATE domain_claims SET receiving_identity_at=CASE WHEN ${retainedIdentity} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
     // Never grant receiving rights (notably to a Virginia sending binding) from a DMARC check.
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
-    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:proof??current.identity.proven},dmarc);
+    // Without BANE_PLATFORM_DOMAIN_WORKSPACE nothing renews the platform attestation: receiving ends with the usual proof grace.
+    const attested=!current.identity.adopted || platformClaim(runtime.config,job.workspaceId,current);
+    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:proof??(current.identity.proven && attested)},dmarc);
   });
   if(dmarc===undefined) throw dnsUnavailable(); // Retry after committing any independent MX change.
 };
@@ -845,6 +869,7 @@ export function registerOperations(app: App) {
     // DNS is read before the row lock; the locked write is fenced on the claim token.
     const row=await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain'); allowedDomain(a,row.name);
     if (host!==null && host!==row.name && !host.endsWith(`.${row.name}`)) throw new ApiError(422,'RECEIVING_HOST_INVALID',`Use ${row.name} or one of its subdomains.`,'host');
+    if (host!==null && reservedPlatformName(host,c.env.config.publicUrl)) throw new ApiError(409,'RECEIVING_HOST_RESERVED',`${host} is one of Bane’s own hosts, so it can’t receive mail for ${row.name}.`,'host');
     if (row.receiving_host && host!==row.receiving_host) throw new ApiError(409,'RECEIVING_HOST_ACTIVE',`${row.receiving_host} already receives mail for ${row.name}. Remove its MX record first; you can choose another host once it stops resolving.`,'host');
     let facts:Partial<IdentityFacts>={receivingChoice:null,issue:null};
     if (host!==null) {

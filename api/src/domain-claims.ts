@@ -15,15 +15,34 @@ export const claimName = z.preprocess(value=>{
   if (typeof value==='string' && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$/i.test(value.trim())) throw notAllowed();
   return value;
 },domainName);
-export async function claimNameAllowed(name:string,publicUrl:string) {
-  const host=new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
-  return name.includes('.') && name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)
+/** The installation's own domain: PUBLIC_URL's host (bane.mx in production). */
+export const platformHost = (publicUrl:string) => new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
+// Operator hosts under the platform domain that not even its owning workspace may claim or receive on, with
+// everything below them: another installation's zone (dev.), release fixtures (e2e., e2e-va., e2e-trusted.), the
+// shared inbound zone (in.), the Domain Connect key (domainconnect.) and service hosts (imap., tracker.). Add new
+// platform hosts here before they go live.
+const platformLabel=/^(?:dev|e2e(?:-[a-z0-9-]+)?|in|domainconnect|imap|tracker)$/;
+export function reservedPlatformName(name:string,publicUrl:string) {
+  const host=platformHost(publicUrl);
+  return name.endsWith('.'+host) && platformLabel.test(name.slice(0,-host.length-1).split('.').at(-1)!);
+}
+/** Only the operator-configured workspace owns the platform domain; every other workspace is always refused. */
+export const platformDomainOwner = (config:Pick<Runtime['config'],'multiTenant'|'platformDomainWorkspace'>,workspace:string) =>
+  config.multiTenant && !!config.platformDomainWorkspace && config.platformDomainWorkspace===workspace;
+export async function claimNameAllowed(name:string,publicUrl:string,platformOwner=false) {
+  const host=platformHost(publicUrl), platform=name===host || name.endsWith('.'+host);
+  return name.includes('.') && (platform ? platformOwner && !reservedPlatformName(name,publicUrl) : !host.endsWith('.'+name))
     && !reservedRoots.some(root=>name===root || name.endsWith('.'+root)) && (await placementRoot(name)).root!==null;
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
 // A hosted workspace has exactly one connection, so the region may be omitted and defaults to it.
 export async function reserveClaim(runtime: Runtime, workspace: string, name: string, region?: string) {
-  if (!await claimNameAllowed(name,runtime.config.publicUrl)) throw notAllowed();
+  const owner=platformDomainOwner(runtime.config,workspace);
+  if (!await claimNameAllowed(name,runtime.config.publicUrl,owner)) throw notAllowed();
+  // The platform domain's SES identity predates every claim and carries no claim tag: only the operator's
+  // adoption (scripts/adopt-platform-domain.ts) creates its claim. Re-adding it afterwards is idempotent.
+  if (owner && name===platformHost(runtime.config.publicUrl) && !(await runtime.db.execute(sql`SELECT FROM domain_claims WHERE workspace_id=${workspace} AND name=${name} AND identity ? 'adopted'`)).rowCount)
+    throw new ApiError(409,'OPERATOR_ADOPTION_REQUIRED','An operator must adopt the platform domain’s existing SES identity first.','name');
   assertSesConfigured(runtime);
   // The statement's snapshot predates the function's own insert, so a brand-new claim joins to nothing: that is
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
