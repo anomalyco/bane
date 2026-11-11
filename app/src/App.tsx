@@ -26,8 +26,7 @@ const loadDocs = docs.preload
 const loadInbound = inbound.preload
 Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs })
 const LogsPage = logs.page(m => m.LogsPage)
-const EmailDetailPage = logs.page(m => m.EmailDetailPage)
-const ReceivedEmailDetailPage = logs.page(m => m.ReceivedEmailDetailPage)
+const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
 const CampaignEditorPage = campaigns.page(m => m.CampaignEditorPage)
 const CampaignReviewPage = campaigns.page(m => m.CampaignReviewPage)
@@ -106,7 +105,7 @@ export function App() {
   useRememberDashboardReady()
   return <AppErrorBoundary><Routes><Route path="docs" element={<Suspense fallback={<BootLoader />}><DocsPage /></Suspense>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
-    <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<ReceivedEmailDetailPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
+    <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
     <Route path="receiving/endpoints" element={<EndpointsPage/>}/><Route path="receiving/rituals" element={<RitualsPage />} /><Route path="receiving/routing" element={<RoutingPage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
     <Route path="receiving/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound" element={<Moved to={() => '/receiving/inbox'} />} /><Route path="inbound/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound/addresses/:id" element={<Moved to={params => `/receiving/addresses/${id(params)}`} />} /><Route path="inbound/webhooks" element={<Moved to={() => '/receiving/webhooks'} />} /><Route path="inbound/webhooks/:id" element={<Moved to={params => `/receiving/webhooks/${id(params)}`} />} />
     <Route path="receiving/inboxes" element={<AgentInboxesPage />} /><Route path="receiving/inboxes/:id" element={<AgentInboxPage />} />

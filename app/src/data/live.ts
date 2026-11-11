@@ -1,6 +1,6 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
-import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, SenderScore } from './types'
+import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The dashboard's selected workspace (multi-tenant installations only). Sent with every request.
@@ -71,6 +71,7 @@ const mapSegment = (r: Json): Segment => ({ ...r, rule: r.rule, match: r.rule?.o
 const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.state, delivery: r.delivery ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', replyTo: r.draft.replyTo ?? [], subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], timezone: 'UTC', recipients: r.delivery?.total ?? r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
 const mapCampaignSummary = (r: Json): Campaign => ({...mapCampaign(r), draft: undefined, attachments: undefined})
 const mapEmailEvent = (r: Json) => ({id: r.id, type: r.type, at: r.createdAt, description: r.type, diagnostic: typeof r.data?.diagnostic === 'string' ? r.data.diagnostic : undefined})
+const mapLog = (r: Json): LogEntry => ({ ...r, regionId: r.region }) as LogEntry
 const mapEmail = (r: Json): Email => ({ ...r, id: r.id, from: r.from, subject: r.subject, status: r.status, to: r.to.join(', '), regionId: r.region, stream: r.kind, sentAt: r.createdAt, html: '', events: [] })
 const sesStatus = (value: unknown) => typeof value !== 'string' ? null : value.toUpperCase() === 'SUCCESS' ? 'verified' : ['FAILED', 'TEMPORARY_FAILURE'].includes(value.toUpperCase()) ? 'failed' : 'pending'
 const mapDomain = (r: Json): Domain => {
@@ -166,6 +167,9 @@ export function createLiveApi(): BaneApi {
       }
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points, streams: [{name: 'transactional', sent: metrics.streams.transactional.emails}, {name: 'marketing', sent: metrics.streams.marketing.emails}], recentCampaigns: campaigns.items }
     } },
+    logs: {
+      list: (input, signal) => page('/logs', input, mapLog, { direction: input.direction === 'all' ? undefined : input.direction, region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search }, signal),
+    },
     emails: {
       list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),
       get: async (id, signal) => {
@@ -261,8 +265,7 @@ export function createLiveApi(): BaneApi {
       enableDomain: (id, input, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/enable`, 'POST', { force: input.force ?? false }, signal),
       disableDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/disable`, 'POST', undefined, signal),
       checkDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
-      received: async (input, signal) => { const query = new URLSearchParams({ includeDelivery: 'true', direction: 'inbound', limit: String(Math.min(100, input.pageSize ?? 50)), ...(input.regionId ? { region: input.regionId } : {}), ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await inboundCall<{ data: ReceivedEmail[]; nextCursor: string | null }>(`/messages?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
-      receivedEmail: (id, signal) => inboundCall<ReceivedEmailDetail>(`/messages/${idPath(id)}?includeDelivery=true&includeHtml=true`, 'GET', undefined, signal),
+      receivedEmail: (id, signal, delivery = true) => inboundCall<ReceivedEmailDetail>(`/messages/${idPath(id)}?includeDelivery=${delivery}&includeHtml=true`, 'GET', undefined, signal),
       keys: async (includeRevoked, signal) => (await inboundCall<{ data: MailboxKey[] }>(`/keys?limit=100&includeRevoked=${includeRevoked}`, 'GET', undefined, signal)).data,
       createKey: async (input, signal) => { const { secret, ...key } = await inboundCall<MailboxKey & { secret: string }>('/keys', 'POST', { name: input.name, permissions: input.permissions, ...(input.addressIds ? { addressIds: input.addressIds } : {}) }, signal); return { key, secret } },
       revokeKey: async (id, signal) => { await inboundCall(`/keys/${idPath(id)}/revoke`, 'POST', undefined, signal) },

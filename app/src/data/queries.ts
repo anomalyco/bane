@@ -1,5 +1,5 @@
 import { connectionApi } from './connections'
-import type { InboundThreadView, BaneApi, PageRequest, Stream, TimeRange } from './types'
+import type { InboundThreadView, BaneApi, LogDirection, PageRequest, Stream, TimeRange } from './types'
 import { workspaceApi } from './workspaces'
 
 // The first-screen queries of the sidebar pages, defined once: a page reads them through useApiDef and
@@ -11,6 +11,7 @@ export const queries = {
   overview: (regionId: string, range: TimeRange, stream: Stream | 'all') => def(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream }, signal)),
   senderScore: () => def(['sender-score'], (api, signal) => api.senderScore.get(signal)),
   emails: (params: PageRequest) => def(['emails', params], (api, signal) => api.emails.list(params, signal)),
+  logs: (params: PageRequest & { direction?: LogDirection }) => def(['logs', params], (api, signal) => api.logs.list(params, signal)),
   inboundDomains: () => def(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal)),
   inboundWebhooks: () => def(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal)),
   routing: () => def(['routing'], (api, signal) => api.routing.routes(signal)),

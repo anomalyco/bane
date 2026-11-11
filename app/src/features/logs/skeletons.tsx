@@ -2,13 +2,18 @@ import { Download, Search } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import { useRegion, useWorkspaceAccess } from '../../data/context'
 import { Button, Input, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, TableSkeleton, Tabs } from '../../components/ui'
+import { rememberedPageSize } from '../../lib/pagination'
+import { logColumnDefs } from './rows'
 import './logs.css'
-export const logColumns = [{ key: 'time', label: 'Created · UTC', width: 150 }, { key: 'status', label: 'Status', width: 112 }, { key: 'to', label: 'Recipient', width: '20%' }, { key: 'from', label: 'Sender', width: '18%' }, { key: 'subject', label: 'Subject' }, { key: 'stream', label: 'Stream', width: 126 }, { key: 'open', label: '', width: 28, skeleton: <Skeleton width={8} /> }]
+// Exactly the loaded page: the header with the direction tabs, the toolbar and the table with its remembered page size.
 export function LogsRouteSkeleton() {
   const { regionId } = useRegion()
   const { canAdminister, multiTenant } = useWorkspaceAccess()
-  const received = useSearchParams()[0].get('view') === 'received'
-  return <div className="logs-page"><PageHeader title="Logs" actions={canAdminister || multiTenant ? undefined : <span className="muted">{regionId}</span>} /><Tabs label="Log type" value={received ? 'received' : 'sent'} onValueChange={() => {}} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /><div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label={received ? 'Search received email' : 'Search email logs'} placeholder={received ? 'Search received mail' : 'Search logs'} disabled /></div>{!received && <><Select value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All statuses' }]} /><Select value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All streams' }]} /></>}</div><Button disabled><Download size={16} />Export page</Button></div><TableSkeleton className="logs-table" columns={logColumns} rows={16} pagination /></div>
+  const [params] = useSearchParams()
+  const campaign = Boolean(params.get('campaign')), view = params.get('view'), direction = campaign ? 'sent' : view === 'sent' || view === 'received' ? view : 'all'
+  return <div className="logs-page"><PageHeader title="Logs" actions={<div className="cluster logs-controls">{!multiTenant && !canAdminister && <span className="muted">{regionId}</span>}<Tabs label="Direction" value={direction} onValueChange={() => {}} disabled items={[{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /></div>} />
+    <div className="data-toolbar"><div className="cluster">{campaign && <Skeleton width={160} height={28} />}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" disabled /></div><Select value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All statuses' }]} /><Select value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All streams' }]} /></div><Button disabled><Download size={16} />Export page</Button></div>
+    <TableSkeleton className="logs-table" columns={logColumnDefs} rows={rememberedPageSize('logs') || 16} pagination /></div>
 }
 export function EmailDetailSkeleton() {
   const { multiTenant } = useWorkspaceAccess()
