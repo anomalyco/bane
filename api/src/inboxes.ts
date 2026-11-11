@@ -113,6 +113,7 @@ type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: s
 function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
   const where = r.domain ?? input.domain;
   switch (r.error) {
+    case 'BYO_KEPT_POLICY_REQUIRED': return new ApiError(409,r.error,'Update the BYO receiving stack to kept-v1 and have the installation operator verify the binding before creating a persistent inbox.');
     case 'ADMIN_REQUIRED': return new ApiError(403, r.error, `${where} automatically creates an address for incoming mail. Creating an inbox here needs an admin using the dashboard or an unrestricted manage key. Choose a receiving domain without an auto-create catch-all, or create a sandbox inbox.`, 'domain');
     case 'RECEIVING_DOMAIN_REQUIRED': return input.domain
       ? new ApiError(409, r.error, `${input.domain} is not a receiving host of this workspace. Omit domain to use the oldest active one, or pick a host from GET /v1/inbound/domains.`, 'domain')

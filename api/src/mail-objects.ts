@@ -82,7 +82,8 @@ export function s3MailObjects(wid: string, client: S3Client, bucket: string): Ma
   return {
     async put(key, body, contentType) {
       const s3 = await loadS3();
-      await client.send(new s3.PutObjectCommand({ ...loc(key), Body: body instanceof Uint8Array ? body : body.stream, ContentLength: body.length, ContentType: contentType }));
+      await client.send(new s3.PutObjectCommand({ ...loc(key), Body: body instanceof Uint8Array ? body : body.stream, ContentLength: body.length, ContentType: contentType,
+        ...(key.startsWith(`${workspacePrefix(wid,'raw')}kept/`)?{Tagging:'bane-kind=kept'}:{}) }));
     },
     async get(key, range) {
       const s3 = await loadS3();
@@ -143,7 +144,7 @@ export function receivedMailStore(runtime: Runtime, wid: string, receipt: Pick<I
   const lifecycle: MailClass = receipt.delivery?.lifecycle==='kept'?'kept':receipt.delivery?.lifecycle === 'ephemeral' ? 'ephemeral' : 'default', inbox = receipt.delivery?.prefixInbox;
   const r2 = runtime.config.multiTenant && receipt.binding?.kind === 'shared' ? hostedMailBucket(runtime, forceInboxStore?'kept':lifecycle) : null;
   if (r2) return { lifecycle, bucket: r2, r2: true, objects: mailObjectsFor(runtime, wid, r2), rawKey: mailKey(wid, lifecycle, inbox, ids.messageId), fileKey: (batch: string, id: string) => mailKey(wid, lifecycle, inbox, ids.messageId, { batch, id }) };
-  return { lifecycle, bucket: receipt.bucket, r2: false, objects: s3MailObjects(wid, s3, receipt.bucket), rawKey: `${workspacePrefix(wid, 'raw')}${lifecycle==='kept'?'kept/':''}${ids.sesMessageId}.eml`, fileKey: (batch: string, id: string) => receivedAttachmentKey(wid, ids.messageId, batch, id) };
+  return { lifecycle, bucket: receipt.bucket, r2: false, objects: s3MailObjects(wid, s3, receipt.bucket), rawKey: `${workspacePrefix(wid, 'raw')}${lifecycle==='kept'?`kept/${ids.messageId}`:ids.sesMessageId}.eml`, fileKey: (batch: string, id: string) => receivedAttachmentKey(wid, ids.messageId, batch, id) };
 }
 /** Archive key for a file sent from an address or inbox; the bucket comes from the sending domain's store. */
 export const sentMailKey = (wid: string, bucket: string, inboxId: string | null, messageId: string, attachmentId: string) =>

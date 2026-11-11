@@ -444,6 +444,10 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   // Rituals see parsed mail. Until they have run use the expiring class, not forever
   // storage for a speculative destination. Ordinary direct deliveries write raw once.
   const initiallyKept=!receipt.routing?.programs && keptRoute(plan);
+  // A route can point at an existing persistent inbox after a BYO connection is
+  // replaced. Don't try an unverified role, mark mail terminal or downgrade retention.
+  const unverifiedKept=runtime.config.multiTenant && receipt.binding?.kind==='byo' && !receipt.binding.kept_policy_v1;
+  if(initiallyKept&&unverifiedKept){s3.destroy();throw new JobDeferred(new Date(Date.now()+60000).toISOString());}
   const store=stores(initiallyKept?keptReceipt:needsDefault||receipt.delivery?.lifecycle==='kept'?{...receipt,delivery:undefined}:receipt);
   const keptStore=stores(keptReceipt);
   const mightKeep=initiallyKept||possibleKept;
@@ -524,6 +528,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   try {
     if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualVerified:verifiedAuthor,ritualScores:evaluated.answers,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});}
     if(!initiallyKept&&keptRoute(plan)){
+      if(unverifiedKept)throw new JobDeferred(new Date(Date.now()+60000).toISOString());
       if(!copied.large)await keptStore.objects.put(keptStore.rawKey,raw,'message/rfc822');
       else await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,keptStore.rawKey,receipt.recipients,'kept',receipt.notification.stagingEtag as string|undefined,undefined,keptStore.r2?keptStore.objects:undefined);
       Object.assign(message,{rawKey:keptStore.rawKey,rawBucket:keptStore.bucket,lifecycle:'kept'});
