@@ -1,8 +1,8 @@
--- Receipt ownership is predicted at claim, then resolved again at commit. Retirements win
--- over catch-all/wildcard delivery. Plus-addresses inherit the base owner's lifetime.
+-- Receipt ownership is predicted at claim, then resolved again at commit. Only simulated, non-routable addresses can be retired for delivery.
+-- Real hosts always fall back to domain routing. Plus-addresses inherit the base owner's lifetime.
 CREATE FUNCTION inbox_delivery(wid text, recipients jsonb) RETURNS jsonb LANGUAGE sql STABLE AS $$
- WITH owners AS (SELECT r.addr,b.id,b.retention_mode,EXISTS(SELECT FROM mail_retired_addresses t WHERE t.workspace_id=wid AND t.address IN (r.addr,regexp_replace(r.addr,'[+][^@]*@','@')) AND t.until>now()) AS retired
- FROM jsonb_array_elements_text(recipients) r(addr) LEFT JOIN LATERAL (SELECT m.id,m.retention_mode FROM mailbox_addresses a JOIN mailboxes m ON m.id=a.mailbox_id AND m.workspace_id=a.workspace_id WHERE a.workspace_id=wid AND a.address IN (r.addr,regexp_replace(r.addr,'[+][^@]*@','@')) ORDER BY (a.address=r.addr) DESC LIMIT 1)b ON true)
+ WITH owners AS (SELECT r.addr,b.id,b.retention_mode,EXISTS(SELECT FROM mail_retired_addresses t WHERE t.workspace_id=wid AND t.address IN (r.addr,regexp_replace(r.addr,'[+][^@]*@','@')) AND t.until>now() AND t.address LIKE '%.sandbox.invalid') AS retired
+ FROM jsonb_array_elements_text(recipients) r(addr) LEFT JOIN LATERAL (SELECT m.id,m.retention_mode FROM mailbox_addresses a JOIN mailboxes m ON m.id=a.mailbox_id AND m.workspace_id=a.workspace_id WHERE a.workspace_id=wid AND (m.delete_after IS NULL OR m.delete_after>statement_timestamp()) AND a.address IN (r.addr,regexp_replace(r.addr,'[+][^@]*@','@')) ORDER BY (a.address=r.addr) DESC LIMIT 1)b ON true)
  SELECT jsonb_build_object('lifecycle',CASE WHEN bool_and(coalesce(retention_mode='ephemeral',false) OR retired) AND count(id)>0 THEN 'ephemeral' ELSE 'default' END,'prefixInbox',min(id) FILTER(WHERE retention_mode='ephemeral'),'drop',coalesce(bool_and(retired),false),'owners',coalesce(jsonb_agg(id),'[]')) FROM owners
 $$;
 
@@ -14,11 +14,12 @@ BEGIN
  SELECT * INTO existing FROM mailboxes WHERE workspace_id=wid AND client_id=req->>'clientId';
  IF FOUND THEN
   IF existing.create_request<>req OR (NOT (p->>'admin')::boolean AND existing.created_by<>actor_id) THEN RETURN jsonb_build_object('error','IDEMPOTENCY_CONFLICT'); END IF;
+  IF existing.expires_at<=now() THEN RETURN jsonb_build_object('error','INBOX_GONE'); END IF;
   RETURN jsonb_build_object('inbox',inbox_view(existing),'replay',true);
  END IF;
  INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(wid,'inbox-create:'||wid,date_trunc('minute',now()),1) ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN least(61,b.used+1) ELSE 1 END,window_start=excluded.window_start RETURNING used INTO used_count;
  IF used_count>60 THEN RETURN jsonb_build_object('error','INBOX_CREATE_RATE'); END IF;
- IF (SELECT count(*) FROM (SELECT 1 FROM mailboxes WHERE workspace_id=wid AND retention_mode='ephemeral' AND expires_at>now() LIMIT 1000)s)>=1000 THEN RETURN jsonb_build_object('error','EPHEMERAL_INBOX_LIMIT'); END IF;
+ IF (SELECT count(*) FROM (SELECT 1 FROM mailboxes WHERE workspace_id=wid AND retention_mode='ephemeral' LIMIT 1000)s)>=1000 THEN RETURN jsonb_build_object('error','EPHEMERAL_INBOX_LIMIT'); END IF;
  IF req->>'type'='sandbox' THEN
   host:=p->>'sandboxHost';
   INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES('virtual_'||host,wid,'virtual_'||host,host,'sandbox','disabled','store') ON CONFLICT(workspace_id,name) DO NOTHING;
@@ -31,6 +32,8 @@ BEGIN
  END IF;
  FOR local IN SELECT jsonb_array_elements_text(p->'locals') LOOP
   addr:=local||'@'||host;
+  IF local IN ('admin','administrator','postmaster','hostmaster','webmaster','security','abuse','root') THEN RETURN jsonb_build_object('error','ADDRESS_RESERVED'); END IF;
+  IF NOT coalesce((p->>'manageAddress')::boolean,false) AND (req->>'localPart' IS NOT NULL OR d.catch_all='create_mailbox' OR EXISTS (SELECT FROM mailboxes m CROSS JOIN LATERAL jsonb_array_elements_text(m.rules) AS r(pattern) WHERE m.workspace_id=wid AND m.domain_id=d.id AND m.expires_at IS NULL AND m.rules<>'[]' AND addr LIKE replace(replace(replace(replace(r.pattern,'!','!!'),'%','!%'),'_','!_'),'*','%') ESCAPE '!')) THEN addr:=NULL; CONTINUE; END IF;
   IF EXISTS(SELECT FROM mail_retired_addresses WHERE workspace_id=wid AND address=addr AND until>now()) THEN IF req->>'localPart' IS NOT NULL THEN RETURN jsonb_build_object('error','ADDRESS_RETIRED','domain',host);END IF;
   ELSIF NOT EXISTS(SELECT FROM mailbox_addresses WHERE workspace_id=wid AND address=addr) THEN EXIT; END IF;
   addr:=NULL;
@@ -101,6 +104,10 @@ DECLARE wid text:=msg->>'workspace_id'; received timestamptz:=(msg->>'received_a
 started timestamptz:=clock_timestamp(); locked timestamptz; published jsonb;
 BEGIN
  INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'ingest') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+ IF EXISTS (SELECT FROM jsonb_to_recordset(envelopes) v(addr text) JOIN mailbox_addresses a ON a.workspace_id=wid AND a.address IN(v.addr,regexp_replace(v.addr,'[+][^@]*@','@')) JOIN mailboxes b ON b.id=a.mailbox_id WHERE b.delete_after<=statement_timestamp() AND NOT a.address LIKE '%.sandbox.invalid') THEN
+  INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+  DELETE FROM mailbox_addresses a USING mailboxes b,jsonb_to_recordset(envelopes) v(addr text) WHERE a.mailbox_id=b.id AND a.workspace_id=wid AND b.delete_after<=statement_timestamp() AND NOT a.address LIKE '%.sandbox.invalid' AND a.address IN(v.addr,regexp_replace(v.addr,'[+][^@]*@','@'));
+ END IF;
  can_create:=can_create AND NOT is_spam AND EXISTS(SELECT FROM jsonb_to_recordset(envelopes) AS v(addr text) JOIN mailbox_domains d ON d.workspace_id=wid AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND d.catch_all='create_mailbox' WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=wid AND a.address IN (addr,regexp_replace(addr,'[+][^@]*@','@'))));
  IF can_create OR msg->>'lifecycle'='ephemeral' THEN INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false; END IF;
  PERFORM mail_inbox_precheck(wid,msg);
@@ -139,12 +146,12 @@ BEGIN
     SELECT f.id,s.workspace_id,s.id,f.filename,f."contentType",f."sizeBytes",f."contentId",f.disposition,f.sha256,f.bucket,f."storageKey" FROM stored s CROSS JOIN jsonb_to_recordset(file_items::jsonb) f(id text,filename text,"contentType" text,"sizeBytes" int,"contentId" text,disposition text,sha256 text,bucket text,"storageKey" text)
   ), indexed AS (INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT workspace_id,message_id,id,thread_id FROM stored WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
   ), target AS MATERIALIZED (SELECT * FROM stored UNION ALL SELECT * FROM known UNION ALL SELECT * FROM extended), routes AS MATERIALIZED (
-    SELECT addr,base,n,d.id AS domain,d.catch_all,r.valid,o.owner,o.receives,rule.id AS ruled,EXISTS(SELECT FROM mail_retired_addresses t WHERE t.workspace_id=wid AND t.address IN(addr,base) AND t.until>now()) AS retired
+    SELECT addr,base,n,d.id AS domain,d.catch_all,r.valid,o.owner,o.receives,rule.id AS ruled,EXISTS(SELECT FROM mail_retired_addresses t WHERE t.workspace_id=wid AND t.address IN(addr,base) AND t.until>now() AND t.address LIKE '%.sandbox.invalid') AS retired
     FROM target x CROSS JOIN jsonb_to_recordset(envelopes::jsonb) r(addr text,n int,valid boolean)
     JOIN mailbox_domains d ON d.workspace_id=x.workspace_id AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND (d.status='active' OR (d.receiving_host IS NULL AND d.status IN ('waiting_for_mx','provisioning')) OR (d.status='disabled' AND d.name LIKE '%.sandbox.invalid' AND msg#>>'{verdicts,simulated}'='true'))
     CROSS JOIN LATERAL (SELECT regexp_replace(addr,'[+][^@]*@','@') AS base) plus
-    LEFT JOIN LATERAL (SELECT b.id AS owner,a.kind<>'public' AND (b.kind='inbox' OR b.expires_at IS NULL OR (b.created_at<=least(x.received_at,received::timestamptz) AND b.expires_at>greatest(statement_timestamp(),least(x.received_at,received::timestamptz)))) AS receives
-      FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND a.address IN(addr,base) ORDER BY (a.address=addr) DESC LIMIT 1) o ON true
+    LEFT JOIN LATERAL (SELECT b.id AS owner,a.kind<>'public' AND ((b.kind='inbox' AND b.delete_after>statement_timestamp()) OR b.expires_at IS NULL OR (b.created_at<=least(x.received_at,received::timestamptz) AND b.expires_at>greatest(statement_timestamp(),least(x.received_at,received::timestamptz)))) AS receives
+      FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND (b.delete_after IS NULL OR b.delete_after>statement_timestamp()) AND a.address IN(addr,base) ORDER BY (a.address=addr) DESC LIMIT 1) o ON true
     LEFT JOIN LATERAL (SELECT b.id FROM (SELECT id,created_at,rules FROM mailboxes WHERE workspace_id=x.workspace_id AND domain_id=d.id AND expires_at IS NULL AND rules<>'[]'::jsonb ORDER BY created_at,id LIMIT 64) b WHERE o.owner IS NULL AND EXISTS (
       SELECT 1 FROM jsonb_array_elements_text(b.rules) t(pattern) WHERE addr LIKE replace(replace(replace(replace(pattern,'!','!!'),'%','!%'),'_','!_'),'*','%') ESCAPE '!') ORDER BY b.created_at,b.id LIMIT 1) rule ON true
   ), misses AS (SELECT * FROM routes WHERE NOT retired AND owner IS NULL AND ruled IS NULL AND valid AND catch_all='create_mailbox' AND can_create),
@@ -187,6 +194,17 @@ BEGIN
  wait_ms:=extract(epoch FROM locked-started)*1000; hold_ms:=extract(epoch FROM clock_timestamp()-locked)*1000; RETURN NEXT;
 END $$;
 
+CREATE FUNCTION inbox_end(wid text,bid text) RETURNS timestamptz LANGUAGE plpgsql AS $$
+DECLARE ended timestamptz;
+BEGIN
+ INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'ingest'),(wid,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+ UPDATE mailboxes SET expires_at=least(expires_at,now()),delete_after=now() WHERE workspace_id=wid AND id=bid AND kind='inbox' RETURNING delete_after INTO ended;
+ IF NOT FOUND THEN RETURN NULL; END IF;
+ DELETE FROM mailbox_addresses a USING mailboxes b WHERE a.workspace_id=wid AND a.mailbox_id=bid AND b.id=bid AND b.create_request->>'type'<>'sandbox';
+ UPDATE mailbox_keys SET expires_at=ended WHERE workspace_id=wid AND mailbox_ids=jsonb_build_array(bid) AND expires_at IS NOT NULL;
+ RETURN ended;
+END $$;
+
 CREATE FUNCTION inbox_retention_batch(batch_size int) RETURNS int LANGUAGE plpgsql AS $$
 DECLARE b mailboxes; candidate record; n int:=0; remaining int:=5000; removed int;
 BEGIN
@@ -197,7 +215,7 @@ BEGIN
   gc AS (INSERT INTO mail_gc_candidates(workspace_id,message_id) SELECT workspace_id,message_id FROM gone ON CONFLICT DO NOTHING) SELECT count(*) INTO removed FROM gone;
   remaining:=remaining-removed;
   IF NOT EXISTS(SELECT FROM mailbox_messages WHERE mailbox_id=b.id) THEN
-   INSERT INTO mail_retired_addresses SELECT workspace_id,address,now()+interval '30 days' FROM mailbox_addresses WHERE mailbox_id=b.id ON CONFLICT(workspace_id,address) DO UPDATE SET until=excluded.until;
+   INSERT INTO mail_retired_addresses SELECT workspace_id,address,now()+interval '30 days' FROM mailbox_addresses WHERE mailbox_id=b.id AND b.create_request->>'type'='sandbox' ON CONFLICT(workspace_id,address) DO UPDATE SET until=excluded.until;
    UPDATE mailbox_keys SET revoked_at=now() WHERE workspace_id=b.workspace_id AND mailbox_ids=jsonb_build_array(b.id) AND revoked_at IS NULL;
    DELETE FROM mailboxes WHERE id=b.id; PERFORM inbox_event(b.workspace_id,b.id,'inbox.deleted');
   END IF;

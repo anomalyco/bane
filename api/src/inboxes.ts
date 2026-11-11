@@ -32,7 +32,7 @@ const create = z.object({
   ttlSeconds: z.number().int().min(60).max(2592000).default(86400).describe('Lifetime before the inbox expires: 60 seconds to 30 days. Default 24 hours.'),
   graceHours: z.number().int().min(0).max(168).default(24).describe('Hours after expiry during which new mail is still stored but held, before everything is erased. 0–168, default 24.'),
   domain: z.string().max(253).toLowerCase().optional().describe('Receiving host for the address, such as reply.acme.com. Default: the workspace’s oldest active receiving host.'),
-  localPart: z.string().max(64).regex(/^[a-z0-9](?:[a-z0-9_-]|\.(?!\.|$))*$/).nullish().describe('Fixed part before the @. Default: 10 random characters, which nobody can guess.'),
+  localPart: z.string().max(64).regex(/^[a-z0-9](?:[a-z0-9_-]|\.(?!\.|$))*$/).nullish().describe('Admin REST only; provisioning keys and MCP must omit this. Default: 10 random characters, which nobody can guess.'),
   name: z.string().max(200).optional().describe('A label for the dashboard and lists. Replies use it as the From display name.'),
   metadata: metadata.default({}),
   clientId: z.string().min(1).max(200).optional().describe('Idempotency key. Repeating a create with the same clientId and body returns the same inbox (200, without the key secret); a different body is a 409.'),
@@ -102,7 +102,7 @@ const meta = { tags: ['Agent inboxes'], security };
 const take = z.coerce.number().int().min(1).max(100).default(25);
 const extract = z.enum(['codes', 'links', 'codes,links', 'links,codes']).optional().describe('Extract one-time codes, links or both into each message’s extract field.');
 const absent = () => new ApiError(404, 'NOT_FOUND', 'No such inbox or message for this credential.');
-const visible = (v: MailboxAccess) => sql`b.workspace_id=${v.workspaceId} AND b.kind='inbox' ${v.mailboxIds ? sql`AND b.id=ANY(${sql.param(v.mailboxIds)}::text[])` : sql``}`;
+const visible = (v: MailboxAccess) => sql`b.workspace_id=${v.workspaceId} AND b.kind='inbox' AND b.delete_after>statement_timestamp() ${v.mailboxIds ? sql`AND b.id=ANY(${sql.param(v.mailboxIds)}::text[])` : sql``}`;
 const randomLocal = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
 
 type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: string; replay: boolean; inbox: Box };
@@ -114,11 +114,13 @@ function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
       ? new ApiError(409, r.error, `${input.domain} is not a receiving host of this workspace. Omit domain to use the oldest active one, or pick a host from GET /v1/inbound/domains.`, 'domain')
       : new ApiError(409, r.error, 'This workspace has no receiving domain yet. Add a domain, enable receiving on it and publish its MX record (Domains in the dashboard, or POST /v1/inbound/domains/{id}/enable), then retry once its status is active. To test without DNS, create an inbox with {"type":"sandbox"} and send it mail with POST /v1/inboxes/{id}/simulate.');
     case 'RECEIVING_NOT_ACTIVE': return new ApiError(409, r.error, `Receiving on ${where} is waiting for its MX record. Publish ${r.mx}, then retry; POST /v1/inbound/domains/${r.domainId}/check rechecks DNS now.`, 'domain');
+    case 'ADDRESS_RESERVED': return new ApiError(409,r.error,'This role address cannot be leased to an inbox.');
+    case 'INBOX_GONE': return new ApiError(409,r.error,'This lease has ended. Choose a new clientId.');
     case 'ADDRESS_TAKEN': return input.localPart
       ? new ApiError(409, r.error, `${input.localPart}@${where} is already in use. Omit localPart for a random address, or choose another.`, 'localPart')
       : new ApiError(409, r.error, 'No free random address was found. Retry the request.', undefined, true);
     case 'ADDRESS_RETIRED': return new ApiError(409, r.error, `${input.localPart}@${where} belonged to a deleted inbox and stays reserved for 30 days. Omit localPart for a random address.`, 'localPart');
-    case 'EPHEMERAL_INBOX_LIMIT': return new ApiError(409, r.error, 'This workspace already has 1,000 active inboxes. Delete ones you no longer need with DELETE /v1/inboxes/{id}, then retry.');
+    case 'EPHEMERAL_INBOX_LIMIT': return new ApiError(409, r.error, 'This workspace already has 1,000 retained inboxes (including grace and pending erasure). Delete ones you no longer need with DELETE /v1/inboxes/{id}, then retry.');
     case 'INBOX_CREATE_RATE': return new ApiError(429, r.error, 'A workspace can create 60 inboxes per minute. Retry after the Retry-After header’s seconds.', undefined, true);
     case 'IDEMPOTENCY_CONFLICT': return new ApiError(409, r.error, `clientId ${JSON.stringify(input.clientId)} was already used for a different request. Reuse a clientId only to retry the same create.`, 'clientId');
     default: return new ApiError(409, 'INBOX_CREATE_FAILED', 'The inbox could not be created.');
@@ -129,9 +131,7 @@ function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
  * sweep erases its mail. Shared by DELETE /v1/inboxes/{id} and DELETE /v1/inbound/addresses/{id}.
  */
 export async function endInbox(db: DbExecutor, where: SQL) {
-  return (await db.execute<{ at: string }>(sql`WITH ended AS (UPDATE mailboxes b SET expires_at=least(now(),b.expires_at),delete_after=now() WHERE b.kind='inbox' AND ${where} RETURNING b.*),
-    keys AS (UPDATE mailbox_keys k SET expires_at=b.delete_after FROM ended b WHERE k.workspace_id=b.workspace_id AND k.mailbox_ids=jsonb_build_array(b.id) AND k.expires_at IS NOT NULL)
-    SELECT delete_after::text at FROM ended`)).rows[0];
+  return (await db.execute<{ at: string }>(sql`SELECT inbox_end(b.workspace_id,b.id)::text at FROM mailboxes b WHERE b.kind='inbox' AND ${where}`)).rows[0];
 }
 type Box = z.infer<typeof Inbox>;
 type FileRow = { id: string; filename: string; content_type: string; size_bytes: number; bucket: string; storage_key: string };
@@ -158,10 +158,12 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }).openapi('CreatedInbox');
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createInbox', summary: 'Create an agent inbox',
-    description: 'Creates an expiring inbox with a fresh address on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 active inboxes per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
+    description: 'Creates an expiring inbox with a fresh address on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
     request: { body: json(create) }, responses: { 200: response(Inbox), 201: response(created), ...errors },
   }), async c => {
     const v = access(c, 'create'), input = c.req.valid('json');
+    const manageAddress = v.admin && c.get('actor')?.credential !== 'mcp' && c.get('actor')?.credential !== 'agentToken';
+    if (input.localPart && !manageAddress) throw new ApiError(403,'PERMISSION_DENIED','This credential must omit localPart and use a generated address.','localPart');
     if (!inboxStoreReady(c.env)) throw new ApiError(503, 'INBOXES_UNAVAILABLE', 'Agent inboxes are not enabled on this deployment yet.');
     const missing = [...(input.send.enabled ? ['send'] as const : []), ...(input.credential?.permissions ?? [])].filter(p => !v.permissions.includes(p));
     if (!v.admin && missing.length) throw new ApiError(403, 'PERMISSION_DENIED', `This key cannot grant ${[...new Set(missing)].join(', ')} permission it does not have.`);
@@ -169,7 +171,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     if (input.type === 'sandbox' && (input.domain || input.localPart || input.send.enabled)) throw new ApiError(422, 'SANDBOX_ONLY', 'Sandbox inboxes get a generated .invalid address and cannot send: omit domain, localPart and send.');
     const secret = input.credential ? randomSecret('bane_mbx_') : null, credential = secret ? { id: id('mbk'), hash: await digest(secret), prefix: secret.slice(0, 14) } : undefined;
     const p = {
-      wid: v.workspaceId, actor: v.keyId, admin: v.admin, hosted: c.env.config.multiTenant, id: id('mbx'), input, key: credential,
+      wid: v.workspaceId, actor: v.keyId, admin: v.admin, manageAddress, hosted: c.env.config.multiTenant, id: id('mbx'), input, key: credential,
       sandboxHost: input.type === 'sandbox' ? `${(await digest(v.workspaceId)).slice(0, 24)}.sandbox.invalid` : undefined,
       locals: input.localPart ? [input.localPart] : [randomLocal(), randomLocal(), randomLocal()],
     };
@@ -217,7 +219,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   });
   app.openapi(createRoute({
     ...meta, method: 'delete', path: item, operationId: 'deleteInbox', summary: 'Delete an inbox now',
-    description: 'The address stops receiving immediately and stays reserved for 30 days, so later mail to it is dropped and counted. Keys created with the inbox stop working now; its messages and objects are erased at the next hourly sweep.',
+    description: 'The address stops receiving immediately and real addresses return to domain routing. Keys created with the inbox stop working now; its messages and objects are erased at the next hourly sweep.',
     request: { params }, responses: { 202: response(z.object({ id: key, status: z.literal('deleting'), deleteAfter: z.string() })), ...errors },
   }), async c => {
     const v = access(c, 'modify'), { id } = c.req.valid('param');

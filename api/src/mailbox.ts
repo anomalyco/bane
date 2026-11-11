@@ -33,7 +33,7 @@ async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermissi
   const value = access(c, permission);
   if (value.mailboxIds && !value.mailboxIds.includes(mailboxId)) throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
   const [row] = await db.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), eq(mailboxes.id, mailboxId)));
-  if (!row || delegatedInbox(c.env) && row.kind!=='inbox') throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
+  if (!row || row.deleteAfter && Date.parse(row.deleteAfter)<=Date.now() || delegatedInbox(c.env) && row.kind!=='inbox') throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
   return { access: value, mailbox: row, scope: scopeOf(value) };
 }
 
@@ -441,6 +441,7 @@ function registerAddresses(app: App) {
         added = aliases.filter(alias => !current.some(row => row.address === alias));
         if (removed.length) await tx.delete(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), inArray(mailboxAddresses.address, removed)));
         if (added.length) {
+          if((await tx.execute(sql`SELECT FROM mail_retired_addresses WHERE workspace_id=${scope.workspaceId} AND address=ANY(${sql.param(added)}::text[]) AND until>now() LIMIT 1`)).rowCount)throw new ApiError(409,'ADDRESS_RETIRED','Release the retired address before assigning it as an alias.');
           const taken = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), inArray(mailboxAddresses.address, added)));
           if (taken.length) throw new ApiError(409, 'ADDRESS_TAKEN', `${taken[0]!.address} already belongs to a mailbox.`, 'aliases');
           await tx.insert(mailboxAddresses).values(added.map(address => ({ ...scope, address, mailboxId: mailbox.id, kind: 'alias' as const })));
@@ -475,6 +476,9 @@ export function registerMailbox(app: App) {
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
   registerInboxes(app, access);
   registerMailObjects(app);
+  app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address for reuse (workspace admin)',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
+    const v=admin(c);await c.env.db.execute(sql`DELETE FROM mail_retired_addresses WHERE workspace_id=${v.workspaceId} AND address=${c.req.valid('param').address.toLowerCase()}`);return c.json({ok:true as const},200);
+  });
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');
   app.openapi(createRoute({method:'get',path:'/v1/inbound/policy',operationId:'getInboundScanPolicy',tags:['Inbound domains'],security,responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c);const {rows}=await c.env.db.execute<{spam:'store'|'quarantine'}>(sql`SELECT spam_policy AS spam FROM mail_receive_limits WHERE workspace_id=${workspaceId}`);return c.json({spam:rows[0]?.spam??'store'},200);});
   app.openapi(createRoute({method:'patch',path:'/v1/inbound/policy',operationId:'updateInboundScanPolicy',tags:['Inbound domains'],security,description:'Non-PASS virus scans are always quarantined. Store non-PASS spam scans without normal receipt notifications, or quarantine them privately.',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c),{spam}=c.req.valid('json');await c.env.db.execute(sql`INSERT INTO mail_receive_limits(workspace_id,spam_policy) VALUES(${workspaceId},${spam}) ON CONFLICT(workspace_id) DO UPDATE SET spam_policy=excluded.spam_policy`);return c.json({spam},200);});
