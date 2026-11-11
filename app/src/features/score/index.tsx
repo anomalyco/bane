@@ -8,6 +8,7 @@ import type { Domain } from '../../data/types'
 import { number } from '../../lib/format'
 import { gradeBands, gradeFor, gradeKey, nextStep, WARMUP_EMAILS, type ScoreReport } from '../../lib/sender-score'
 import { useSenderScore } from './use-score'
+import { ScoreCard } from './ScoreCard'
 import './score.css'
 
 type Graded = Extract<ScoreReport, { state: 'graded' }>
@@ -17,7 +18,7 @@ const whole = (value: number) => Math.round(value)
 const width = (share: number) => ({ '--share': `${Math.round(share * 1000) / 10}%` }) as CSSProperties
 
 // Compact card for the bottom of the sidebar, full width and two units tall. Three takes:
-//  a: tile — badge, score and a meter towards the next grade
+//  a: the collectible card (ScoreCard, compact)
 //  b: ladder — the six grades as segments, filled up to yours
 //  c: report — badge, score and one mark per factor, like subjects on a report card
 export function SidebarScore({ variant }: { variant: 'a' | 'b' | 'c' }) {
@@ -40,15 +41,8 @@ export function SidebarScore({ variant }: { variant: 'a' | 'b' | 'c' }) {
       <span className="score-marks" aria-hidden="true">{warmup ? ladder.map((band, index) => <span key={band.grade} className="score-mark" data-grade="none" data-filled={report.emails / WARMUP_EMAILS * ladder.length >= index + 1 || undefined} />) : report.factors.map(factor => { const grade = gradeFor(factor.score); return <span key={factor.key} className="score-mark" data-grade={gradeKey(grade)} title={`${factor.label}: ${grade}`}>{grade[0]}</span> })}</span>
     </span>
   </Link>
-  return <Link to="/#sender-score" className="score-side score-side--a" aria-label={label}>
-    <GradeBadge grade={warmup ? null : report.grade} size="md" label={label} progress={warmup ? report.emails / WARMUP_EMAILS : 0} />
-    <span className="score-side__stack">
-      <span className="score-side__row"><span className="muted">{warmup ? 'First 100 emails' : 'Sender score'}</span><span className="score-side__value">{warmup ? <>{report.emails}<span className="muted">/{WARMUP_EMAILS}</span></> : whole(report.score)}</span></span>
-      <span className="score-meter" data-grade={warmup ? 'none' : gradeKey(report.grade)} style={width(warmup ? report.emails / WARMUP_EMAILS : within(report))}><i /></span>
-    </span>
-  </Link>
+  return <ScoreCard report={report} size="compact" />
 }
-
 // The last 14 daily scores; the score climbs at most 2 points a day, so this is the incremental progress.
 function History({ report, caption = true }: { report: Graded; caption?: boolean }) {
   const low = Math.min(...report.history) - 4, high = Math.max(...report.history)
@@ -69,6 +63,7 @@ function BandMeter({ report }: { report: Graded }) {
 function FactorBar({ score }: { score: number }) {
   return <span className="score-bar" data-low={score < 60 || undefined} style={width(score / 100)}><i /></span>
 }
+const trendText = (report: Graded) => { const moved = whole(report.score - report.history[0]); return `${moved > 0 ? '+' : moved < 0 ? '−' : '±'}${Math.abs(moved)} in 14 days` }
 const nextLine = (report: Graded) => report.next ? `${report.grade} · ${Math.ceil(report.next.gap)} to ${report.next.grade}` : `${report.grade} · top grade`
 
 function Warmup({ report }: { report: Extract<ScoreReport, { state: 'warmup' }> }) {
@@ -83,12 +78,20 @@ export function ReportCard({ variant }: { variant: 'column' | 'band' | 'hero' })
   const { report, domains } = useSenderScore()
   if (!report) return <section id="sender-score" className={`score-report score-report--${variant}`} aria-busy="true" />
   const heading = <h2 className="score-report__title">Sender score</h2>
+  if (variant === 'column') return <section id="sender-score" className="score-report score-report--card" aria-label="Sender score">
+    <ScoreCard report={report} size="full" />
+    {report.state === 'graded' && <div className="score-breakdown">
+      <div className="score-breakdown__head"><h2>Breakdown</h2><span className="muted">{trendText(report)}</span></div>
+      <History report={report} caption={false} />
+      <ul className="score-factors score-factors--compact">{report.factors.map(factor => <li key={factor.key} title={factor.source}><span>{factor.label}</span><FactorBar score={factor.score} /><span className="muted">{factor.format(factor.value)}</span></li>)}</ul>
+    </div>}
+  </section>
   if (report.state === 'warmup') return <section id="sender-score" className={`score-report score-report--${variant} score-report--warmup`} aria-label="Sender score">
     <div className="score-report__side">
       <div className="score-report__lead"><GradeBadge grade={null} size={variant === 'hero' ? 'xl' : 'lg'} progress={report.emails / report.needed} /><div className="score-report__numbers">{heading}<span className="score-number">{report.emails}<span className="score-number__of">/{report.needed}</span></span></div></div>
       <Warmup report={report} />
     </div>
-    {variant !== 'column' && <ul className="score-factors score-factors--pending">{['Complaints', 'Bounces', 'Content', 'Authentication', 'List hygiene', 'Consistency'].map(label => <li key={label}><span>{label}</span><span className="muted">—</span></li>)}</ul>}
+    <ul className="score-factors score-factors--pending">{['Complaints', 'Bounces', 'Content', 'Authentication', 'List hygiene', 'Consistency'].map(label => <li key={label}><span>{label}</span><span className="muted">—</span></li>)}</ul>
   </section>
   const step = nextStep(report)
   const target = stepTarget(step.factor.key, domains)
@@ -110,12 +113,7 @@ export function ReportCard({ variant }: { variant: 'column' | 'band' | 'hero' })
     <table className="score-table"><tbody>{report.factors.map(factor => <tr key={factor.key} title={factor.source}><th scope="row">{factor.label}</th><td><FactorBar score={factor.score} /></td><td>{factor.format(factor.value)}</td><td className="muted">{factor.lost >= .5 ? `−${whole(factor.lost)}` : ''}</td></tr>)}</tbody></table>
     <div className="score-report__trend"><History report={report} /></div>
   </section>
-  return <section id="sender-score" className="score-report score-report--column" aria-label="Sender score">
-    {summary}
-    <BandMeter report={report} />
-    <History report={report} />
-    <ul className="score-factors">{report.factors.map(factor => <li key={factor.key} title={factor.source}><span>{factor.label}</span><FactorBar score={factor.score} /><span className="muted">{factor.format(factor.value)}</span></li>)}</ul>
-  </section>
+  return null
 }
 
 // What raises the score most, as a place to go.

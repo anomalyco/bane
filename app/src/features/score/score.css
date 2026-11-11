@@ -112,3 +112,12 @@
   .score-report--hero { grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); }
   .score-report__trend { display: none; }
 }
+
+/* Column report (direction A, pass 2): the collectible card, then a compact breakdown. */
+.score-report--card { display: flex; flex-direction: column; gap: var(--space-16); }
+.score-breakdown { display: flex; flex-direction: column; gap: var(--space-8); }
+.score-breakdown__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-8); }
+.score-breakdown__head h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.score-breakdown__head .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.score-breakdown .score-history { height: 20px; gap: 2px; }
+.score-factors--compact > li { grid-template-columns: minmax(0, 1fr) 72px 52px; min-height: 30px; gap: var(--space-12); }

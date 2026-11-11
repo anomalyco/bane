@@ -1,0 +1,80 @@
+/* The collectible sender score card. Materials per grade: two tones (a → b), ink, the medallion disc and line work.
+   Ink is checked against both tones (≥ 4.5:1 for the small print, more for the grade and score). */
+.score-card { --card-a: #2E3138; --card-b: #555A66; --card-ink: #F5F6F8; --card-disc: rgb(0 0 0 / 24%); --card-line: #D6DAE2; --holo: .1; }
+.score-card[data-grade='aplus'] { --card-a: #B4851A; --card-b: #E6C76A; --card-ink: #271A00; --card-disc: rgb(255 246 214 / 55%); --card-line: #5C4300; --holo: .32; }
+.score-card[data-grade='a'] { --card-a: #09512F; --card-b: #0F7B47; --card-ink: #F2FFF7; --card-disc: rgb(0 0 0 / 22%); --card-line: #CFF5E0; }
+.score-card[data-grade='b'] { --card-a: #1A2A8F; --card-b: #3550DD; --card-ink: #F4F6FF; --card-disc: rgb(0 0 0 / 22%); --card-line: #DCE3FF; }
+.score-card[data-grade='c'] { --card-a: #C5821A; --card-b: #EDBF55; --card-ink: #2A1A00; --card-disc: rgb(255 246 218 / 50%); --card-line: #5E3D00; }
+.score-card[data-grade='d'] { --card-a: #842F13; --card-b: #AE4E20; --card-ink: #FFF5EF; --card-disc: rgb(0 0 0 / 22%); --card-line: #FFD9C4; }
+.score-card[data-grade='f'] { --card-a: #74101D; --card-b: #B22234; --card-ink: #FFF2F3; --card-disc: rgb(0 0 0 / 25%); --card-line: #FFD0D5; }
+
+.score-card {
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  position: relative; isolation: isolate; overflow: hidden; display: block; color: var(--card-ink); text-decoration: none;
+  background: linear-gradient(135deg, var(--card-a), var(--card-b));
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 14%), 0 0 0 .5px rgb(0 0 0 / 22%), 0 2px 6px rgb(0 0 0 / 10%);
+  font-variant-numeric: tabular-nums;
+}
+/* A certificate frame inside the edge. */
+.score-card::before { content: ''; position: absolute; inset: 4px; z-index: 1; border: 1px solid color-mix(in srgb, var(--card-ink) 24%, transparent); border-radius: calc(var(--card-radius) - 4px); pointer-events: none; }
+.score-card__lines { position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%; color: var(--card-line); opacity: .17; }
+.score-card__lines path { fill: none; stroke: currentColor; stroke-width: .7; vector-effect: non-scaling-stroke; }
+.score-card__grain { position: absolute; inset: 0; z-index: 2; background-image: var(--grain); background-size: 180px; mix-blend-mode: overlay; opacity: .34; pointer-events: none; }
+/* Sheen: a soft diagonal band and a hotspot that follow the pointer (--sx, --sy), plus a faint holographic foil. */
+.score-card__sheen { position: absolute; inset: 0; z-index: 3; pointer-events: none; mix-blend-mode: soft-light;
+  background:
+    radial-gradient(circle at calc(var(--sx, .72) * 100%) calc(var(--sy, .18) * 100%), rgb(255 255 255 / 50%), transparent 46%),
+    linear-gradient(110deg, transparent 32%, rgb(255 255 255 / 55%) 45%, rgb(255 210 246 / 35%) 50%, rgb(168 226 255 / 40%) 55%, transparent 68%);
+  background-size: 100% 100%, 280% 100%;
+  background-position: 0 0, calc((1 - var(--sx, .3)) * 100%) 0;
+  transition: background-position .55s cubic-bezier(.2, .7, .2, 1);
+}
+.score-card__sheen::after { content: ''; position: absolute; inset: 0; mix-blend-mode: color-dodge; opacity: var(--holo);
+  background: conic-gradient(from calc(var(--sx, .3) * 220deg + 20deg) at 30% 70%, #ff9fe0, #ffe39a, #9dffd2, #9ddcff, #cdb0ff, #ff9fe0); }
+.score-card > :not(.score-card__lines, .score-card__grain, .score-card__sheen) { position: relative; z-index: 1; }
+
+.score-card__medal { position: relative; display: grid; place-items: center; flex: none; }
+.score-card__medal svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.score-card__ring path { fill: none; stroke: var(--card-ink); stroke-width: .55; opacity: .5; }
+.score-card__disc { fill: var(--card-disc); }
+.score-card__spiro { fill: none; stroke: var(--card-ink); stroke-width: .35; opacity: .2; }
+.score-card__rim { fill: none; stroke: var(--card-ink); stroke-width: .9; opacity: .7; }
+.score-card__progress { fill: none; stroke: var(--card-ink); stroke-width: 3; stroke-linecap: round; }
+.score-card__track { fill: none; stroke: var(--card-ink); stroke-width: 3; opacity: .16; }
+.score-card--compact .score-card__track { stroke-width: 6; }
+.score-card__letter { position: relative; display: inline-flex; align-items: flex-start; font-family: var(--font-mono); font-weight: 700; line-height: 1; letter-spacing: -.04em; }
+.score-card__plus { font-size: .5em; margin-left: .03em; }
+.score-card__meter { position: relative; display: block; height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--card-ink) 22%, transparent); overflow: hidden; }
+.score-card__meter > i { position: absolute; inset: 0 auto 0 0; width: var(--share, 0%); border-radius: inherit; background: var(--card-ink); }
+.score-card__of { margin-left: 2px; font-size: .42em; font-weight: var(--font-weight-regular); letter-spacing: 0; opacity: .8; }
+
+/* Full: the Overview report card. */
+.score-card--full { --card-radius: 12px; display: flex; flex-direction: column; border-radius: var(--card-radius); padding: 14px 16px 10px; }
+.score-card__top { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 10px; line-height: 14px; letter-spacing: .14em; text-transform: uppercase; }
+.score-card__top > :last-child { opacity: .8; }
+.score-card__main { display: flex; align-items: center; gap: 16px; margin: 8px 0 12px; }
+.score-card--full .score-card__medal { width: 76px; height: 76px; }
+.score-card--full .score-card__letter { font-size: 34px; }
+.score-card__figures { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.score-card__score { font-size: 46px; line-height: 46px; font-weight: 600; letter-spacing: -.045em; }
+.score-card__sub { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.score-card__ends { display: flex; justify-content: space-between; margin-top: 6px; font-family: var(--font-mono); font-size: 10px; line-height: 14px; letter-spacing: .04em; }
+.score-card__micro { margin: 8px -2px 0; overflow: hidden; white-space: nowrap; font-family: var(--font-mono); font-size: 5.5px; line-height: 7px; letter-spacing: .24em; opacity: .55; mask-image: linear-gradient(90deg, #000 80%, transparent); }
+
+/* Compact: the sidebar card, full width and 56px tall. */
+.score-card--compact { --card-radius: 10px; display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 12px 0 8px; border-radius: var(--card-radius); }
+.score-card--compact::before { inset: 3px; }
+.score-card--compact .score-card__medal { width: 40px; height: 40px; }
+.score-card--compact .score-card__letter { font-size: 18px; }
+.score-card--compact .score-card__ring path { stroke-width: 1.1; }
+.score-card--compact .score-card__spiro { stroke-width: .8; opacity: .18; }
+.score-card--compact .score-card__progress { stroke-width: 6; }
+.score-card__stack { display: flex; flex: 1; flex-direction: column; gap: 7px; min-width: 0; }
+.score-card__row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; white-space: nowrap; }
+.score-card__eyebrow { font-family: var(--font-mono); font-size: 9px; line-height: 12px; letter-spacing: .14em; text-transform: uppercase; }
+.score-card__value { font-size: 17px; line-height: 18px; font-weight: 600; letter-spacing: -.02em; }
+.score-card--compact .score-card__of { font-size: 11px; }
+.score-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+@media (hover: hover) { .score-card--compact:hover { --sy: .5; } }
+@media (prefers-reduced-motion: reduce) { .score-card__sheen { transition: none; } }
