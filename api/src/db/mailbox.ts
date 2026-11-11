@@ -38,7 +38,7 @@ export const mailboxRegions = pgTable('mailbox_regions', {
 
 export const mailboxDomains = pgTable('mailbox_domains', {
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), name: text('name').notNull(), receivingHost:text('receiving_host'), region: text('region').notNull(),
-  status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: catchAll('catch_all').notNull().default(sql`'create_mailbox'`),
+  status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: catchAll('catch_all').notNull().default(sql`'store'`),
   mx: jsonb('mx').$type<MxReport | null>(), mxMisses:smallint('mx_misses').notNull().default(0),lastError: text('last_error'), enabledAt: ts('enabled_at'), checkedAt: ts('checked_at'),
   // Subdomains (acme.example.com) point at their receiving parent and share its SES domain.
   parentId: text('parent_id'), acceptSubdomains: boolean('accept_subdomains').notNull().default(false),
@@ -47,7 +47,7 @@ export const mailboxDomains = pgTable('mailbox_domains', {
 }, t => [unique('mailbox_domains_name').on(t.workspaceId, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.domainId).where(sql`${t.parentId} IS NULL`),uniqueIndex('mailbox_domains_receiving_host').on(t.workspaceId,t.receivingHost).where(sql`${t.receivingHost} IS NOT NULL AND ${t.status} IN ('active','provisioning')`), index('mailbox_domains_region').on(t.workspaceId, t.region, t.status)]);
 
 export const mailboxes = pgTable('mailboxes', {
-  id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),
+  id: text('id').primaryKey(), ...scope(), key:text('key'), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),
   rules: jsonb('rules').$type<string[]>().notNull().default([]), metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   origin: text('origin').$type<'api' | 'auto'>().notNull().default('api'),
   sendLimits: jsonb('send_limits').$type<Partial<SendLimits>>().notNull().default({}),
@@ -143,6 +143,7 @@ export const mailboxEvents = pgTable('mailbox_events', {
 export const mailboxWebhooks = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(), url: text('url').notNull(), description: text('description').notNull().default(''),
   eventTypes: jsonb('event_types').$type<string[]>().notNull(), mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), paused: boolean('paused').notNull().default(false),
+  key:text('key'),name:text('name'),format:text('format').$type<'bane'|'inbound'>().notNull().default('bane'),junk:text('junk').$type<'skip'|'include'>().notNull().default('skip'),include:jsonb('include').$type<('message'|'raw')[]>().notNull().default([]),timeoutSeconds:smallint('timeout_seconds').notNull().default(5),retryAttempts:smallint('retry_attempts').notNull().default(10),encryptedLegacyToken:text('encrypted_legacy_token'),
   encryptedSecret: text('encrypted_secret').notNull(), encryptedHeaders: text('encrypted_headers'), createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
