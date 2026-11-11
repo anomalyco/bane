@@ -7759,6 +7759,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       const call = async (method: string, path: string, data?: Json, status = 200) => ok(await local(method, path, data), status);
       const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'support@receive.example', key: 'support' }), 201);
+      error(await local('POST', '/v1/inbound/addresses', { address: 'help@receive.example', key: 'support' }), 409, 'KEY_TAKEN');
       const hook = await call(
         'POST',
         '/v1/inbound/webhooks',
@@ -7809,7 +7810,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         },
       );
       await t.test('routing: dry run on a stored message equals the routing ingest recorded on its receipt', async () => {
-        assert.deepEqual(await call('POST', '/v1/routing/test', { messageId: received.id }), received.routing);
+        const replay = await call('POST', '/v1/routing/test', { messageId: received.id });
+        assert.deepEqual({ version: replay.version, recipients: replay.recipients }, received.routing);
+        assert.deepEqual(replay.message, { from: 'a@example.org', subject: 'Test route-both' });
       });
       const inbound = await call(
         'POST',
@@ -7876,18 +7879,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(p.email.parsedData.raw, raw.get('route-unknown')!.toString());
         assert.equal(p.email.cleanedContent.text, 'Hello\n');
         assert.equal(p.email.spam.isJunk, false);
+        assert.deepEqual(p.email.envelopeRecipients, ['unknown@receive.example']);
+        assert.match(p.email.threadId, /^thr_/);
+        assert.equal(p.email.messageId, '<route-unknown@example.org>');
+        assert.equal(p.email.parsedData.headers.subject, 'Test route-unknown');
         assert.deepEqual(p.endpoint, { id: inbound.id, name: 'Helpdesk', type: 'webhook' });
         assert.equal(h.get('x-webhook-verification-token'), inbound.verificationToken);
         assert.equal(h.get('x-webhook-event'), p.event);
         assert.equal(h.get('x-endpoint-id'), p.endpoint.id);
         assert.equal(h.get('x-webhook-timestamp'), p.timestamp);
-        assert.equal(
-          h.get('webhook-signature'),
-          'v1,' +
-            createHmac('sha256', Buffer.from(inbound.secret.slice(6), 'base64'))
-              .update(`${h.get('webhook-id')}.${h.get('webhook-timestamp')}.${body}`)
-              .digest('base64'),
-        );
+        assert.equal(h.get('x-email-id'), compatMail.id);
+        // The SDK verifier accepts the exact body and rejects any change to it.
+        const { verifyWebhook } = await import('../sdk/src/webhooks.js');
+        assert.equal(await verifyWebhook(body, h, inbound.secret), true);
+        assert.equal(await verifyWebhook(Buffer.from(body), Object.fromEntries(h), inbound.secret), true);
+        assert.equal(await verifyWebhook(body + ' ', h, inbound.secret), false);
       });
       await t.test('routing: webhook tests do not disclose endpoint credentials to override URLs; redelivery is fenced', async () => {
         let signed = '';
@@ -7936,18 +7942,55 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         }
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
-        const cfg = await call('GET', '/v1/routing?format=config'),
+        const read = await local('GET', '/v1/routing?format=config'),
+          cfg = ok(read),
           apply = (config: Json, version: number, preview = false) =>
-            local('PUT', '/v1/routing' + (preview ? '?dryRun=true' : ''), config, 'live', { 'if-match': String(version) });
-        assert.deepEqual(ok(await apply(cfg, cfg.version)), { version: cfg.version, diff: [] });
+            local('PUT', '/v1/routing' + (preview ? '?dryRun=true' : ''), config, 'live', { 'if-match': `"${version}"` });
+        assert.equal(read.headers.get('etag'), `"${cfg.version}"`);
+        assert.deepEqual(ok(await apply(cfg, cfg.version)), { version: cfg.version, diff: [], warnings: [] });
         const changed = { routes: [...cfg.routes, { key: 'drop', match: 'drop@receive.example', to: 'drop' }] };
         assert.equal(ok(await apply(changed, cfg.version, true)).diff.length, 1);
         assert.equal((await call('GET', '/v1/routing')).version, cfg.version);
         error(await apply(changed, cfg.version - 1), 409, 'VERSION_CONFLICT');
-        assert.equal(ok(await apply(changed, cfg.version)).version, cfg.version + 1);
-        const m = await ingest('route-drop', ['drop@receive.example']);
-        assert.equal(m.id, null);
-        assert.equal(m.routing.recipients[0].dropped, true);
+        const applied = await apply(changed, cfg.version);
+        assert.equal(ok(applied).version, cfg.version + 1);
+        assert.equal(applied.headers.get('etag'), `"${cfg.version + 1}"`);
+        error(await local('PATCH', '/v1/routing/routes/drop', { note: 'stale' }, 'live', { 'if-match': String(cfg.version) }), 409, 'VERSION_CONFLICT');
+      });
+      await t.test('routing: an all-drop message settles in the claim and settlement statements, without S3', async (it) => {
+        await db.query('DELETE FROM jobs');
+        const { processJobs } = await import('./src/jobs.js');
+        raw.set('route-drop', Buffer.from('Subject: drop\r\n\r\nBody'));
+        await submit('route-drop', ['drop@receive.example']);
+        const queries = it.mock.method(pg.Client.prototype, 'query'),
+          s3 = it.mock.method(S3Client.prototype, 'send');
+        assert.equal(await processJobs(runtime, mailboxIngestJobs, 1, 1), 1);
+        assert.equal(queries.mock.callCount(), 2);
+        assert.equal(s3.mock.callCount(), 0);
+        const m = (
+          await db.query(
+            'SELECT m.id,r.status,r.routing FROM mail_receipts r LEFT JOIN mail_messages m USING(workspace_id,ses_message_id) WHERE r.workspace_id=$1 AND r.ses_message_id=$2',
+            [wid, 'route-drop'],
+          )
+        ).rows[0];
+        assert.deepEqual([m.id, m.status, m.routing.recipients[0].dropped], [null, 'processed', true]);
+      });
+      await t.test('routing: dry runs try pasted MIME, unsaved routes and earlier versions without saving anything', async () => {
+        const saved = await call('GET', '/v1/routing'),
+          draft = await call('GET', '/v1/routing?format=config');
+        draft.routes.push({ match: 'billing@receive.example', to: ['inbox:support'] });
+        const pasted = Buffer.from('From: Ana <Ana@Example.org>\r\nTo: billing@receive.example\r\nCc: Sales <sales@receive.example>\r\nSubject: Invoice\r\n\r\nHi').toString('base64');
+        const preview = await call('POST', '/v1/routing/test', { raw: pasted, config: draft });
+        assert.deepEqual([preview.unsaved, preview.version, preview.message], [true, saved.version, { from: 'ana@example.org', subject: 'Invoice' }]);
+        assert.deepEqual(
+          preview.recipients.map((r: Json) => [r.address, r.tier, r.inboxes]),
+          [['billing@receive.example', 'exact', [box.id]], ['sales@receive.example', 'catchall', []]],
+        );
+        assert.deepEqual(await call('GET', '/v1/routing'), saved);
+        const first = await call('POST', '/v1/routing/test', { envelope: { to: [box.address] }, version: 0 });
+        assert.deepEqual([first.version, first.recipients[0].tier, first.recipients[0].inboxes], [0, 'address', [box.id]]);
+        error(await local('POST', '/v1/routing/test', { envelope: { to: [box.address] }, config: { routes: [{ match: box.address, to: ['inbox:missing'] }] } }), 422, 'UNKNOWN_DESTINATION');
+        error(await local('POST', '/v1/routing/test', { raw: Buffer.from('Subject: no recipients\r\n\r\n').toString('base64') }), 422, 'MISSING_RECIPIENTS');
       });
       await t.test('routing: restoring version N recreates routes and plans; audit records the actor and diff', async () => {
         const { version } = await call('GET', '/v1/routing');
@@ -7959,7 +8002,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const { data } = await call('GET', '/v1/routing/audit');
         assert.equal(data[0].before, null);
         assert.equal(data[0].after.id, compat.id);
-        assert.ok(data[0].actor_id);
+        assert.deepEqual([data[0].version, data[0].note, data[0].actor.type], [version + 2, `Restore of v${version}`, 'dashboard']);
+        assert.ok(data[0].actor.id);
+        const versions = await call('GET', '/v1/routing/versions?limit=2');
+        assert.deepEqual(versions.data.map((v: Json) => v.version), [version + 2, version + 1]);
+        assert.equal(versions.nextCursor, String(version + 1));
       });
       await t.test('routing: deleted or expired destinations fall back to keep, with a trace warning', async () => {
         await call('PATCH', '/v1/routing/routes/support', { to: [box.id] });
@@ -7971,8 +8018,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('routing: deleting a referenced destination returns 409 unless detached', async () => {
         error(await local('DELETE', '/v1/inbound/addresses/' + box.id), 409, 'REFERENCED');
+        const { version } = await call('GET', '/v1/routing');
         await call('DELETE', '/v1/inbound/addresses/' + box.id + '?detach=true');
         assert.deepEqual((await call('GET', '/v1/routing/routes/' + both.id)).to, []);
+        // Restoring a version that still listed the deleted inbox leaves it out and says so.
+        const restored = await call('POST', `/v1/routing/versions/${version}/restore`, {});
+        assert.match(restored.warnings.join(' '), new RegExp(`Removed ${box.id} from support@receive.example`));
       });
     });
   });

@@ -1,3 +1,8 @@
+-- Receipts keep the whole trace up to 4 KiB; a larger one keeps its version and outcome counts.
+CREATE FUNCTION mail_routing_trace(plan jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+ SELECT CASE WHEN octet_length(plan::text)<=4096 THEN plan ELSE jsonb_build_object('version',plan->'version','truncated',true,'recipientCount',jsonb_array_length(plan->'recipients'),
+  'droppedCount',(SELECT count(*) FROM jsonb_array_elements(plan->'recipients') r WHERE (r->>'dropped')::boolean)) END
+$$;
 -- Recheck claim-time destinations under the ingest lane. A concurrent delete/expiry/DMARC hold
 -- can only reduce delivery; it must never turn an explicit route into an auto-created address.
 CREATE FUNCTION mail_apply_route(w text,p jsonb,received timestamptz,dmarc text) RETURNS jsonb LANGUAGE sql STABLE AS $$
@@ -6,7 +11,7 @@ CREATE FUNCTION mail_apply_route(w text,p jsonb,received timestamptz,dmarc text)
  SELECT jsonb_agg(id ORDER BY ord) AS boxes,bool_or(require_dmarc) AS held FROM jsonb_array_elements_text(item->'inboxes') WITH ORDINALITY ref(k,ord) JOIN mailboxes b ON b.workspace_id=w AND b.id=k AND (b.expires_at IS NULL OR (b.created_at<=received AND b.expires_at>greatest(statement_timestamp(),received)))) b ON true
  LEFT JOIN LATERAL (SELECT jsonb_agg(id ORDER BY ord) AS hooks FROM jsonb_array_elements_text(item->'webhooks') WITH ORDINALITY ref(k,ord) JOIN mailbox_webhooks h ON h.workspace_id=w AND h.id=k AND NOT h.paused AND (h.junk='include' OR NOT (item->>'junk')::boolean)
  WHERE dmarc='PASS' OR (NOT coalesce(b.held,false) AND NOT EXISTS(SELECT FROM mailbox_addresses a JOIN mailboxes m ON m.id=a.mailbox_id AND m.workspace_id=w WHERE a.workspace_id=w AND a.address IN(item->>'address',regexp_replace(item->>'address','[+][^@]*@','@')) AND m.require_dmarc))) h ON true)
- SELECT jsonb_set(p,'{recipients}',coalesce(jsonb_agg(item||jsonb_build_object('inboxes',boxes,'webhooks',hooks,'warnings',CASE WHEN boxes<>item->'inboxes' OR hooks<>item->'webhooks' THEN item->'warnings'||'"Destination changed before storage"'::jsonb ELSE item->'warnings' END) ORDER BY n),'[]')) FROM checked
+ SELECT jsonb_set(p,'{recipients}',coalesce(jsonb_agg(item||jsonb_build_object('inboxes',boxes,'webhooks',hooks,'warnings',CASE WHEN boxes<>item->'inboxes' OR hooks<>item->'webhooks' THEN item->'warnings'||'"Destinations changed between the claim and storage."'::jsonb ELSE item->'warnings' END) ORDER BY n),'[]')) FROM checked
 $$;
 
 CREATE FUNCTION mail_store_incoming(msg jsonb, file_items jsonb, refs_json jsonb, envelopes jsonb, authenticated_from boolean, can_create boolean, plan jsonb)
@@ -59,7 +64,7 @@ BEGIN
     JOIN jsonb_array_elements(plan->'recipients') pr(item) ON pr.item->>'address'=addr AND NOT (pr.item->>'dropped')::boolean
     CROSS JOIN LATERAL (SELECT regexp_replace(addr,'[+][^@]*@','@') AS base) plus
     LEFT JOIN LATERAL (SELECT b.id AS owner,a.kind<>'public' AND (b.expires_at IS NULL OR (b.created_at<=least(x.received_at,received::timestamptz) AND b.expires_at>greatest(statement_timestamp(),least(x.received_at,received::timestamptz)))) AS receives
-      FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND a.address=addr AND pr.item->>'tier'='default' ORDER BY (a.address=addr) DESC LIMIT 1) o ON true
+      FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND a.address=addr AND pr.item->>'tier'='default' LIMIT 1) o ON true
   ), misses AS (SELECT * FROM routes WHERE owner IS NULL AND item->>'tier'='default' AND valid AND catch_all='create_mailbox' AND can_create),
   domain_budget AS MATERIALIZED (SELECT domain,least(500-count(created_at),50-count(*) FILTER (WHERE created_at>now()-interval '1 hour')) AS slots
     FROM (SELECT DISTINCT domain FROM misses) d LEFT JOIN LATERAL (SELECT created_at FROM mailboxes b WHERE b.workspace_id=wid AND b.domain_id=d.domain AND b.origin='auto' LIMIT 500) b ON true GROUP BY domain),
@@ -78,7 +83,7 @@ BEGIN
   summaries AS (INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
     SELECT a.mailbox_id,x.thread_id,x.workspace_id,1,1,x.received_at,x.received_at,x.spam,CASE WHEN x.spam THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM target x JOIN added a ON a.message_id=x.id ORDER BY a.mailbox_id
     ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+1,last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=false RETURNING mailbox_id),
-  done AS (UPDATE mail_receipts SET status='processed',processed_at=now(),error=NULL,routing=CASE WHEN octet_length(plan::text)<=4096 THEN plan ELSE jsonb_build_object('version',plan->'version','truncated',true,'recipientCount',jsonb_array_length(plan->'recipients')) END WHERE workspace_id=wid AND ses_message_id=(msg->>'ses_message_id') AND EXISTS(SELECT FROM delivery)),
+  done AS (UPDATE mail_receipts SET status='processed',processed_at=now(),error=NULL,routing=mail_routing_trace(plan) WHERE workspace_id=wid AND ses_message_id=(msg->>'ses_message_id') AND EXISTS(SELECT FROM delivery)),
   items AS MATERIALIZED (SELECT workspace_id,'message.stored' AS type,NULL::text AS mailbox_id,thread_id,id AS message_id,jsonb_strip_nulls(jsonb_build_object('contactId',c.contact_id,'clearedSuppressionReason',c.suppression_reason)) AS data,1 AS ord FROM stored s LEFT JOIN cleared c ON c.message_id=s.id
     UNION ALL SELECT workspace_id,'address.created',id,NULL,NULL,'{"origin":"auto"}'::jsonb,2 FROM boxes
     UNION ALL SELECT x.workspace_id,CASE WHEN is_spam THEN 'message.junk' ELSE 'message.received' END,a.mailbox_id,x.thread_id,x.id,jsonb_build_object('spam',x.spam,'automated',x.automated,'dmarc',dmarc::text),3

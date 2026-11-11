@@ -143,7 +143,7 @@ export const mailboxEvents = pgTable('mailbox_events', {
 export const mailboxWebhooks = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(), url: text('url').notNull(), description: text('description').notNull().default(''),
   eventTypes: jsonb('event_types').$type<string[]>().notNull(), mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), paused: boolean('paused').notNull().default(false),
-  key:text('key'),name:text('name'),format:text('format').$type<'bane'|'inbound'>().notNull().default('bane'),junk:text('junk').$type<'skip'|'include'>().notNull().default('skip'),include:jsonb('include').$type<('message'|'raw')[]>().notNull().default([]),timeoutSeconds:smallint('timeout_seconds').notNull().default(5),retryAttempts:smallint('retry_attempts').notNull().default(10),encryptedLegacyToken:text('encrypted_legacy_token'),
+  key:text('key'),name:text('name'),format:text('format').$type<'bane'|'inbound'>().notNull().default('bane'),junk:text('junk').$type<'skip'|'include'>().notNull().default('skip'),include:jsonb('include').$type<('message'|'raw')[]>().notNull().default([]),timeoutSeconds:smallint('timeout_seconds').notNull().default(5),retryAttempts:smallint('retry_attempts').notNull().default(9),
   encryptedSecret: text('encrypted_secret').notNull(), encryptedHeaders: text('encrypted_headers'), createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 

@@ -159,7 +159,11 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const requestId = c.get('requestId');
     const known = error instanceof ApiError;
     const invalidJson = error instanceof SyntaxError;
-    const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.') : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
+    const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
+    const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
+      : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
+      : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
     // Messages and even record-key validation paths can contain caller-supplied addresses.
     const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
     const unexpected = !known && responseError.status >= 500;

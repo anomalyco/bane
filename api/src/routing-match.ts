@@ -1,5 +1,6 @@
-/** Pure recipient matcher. Inputs contain only this envelope's hosts, owners and route references. */
-type Route = { id: string; match: string; to: string[] | 'drop'; subaddresses?: boolean };
+/** Pure recipient matcher shared by ingest and dry runs. The claim reads only this envelope's hosts, owners and destinations. */
+export type RouteTarget = string[] | 'drop';
+type Route = { id: string | null; match: string; to: RouteTarget; subaddresses?: boolean };
 export type RoutingInput = {
   version: number;
   legacy: boolean;
@@ -9,6 +10,13 @@ export type RoutingInput = {
   boxes: Record<string, { dmarc: boolean; created: string; expires: string | null }> | null;
   hooks: Record<string, string> | null;
 };
+/** Why a recipient went where it did, most specific first. `address` is an inbox's own address or alias, which needs no route. */
+export const ROUTE_TIERS = ['exact', 'address', 'pattern', 'subaddress', 'catchall', 'default'] as const;
+export type RouteTier = (typeof ROUTE_TIERS)[number];
+export const MESSAGE_INBOX_LIMIT = 10;
+export const MESSAGE_WEBHOOK_LIMIT = 20;
+export const plusBase = (address: string) => address.replace(/\+[^@]*@/, '@');
+
 // Consume literal segments in order, anchoring both ends. No backtracking or generated regex.
 export function addressGlob(pattern: string, address: string) {
   const parts = pattern.split('*');
@@ -24,82 +32,69 @@ export function addressGlob(pattern: string, address: string) {
   }
   return offset <= address.length - last.length;
 }
-export function matchRouting(
-  input: RoutingInput,
-  addresses: string[],
-  junk: boolean,
-  dmarc: string,
-  received: string,
-  now = Date.now(),
-) {
-  const boxes = new Set<string>(),
-    hooks = new Set<string>();
+
+type Resolved = { tier: RouteTier; route: Route | null; to: RouteTarget };
+function resolve(input: RoutingInput, address: string): Resolved {
+  const host = input.hosts?.[address.split('@')[1]!],
+    base = plusBase(address);
+  const at = (addr: string): Resolved | undefined => {
+    const route = input.exact?.[addr],
+      owner = input.owners?.[addr];
+    if (route) return { tier: 'exact', route, to: route.to };
+    // A send-only public address never receives.
+    if (owner) return { tier: 'address', route: null, to: owner.public ? [] : [owner.id] };
+  };
+  const pattern = (catchAll: boolean) => {
+    const route = host?.patterns.find((r) => r.match.startsWith('*@') === catchAll && addressGlob(r.match, address));
+    return route && { tier: catchAll ? ('catchall' as const) : ('pattern' as const), route, to: route.to };
+  };
+  const exact = at(address);
+  if (exact) return exact;
+  const parent = address === base ? undefined : at(base);
+  const subaddress = parent && parent.route?.subaddresses !== false ? { ...parent, tier: 'subaddress' as const } : undefined;
+  // Workspaces whose address patterns predate routing keep the plus base ahead of local patterns.
+  if (input.legacy && subaddress) return subaddress;
+  return pattern(false) ?? subaddress ?? pattern(true) ?? { tier: 'default', route: null, to: [] };
+}
+
+export function matchRouting(input: RoutingInput, addresses: string[], junk: boolean, dmarc: string, received: string, now = Date.now()) {
+  const inboxes = new Set<string>(),
+    webhooks = new Set<string>(),
+    at = Date.parse(received);
+  const receives = (box: NonNullable<RoutingInput['boxes']>[string]) =>
+    !box.expires || (Date.parse(box.created) <= at && Date.parse(box.expires) > Math.max(now, at));
   const recipients = addresses.map((address) => {
-    const host = input.hosts?.[address.split('@')[1]!],
-      base = address.replace(/\+[^@]*@/, '@');
-    const owner = (addr: string): Route | undefined => {
-      const o = input.owners?.[addr];
-      return o ? { id: o.id, match: addr, to: o.public ? [] : [o.id] } : undefined;
-    };
-    const exact = (addr: string) => input.exact?.[addr] ?? owner(addr);
-    let route = exact(address),
-      tier = 'exact';
-    const baseRoute = address === base ? undefined : exact(base);
-    const fallback = baseRoute?.subaddresses === false ? undefined : baseRoute;
-    if (!route && input.legacy && fallback) {
-      route = fallback;
-      tier = 'subaddress';
-    }
-    if (!route) {
-      route = host?.patterns.find((r) => !r.match.startsWith('*@') && addressGlob(r.match, address));
-      tier = 'pattern';
-    }
-    if (!route) {
-      route = fallback;
-      tier = 'subaddress';
-    }
-    if (!route) {
-      route = host?.patterns.find((r) => r.match.startsWith('*@') && addressGlob(r.match, address));
-      tier = 'catchall';
-    }
-    if (!route) tier = 'default';
-    const inboxes: string[] = [],
-      webhooks: string[] = [],
+    const { tier, route, to } = resolve(input, address);
+    const refs = to === 'drop' ? [] : to,
+      mine = { inboxes: [] as string[], webhooks: [] as string[] },
       warnings: string[] = [];
-    const refs = Array.isArray(route?.to) ? route.to : [];
-    // requireDmarc belongs to the addressed inbox as well as any explicit inbox destinations.
-    const owning = input.owners?.[address] ?? input.owners?.[base];
-    const held = dmarc !== 'PASS' && ((owning && input.boxes?.[owning.id]?.dmarc) || refs.some((id) => input.boxes?.[id]?.dmarc));
+    // Each message reaches a bounded number of destinations across all of its recipients.
+    const take = (kind: 'inboxes' | 'webhooks', id: string) => {
+      const [seen, limit] = kind === 'inboxes' ? [inboxes, MESSAGE_INBOX_LIMIT] : [webhooks, MESSAGE_WEBHOOK_LIMIT];
+      if (!seen.has(id) && seen.size >= limit) return warnings.push(`${id} skipped: a message reaches at most ${limit} ${kind}.`);
+      seen.add(id);
+      mine[kind].push(id);
+    };
+    // requireDmarc on the addressed inbox, or on any inbox destination, holds this recipient's webhooks.
+    const owner = input.owners?.[address] ?? input.owners?.[plusBase(address)];
+    const held = dmarc !== 'PASS' && [owner?.id, ...refs].some((id) => id && input.boxes?.[id]?.dmarc);
     for (const id of refs) {
       const box = input.boxes?.[id],
         hook = input.hooks?.[id];
-      if (
-        box &&
-        (!box.expires ||
-          (Date.parse(box.created) <= Date.parse(received) && Date.parse(box.expires) > Math.max(now, Date.parse(received))))
-      ) {
-        if (boxes.has(id) || boxes.size < 10) {
-          boxes.add(id);
-          inboxes.push(id);
-        } else warnings.push(`Inbox limit: ${id}`);
-      } else if (hook) {
-        if (!held && (!junk || hook === 'include')) {
-          if (hooks.has(id) || hooks.size < 20) {
-            hooks.add(id);
-            webhooks.push(id);
-          } else warnings.push(`Webhook limit: ${id}`);
-        }
-      } else warnings.push(`Destination unavailable: ${id}`);
+      if (box && receives(box)) take('inboxes', id);
+      else if (hook && held) warnings.push(`${id} skipped: an inbox on this route requires DMARC to pass.`);
+      else if (hook && junk && hook !== 'include') warnings.push(`${id} skipped: the message is junk and this webhook's junk setting is skip.`);
+      else if (hook) take('webhooks', id);
+      else warnings.push(`${id} is unavailable: it was deleted, has expired or is paused.`);
     }
     return {
       address,
-      route: route?.id ?? null,
       tier,
-      default: host?.default === 'create_mailbox' ? 'create_address' : 'store',
-      inboxes,
-      webhooks,
+      route: route?.id ?? null,
+      ...mine,
+      dropped: to === 'drop',
       junk,
-      dropped: route?.to === 'drop',
+      domainDefault: input.hosts?.[address.split('@')[1]!]?.default === 'create_mailbox' ? ('create_address' as const) : ('store' as const),
       warnings,
     };
   });

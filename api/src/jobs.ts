@@ -8,6 +8,8 @@ import { failCampaign } from './states.js';
 import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
+/** An inbound webhook delivery gets its first attempt plus the webhook's retries (9 by default, today's 10 attempts). */
+export const mailboxWebhookAttempts = (hook?: Pick<ClaimedWebhook, 'retry_attempts'> | null) => 1 + (hook?.retry_attempts ?? WEBHOOK_ATTEMPTS - 1);
 const LOAD_ERROR_THRESHOLD = 6;
 export async function wakeWebhooks(runtime:Runtime,count:number) {
   if (count) try { await runtime.wake?.(count,'webhook'); } catch { log('warn',{code:'QUEUE_WAKE_FAILED',message:'Webhook jobs remain durable.'}); }
@@ -149,9 +151,9 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
       const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
-      const retry = error instanceof ApiError && error.retryable && (job.attempts < (job.type==='mailbox.webhook'?1+(job.webhook?.retry_attempts??(WEBHOOK_ATTEMPTS-1)):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || error.code === 'JOB_FINALIZATION_FAILED');
+      const retry = error instanceof ApiError && error.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || error.code === 'JOB_FINALIZATION_FAILED');
       const delay=Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
-      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:1+(job.webhook.retry_attempts??9)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
+      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
       log('error', { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: error instanceof ApiError ? error.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
     } finally {
       activeJobs--;

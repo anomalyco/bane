@@ -1,12 +1,12 @@
 -- No existing domain is rewritten. A workspace with no routing state still uses the six-argument store.
 ALTER TABLE mailbox_domains ALTER catch_all SET DEFAULT 'store';
 ALTER TABLE mail_receipts ADD routing jsonb;
-ALTER TABLE mailboxes ADD key text, ADD UNIQUE(workspace_id,key);
-ALTER TABLE mailbox_webhooks ADD key text, ADD UNIQUE(workspace_id,key), ADD name text,
+ALTER TABLE mailboxes ADD key text, ADD CONSTRAINT mailboxes_key UNIQUE(workspace_id,key);
+ALTER TABLE mailbox_webhooks ADD key text, ADD CONSTRAINT mailbox_webhooks_key UNIQUE(workspace_id,key), ADD name text,
  ADD format text NOT NULL DEFAULT 'bane' CHECK(format IN ('bane','inbound')),
  ADD junk text NOT NULL DEFAULT 'skip' CHECK(junk IN ('skip','include')),
  ADD include jsonb NOT NULL DEFAULT '[]', ADD timeout_seconds smallint NOT NULL DEFAULT 5 CHECK(timeout_seconds BETWEEN 1 AND 30),
- ADD retry_attempts smallint NOT NULL DEFAULT 10 CHECK(retry_attempts BETWEEN 0 AND 10), ADD encrypted_legacy_token text;
+ ADD retry_attempts smallint NOT NULL DEFAULT 9 CHECK(retry_attempts BETWEEN 0 AND 10); -- 9 retries keeps today's 10 attempts.
 ALTER TABLE mailbox_webhook_deliveries ADD routed boolean NOT NULL DEFAULT false, ADD format text NOT NULL DEFAULT 'bane';
 CREATE UNIQUE INDEX mailbox_hook_once_per_routed_message ON mailbox_webhook_deliveries(workspace_id,webhook_id,(payload->>'messageId')) WHERE routed;
 CREATE TABLE mail_routing_state(workspace_id text PRIMARY KEY,version integer NOT NULL DEFAULT 0,legacy_base boolean NOT NULL DEFAULT false);
@@ -25,9 +25,10 @@ CREATE TABLE mail_routing_audit(workspace_id text NOT NULL,version integer NOT N
 CREATE FUNCTION mail_compile_routes(w text,d text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE patterns jsonb;
 BEGIN
- SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'match',match,'to',destinations) ORDER BY length(replace(match,'*','')) DESC,created_at,id),'[]') INTO patterns FROM (
- SELECT id,match,destinations,created_at FROM mail_routes WHERE workspace_id=w AND domain_id=d AND position('*' IN match)>0 AND enabled
- UNION ALL SELECT b.id,p,jsonb_build_array(b.id),b.created_at FROM mailboxes b CROSS JOIN jsonb_array_elements_text(b.rules) p WHERE b.workspace_id=w AND b.domain_id=d AND b.expires_at IS NULL AND rules<>'[]') all_patterns;
+ -- Most literal characters first, then oldest. Address wildcard rules have no route ID.
+ SELECT coalesce(jsonb_agg(jsonb_build_object('id',route_id,'match',match,'to',destinations) ORDER BY length(replace(match,'*','')) DESC,created_at,coalesce(route_id,owner)),'[]') INTO patterns FROM (
+ SELECT id AS route_id,NULL AS owner,match,destinations,created_at FROM mail_routes WHERE workspace_id=w AND domain_id=d AND position('*' IN match)>0 AND enabled
+ UNION ALL SELECT NULL,b.id,p,jsonb_build_array(b.id),b.created_at FROM mailboxes b CROSS JOIN jsonb_array_elements_text(b.rules) p WHERE b.workspace_id=w AND b.domain_id=d AND b.expires_at IS NULL AND rules<>'[]') all_patterns;
  IF octet_length(patterns::text)>65536 THEN RAISE EXCEPTION 'Host routing plan exceeds 64 KiB' USING ERRCODE='54000'; END IF;
  INSERT INTO mail_routing_plans VALUES(w,d,patterns) ON CONFLICT(workspace_id,scope) DO UPDATE SET plan=excluded.plan;
 END $$;

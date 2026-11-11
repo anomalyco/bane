@@ -6319,19 +6319,19 @@
       "RoutingConfig": {
         "type": "object",
         "properties": {
+          "version": {
+            "type": "integer"
+          },
           "routes": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/MailRoute"
             }
-          },
-          "version": {
-            "type": "integer"
           }
         },
         "required": [
-          "routes",
-          "version"
+          "version",
+          "routes"
         ]
       },
       "MailRoute": {
@@ -6342,11 +6342,13 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "match": {
             "type": "string",
-            "maxLength": 254
+            "maxLength": 254,
+            "description": "Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default."
           },
           "to": {
             "anyOf": [
@@ -6360,11 +6362,14 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "maxLength": 128
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                 },
                 "maxItems": 10
               }
-            ]
+            ],
+            "description": "Inbox and webhook IDs, [] to keep, or 'drop'."
           },
           "subaddresses": {
             "type": "boolean"
@@ -6373,8 +6378,7 @@
             "type": "boolean"
           },
           "note": {
-            "type": "string",
-            "maxLength": 500
+            "type": "string"
           },
           "id": {
             "type": "string"
@@ -6384,8 +6388,12 @@
           }
         },
         "required": [
+          "key",
           "match",
           "to",
+          "subaddresses",
+          "enabled",
+          "note",
           "id",
           "createdAt"
         ],
@@ -6394,6 +6402,10 @@
       "RoutingConfigFile": {
         "type": "object",
         "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Ignored on apply; send the version in If-Match."
+          },
           "routes": {
             "type": "array",
             "items": {
@@ -6404,11 +6416,13 @@
                     "string",
                     "null"
                   ],
-                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                  "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
                 },
                 "match": {
                   "type": "string",
-                  "maxLength": 254
+                  "maxLength": 254,
+                  "description": "Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default."
                 },
                 "to": {
                   "anyOf": [
@@ -6422,17 +6436,22 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "maxLength": 128
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                       },
                       "maxItems": 10
                     }
-                  ]
+                  ],
+                  "description": "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
                 },
                 "subaddresses": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "Also route user+tag@host here when nothing more specific matches. Default true."
                 },
                 "enabled": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "A disabled route is skipped; its mail falls through to the next tier. Default true."
                 },
                 "note": {
                   "type": "string",
@@ -6446,15 +6465,74 @@
               "additionalProperties": false
             },
             "maxItems": 10000
-          },
-          "version": {
-            "type": "integer"
           }
         },
         "required": [
           "routes"
         ],
         "additionalProperties": false
+      },
+      "RoutingChange": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Routing version after the change; unchanged for a dry run or when nothing changed."
+          },
+          "diff": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutingDiff"
+            },
+            "description": "before null: created; after null: deleted."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "diff",
+          "warnings"
+        ]
+      },
+      "RoutingDiff": {
+        "type": "object",
+        "properties": {
+          "before": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          },
+          "after": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "before",
+          "after"
+        ]
       },
       "CreateMailRoute": {
         "type": "object",
@@ -6464,11 +6542,13 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "match": {
             "type": "string",
-            "maxLength": 254
+            "maxLength": 254,
+            "description": "Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default."
           },
           "to": {
             "anyOf": [
@@ -6482,17 +6562,22 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "maxLength": 128
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
                 },
                 "maxItems": 10
               }
-            ]
+            ],
+            "description": "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
           },
           "subaddresses": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Also route user+tag@host here when nothing more specific matches. Default true."
           },
           "enabled": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "A disabled route is skipped; its mail falls through to the next tier. Default true."
           },
           "note": {
             "type": "string",
@@ -6503,6 +6588,409 @@
           "match",
           "to"
         ],
+        "additionalProperties": false
+      },
+      "UpdateMailRoute": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+          },
+          "match": {
+            "type": "string",
+            "maxLength": 254,
+            "description": "Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default."
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "drop"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                },
+                "maxItems": 10
+              }
+            ],
+            "description": "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
+          },
+          "subaddresses": {
+            "type": "boolean",
+            "description": "Also route user+tag@host here when nothing more specific matches. Default true."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "A disabled route is skipped; its mail falls through to the next tier. Default true."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "additionalProperties": false
+      },
+      "RoutingAuditEntry": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "resourceId": {
+            "type": "string"
+          },
+          "before": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          },
+          "after": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "resourceId",
+          "before",
+          "after",
+          "actor",
+          "requestId",
+          "note",
+          "createdAt"
+        ]
+      },
+      "RoutingVersion": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ]
+          },
+          "changes": {
+            "type": "integer"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "createdAt",
+          "actor",
+          "changes",
+          "note"
+        ]
+      },
+      "RoutingVersionDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RoutingConfig"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "diff": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RoutingDiff"
+                }
+              }
+            },
+            "required": [
+              "diff"
+            ]
+          }
+        ]
+      },
+      "RoutingTestResult": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The routing version tested; for unsaved config, the saved version it starts from."
+          },
+          "unsaved": {
+            "type": "boolean"
+          },
+          "verdicts": {
+            "type": "object",
+            "properties": {
+              "spam": {
+                "type": "string"
+              },
+              "dmarc": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "spam",
+              "dmarc"
+            ]
+          },
+          "message": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "subject": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "from",
+              "subject"
+            ]
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutedRecipient"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "unsaved",
+          "verdicts",
+          "message",
+          "recipients"
+        ]
+      },
+      "RoutedRecipient": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "address",
+              "pattern",
+              "subaddress",
+              "catchall",
+              "default"
+            ],
+            "description": "What matched: exact (an exact route), address (an inbox's own address or alias), pattern (a local-part pattern), subaddress (the route or inbox of user@ for user+tag@), catchall (*@host) or default (the domain's catch-all setting)."
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Route ID; null for an address, an address wildcard rule or the domain default."
+          },
+          "inboxes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "webhooks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dropped": {
+            "type": "boolean"
+          },
+          "junk": {
+            "type": "boolean"
+          },
+          "domainDefault": {
+            "type": "string",
+            "enum": [
+              "store",
+              "create_address"
+            ],
+            "description": "The domain catch-all setting, used when tier is default."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destinations that were skipped, and why."
+          }
+        },
+        "required": [
+          "address",
+          "tier",
+          "route",
+          "inboxes",
+          "webhooks",
+          "dropped",
+          "junk",
+          "domainDefault",
+          "warnings"
+        ]
+      },
+      "RoutingTest": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "Replay a stored inbound message with its envelope recipients and SES verdicts."
+          },
+          "raw": {
+            "type": "string",
+            "maxLength": 8388608,
+            "description": "A pasted message: base64 RFC 822 MIME, parsed with the ingest limits. Its To and Cc are the recipients unless envelope.to is set."
+          },
+          "envelope": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 254,
+                  "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+                },
+                "minItems": 1,
+                "maxItems": 100
+              }
+            },
+            "required": [
+              "to"
+            ],
+            "additionalProperties": false,
+            "description": "Envelope recipients, including Bcc."
+          },
+          "verdicts": {
+            "type": "object",
+            "properties": {
+              "spam": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "GRAY",
+                  "PROCESSING_FAILED"
+                ]
+              },
+              "dmarc": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "GRAY",
+                  "PROCESSING_FAILED"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "description": "SES verdicts for envelope and raw tests. Each defaults to PASS. A stored message uses its own."
+          },
+          "config": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RoutingConfigFile"
+              },
+              {
+                "description": "Unsaved routes to test instead of the saved ones: a PUT /v1/routing body. Nothing is saved."
+              }
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Test the routes of an earlier version instead of the saved ones."
+          }
+        },
         "additionalProperties": false
       },
       "InboundScanPolicy": {
@@ -7012,7 +7500,8 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "address": {
             "type": "string"
@@ -7148,7 +7637,8 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "address": {
             "type": "string",
@@ -7245,7 +7735,8 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "displayName": {
             "type": [
@@ -8611,7 +9102,8 @@
                 "type": "string"
               },
               "verificationToken": {
-                "type": "string"
+                "type": "string",
+                "description": "inbound format: the X-Webhook-Verification-Token value."
               }
             },
             "required": [
@@ -8698,28 +9190,32 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "name": {
             "type": [
               "string",
               "null"
             ],
-            "maxLength": 120
+            "maxLength": 120,
+            "description": "Display name; sent as endpoint.name in the inbound format."
           },
           "format": {
             "type": "string",
             "enum": [
               "bane",
               "inbound"
-            ]
+            ],
+            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
             "enum": [
               "skip",
               "include"
-            ]
+            ],
+            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound."
           },
           "include": {
             "type": "array",
@@ -8730,17 +9226,20 @@
                 "raw"
               ]
             },
-            "maxItems": 2
+            "maxItems": 2,
+            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events."
           },
           "timeoutSeconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 30
+            "maximum": 30,
+            "description": "Seconds to wait for a 2xx response. Default 5."
           },
           "retryAttempts": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 10
+            "maximum": 10,
+            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound."
           }
         },
         "required": [
@@ -8770,28 +9269,32 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "name": {
             "type": [
               "string",
               "null"
             ],
-            "maxLength": 120
+            "maxLength": 120,
+            "description": "Display name; sent as endpoint.name in the inbound format."
           },
           "format": {
             "type": "string",
             "enum": [
               "bane",
               "inbound"
-            ]
+            ],
+            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
             "enum": [
               "skip",
               "include"
-            ]
+            ],
+            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound."
           },
           "include": {
             "type": "array",
@@ -8802,17 +9305,20 @@
                 "raw"
               ]
             },
-            "maxItems": 2
+            "maxItems": 2,
+            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events."
           },
           "timeoutSeconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 30
+            "maximum": 30,
+            "description": "Seconds to wait for a 2xx response. Default 5."
           },
           "retryAttempts": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 10
+            "maximum": 10,
+            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound."
           },
           "url": {
             "type": "string",
@@ -8847,7 +9353,8 @@
             "maxItems": 13,
             "default": [
               "message.received"
-            ]
+            ],
+            "description": "Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it."
           },
           "paused": {
             "type": "boolean",
@@ -8922,28 +9429,32 @@
               "string",
               "null"
             ],
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
           },
           "name": {
             "type": [
               "string",
               "null"
             ],
-            "maxLength": 120
+            "maxLength": 120,
+            "description": "Display name; sent as endpoint.name in the inbound format."
           },
           "format": {
             "type": "string",
             "enum": [
               "bane",
               "inbound"
-            ]
+            ],
+            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
             "enum": [
               "skip",
               "include"
-            ]
+            ],
+            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound."
           },
           "include": {
             "type": "array",
@@ -8954,17 +9465,20 @@
                 "raw"
               ]
             },
-            "maxItems": 2
+            "maxItems": 2,
+            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events."
           },
           "timeoutSeconds": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 30
+            "maximum": 30,
+            "description": "Seconds to wait for a 2xx response. Default 5."
           },
           "retryAttempts": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 10
+            "maximum": 10,
+            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound."
           },
           "url": {
             "type": "string",
@@ -8995,7 +9509,8 @@
                 "address.deleted"
               ]
             },
-            "maxItems": 13
+            "maxItems": 13,
+            "description": "Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it."
           },
           "paused": {
             "type": "boolean"
@@ -9043,11 +9558,66 @@
         },
         "additionalProperties": false
       },
+      "InboundWebhookTestResult": {
+        "type": "object",
+        "properties": {
+          "statusCode": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "statusCode"
+        ]
+      },
+      "TestInboundWebhook": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "bane",
+              "inbound"
+            ],
+            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+          },
+          "overrideUrl": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "additionalProperties": false
+      },
+      "InboundRedelivery": {
+        "type": "object",
+        "properties": {
+          "queued": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "queued"
+        ]
+      },
+      "RedeliverInboundMessage": {
+        "type": "object",
+        "properties": {
+          "destination": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "A webhook ID: redeliver to that webhook only."
+          }
+        },
+        "additionalProperties": false
+      },
       "InboundWebhookRotatedSecret": {
         "type": "object",
         "properties": {
           "secret": {
             "type": "string"
+          },
+          "verificationToken": {
+            "type": "string",
+            "description": "inbound format: the new X-Webhook-Verification-Token, which changes with the secret."
           }
         },
         "required": [
@@ -29513,6 +30083,8 @@
           "Routing"
         ],
         "operationId": "getRouting",
+        "summary": "Read the routing config",
+        "description": "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes and webhooks as inbox:<key> and webhook:<key>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
         "parameters": [
           {
             "schema": {
@@ -29674,6 +30246,8 @@
           "Routing"
         ],
         "operationId": "applyRouting",
+        "summary": "Replace every route",
+        "description": "Declarative apply: routes are matched by key (or, without a key, by match), so applying the same file again changes nothing. Routes missing from the file are deleted. Requires If-Match with the version you read. dryRun=true returns the diff without saving.",
         "parameters": [
           {
             "schema": {
@@ -29690,9 +30264,11 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 32
+              "maxLength": 32,
+              "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag."
             },
             "required": true,
+            "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.",
             "name": "if-match",
             "in": "header"
           }
@@ -29713,54 +30289,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "integer"
-                    },
-                    "diff": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "before": {
-                            "allOf": [
-                              {
-                                "$ref": "#/components/schemas/MailRoute"
-                              },
-                              {
-                                "type": [
-                                  "object",
-                                  "null"
-                                ]
-                              }
-                            ]
-                          },
-                          "after": {
-                            "allOf": [
-                              {
-                                "$ref": "#/components/schemas/MailRoute"
-                              },
-                              {
-                                "type": [
-                                  "object",
-                                  "null"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        "required": [
-                          "before",
-                          "after"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "version",
-                    "diff"
-                  ]
+                  "$ref": "#/components/schemas/RoutingChange"
                 }
               }
             }
@@ -29897,6 +30426,7 @@
           "Routing"
         ],
         "operationId": "listRoutes",
+        "summary": "List routes",
         "responses": {
           "200": {
             "description": "Success",
@@ -30049,6 +30579,21 @@
           "Routing"
         ],
         "operationId": "createRoute",
+        "summary": "Route a recipient",
+        "description": "Example: { \"match\": \"support@acme.com\", \"to\": [\"inbox:support\", \"webhook:helpdesk\"] } keeps the Support inbox and adds a webhook. Mail is routed by the new version as soon as this returns. Test first with testRouting.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag."
+            },
+            "required": false,
+            "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.",
+            "name": "if-match",
+            "in": "header"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -30202,13 +30747,16 @@
           "Routing"
         ],
         "operationId": "getRoute",
+        "summary": "Read a route",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "maxLength": 128
+              "maxLength": 128,
+              "description": "Route ID or key."
             },
             "required": true,
+            "description": "Route ID or key.",
             "name": "id",
             "in": "path"
           }
@@ -30354,15 +30902,30 @@
           "Routing"
         ],
         "operationId": "updateRoute",
+        "summary": "Change a route",
+        "description": "Only supplied fields change; to replaces the whole destination list.",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "maxLength": 128
+              "maxLength": 128,
+              "description": "Route ID or key."
             },
             "required": true,
+            "description": "Route ID or key.",
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag."
+            },
+            "required": false,
+            "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.",
+            "name": "if-match",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -30370,49 +30933,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "key": {
-                    "type": [
-                      "string",
-                      "null"
-                    ],
-                    "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
-                  },
-                  "match": {
-                    "type": "string",
-                    "maxLength": 254
-                  },
-                  "to": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "enum": [
-                          "drop"
-                        ]
-                      },
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "string",
-                          "maxLength": 128
-                        },
-                        "maxItems": 10
-                      }
-                    ]
-                  },
-                  "subaddresses": {
-                    "type": "boolean"
-                  },
-                  "enabled": {
-                    "type": "boolean"
-                  },
-                  "note": {
-                    "type": "string",
-                    "maxLength": 500
-                  }
-                },
-                "additionalProperties": false
+                "$ref": "#/components/schemas/UpdateMailRoute"
               }
             }
           }
@@ -30558,15 +31079,30 @@
           "Routing"
         ],
         "operationId": "deleteRoute",
+        "summary": "Delete a route",
+        "description": "The recipient falls back to the next tier, such as its inbox's own address or the catch-all.",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "maxLength": 128
+              "maxLength": 128,
+              "description": "Route ID or key."
             },
             "required": true,
+            "description": "Route ID or key.",
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag."
+            },
+            "required": false,
+            "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.",
+            "name": "if-match",
+            "in": "header"
           }
         ],
         "responses": {
@@ -30575,54 +31111,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "integer"
-                    },
-                    "diff": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "before": {
-                            "allOf": [
-                              {
-                                "$ref": "#/components/schemas/MailRoute"
-                              },
-                              {
-                                "type": [
-                                  "object",
-                                  "null"
-                                ]
-                              }
-                            ]
-                          },
-                          "after": {
-                            "allOf": [
-                              {
-                                "$ref": "#/components/schemas/MailRoute"
-                              },
-                              {
-                                "type": [
-                                  "object",
-                                  "null"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        "required": [
-                          "before",
-                          "after"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "version",
-                    "diff"
-                  ]
+                  "$ref": "#/components/schemas/RoutingChange"
                 }
               }
             }
@@ -30759,22 +31248,48 @@
           "Routing"
         ],
         "operationId": "getRoutingAudit",
+        "summary": "List route changes",
+        "description": "One entry per changed route, newest first, with the state before and after, who changed it and the request ID.",
         "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "required": false,
-            "name": "resource",
-            "in": "query"
-          },
           {
             "schema": {
               "type": "string",
               "maxLength": 200
             },
             "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Only changes to this route ID."
+            },
+            "required": false,
+            "description": "Only changes to this route ID.",
+            "name": "resource",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Only changes by this API key, agent, MCP grant or user ID."
+            },
+            "required": false,
+            "description": "Only changes by this API key, agent, MCP grant or user ID.",
             "name": "actor",
             "in": "query"
           },
@@ -30799,13 +31314,19 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "type": "object",
-                        "additionalProperties": {}
+                        "$ref": "#/components/schemas/RoutingAuditEntry"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
-                    "data"
+                    "data",
+                    "nextCursor"
                   ]
                 }
               }
@@ -30943,6 +31464,30 @@
           "Routing"
         ],
         "operationId": "listRoutingVersions",
+        "summary": "List routing versions",
+        "description": "Newest first. Every change, apply, detach and restore is one version.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success",
@@ -30954,13 +31499,19 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "type": "object",
-                        "additionalProperties": {}
+                        "$ref": "#/components/schemas/RoutingVersion"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
-                    "data"
+                    "data",
+                    "nextCursor"
                   ]
                 }
               }
@@ -31098,6 +31649,8 @@
           "Routing"
         ],
         "operationId": "getRoutingVersion",
+        "summary": "Read a routing version",
+        "description": "The routes as they were at version v, and what that version changed.",
         "parameters": [
           {
             "schema": {
@@ -31118,57 +31671,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/RoutingConfig"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "diff": {
-                          "type": "array",
-                          "items": {
-                            "type": "object",
-                            "properties": {
-                              "before": {
-                                "allOf": [
-                                  {
-                                    "$ref": "#/components/schemas/MailRoute"
-                                  },
-                                  {
-                                    "type": [
-                                      "object",
-                                      "null"
-                                    ]
-                                  }
-                                ]
-                              },
-                              "after": {
-                                "allOf": [
-                                  {
-                                    "$ref": "#/components/schemas/MailRoute"
-                                  },
-                                  {
-                                    "type": [
-                                      "object",
-                                      "null"
-                                    ]
-                                  }
-                                ]
-                              }
-                            },
-                            "required": [
-                              "before",
-                              "after"
-                            ]
-                          }
-                        }
-                      },
-                      "required": [
-                        "diff"
-                      ]
-                    }
-                  ]
+                  "$ref": "#/components/schemas/RoutingVersionDetail"
                 }
               }
             }
@@ -31305,6 +31808,8 @@
           "Routing"
         ],
         "operationId": "restoreRoutingVersion",
+        "summary": "Restore a routing version",
+        "description": "Saves the routes of version v as a new version. Destinations deleted since are left out and listed in warnings. Webhook settings and domain catch-all settings are not versioned, so they keep their current values.",
         "parameters": [
           {
             "schema": {
@@ -31317,6 +31822,17 @@
             "required": false,
             "name": "v",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag."
+            },
+            "required": false,
+            "description": "Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.",
+            "name": "if-match",
+            "in": "header"
           }
         ],
         "responses": {
@@ -31325,54 +31841,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "integer"
-                    },
-                    "diff": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "before": {
-                            "allOf": [
-                              {
-                                "$ref": "#/components/schemas/MailRoute"
-                              },
-                              {
-                                "type": [
-                                  "object",
-                                  "null"
-                                ]
-                              }
-                            ]
-                          },
-                          "after": {
-                            "allOf": [
-                              {
-                                "$ref": "#/components/schemas/MailRoute"
-                              },
-                              {
-                                "type": [
-                                  "object",
-                                  "null"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        "required": [
-                          "before",
-                          "after"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "version",
-                    "diff"
-                  ]
+                  "$ref": "#/components/schemas/RoutingChange"
                 }
               }
             }
@@ -31509,51 +31978,14 @@
           "Routing"
         ],
         "operationId": "testRouting",
-        "description": "Read-only. Resolve envelope recipients or replay a stored message against the current routing version.",
+        "summary": "Preview where mail would go",
+        "description": "Read-only: nothing is delivered or saved. Resolves recipients with the same matcher ingest uses and explains each one. Supply envelope.to, a pasted raw message or a stored messageId; add config to test unsaved routes or version to test an earlier one. A stored message tested against the current version matches the routing recorded when it arrived, unless destinations changed since.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "messageId": {
-                    "type": "string"
-                  },
-                  "envelope": {
-                    "type": "object",
-                    "properties": {
-                      "from": {
-                        "type": "string"
-                      },
-                      "to": {
-                        "type": "array",
-                        "items": {
-                          "type": "string",
-                          "maxLength": 254,
-                          "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
-                        },
-                        "minItems": 1,
-                        "maxItems": 100
-                      }
-                    },
-                    "required": [
-                      "to"
-                    ]
-                  },
-                  "verdicts": {
-                    "type": "object",
-                    "properties": {
-                      "spam": {
-                        "type": "string"
-                      },
-                      "dmarc": {
-                        "type": "string"
-                      }
-                    }
-                  }
-                },
-                "additionalProperties": false
+                "$ref": "#/components/schemas/RoutingTest"
               }
             }
           }
@@ -31564,74 +31996,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "number"
-                    },
-                    "recipients": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "address": {
-                            "type": "string"
-                          },
-                          "route": {
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          },
-                          "tier": {
-                            "type": "string"
-                          },
-                          "default": {
-                            "type": "string"
-                          },
-                          "inboxes": {
-                            "type": "array",
-                            "items": {
-                              "type": "string"
-                            }
-                          },
-                          "webhooks": {
-                            "type": "array",
-                            "items": {
-                              "type": "string"
-                            }
-                          },
-                          "junk": {
-                            "type": "boolean"
-                          },
-                          "dropped": {
-                            "type": "boolean"
-                          },
-                          "warnings": {
-                            "type": "array",
-                            "items": {
-                              "type": "string"
-                            }
-                          }
-                        },
-                        "required": [
-                          "address",
-                          "route",
-                          "tier",
-                          "default",
-                          "inboxes",
-                          "webhooks",
-                          "junk",
-                          "dropped",
-                          "warnings"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "version",
-                    "recipients"
-                  ]
+                  "$ref": "#/components/schemas/RoutingTestResult"
                 }
               }
             }
@@ -34536,7 +34901,7 @@
           }
         ],
         "operationId": "deleteInboundAddress",
-        "description": "Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.",
+        "description": "Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.",
         "parameters": [
           {
             "schema": {
@@ -34556,9 +34921,11 @@
               "enum": [
                 "true",
                 "false"
-              ]
+              ],
+              "description": "Also remove this inbox from every route that delivers to it, as one routing version."
             },
             "required": false,
+            "description": "Also remove this inbox from every route that delivers to it, as one routing version.",
             "name": "detach",
             "in": "query"
           }
@@ -36937,7 +37304,7 @@
           "Inbound webhooks"
         ],
         "summary": "Subscribe to inbound events",
-        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret is returned once.",
+        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -37385,6 +37752,7 @@
         "tags": [
           "Inbound webhooks"
         ],
+        "description": "Only supplied fields change. Changing format resets junk to that format's default unless junk is supplied too.",
         "parameters": [
           {
             "schema": {
@@ -37565,9 +37933,11 @@
               "enum": [
                 "true",
                 "false"
-              ]
+              ],
+              "description": "Also remove it from every route that delivers to it, as one routing version. Without it, a referenced webhook is not deleted."
             },
             "required": false,
+            "description": "Also remove it from every route that delivers to it, as one routing version. Without it, a referenced webhook is not deleted.",
             "name": "detach",
             "in": "query"
           }
@@ -37715,6 +38085,8 @@
         "tags": [
           "Inbound webhooks"
         ],
+        "summary": "Send a test delivery",
+        "description": "Posts a synthetic message.received for an example message, in the webhook's format or the one given, and returns the response status. overrideUrl sends it elsewhere, signed with a throwaway secret and without the webhook's custom headers.",
         "parameters": [
           {
             "schema": {
@@ -37732,21 +38104,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "format": {
-                    "type": "string",
-                    "enum": [
-                      "bane",
-                      "inbound"
-                    ]
-                  },
-                  "overrideUrl": {
-                    "type": "string",
-                    "maxLength": 2048
-                  }
-                },
-                "additionalProperties": false
+                "$ref": "#/components/schemas/TestInboundWebhook"
               }
             }
           }
@@ -37757,15 +38115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "statusCode": {
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "statusCode"
-                  ]
+                  "$ref": "#/components/schemas/InboundWebhookTestResult"
                 }
               }
             }
@@ -37885,7 +38235,7 @@
         ]
       }
     },
-    "/v1/inbound/messages/{id}/redeliver": {
+    "/v1/inbound/messages/{messageId}/redeliver": {
       "post": {
         "operationId": "redeliverInboundMessage",
         "security": [
@@ -37902,15 +38252,16 @@
         "tags": [
           "Inbound webhooks"
         ],
+        "summary": "Redeliver a message to its route webhooks",
+        "description": "Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none exist, they are still pending or their webhook is paused. Receivers deduplicate by Webhook-Id.",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "minLength": 1,
               "maxLength": 120
             },
             "required": true,
-            "name": "id",
+            "name": "messageId",
             "in": "path"
           }
         ],
@@ -37919,14 +38270,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "destination": {
-                    "type": "string",
-                    "maxLength": 128
-                  }
-                },
-                "additionalProperties": false
+                "$ref": "#/components/schemas/RedeliverInboundMessage"
               }
             }
           }
@@ -37937,15 +38281,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "queued": {
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "queued"
-                  ]
+                  "$ref": "#/components/schemas/InboundRedelivery"
                 }
               }
             }
@@ -38055,12 +38391,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { redeliverInboundMessage } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await redeliverInboundMessage({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { redeliverInboundMessage } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await redeliverInboundMessage({\n  client,\n  path: {\n    \"messageId\": \"message_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inbound/messages/resource_123/redeliver' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inbound/messages/message_123/redeliver' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }

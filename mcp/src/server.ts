@@ -8,6 +8,8 @@ const SPEC_LIMIT = 2 * 1024 * 1024;
 const RESPONSE_LIMIT = 16 * 1024 * 1024;
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
+// POST operations that change nothing: listed without allowWrites and without confirm.
+const READ_ONLY_POSTS = new Set(['testRouting']);
 // Unlike the legacy outbound catalog, inbound discovery is opt-in per operation.
 const INBOUND = new Map([
   ['getRouting', 'get /v1/routing'], ['testRouting', 'post /v1/routing/test'], ['listRoutingVersions', 'get /v1/routing/versions'],
@@ -249,7 +251,7 @@ async function main() {
       if (config.addressKey && (routing || !inbound || path.startsWith('/v1/inbound/domains') || (path.startsWith('/v1/inbound/addresses') && method !== 'get'))) continue;
       if (EXCLUDED.has(name) || (path === '/v1/api-keys' && method !== 'get')) continue;
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
-      const write = method !== 'get' && name !== 'testRouting';
+      const write = method !== 'get' && !READ_ONLY_POSTS.has(name);
       if (write && !config.allowWrites) continue;
       if (operations.has(name) || operations.size >= 256) fail('INVALID_SPEC', 'Duplicate operationId or too many tools.');
       const schema = inputSchema(spec, item as ObjectValue, operation, write);

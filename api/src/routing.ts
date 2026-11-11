@@ -1,52 +1,147 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { actor, ApiError, errors, id, json, response, security, type App, type Ctx, type DbExecutor } from './core.js';
+import { actor, ApiError, errors, id, json, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { PARSE_LIMIT } from './mailbox-mime.js';
 import { ADDRESS, lockMailboxLane } from './mailbox-store.js';
-import { matchRouting, type RoutingInput } from './routing-match.js';
+import { matchRouting, ROUTE_TIERS, type RoutingInput } from './routing-match.js';
 
-export const RoutingKey = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
+export const RoutingKey = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{0,62}$/)
+  .describe('Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.');
 const Address = z.string().trim().toLowerCase().max(254);
-const Fields = z
+const Destination = z.string().min(1).max(128).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).');
+const RouteFields = z
   .object({
     key: RoutingKey.nullable().optional(),
-    match: Address,
-    to: z.union([z.literal('drop'), z.array(z.string().max(128)).max(10)]),
-    subaddresses: z.boolean().optional(),
-    enabled: z.boolean().optional(),
+    match: Address.describe(
+      'Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default.',
+    ),
+    to: z
+      .union([z.literal('drop'), z.array(Destination).max(10)])
+      .describe(
+        "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.",
+      ),
+    subaddresses: z.boolean().optional().describe('Also route user+tag@host here when nothing more specific matches. Default true.'),
+    enabled: z.boolean().optional().describe('A disabled route is skipped; its mail falls through to the next tier. Default true.'),
     note: z.string().max(500).optional(),
   })
   .strict();
-const View = Fields.extend({ id: z.string(), createdAt: z.string() }).openapi('MailRoute'),
-  Config = z.object({ routes: z.array(View), version: z.number().int() }).openapi('RoutingConfig');
-type Route = z.infer<typeof View>;
-const ConfigFile = z
-  .object({ routes: z.array(Fields).max(10000), version: z.number().int().optional() })
+const MailRoute = RouteFields.extend({
+  id: z.string(),
+  key: RoutingKey.nullable(),
+  to: RouteFields.shape.to.describe("Inbox and webhook IDs, [] to keep, or 'drop'."),
+  subaddresses: z.boolean(),
+  enabled: z.boolean(),
+  note: z.string(),
+  createdAt: z.string(),
+}).openapi('MailRoute');
+type Route = z.infer<typeof MailRoute>;
+type RouteInput = z.infer<typeof RouteFields>;
+const RoutingConfig = z.object({ version: z.number().int(), routes: z.array(MailRoute) }).openapi('RoutingConfig');
+const RoutingConfigFile = z
+  .object({ version: z.number().int().optional().describe('Ignored on apply; send the version in If-Match.'), routes: z.array(RouteFields).max(10000) })
   .strict()
   .openapi('RoutingConfigFile');
-const Diff = z.object({ before: View.nullable(), after: View.nullable() }),
-  Change = z.object({ version: z.number().int(), diff: z.array(Diff) });
+const RoutingDiff = z.object({ before: MailRoute.nullable(), after: MailRoute.nullable() }).openapi('RoutingDiff');
+const RoutingChange = z
+  .object({
+    version: z.number().int().describe('Routing version after the change; unchanged for a dry run or when nothing changed.'),
+    diff: z.array(RoutingDiff).describe('before null: created; after null: deleted.'),
+    warnings: z.array(z.string()),
+  })
+  .openapi('RoutingChange');
+const ActorView = z.object({ type: z.string(), id: z.string() });
+const RoutingVersion = z
+  .object({ version: z.number().int(), createdAt: z.string(), actor: ActorView, changes: z.number().int(), note: z.string().nullable() })
+  .openapi('RoutingVersion');
+const RoutingAuditEntry = z
+  .object({
+    version: z.number().int(),
+    resourceId: z.string(),
+    before: MailRoute.nullable(),
+    after: MailRoute.nullable(),
+    actor: ActorView,
+    requestId: z.string().nullable(),
+    note: z.string().nullable(),
+    createdAt: z.string(),
+  })
+  .openapi('RoutingAuditEntry');
+const Verdict = z.enum(['PASS', 'FAIL', 'GRAY', 'PROCESSING_FAILED']);
+const RoutingTest = z
+  .object({
+    messageId: z.string().max(120).optional().describe('Replay a stored inbound message with its envelope recipients and SES verdicts.'),
+    raw: z
+      .string()
+      .max(Math.ceil(PARSE_LIMIT / 3) * 4)
+      .optional()
+      .describe('A pasted message: base64 RFC 822 MIME, parsed with the ingest limits. Its To and Cc are the recipients unless envelope.to is set.'),
+    envelope: z
+      .object({ to: z.array(Address.regex(ADDRESS)).min(1).max(100) })
+      .strict()
+      .optional()
+      .describe('Envelope recipients, including Bcc.'),
+    verdicts: z
+      .object({ spam: Verdict.optional(), dmarc: Verdict.optional() })
+      .strict()
+      .optional()
+      .describe('SES verdicts for envelope and raw tests. Each defaults to PASS. A stored message uses its own.'),
+    config: RoutingConfigFile.optional().describe('Unsaved routes to test instead of the saved ones: a PUT /v1/routing body. Nothing is saved.'),
+    version: z.number().int().nonnegative().optional().describe('Test the routes of an earlier version instead of the saved ones.'),
+  })
+  .strict()
+  .openapi('RoutingTest');
+const RoutedRecipient = z
+  .object({
+    address: z.string(),
+    tier: z
+      .enum(ROUTE_TIERS)
+      .describe(
+        "What matched: exact (an exact route), address (an inbox's own address or alias), pattern (a local-part pattern), subaddress (the route or inbox of user@ for user+tag@), catchall (*@host) or default (the domain's catch-all setting).",
+      ),
+    route: z.string().nullable().describe('Route ID; null for an address, an address wildcard rule or the domain default.'),
+    inboxes: z.array(z.string()),
+    webhooks: z.array(z.string()),
+    dropped: z.boolean(),
+    junk: z.boolean(),
+    domainDefault: z.enum(['store', 'create_address']).describe('The domain catch-all setting, used when tier is default.'),
+    warnings: z.array(z.string()).describe('Destinations that were skipped, and why.'),
+  })
+  .openapi('RoutedRecipient');
+const RoutingTestResult = z
+  .object({
+    version: z.number().int().describe('The routing version tested; for unsaved config, the saved version it starts from.'),
+    unsaved: z.boolean(),
+    verdicts: z.object({ spam: z.string(), dmarc: z.string() }),
+    message: z.object({ from: z.string().nullable(), subject: z.string().nullable() }).nullable(),
+    recipients: z.array(RoutedRecipient),
+  })
+  .openapi('RoutingTestResult');
+
+const fail = (status: number, code: string, message: string, field?: string) => new ApiError(status, code, message, field);
 const columns = sql`id,key,match,destinations AS "to",subaddresses,enabled,note,created_at::text AS "createdAt"`;
-const failure = (code: string, message: string, status = 422) => new ApiError(status, code, message);
-const list = async (tx: DbExecutor, w: string) =>
+const hostOf = (match: string) => match.split('@')[1]!;
+const listRoutes = async (tx: DbExecutor, w: string) =>
   (await tx.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} ORDER BY match`)).rows;
-async function current(tx: DbExecutor, w: string) {
-  return (
-    await tx.execute<{ v: number }>(sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS v`)
-  ).rows[0]!.v;
-}
-async function historical(tx: DbExecutor, w: string, v: number) {
-  return (
+const currentVersion = async (tx: DbExecutor, w: string) =>
+  (await tx.execute<{ v: number }>(sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS v`)).rows[0]!.v;
+/** Routes as they were at version v: the latest audited state of each route at or before it. */
+const historical = async (tx: DbExecutor, w: string, v: number) =>
+  (
     await tx.execute<{ r: Route }>(
       sql`SELECT r FROM (SELECT DISTINCT ON(resource_id) after AS r FROM mail_routing_audit WHERE workspace_id=${w} AND version<=${v} ORDER BY resource_id,version DESC) h WHERE r IS NOT NULL ORDER BY r->>'match'`,
     )
   ).rows.map((r) => r.r);
+/** Opts a workspace into the routed store without changing routing (the version stays the same). */
+export const enableRouting = (tx: DbExecutor, w: string) =>
+  tx.execute(sql`INSERT INTO mail_routing_state(workspace_id) VALUES(${w}) ON CONFLICT DO NOTHING`);
+
+function findRoute(routes: Route[], ref: string) {
+  const route = routes.find((r) => r.id === ref || r.key === ref);
+  if (!route) throw fail(404, 'NOT_FOUND', `Route ${ref} was not found. List routes with GET /v1/routing/routes.`);
+  return route;
 }
-const find = (routes: Route[], ref: string) => {
-  const r = routes.find((r) => r.id === ref || r.key === ref);
-  if (!r) throw failure('NOT_FOUND', 'Route not found.', 404);
-  return r;
-};
-function make(fields: z.infer<typeof Fields>, previous?: Route): Route {
+function makeRoute(fields: RouteInput, previous?: Route): Route {
   return {
     id: previous?.id ?? id('rte'),
     createdAt: previous?.createdAt ?? new Date().toISOString(),
@@ -58,181 +153,250 @@ function make(fields: z.infer<typeof Fields>, previous?: Route): Route {
     match: fields.match.replace(/^@/, '*@'),
   };
 }
-async function save(tx: DbExecutor, c: Ctx, w: string, version: number, before: Route[], after: Route[], dry = false, note = '') {
-  const old = new Map(before.map((r) => [r.id, r])),
-    seen = new Set<string>(),
+/** A config entry updates the route with its key, or else the keyless route with its match. */
+const existingFor = (routes: Route[], f: RouteInput) =>
+  (f.key ? routes.find((r) => r.key === f.key) : undefined) ?? routes.find((r) => r.match === f.match.replace(/^@/, '*@') && (!f.key || !r.key));
+const same = (a: Route | undefined, b: Route) =>
+  !!a && (['key', 'match', 'to', 'enabled', 'subaddresses', 'note'] as const).every((k) => JSON.stringify(a[k]) === JSON.stringify(b[k]));
+
+function checkRoutes(routes: Route[]) {
+  const matches = new Map<string, Route>(),
     keys = new Set<string>(),
-    counts = new Map<string, number>();
+    patterns = new Map<string, number>();
   let exact = 0;
-  const same = (a: Route | undefined, b: Route) =>
-    !!a &&
-    (['key', 'match', 'to', 'enabled', 'subaddresses', 'note'] as const).every(
-      (k) => JSON.stringify(a[k]) === JSON.stringify(b[k]),
-    );
-  let changed: Route[] = [];
-  for (const r of after) {
-    if (!ADDRESS.test(r.match) || r.match.split('@')[1]!.includes('*'))
-      throw failure('INVALID_MATCH', 'Supply an address or a local-part wildcard on a receiving host.');
-    if (seen.has(r.match) || (r.key && keys.has(r.key))) throw failure('ROUTE_CONFLICT', 'Duplicate match or route key.', 409);
-    seen.add(r.match);
+  for (const r of routes) {
+    if (!ADDRESS.test(r.match) || hostOf(r.match).includes('*'))
+      throw fail(
+        422,
+        'INVALID_MATCH',
+        `"${r.match}" is not a valid match. Use an address (support@acme.com), a local-part pattern (reply+*@acme.com) or a catch-all (*@acme.com).`,
+        'match',
+      );
+    const other = matches.get(r.match);
+    if (other)
+      throw fail(409, 'ROUTE_CONFLICT', `Route ${other.key ?? other.id} already matches ${r.match}. Add the destinations to that route instead.`, 'match');
+    if (r.key && keys.has(r.key)) throw fail(409, 'ROUTE_CONFLICT', `Route key ${r.key} is used twice. Keys must be unique.`, 'key');
+    matches.set(r.match, r);
     if (r.key) keys.add(r.key);
-    if (r.match.includes('*')) {
-      const host = r.match.split('@')[1]!,
-        n = 1 + (counts.get(host) ?? 0);
-      if (n > 64) throw failure('ROUTE_LIMIT', 'At most 64 patterns per host.', 409);
-      counts.set(host, n);
-    } else if (++exact > 10000) throw failure('ROUTE_LIMIT', 'At most 10,000 exact routes.', 409);
-    const prev = old.get(r.id);
-    if (!same(prev, r)) changed.push(r);
+    if (!r.match.includes('*')) {
+      if (++exact > 10000) throw fail(409, 'ROUTE_LIMIT', 'A workspace has at most 10,000 exact routes. Use a pattern or catch-all route.');
+      continue;
+    }
+    const n = (patterns.get(hostOf(r.match)) ?? 0) + 1;
+    if (n > 64) throw fail(409, 'ROUTE_LIMIT', `${hostOf(r.match)} has more than 64 pattern routes, the limit per host.`);
+    patterns.set(hostOf(r.match), n);
   }
-  const existing = new Set(after.map((r) => r.id)),
-    removed = before.filter((r) => !existing.has(r.id));
-  const refs = [...new Set(changed.flatMap((r) => (Array.isArray(r.to) ? r.to : [])))];
-  const dests = (
-    await tx.execute<{ id: string; ref: string }>(
-      sql`WITH refs AS (SELECT jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) AS ref) SELECT b.id,ref FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND (b.id=ref OR 'inbox:'||b.key=ref) UNION ALL SELECT h.id,ref FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND (h.id=ref OR 'webhook:'||h.key=ref)`,
-    )
-  ).rows;
-  const ids = new Map(dests.map((d) => [d.ref, d.id]));
-  for (const r of changed)
-    if (Array.isArray(r.to))
-      r.to = [
-        ...new Set(
-          r.to.map((ref) => {
-            const id = ids.get(ref);
-            if (!id) throw failure('UNKNOWN_DESTINATION', 'Destination does not exist in this workspace.');
-            return id;
-          }),
-        ),
-      ];
-  changed = changed.filter((r) => !same(old.get(r.id), r));
-  const diff = [
-    ...removed.map((r) => ({ before: r, after: null })),
-    ...changed.map((r) => ({ before: old.get(r.id) ?? null, after: r })),
-  ];
-  if (!diff.length) return { version, diff };
-  const hosts = [
-    ...new Set(
-      diff
-        .flatMap((d) => [d.before, d.after])
-        .filter((r): r is Route => !!r)
-        .map((r) => r.match.split('@')[1]!),
-    ),
-  ];
-  const domains = (
-    await tx.execute<{ id: string; host: string }>(
-      sql`SELECT id,coalesce(receiving_host,name) AS host FROM mailbox_domains WHERE workspace_id=${w} AND coalesce(receiving_host,name) IN (SELECT jsonb_array_elements_text(${JSON.stringify(hosts)}))`,
-    )
-  ).rows;
-  const domain = new Map(domains.map((d) => [d.host, d.id]));
-  for (const r of changed)
-    if (!domain.has(r.match.split('@')[1]!))
-      throw failure('UNKNOWN_HOST', 'Route must belong to a receiving host in this workspace.');
-  if (dry) return { version, diff };
-  await tx.execute(
-    sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},1) ON CONFLICT(workspace_id) DO UPDATE SET version=mail_routing_state.version+1`,
-  );
-  await tx.execute(
-    sql`DELETE FROM mail_routes WHERE workspace_id=${w} AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(diff.map((d) => (d.before ?? d.after)!.id))}))`,
-  );
-  await tx.execute(
-    sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(changed.map((r) => ({ ...r, domain: domain.get(r.match.split('@')[1]!) })))}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
-  );
-  const a = c.get('actor');
-  await tx.execute(
-    sql`INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note) SELECT ${w},${version + 1},coalesce(before->>'id',after->>'id'),before,after,${a.credential ?? 'apiKey'},${a.keyId},${c.get('requestId')},${note} FROM jsonb_to_recordset(${JSON.stringify(diff)}::jsonb) x(before jsonb,after jsonb)`,
-  );
-  const affected = diff
-    .flatMap((d) => [d.before, d.after])
-    .filter((r) => r?.match.includes('*'))
-    .map((r) => domain.get(r!.match.split('@')[1]!));
-  for (const d of new Set(affected.filter(Boolean))) await tx.execute(sql`SELECT mail_compile_routes(${w},${d})`);
-  return { version: version + 1, diff };
 }
-export async function detachDestination(tx: DbExecutor, c: Ctx, w: string, dest: string) {
+/** Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing. */
+async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean) {
+  const refs = [...new Set(routes.flatMap((r) => (Array.isArray(r.to) ? r.to : [])))],
+    warnings: string[] = [];
+  if (!refs.length) return warnings;
+  const found = new Map(
+    (
+      await tx.execute<{ ref: string; id: string }>(
+        sql`WITH refs AS (SELECT jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) AS ref)
+          SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND (b.id=ref OR 'inbox:'||b.key=ref)
+          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND (h.id=ref OR 'webhook:'||h.key=ref)`,
+      )
+    ).rows.map((d) => [d.ref, d.id]),
+  );
+  for (const r of routes) {
+    if (!Array.isArray(r.to)) continue;
+    const missing = r.to.filter((ref) => !found.has(ref));
+    if (missing.length && !lenient)
+      throw fail(
+        422,
+        'UNKNOWN_DESTINATION',
+        `${missing[0]} is not an inbox or webhook in this workspace. Use an ID from listInboundAddresses or listInboundWebhooks, or a key such as inbox:support.`,
+        'to',
+      );
+    for (const ref of missing) warnings.push(`Removed ${ref} from ${r.match}: it no longer exists.`);
+    r.to = [...new Set(r.to.flatMap((ref) => found.get(ref) ?? []))];
+  }
+  return warnings;
+}
+
+/** Validates and writes a whole route set as one version: rows, one audit row per changed route, and the affected host plans. */
+async function save(
+  tx: DbExecutor,
+  c: Ctx,
+  w: string,
+  version: number,
+  before: Route[],
+  after: Route[],
+  { dryRun = false, lenient = false, note = '' } = {},
+) {
+  checkRoutes(after);
+  const previous = new Map(before.map((r) => [r.id, r])),
+    kept = new Set(after.map((r) => r.id));
+  const warnings = await resolveDestinations(
+    tx,
+    w,
+    after.filter((r) => !same(previous.get(r.id), r)),
+    lenient,
+  );
+  const diff = [
+    ...before.filter((r) => !kept.has(r.id)).map((r) => ({ before: r, after: null })),
+    ...after.filter((r) => !same(previous.get(r.id), r)).map((r) => ({ before: previous.get(r.id) ?? null, after: r })),
+  ];
+  if (!diff.length) return { version, diff, warnings };
+  const routes = diff.flatMap((d) => [d.before, d.after]).filter((r): r is Route => !!r);
+  const domains = new Map(
+    (
+      await tx.execute<{ id: string; host: string }>(
+        sql`SELECT id,coalesce(receiving_host,name) AS host FROM mailbox_domains WHERE workspace_id=${w} AND coalesce(receiving_host,name) IN (SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(routes.map((r) => hostOf(r.match)))])}::jsonb))`,
+      )
+    ).rows.map((d) => [d.host, d.id]),
+  );
+  for (const { after: r } of diff)
+    if (r && !domains.has(hostOf(r.match)))
+      throw fail(
+        422,
+        'UNKNOWN_HOST',
+        `${hostOf(r.match)} is not a receiving domain in this workspace. Check the spelling, or enable receiving for it first.`,
+        'match',
+      );
+  if (dryRun) return { version, diff, warnings };
+  const [{ next }] = (
+    await tx.execute<{ next: number }>(
+      sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},1) ON CONFLICT(workspace_id) DO UPDATE SET version=mail_routing_state.version+1 RETURNING version AS next`,
+    )
+  ).rows as [{ next: number }];
+  await tx.execute(
+    sql`DELETE FROM mail_routes WHERE workspace_id=${w} AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(diff.map((d) => (d.before ?? d.after)!.id))}::jsonb))`,
+  );
+  const rows = diff.flatMap((d) => (d.after ? [{ ...d.after, domain: domains.get(hostOf(d.after.match)) }] : []));
+  await tx.execute(
+    sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
+  );
+  const who = c.get('actor');
+  await tx.execute(
+    sql`INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note) SELECT ${w},${next},coalesce(before->>'id',after->>'id'),before,after,${who.credential ?? 'apiKey'},${who.keyId},${c.get('requestId')},${note || null} FROM jsonb_to_recordset(${JSON.stringify(diff)}::jsonb) x(before jsonb,after jsonb)`,
+  );
+  // Exact routes are point lookups; only pattern and catch-all changes rewrite their host's plan.
+  for (const domain of new Set(routes.filter((r) => r.match.includes('*')).map((r) => domains.get(hostOf(r.match)))))
+    if (domain) await tx.execute(sql`SELECT mail_compile_routes(${w},${domain})`);
+  return { version: next, diff, warnings };
+}
+/** Removes a deleted inbox or webhook from every route, as one routing version, or refuses without ?detach=true. */
+export async function detachDestination(tx: DbExecutor, c: Ctx, w: string, destination: string) {
   await lockMailboxLane(tx, w, 'address');
-  if (!(await tx.execute(sql`SELECT FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${dest} LIMIT 1`)).rowCount)
-    return;
+  const using = (
+    await tx.execute<{ match: string }>(sql`SELECT match FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${destination} ORDER BY match LIMIT 3`)
+  ).rows.map((r) => r.match);
+  if (!using.length) return;
   if (c.req.query('detach') !== 'true')
-    throw failure('REFERENCED', 'Destination is used by a route. Pass detach=true to remove its references.', 409);
-  const routes = await list(tx, w);
+    throw fail(
+      409,
+      'REFERENCED',
+      `Routes for ${using.join(', ')}${using.length === 3 ? ' and more' : ''} deliver to ${destination}. Delete with ?detach=true to remove it from those routes too, or change the routes first.`,
+    );
+  const routes = await listRoutes(tx, w);
   await save(
     tx,
     c,
     w,
-    await current(tx, w),
+    await currentVersion(tx, w),
     routes,
-    routes.map((r) => (Array.isArray(r.to) && r.to.includes(dest) ? { ...r, to: r.to.filter((id) => id !== dest) } : r)),
-    false,
-    'Detach destination',
+    routes.map((r) => (Array.isArray(r.to) && r.to.includes(destination) ? { ...r, to: r.to.filter((id) => id !== destination) } : r)),
+    { note: `Detach ${destination}` },
   );
 }
+class RolledBack<T> extends Error {
+  constructor(readonly value: T) {
+    super('Rolled back');
+  }
+}
+/** Runs work in a transaction and always rolls it back: dry runs exercise the real write path without keeping it. */
+async function rolledBack<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>): Promise<T> {
+  try {
+    await db.transaction(async (tx) => {
+      throw new RolledBack(await work(tx));
+    });
+  } catch (error) {
+    if (error instanceof RolledBack) return error.value as T;
+    throw error;
+  }
+  throw new Error('Rolled-back transaction committed.');
+}
+type MimeAddress = { address?: string; group?: MimeAddress[] };
+const addressesOf = (list: MimeAddress[] | undefined): string[] =>
+  (list ?? []).flatMap((a) => (a.group ? addressesOf(a.group) : a.address ? [a.address.trim().toLowerCase()] : []));
+
 export function registerRouting(app: App) {
   const path = '/v1/routing',
-    meta = { security, tags: ['Routing'] },
-    wid = (c: Ctx) => {
-      const a = actor(c, 'manage');
-      if (a.domains.length || a.role === 'member')
-        throw failure('ADMIN_REQUIRED', 'Use an unrestricted workspace manage credential.', 403);
-      return a.workspaceId;
-    };
+    meta = { security, tags: ['Routing'] };
+  const workspace = (c: Ctx) => {
+    const a = actor(c, 'manage');
+    if (a.domains.length || a.role === 'member')
+      throw fail(
+        403,
+        'ADMIN_REQUIRED',
+        'Routing covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.',
+      );
+    return a.workspaceId;
+  };
   const edit = async (
     c: Ctx,
-    fn: (rows: Route[], tx: DbExecutor, version: number) => Route[] | Promise<Route[]>,
-    dry = false,
-    note = '',
+    change: (routes: Route[], tx: DbExecutor, version: number) => Route[] | Promise<Route[]>,
+    options: Parameters<typeof save>[6] = {},
   ) => {
-    const w = wid(c);
+    const w = workspace(c);
     if (['mcp', 'agentToken'].includes(c.get('actor').credential ?? ''))
-      throw failure('ADMIN_REQUIRED', 'Routing changes require workspace admin approval.', 403);
-    return c.env.db.transaction(async (tx) => {
+      throw fail(403, 'ADMIN_REQUIRED', 'MCP and agent credentials can read and test routing, not change it. Change routes in the dashboard or with an API key.');
+    const result = await c.env.db.transaction(async (tx) => {
       await lockMailboxLane(tx, w, 'address');
-      const version = await current(tx, w),
-        expected = c.req.header('if-match');
-      if (expected !== undefined && expected !== String(version) && expected !== `"${version}"`)
-        throw failure('VERSION_CONFLICT', 'Routing has changed. Read the current version.', 409);
-      const rows = await list(tx, w);
-      return save(tx, c, w, version, rows, await fn(rows, tx, version), dry, note);
+      const version = await currentVersion(tx, w),
+        expected = c.req.header('if-match')?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+      if (expected !== undefined && expected !== '*' && expected !== String(version))
+        throw fail(
+          409,
+          'VERSION_CONFLICT',
+          `Routing is at version ${version}, not ${expected}. Read GET /v1/routing again, reapply your change and send If-Match: "${version}".`,
+        );
+      const routes = await listRoutes(tx, w);
+      return save(tx, c, w, version, routes, await change(routes, tx, version), options);
     });
+    c.header('ETag', `"${result.version}"`);
+    return result;
   };
-  const params = z.object({ id: z.string().max(128) }),
-    versions = z.object({ v: z.coerce.number().int().nonnegative() });
+  const IfMatch = z.string().max(32).describe('Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.'),
+    ifMatch = z.object({ 'if-match': IfMatch.optional() });
+  const RouteParam = z.object({ id: z.string().max(128).describe('Route ID or key.') }),
+    VersionParam = z.object({ v: z.coerce.number().int().nonnegative() }),
+    Page = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) });
+
   app.openapi(
     createRoute({
       ...meta,
       method: 'get',
       path,
       operationId: 'getRouting',
+      summary: 'Read the routing config',
+      description:
+        "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes and webhooks as inbox:<key> and webhook:<key>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
       request: { query: z.object({ format: z.enum(['config']).optional() }) },
-      responses: { 200: response(z.union([Config, ConfigFile])), ...errors },
+      responses: { 200: response(z.union([RoutingConfig, RoutingConfigFile])), ...errors },
     }),
     async (c) => {
-      const w = wid(c);
-      const result = (
+      const w = workspace(c);
+      const config = (
         await c.env.db.execute<{ version: number; routes: Route[] }>(
           sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS version,coalesce((SELECT jsonb_agg(r ORDER BY match) FROM (SELECT ${columns} FROM mail_routes WHERE workspace_id=${w}) r),'[]') AS routes`,
         )
       ).rows[0]!;
-      if (c.req.valid('query').format === 'config') {
-        const keys = new Map(
-          (
-            await c.env.db.execute<{ id: string; ref: string }>(
-              sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key AS ref FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL`,
-            )
-          ).rows.map((r) => [r.id, r.ref]),
-        );
-        return c.json(
-          {
-            version: result.version,
-            routes: result.routes.map(({ id: _id, createdAt: _at, ...r }) => ({
-              ...r,
-              to: Array.isArray(r.to) ? r.to.map((id) => keys.get(id) ?? id) : r.to,
-            })),
-          },
-          200,
-        );
-      }
-      return c.json(result, 200);
+      c.header('ETag', `"${config.version}"`);
+      if (c.req.valid('query').format !== 'config') return c.json(config, 200);
+      const keys = new Map(
+        (
+          await c.env.db.execute<{ id: string; ref: string }>(
+            sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL`,
+          )
+        ).rows.map((r) => [r.id, r.ref]),
+      );
+      const routes = config.routes.map(({ id: _id, createdAt: _at, ...r }) => ({ ...r, to: Array.isArray(r.to) ? r.to.map((d) => keys.get(d) ?? d) : r.to }));
+      return c.json({ version: config.version, routes }, 200);
     },
   );
   app.openapi(
@@ -241,26 +405,21 @@ export function registerRouting(app: App) {
       method: 'put',
       path,
       operationId: 'applyRouting',
+      summary: 'Replace every route',
+      description:
+        'Declarative apply: routes are matched by key (or, without a key, by match), so applying the same file again changes nothing. Routes missing from the file are deleted. Requires If-Match with the version you read. dryRun=true returns the diff without saving.',
       request: {
-        headers: z.object({ 'if-match': z.string().max(32) }),
+        headers: z.object({ 'if-match': IfMatch }),
         query: z.object({ dryRun: z.enum(['true', 'false']).optional() }),
-        body: json(ConfigFile),
+        body: json(RoutingConfigFile),
       },
-      responses: { 200: response(Change), ...errors },
+      responses: { 200: response(RoutingChange), ...errors },
     }),
     async (c) =>
       c.json(
-        await edit(
-          c,
-          (rows) =>
-            c.req.valid('json').routes.map((f) =>
-              make(
-                f,
-                rows.find((r) => (f.key ? r.key === f.key : r.match === f.match)),
-              ),
-            ),
-          c.req.valid('query').dryRun === 'true',
-        ),
+        await edit(c, (routes) => c.req.valid('json').routes.map((f) => makeRoute(f, existingFor(routes, f))), {
+          dryRun: c.req.valid('query').dryRun === 'true',
+        }),
         200,
       ),
   );
@@ -270,9 +429,10 @@ export function registerRouting(app: App) {
       method: 'get',
       path: path + '/routes',
       operationId: 'listRoutes',
-      responses: { 200: response(z.object({ data: z.array(View) })), ...errors },
+      summary: 'List routes',
+      responses: { 200: response(z.object({ data: z.array(MailRoute) })), ...errors },
     }),
-    async (c) => c.json({ data: await list(c.env.db, wid(c)) }, 200),
+    async (c) => c.json({ data: await listRoutes(c.env.db, workspace(c)) }, 200),
   );
   app.openapi(
     createRoute({
@@ -280,13 +440,16 @@ export function registerRouting(app: App) {
       method: 'post',
       path: path + '/routes',
       operationId: 'createRoute',
-      request: { body: json(Fields.openapi('CreateMailRoute')) },
-      responses: { 201: response(View), ...errors },
+      summary: 'Route a recipient',
+      description:
+        'Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk"] } keeps the Support inbox and adds a webhook. Mail is routed by the new version as soon as this returns. Test first with testRouting.',
+      request: { headers: ifMatch, body: json(RouteFields.openapi('CreateMailRoute')) },
+      responses: { 201: response(MailRoute), ...errors },
     }),
     async (c) => {
-      const r = make(c.req.valid('json'));
-      await edit(c, (rows) => [...rows, r]);
-      return c.json(r, 201);
+      const route = makeRoute(c.req.valid('json'));
+      await edit(c, (routes) => [...routes, route]);
+      return c.json(route, 201);
     },
   );
   app.openapi(
@@ -295,10 +458,11 @@ export function registerRouting(app: App) {
       method: 'get',
       path: path + '/routes/{id}',
       operationId: 'getRoute',
-      request: { params },
-      responses: { 200: response(View), ...errors },
+      summary: 'Read a route',
+      request: { params: RouteParam },
+      responses: { 200: response(MailRoute), ...errors },
     }),
-    async (c) => c.json(find(await list(c.env.db, wid(c)), c.req.valid('param').id), 200),
+    async (c) => c.json(findRoute(await listRoutes(c.env.db, workspace(c)), c.req.valid('param').id), 200),
   );
   app.openapi(
     createRoute({
@@ -306,17 +470,19 @@ export function registerRouting(app: App) {
       method: 'patch',
       path: path + '/routes/{id}',
       operationId: 'updateRoute',
-      request: { params, body: json(Fields.partial()) },
-      responses: { 200: response(View), ...errors },
+      summary: 'Change a route',
+      description: 'Only supplied fields change; to replaces the whole destination list.',
+      request: { params: RouteParam, headers: ifMatch, body: json(RouteFields.partial().openapi('UpdateMailRoute')) },
+      responses: { 200: response(MailRoute), ...errors },
     }),
     async (c) => {
-      let r: Route;
-      await edit(c, (rows) => {
-        const prev = find(rows, c.req.valid('param').id);
-        r = make({ ...prev, ...c.req.valid('json') }, prev);
-        return rows.map((old) => (old === prev ? r : old));
+      let updated: Route | undefined;
+      await edit(c, (routes) => {
+        const previous = findRoute(routes, c.req.valid('param').id);
+        updated = makeRoute({ ...previous, ...c.req.valid('json') }, previous);
+        return routes.map((r) => (r === previous ? updated! : r));
       });
-      return c.json(r!, 200);
+      return c.json(updated!, 200);
     },
   );
   app.openapi(
@@ -325,45 +491,51 @@ export function registerRouting(app: App) {
       method: 'delete',
       path: path + '/routes/{id}',
       operationId: 'deleteRoute',
-      request: { params },
-      responses: { 200: response(Change), ...errors },
+      summary: 'Delete a route',
+      description: "The recipient falls back to the next tier, such as its inbox's own address or the catch-all.",
+      request: { params: RouteParam, headers: ifMatch },
+      responses: { 200: response(RoutingChange), ...errors },
     }),
     async (c) =>
       c.json(
-        await edit(c, (rows) => {
-          const removed = find(rows, c.req.valid('param').id);
-          return rows.filter((r) => r !== removed);
+        await edit(c, (routes) => {
+          const removed = findRoute(routes, c.req.valid('param').id);
+          return routes.filter((r) => r !== removed);
         }),
         200,
       ),
   );
-  const audit = z.record(z.string(), z.unknown());
   app.openapi(
     createRoute({
       ...meta,
       method: 'get',
       path: path + '/audit',
       operationId: 'getRoutingAudit',
+      summary: 'List route changes',
+      description: 'One entry per changed route, newest first, with the state before and after, who changed it and the request ID.',
       request: {
-        query: z.object({
-          resource: z.string().max(128).optional(),
-          actor: z.string().max(200).optional(),
+        query: Page.extend({
+          resource: z.string().max(128).optional().describe('Only changes to this route ID.'),
+          actor: z.string().max(200).optional().describe('Only changes by this API key, agent, MCP grant or user ID.'),
           since: z.iso.datetime().optional(),
         }),
       },
-      responses: { 200: response(z.object({ data: z.array(audit) })), ...errors },
+      responses: { 200: response(z.object({ data: z.array(RoutingAuditEntry), nextCursor: z.string().nullable() })), ...errors },
     }),
-    async (c) =>
-      c.json(
-        {
-          data: (
-            await c.env.db.execute(
-              sql`SELECT * FROM mail_routing_audit WHERE workspace_id=${wid(c)} ${c.req.query('resource') ? sql`AND resource_id=${c.req.query('resource')}` : sql``} ${c.req.query('actor') ? sql`AND actor_id=${c.req.query('actor')}` : sql``} ${c.req.query('since') ? sql`AND created_at>=${c.req.query('since')}::timestamptz` : sql``} ORDER BY version DESC,resource_id LIMIT 100`,
-            )
-          ).rows,
-        },
-        200,
-      ),
+    async (c) => {
+      const w = workspace(c),
+        q = c.req.valid('query'),
+        [cv, cr] = (q.cursor ?? '').split(':');
+      const rows = (
+        await c.env.db.execute<z.infer<typeof RoutingAuditEntry>>(
+          sql`SELECT version,resource_id AS "resourceId",before,after,jsonb_build_object('type',actor_type,'id',actor_id) AS actor,request_id AS "requestId",note,created_at::text AS "createdAt" FROM mail_routing_audit WHERE workspace_id=${w}
+            ${q.resource ? sql`AND resource_id=${q.resource}` : sql``} ${q.actor ? sql`AND actor_id=${q.actor}` : sql``} ${q.since ? sql`AND created_at>=${q.since}::timestamptz` : sql``}
+            ${q.cursor ? sql`AND (version<${Number(cv)} OR (version=${Number(cv)} AND resource_id>${cr ?? ''}))` : sql``} ORDER BY version DESC,resource_id LIMIT ${q.limit + 1}`,
+        )
+      ).rows;
+      const last = rows.length > q.limit ? rows[q.limit - 1]! : null;
+      return c.json({ data: rows.slice(0, q.limit), nextCursor: last && `${last.version}:${last.resourceId}` }, 200);
+    },
   );
   app.openapi(
     createRoute({
@@ -371,19 +543,22 @@ export function registerRouting(app: App) {
       method: 'get',
       path: path + '/versions',
       operationId: 'listRoutingVersions',
-      responses: { 200: response(z.object({ data: z.array(audit) })), ...errors },
+      summary: 'List routing versions',
+      description: 'Newest first. Every change, apply, detach and restore is one version.',
+      request: { query: Page },
+      responses: { 200: response(z.object({ data: z.array(RoutingVersion), nextCursor: z.string().nullable() })), ...errors },
     }),
-    async (c) =>
-      c.json(
-        {
-          data: (
-            await c.env.db.execute(
-              sql`SELECT version,max(actor_id) AS actor,max(created_at) AS "createdAt",count(*)::int AS changes FROM mail_routing_audit WHERE workspace_id=${wid(c)} GROUP BY version ORDER BY version DESC LIMIT 100`,
-            )
-          ).rows,
-        },
-        200,
-      ),
+    async (c) => {
+      const w = workspace(c),
+        q = c.req.valid('query');
+      const rows = (
+        await c.env.db.execute<z.infer<typeof RoutingVersion>>(
+          sql`SELECT version,min(created_at)::text AS "createdAt",jsonb_build_object('type',min(actor_type),'id',min(actor_id)) AS actor,count(*)::int AS changes,max(note) AS note FROM mail_routing_audit
+            WHERE workspace_id=${w} ${q.cursor ? sql`AND version<${Number(q.cursor) || 0}` : sql``} GROUP BY version ORDER BY version DESC LIMIT ${q.limit + 1}`,
+        )
+      ).rows;
+      return c.json({ data: rows.slice(0, q.limit), nextCursor: rows.length > q.limit ? String(rows[q.limit - 1]!.version) : null }, 200);
+    },
   );
   app.openapi(
     createRoute({
@@ -391,25 +566,21 @@ export function registerRouting(app: App) {
       method: 'get',
       path: path + '/versions/{v}',
       operationId: 'getRoutingVersion',
-      request: { params: versions },
-      responses: { 200: response(Config.extend({ diff: z.array(Diff) })), ...errors },
+      summary: 'Read a routing version',
+      description: 'The routes as they were at version v, and what that version changed.',
+      request: { params: VersionParam },
+      responses: { 200: response(RoutingConfig.extend({ diff: z.array(RoutingDiff) }).openapi('RoutingVersionDetail')), ...errors },
     }),
     async (c) => {
-      const w = wid(c),
+      const w = workspace(c),
         v = c.req.valid('param').v;
-      if (v > (await current(c.env.db, w))) throw failure('NOT_FOUND', 'Version not found.', 404);
-      return c.json(
-        {
-          version: v,
-          routes: await historical(c.env.db, w, v),
-          diff: (
-            await c.env.db.execute<z.infer<typeof Diff>>(
-              sql`SELECT before,after FROM mail_routing_audit WHERE workspace_id=${w} AND version=${v} ORDER BY resource_id`,
-            )
-          ).rows,
-        },
-        200,
-      );
+      if (v > (await currentVersion(c.env.db, w))) throw fail(404, 'NOT_FOUND', `Version ${v} does not exist yet. List versions with GET /v1/routing/versions.`);
+      const diff = (
+        await c.env.db.execute<z.infer<typeof RoutingDiff>>(
+          sql`SELECT before,after FROM mail_routing_audit WHERE workspace_id=${w} AND version=${v} ORDER BY resource_id`,
+        )
+      ).rows;
+      return c.json({ version: v, routes: await historical(c.env.db, w, v), diff }, 200);
     },
   );
   app.openapi(
@@ -418,82 +589,95 @@ export function registerRouting(app: App) {
       method: 'post',
       path: path + '/versions/{v}/restore',
       operationId: 'restoreRoutingVersion',
-      request: { params: versions },
-      responses: { 200: response(Change), ...errors },
+      summary: 'Restore a routing version',
+      description:
+        'Saves the routes of version v as a new version. Destinations deleted since are left out and listed in warnings. Webhook settings and domain catch-all settings are not versioned, so they keep their current values.',
+      request: { params: VersionParam, headers: ifMatch },
+      responses: { 200: response(RoutingChange), ...errors },
     }),
     async (c) => {
-      const v = c.req.valid('param').v;
+      const v = c.req.valid('param').v,
+        w = workspace(c);
       return c.json(
         await edit(
           c,
-          (_, tx, cur) => {
-            if (v > cur) throw failure('NOT_FOUND', 'Version not found.', 404);
-            return historical(tx, wid(c), v);
+          (_routes, tx, version) => {
+            if (v > version) throw fail(404, 'NOT_FOUND', `Version ${v} does not exist yet. List versions with GET /v1/routing/versions.`);
+            return historical(tx, w, v);
           },
-          false,
-          `Restore of v${v}`,
+          { lenient: true, note: `Restore of v${v}` },
         ),
         200,
       );
     },
   );
-  const test = z
-    .object({
-      messageId: z.string().optional(),
-      envelope: z.object({ from: z.string().optional(), to: z.array(Address.regex(ADDRESS)).min(1).max(100) }).optional(),
-      verdicts: z.object({ spam: z.string().optional(), dmarc: z.string().optional() }).optional(),
-    })
-    .strict();
-  const result = z.object({
-    version: z.number(),
-    recipients: z.array(
-      z.object({
-        address: z.string(),
-        route: z.string().nullable(),
-        tier: z.string(),
-        default: z.string(),
-        inboxes: z.array(z.string()),
-        webhooks: z.array(z.string()),
-        junk: z.boolean(),
-        dropped: z.boolean(),
-        warnings: z.array(z.string()),
-      }),
-    ),
-  });
   app.openapi(
     createRoute({
       ...meta,
       method: 'post',
       path: path + '/test',
       operationId: 'testRouting',
-      description: 'Read-only. Resolve envelope recipients or replay a stored message against the current routing version.',
-      request: { body: json(test) },
-      responses: { 200: response(result), ...errors },
+      summary: 'Preview where mail would go',
+      description:
+        'Read-only: nothing is delivered or saved. Resolves recipients with the same matcher ingest uses and explains each one. Supply envelope.to, a pasted raw message or a stored messageId; add config to test unsaved routes or version to test an earlier one. A stored message tested against the current version matches the routing recorded when it arrived, unless destinations changed since.',
+      request: { body: json(RoutingTest) },
+      responses: { 200: response(RoutingTestResult), ...errors },
     }),
     async (c) => {
-      const w = wid(c),
+      const w = workspace(c),
         input = c.req.valid('json');
+      if (input.messageId && input.raw) throw fail(422, 'INVALID_TEST', 'Supply messageId or raw, not both.', 'raw');
+      if (input.config && input.version !== undefined) throw fail(422, 'INVALID_TEST', 'Supply config or version, not both.', 'version');
       let to = input.envelope?.to,
-        junk = input.verdicts?.spam?.toUpperCase() !== 'PASS',
-        dmarc = input.verdicts?.dmarc?.toUpperCase() ?? 'GRAY',
-        at = new Date().toISOString();
+        spam: string = input.verdicts?.spam ?? 'PASS',
+        dmarc: string = input.verdicts?.dmarc ?? 'PASS',
+        received = new Date().toISOString(),
+        message: { from: string | null; subject: string | null } | null = null;
       if (input.messageId) {
         const row = (
-          await c.env.db.execute<{ to: string[]; spam: boolean; dmarc: string; at: string }>(
-            sql`SELECT envelope_to AS "to",spam,verdicts->>'dmarc' AS dmarc,received_at::text AS at FROM mail_messages WHERE workspace_id=${w} AND id=${input.messageId} AND direction='inbound'`,
+          await c.env.db.execute<{ to: string[]; spam: string | null; dmarc: string | null; at: string; from: string | null; subject: string }>(
+            sql`SELECT envelope_to AS "to",verdicts->>'spam' AS spam,verdicts->>'dmarc' AS dmarc,received_at::text AS at,from_address AS "from",subject FROM mail_messages WHERE workspace_id=${w} AND id=${input.messageId} AND direction='inbound'`,
           )
         ).rows[0];
-        if (!row) throw failure('NOT_FOUND', 'Message not found.', 404);
-        to = row.to;
-        junk = row.spam;
-        dmarc = row.dmarc;
-        at = row.at;
+        if (!row) throw fail(404, 'NOT_FOUND', `Inbound message ${input.messageId} was not found.`, 'messageId');
+        ({ to, at: received } = row);
+        spam = row.spam ?? 'MISSING';
+        dmarc = row.dmarc ?? '';
+        message = { from: row.from, subject: row.subject };
       }
-      if (!to) throw failure('MISSING_ENVELOPE', 'Supply envelope.to or messageId.');
-      const { p } = (
-        await c.env.db.execute<{ p: RoutingInput }>(sql`SELECT mail_route_input(${w},${JSON.stringify(to)}::jsonb,true) AS p`)
-      ).rows[0]!;
-      return c.json(matchRouting(p, to, junk, dmarc, at), 200);
+      if (input.raw) {
+        const { parseInboundMime } = await import('./mailbox-ingest.js');
+        const email = await parseInboundMime(Uint8Array.from(Buffer.from(input.raw, 'base64')));
+        if (!email)
+          throw fail(422, 'INVALID_MIME', 'raw is not a parseable message within the ingest limits. Send the whole message, headers included, base64-encoded.', 'raw');
+        to ??= [...new Set(addressesOf([...(email.to ?? []), ...(email.cc ?? [])]).filter((a) => ADDRESS.test(a)))].slice(0, 100);
+        message = { from: email.from?.address?.toLowerCase() ?? null, subject: email.subject ?? null };
+      }
+      if (!to?.length) throw fail(422, 'MISSING_RECIPIENTS', 'Supply envelope.to, a raw message with To or Cc addresses, or a messageId.', 'envelope');
+      const read = async (tx: DbExecutor) =>
+        (await tx.execute<{ p: RoutingInput }>(sql`SELECT mail_route_input(${w},${JSON.stringify(to)}::jsonb,true) AS p`)).rows[0]!.p;
+      let routing: RoutingInput,
+        version: number;
+      if (input.config || input.version !== undefined) {
+        // Apply the candidate routes with the real write path, read the claim input, and roll it all back.
+        ({ routing, version } = await rolledBack(c.env.db, async (tx) => {
+          await lockMailboxLane(tx, w, 'address');
+          const saved = await currentVersion(tx, w),
+            routes = await listRoutes(tx, w);
+          if (input.version !== undefined && input.version > saved)
+            throw fail(404, 'NOT_FOUND', `Version ${input.version} does not exist yet. List versions with GET /v1/routing/versions.`, 'version');
+          const candidate = input.config
+            ? input.config.routes.map((f) => makeRoute(f, existingFor(routes, f)))
+            : await historical(tx, w, input.version!);
+          await save(tx, c, w, saved, routes, candidate, { lenient: !input.config });
+          return { routing: await read(tx), version: input.version ?? saved };
+        }));
+      } else {
+        routing = await read(c.env.db);
+        version = routing.version;
+      }
+      const result = matchRouting(routing, to, spam !== 'PASS', dmarc, received);
+      return c.json({ version, unsaved: !!input.config, verdicts: { spam, dmarc }, message, recipients: result.recipients }, 200);
     },
   );
 }

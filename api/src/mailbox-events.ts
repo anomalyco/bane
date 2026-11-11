@@ -1,7 +1,7 @@
 import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
 import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { mailboxEvents } from './db/mailbox.js';
-import { inboundHookClaim,JobDeferred,WEBHOOK_ATTEMPTS,retryDatabaseFailures } from './jobs.js';
+import { inboundHookClaim,JobDeferred,mailboxWebhookAttempts,retryDatabaseFailures } from './jobs.js';
 
 export const inboundEventTypes = ['message.received','message.junk', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
@@ -29,7 +29,7 @@ export function mailboxEventCtes(source:SQL) {
 const fanout:JobHandler=retryDatabaseFailures(async(runtime,payload,job)=>{
   // Snapshot endpoint IDs at commit, not at expansion: a new subscription never receives historical mail.
   const records=sql`deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,routed,format,payload)
-    SELECT 'mwd_'||gen_random_uuid(),e.workspace_id,h.id,e.seq,jsonb_typeof(ref)='object',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','rules','[]'::jsonb,'junk',e.type='message.junk','subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)
+    SELECT 'mwd_'||gen_random_uuid(),e.workspace_id,h.id,e.seq,jsonb_typeof(ref)='object',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','junk',e.type='message.junk','subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)
     FROM settled CROSS JOIN jsonb_each(${JSON.stringify(payload)}::jsonb) s(seq,hooks) JOIN mailbox_events e ON e.workspace_id=${job.workspaceId} AND e.seq=s.seq::bigint
     CROSS JOIN jsonb_array_elements(s.hooks) ref JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND h.id=coalesce(ref->>'id',ref#>>'{}')
     ON CONFLICT DO NOTHING RETURNING id,workspace_id),
@@ -62,13 +62,13 @@ const loadWebhookOps = lazyModule(() => import('./inbound-webhook.js'));
 const webhookJob: JobHandler = async (runtime, payload, job) => {
   const delivery=job.webhook!==undefined?job.webhook:(await runtime.db.execute<import('./core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT ${job.id}::text AS id,${job.workspaceId}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify(payload)}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0];
   if(!delivery)return;
-  const {sendInboundWebhook}=await loadWebhookOps();
+  const {deliverInboundWebhook}=await loadWebhookOps();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
-    const result=await sendInboundWebhook(runtime,job.workspaceId,delivery);if(result.status===410)retryable=false;
+    const result=await deliverInboundWebhook(runtime,job.workspaceId,delivery);if(result.status===410)retryable=false;
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { if (e instanceof ModuleLoadError || e instanceof JobDeferred) throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
-  const retry = Boolean(error) && retryable && job.attempts < (1+(delivery.retry_attempts??WEBHOOK_ATTEMPTS-1));
+  const retry = Boolean(error) && retryable && job.attempts < mailboxWebhookAttempts(delivery);
   const record=sql`recorded AS (UPDATE mailbox_webhook_deliveries d SET attempt_count=attempt_count+1,status=${!error?'delivered':retry?'pending':'failed'},last_status_code=${statusCode}::int,last_error=${error}::text,updated_at=now() FROM settled WHERE d.id=${delivery.delivery_id} AND d.workspace_id=${job.workspaceId} AND d.generation=${delivery.generation} AND d.status='pending')`;
   if(job.recordWithSettlement)job.recordWithSettlement(record);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${record} SELECT 1`);
   if (error) throw new ApiError(503, error, 'Mailbox webhook delivery failed; it will be retried.', undefined, retry);

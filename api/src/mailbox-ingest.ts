@@ -403,9 +403,10 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
   const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
   const plan=receipt.routing && matchRouting(receipt.routing,receipt.recipients,spam,verdicts.dmarc??'',receivedAt);
+  // Every recipient dropped by route: settle with the job and its trace, without reading S3 or storing anything.
   if(plan?.recipients.length && plan.recipients.every(r=>r.dropped)){
-    s3.destroy();const trace=JSON.stringify(plan);
-    const recorded=sql`recorded AS (UPDATE mail_receipts SET status='processed',processed_at=now(),routing=${Buffer.byteLength(trace)<=4096?trace:JSON.stringify({version:plan.version,truncated:true,recipientCount:plan.recipients.length,dropped:true})}::jsonb FROM settled WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
+    s3.destroy();
+    const recorded=sql`recorded AS (UPDATE mail_receipts SET status='processed',processed_at=now(),routing=mail_routing_trace(${JSON.stringify(plan)}::jsonb) FROM settled WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
     if(job.recordWithSettlement)job.recordWithSettlement(recorded);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${recorded} SELECT 1`);return;
   }
   const readStarted=performance.now();

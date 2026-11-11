@@ -1588,40 +1588,230 @@ export type ConfigureSesAutoValidation = {
 };
 
 export type RoutingConfig = {
-    routes: Array<MailRoute>;
     version: number;
+    routes: Array<MailRoute>;
 };
 
 export type MailRoute = {
-    key?: string | null;
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
+    key: string | null;
+    /**
+     * Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default.
+     */
     match: string;
+    /**
+     * Inbox and webhook IDs, [] to keep, or 'drop'.
+     */
     to: 'drop' | Array<string>;
-    subaddresses?: boolean;
-    enabled?: boolean;
-    note?: string;
+    subaddresses: boolean;
+    enabled: boolean;
+    note: string;
     id: string;
     createdAt: string;
 };
 
 export type RoutingConfigFile = {
+    /**
+     * Ignored on apply; send the version in If-Match.
+     */
+    version?: number;
     routes: Array<{
+        /**
+         * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+         */
         key?: string | null;
+        /**
+         * Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default.
+         */
         match: string;
+        /**
+         * Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+         */
         to: 'drop' | Array<string>;
+        /**
+         * Also route user+tag@host here when nothing more specific matches. Default true.
+         */
         subaddresses?: boolean;
+        /**
+         * A disabled route is skipped; its mail falls through to the next tier. Default true.
+         */
         enabled?: boolean;
         note?: string;
     }>;
-    version?: number;
+};
+
+export type RoutingChange = {
+    /**
+     * Routing version after the change; unchanged for a dry run or when nothing changed.
+     */
+    version: number;
+    /**
+     * before null: created; after null: deleted.
+     */
+    diff: Array<RoutingDiff>;
+    warnings: Array<string>;
+};
+
+export type RoutingDiff = {
+    before: MailRoute & ({
+        [key: string]: unknown;
+    } | null);
+    after: MailRoute & ({
+        [key: string]: unknown;
+    } | null);
 };
 
 export type CreateMailRoute = {
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key?: string | null;
+    /**
+     * Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default.
+     */
     match: string;
+    /**
+     * Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+     */
     to: 'drop' | Array<string>;
+    /**
+     * Also route user+tag@host here when nothing more specific matches. Default true.
+     */
     subaddresses?: boolean;
+    /**
+     * A disabled route is skipped; its mail falls through to the next tier. Default true.
+     */
     enabled?: boolean;
     note?: string;
+};
+
+export type UpdateMailRoute = {
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
+    key?: string | null;
+    /**
+     * Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default.
+     */
+    match?: string;
+    /**
+     * Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+     */
+    to?: 'drop' | Array<string>;
+    /**
+     * Also route user+tag@host here when nothing more specific matches. Default true.
+     */
+    subaddresses?: boolean;
+    /**
+     * A disabled route is skipped; its mail falls through to the next tier. Default true.
+     */
+    enabled?: boolean;
+    note?: string;
+};
+
+export type RoutingAuditEntry = {
+    version: number;
+    resourceId: string;
+    before: MailRoute & ({
+        [key: string]: unknown;
+    } | null);
+    after: MailRoute & ({
+        [key: string]: unknown;
+    } | null);
+    actor: {
+        type: string;
+        id: string;
+    };
+    requestId: string | null;
+    note: string | null;
+    createdAt: string;
+};
+
+export type RoutingVersion = {
+    version: number;
+    createdAt: string;
+    actor: {
+        type: string;
+        id: string;
+    };
+    changes: number;
+    note: string | null;
+};
+
+export type RoutingVersionDetail = RoutingConfig & {
+    diff: Array<RoutingDiff>;
+};
+
+export type RoutingTestResult = {
+    /**
+     * The routing version tested; for unsaved config, the saved version it starts from.
+     */
+    version: number;
+    unsaved: boolean;
+    verdicts: {
+        spam: string;
+        dmarc: string;
+    };
+    message: {
+        from: string | null;
+        subject: string | null;
+    } | null;
+    recipients: Array<RoutedRecipient>;
+};
+
+export type RoutedRecipient = {
+    address: string;
+    /**
+     * What matched: exact (an exact route), address (an inbox's own address or alias), pattern (a local-part pattern), subaddress (the route or inbox of user@ for user+tag@), catchall (*@host) or default (the domain's catch-all setting).
+     */
+    tier: 'exact' | 'address' | 'pattern' | 'subaddress' | 'catchall' | 'default';
+    /**
+     * Route ID; null for an address, an address wildcard rule or the domain default.
+     */
+    route: string | null;
+    inboxes: Array<string>;
+    webhooks: Array<string>;
+    dropped: boolean;
+    junk: boolean;
+    /**
+     * The domain catch-all setting, used when tier is default.
+     */
+    domainDefault: 'store' | 'create_address';
+    /**
+     * Destinations that were skipped, and why.
+     */
+    warnings: Array<string>;
+};
+
+export type RoutingTest = {
+    /**
+     * Replay a stored inbound message with its envelope recipients and SES verdicts.
+     */
+    messageId?: string;
+    /**
+     * A pasted message: base64 RFC 822 MIME, parsed with the ingest limits. Its To and Cc are the recipients unless envelope.to is set.
+     */
+    raw?: string;
+    /**
+     * Envelope recipients, including Bcc.
+     */
+    envelope?: {
+        to: Array<string>;
+    };
+    /**
+     * SES verdicts for envelope and raw tests. Each defaults to PASS. A stored message uses its own.
+     */
+    verdicts?: {
+        spam?: 'PASS' | 'FAIL' | 'GRAY' | 'PROCESSING_FAILED';
+        dmarc?: 'PASS' | 'FAIL' | 'GRAY' | 'PROCESSING_FAILED';
+    };
+    config?: RoutingConfigFile & unknown;
+    /**
+     * Test the routes of an earlier version instead of the saved ones.
+     */
+    version?: number;
 };
 
 export type InboundScanPolicy = {
@@ -1785,6 +1975,9 @@ export type InboundAddressPage = {
 
 export type InboundAddress = {
     id: string;
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key: string | null;
     address: string;
     displayName: string | null;
@@ -1826,6 +2019,9 @@ export type InboundAddress = {
 };
 
 export type CreateInboundAddress = {
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key?: string | null;
     address: string;
     displayName?: string | null;
@@ -1861,6 +2057,9 @@ export type CreateInboundAddress = {
 };
 
 export type UpdateInboundAddress = {
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key?: string | null;
     displayName?: string | null;
     aliases?: Array<string>;
@@ -2213,6 +2412,9 @@ export type InboundKeyPage = {
 
 export type InboundWebhookSecret = InboundWebhook & {
     secret: string;
+    /**
+     * inbound format: the X-Webhook-Verification-Token value.
+     */
     verificationToken?: string;
 };
 
@@ -2233,25 +2435,70 @@ export type InboundWebhook = {
     createdAt: string;
     updatedAt: string;
     addressIds: Array<string> | null;
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key: string | null;
+    /**
+     * Display name; sent as endpoint.name in the inbound format.
+     */
     name: string | null;
+    /**
+     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     */
     format: 'bane' | 'inbound';
+    /**
+     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound.
+     */
     junk: 'skip' | 'include';
+    /**
+     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events.
+     */
     include: Array<'message' | 'raw'>;
+    /**
+     * Seconds to wait for a 2xx response. Default 5.
+     */
     timeoutSeconds: number;
+    /**
+     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.
+     */
     retryAttempts: number;
 };
 
 export type CreateInboundWebhook = {
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key?: string | null;
+    /**
+     * Display name; sent as endpoint.name in the inbound format.
+     */
     name?: string | null;
+    /**
+     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     */
     format?: 'bane' | 'inbound';
+    /**
+     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound.
+     */
     junk?: 'skip' | 'include';
+    /**
+     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events.
+     */
     include?: Array<'message' | 'raw'>;
+    /**
+     * Seconds to wait for a 2xx response. Default 5.
+     */
     timeoutSeconds?: number;
+    /**
+     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.
+     */
     retryAttempts?: number;
     url: string;
     description?: string;
+    /**
+     * Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.
+     */
     eventTypes?: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
     /**
@@ -2272,15 +2519,39 @@ export type InboundWebhookList = {
 };
 
 export type UpdateInboundWebhook = {
+    /**
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     */
     key?: string | null;
+    /**
+     * Display name; sent as endpoint.name in the inbound format.
+     */
     name?: string | null;
+    /**
+     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     */
     format?: 'bane' | 'inbound';
+    /**
+     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound.
+     */
     junk?: 'skip' | 'include';
+    /**
+     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME (up to 2 MiB) in message events.
+     */
     include?: Array<'message' | 'raw'>;
+    /**
+     * Seconds to wait for a 2xx response. Default 5.
+     */
     timeoutSeconds?: number;
+    /**
+     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.
+     */
     retryAttempts?: number;
     url?: string;
     description?: string;
+    /**
+     * Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.
+     */
     eventTypes?: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
     /**
@@ -2296,8 +2567,35 @@ export type UpdateInboundWebhook = {
     addressIds?: Array<string> | null;
 };
 
+export type InboundWebhookTestResult = {
+    statusCode: number;
+};
+
+export type TestInboundWebhook = {
+    /**
+     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     */
+    format?: 'bane' | 'inbound';
+    overrideUrl?: string;
+};
+
+export type InboundRedelivery = {
+    queued: number;
+};
+
+export type RedeliverInboundMessage = {
+    /**
+     * A webhook ID: redeliver to that webhook only.
+     */
+    destination?: string;
+};
+
 export type InboundWebhookRotatedSecret = {
     secret: string;
+    /**
+     * inbound format: the new X-Webhook-Verification-Token, which changes with the secret.
+     */
+    verificationToken?: string;
 };
 
 export type InboundWebhookDeliveryPage = {
@@ -10040,6 +10338,9 @@ export type GetRoutingResponse = GetRoutingResponses[keyof GetRoutingResponses];
 export type ApplyRoutingData = {
     body: RoutingConfigFile;
     headers: {
+        /**
+         * Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.
+         */
         'if-match': string;
     };
     path?: never;
@@ -10098,17 +10399,7 @@ export type ApplyRoutingResponses = {
     /**
      * Success
      */
-    200: {
-        version: number;
-        diff: Array<{
-            before: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-            after: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-        }>;
-    };
+    200: RoutingChange;
 };
 
 export type ApplyRoutingResponse = ApplyRoutingResponses[keyof ApplyRoutingResponses];
@@ -10178,6 +10469,12 @@ export type ListRoutesResponse = ListRoutesResponses[keyof ListRoutesResponses];
 
 export type CreateRouteData = {
     body: CreateMailRoute;
+    headers?: {
+        /**
+         * Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.
+         */
+        'if-match'?: string;
+    };
     path?: never;
     query?: never;
     url: '/v1/routing/routes';
@@ -10239,7 +10536,16 @@ export type CreateRouteResponse = CreateRouteResponses[keyof CreateRouteResponse
 
 export type DeleteRouteData = {
     body?: never;
+    headers?: {
+        /**
+         * Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.
+         */
+        'if-match'?: string;
+    };
     path: {
+        /**
+         * Route ID or key.
+         */
         id: string;
     };
     query?: never;
@@ -10295,17 +10601,7 @@ export type DeleteRouteResponses = {
     /**
      * Success
      */
-    200: {
-        version: number;
-        diff: Array<{
-            before: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-            after: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-        }>;
-    };
+    200: RoutingChange;
 };
 
 export type DeleteRouteResponse = DeleteRouteResponses[keyof DeleteRouteResponses];
@@ -10313,6 +10609,9 @@ export type DeleteRouteResponse = DeleteRouteResponses[keyof DeleteRouteResponse
 export type GetRouteData = {
     body?: never;
     path: {
+        /**
+         * Route ID or key.
+         */
         id: string;
     };
     query?: never;
@@ -10374,15 +10673,17 @@ export type GetRouteResponses = {
 export type GetRouteResponse = GetRouteResponses[keyof GetRouteResponses];
 
 export type UpdateRouteData = {
-    body: {
-        key?: string | null;
-        match?: string;
-        to?: 'drop' | Array<string>;
-        subaddresses?: boolean;
-        enabled?: boolean;
-        note?: string;
+    body: UpdateMailRoute;
+    headers?: {
+        /**
+         * Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.
+         */
+        'if-match'?: string;
     };
     path: {
+        /**
+         * Route ID or key.
+         */
         id: string;
     };
     query?: never;
@@ -10447,7 +10748,15 @@ export type GetRoutingAuditData = {
     body?: never;
     path?: never;
     query?: {
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only changes to this route ID.
+         */
         resource?: string;
+        /**
+         * Only changes by this API key, agent, MCP grant or user ID.
+         */
         actor?: string;
         since?: string;
     };
@@ -10504,9 +10813,8 @@ export type GetRoutingAuditResponses = {
      * Success
      */
     200: {
-        data: Array<{
-            [key: string]: unknown;
-        }>;
+        data: Array<RoutingAuditEntry>;
+        nextCursor: string | null;
     };
 };
 
@@ -10515,7 +10823,10 @@ export type GetRoutingAuditResponse = GetRoutingAuditResponses[keyof GetRoutingA
 export type ListRoutingVersionsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/v1/routing/versions';
 };
 
@@ -10569,9 +10880,8 @@ export type ListRoutingVersionsResponses = {
      * Success
      */
     200: {
-        data: Array<{
-            [key: string]: unknown;
-        }>;
+        data: Array<RoutingVersion>;
+        nextCursor: string | null;
     };
 };
 
@@ -10635,22 +10945,19 @@ export type GetRoutingVersionResponses = {
     /**
      * Success
      */
-    200: RoutingConfig & {
-        diff: Array<{
-            before: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-            after: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-        }>;
-    };
+    200: RoutingVersionDetail;
 };
 
 export type GetRoutingVersionResponse = GetRoutingVersionResponses[keyof GetRoutingVersionResponses];
 
 export type RestoreRoutingVersionData = {
     body?: never;
+    headers?: {
+        /**
+         * Apply only if routing is still at this version, from GET /v1/routing or a previous ETag.
+         */
+        'if-match'?: string;
+    };
     path?: {
         v?: number | null;
     };
@@ -10707,33 +11014,13 @@ export type RestoreRoutingVersionResponses = {
     /**
      * Success
      */
-    200: {
-        version: number;
-        diff: Array<{
-            before: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-            after: MailRoute & ({
-                [key: string]: unknown;
-            } | null);
-        }>;
-    };
+    200: RoutingChange;
 };
 
 export type RestoreRoutingVersionResponse = RestoreRoutingVersionResponses[keyof RestoreRoutingVersionResponses];
 
 export type TestRoutingData = {
-    body: {
-        messageId?: string;
-        envelope?: {
-            from?: string;
-            to: Array<string>;
-        };
-        verdicts?: {
-            spam?: string;
-            dmarc?: string;
-        };
-    };
+    body: RoutingTest;
     path?: never;
     query?: never;
     url: '/v1/routing/test';
@@ -10788,20 +11075,7 @@ export type TestRoutingResponses = {
     /**
      * Success
      */
-    200: {
-        version: number;
-        recipients: Array<{
-            address: string;
-            route: string | null;
-            tier: string;
-            default: string;
-            inboxes: Array<string>;
-            webhooks: Array<string>;
-            junk: boolean;
-            dropped: boolean;
-            warnings: Array<string>;
-        }>;
-    };
+    200: RoutingTestResult;
 };
 
 export type TestRoutingResponse = TestRoutingResponses[keyof TestRoutingResponses];
@@ -11763,6 +12037,9 @@ export type DeleteInboundAddressData = {
         addressId: string;
     };
     query?: {
+        /**
+         * Also remove this inbox from every route that delivers to it, as one routing version.
+         */
         detach?: 'true' | 'false';
     };
     url: '/v1/inbound/addresses/{addressId}';
@@ -12920,6 +13197,9 @@ export type DeleteInboundWebhookData = {
         id: string;
     };
     query?: {
+        /**
+         * Also remove it from every route that delivers to it, as one routing version. Without it, a referenced webhook is not deleted.
+         */
         detach?: 'true' | 'false';
     };
     url: '/v1/inbound/webhooks/{id}';
@@ -13106,10 +13386,7 @@ export type UpdateInboundWebhookResponses = {
 export type UpdateInboundWebhookResponse = UpdateInboundWebhookResponses[keyof UpdateInboundWebhookResponses];
 
 export type TestInboundWebhookData = {
-    body: {
-        format?: 'bane' | 'inbound';
-        overrideUrl?: string;
-    };
+    body: TestInboundWebhook;
     path: {
         id: string;
     };
@@ -13166,22 +13443,18 @@ export type TestInboundWebhookResponses = {
     /**
      * Success
      */
-    200: {
-        statusCode: number;
-    };
+    200: InboundWebhookTestResult;
 };
 
 export type TestInboundWebhookResponse = TestInboundWebhookResponses[keyof TestInboundWebhookResponses];
 
 export type RedeliverInboundMessageData = {
-    body: {
-        destination?: string;
-    };
+    body: RedeliverInboundMessage;
     path: {
-        id: string;
+        messageId: string;
     };
     query?: never;
-    url: '/v1/inbound/messages/{id}/redeliver';
+    url: '/v1/inbound/messages/{messageId}/redeliver';
 };
 
 export type RedeliverInboundMessageErrors = {
@@ -13233,9 +13506,7 @@ export type RedeliverInboundMessageResponses = {
     /**
      * Success
      */
-    202: {
-        queued: number;
-    };
+    202: InboundRedelivery;
 };
 
 export type RedeliverInboundMessageResponse = RedeliverInboundMessageResponses[keyof RedeliverInboundMessageResponses];
