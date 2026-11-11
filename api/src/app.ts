@@ -27,7 +27,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
-  if (/^\/v1\/(?:rituals|endpoints|forwarding|inbox-connections|inboxes|objects)(?:\/|$)/.test(pathname)) return 'mailbox';
+  if (/^\/v1\/(?:rituals|endpoints|forwarding|inbox-connections|inboxes|objects|logs)(?:\/|$)/.test(pathname)) return 'mailbox';
   if (pathname === '/v1/regions' || pathname.startsWith('/v1/regions/')) return 'ses-regions';
   if (pathname === '/v1/routing' || pathname.startsWith('/v1/routing/') || pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
@@ -156,7 +156,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     await next();
   };
   // Discovery, provisioning and the catalog load persisted settings themselves.
-  app.on('GET', ['/v1/emails', '/v1/campaigns'], (c, next) => c.req.query('region') ? regions(c, next) : next());
+  app.on('GET', ['/v1/emails', '/v1/campaigns', '/v1/logs'], (c, next) => c.req.query('region') ? regions(c, next) : next());
   const selfHostedRegions = (c: Ctx, next: () => Promise<void>) => c.env.config.multiTenant ? next() : regions(c, next);
   app.on('GET', ['/v1/settings/ses', '/v1/domains/:id'], selfHostedRegions);
   app.on('GET', '/v1/domains', (c, next) => c.req.query('region') !== undefined ? regions(c, next) : selfHostedRegions(c, next));
