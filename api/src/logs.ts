@@ -5,7 +5,7 @@ import { actor, ApiError, errors, PageQuery, region, response, security, type Ac
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { accessibleMessages, readsDelivery, visibleAddresses } from './inbound-threads.js';
-import { literalSearch, pageBinding, scope, senderDomainWhere, Status } from './sending.js';
+import { listedSubject, literalSearch, pageBinding, scope, senderDomainWhere, Status } from './sending.js';
 
 // Logs: sent and received mail in one list, newest first, from one SQL statement. Each side keeps its own index
 // (sending_emails_created_page, mail_messages_tenant_page) and limit; the outer query merges the two pages. The cursor
@@ -102,7 +102,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     return c.json({
       data: rows.slice(0, q.limit).map(row => ({
         id: row.id, direction: row.direction, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
-        to: (row.to ?? []).map(String), subject: row.subject, stream: row.stream, campaignId: row.campaign_id, simulated: row.simulated, attachmentCount: row.attachment_count,
+        to: (row.to ?? []).map(String), subject: listedSubject(a, row).subject, stream: row.stream, campaignId: row.campaign_id, simulated: row.simulated, attachmentCount: row.attachment_count,
         threadId: row.thread_id, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
       })),
       nextCursor: last ? Buffer.from(JSON.stringify([last.at, last.direction, last.id, binding])).toString('base64url') : null,

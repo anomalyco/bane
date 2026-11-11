@@ -70,7 +70,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
-  for(const name of ['listLogs','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
+  for(const name of ['listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
@@ -4394,6 +4394,14 @@ describe('Dashboard API capabilities', () => {
       const readerPage = ok(await request('GET', '/v1/logs', reader.secret)); assert.deepEqual([ids(readerPage), readerPage.received], [[s2, s1], false]);
       assert.equal(error(await request('GET', '/v1/logs?direction=received', reader.secret), 403).code, 'ADMIN_REQUIRED');
       assert.deepEqual(ids(ok(await request('GET', '/v1/logs', manager_.secret))), [s2, r2, r1, s1]);
+      // Lists redact unsubscribe capability tokens from subjects for non-manage callers, like getEmailDetail does.
+      const token = `u_${'ab'.repeat(32)}`;
+      await db.query('UPDATE sending_emails SET subject = $2 WHERE id = $1', [s1, `Logs one ${token}`]);
+      const subjectOf = (page: Json) => page.data.find((row: Json) => row.id === s1).subject;
+      assert.equal(subjectOf(ok(await request('GET', '/v1/logs', reader.secret))), 'Logs one [redacted]');
+      assert.equal(subjectOf(ok(await request('GET', '/v1/emails', reader.secret))), 'Logs one [redacted]');
+      assert.equal(ok(await request('GET', `/v1/emails/${s1}`, reader.secret)).subject, 'Logs one [redacted]');
+      assert.equal(subjectOf(ok(await request('GET', '/v1/logs', manager_.secret))), `Logs one ${token}`);
       // Delivery details of received mail: owner/admin sessions and manage API keys only, never MCP grants or agent tokens.
       const { readsDelivery } = await import('./src/inbound-threads.js');
       const admin = { keyId: 'k', workspaceId: wid, admin: true, mailboxIds: null, permissions: ['read' as const] };

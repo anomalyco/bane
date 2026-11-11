@@ -195,6 +195,8 @@ const emailColumns = {
   errorCode: emails.errorCode, suppressionReason: emails.suppressionReason, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
 };
 function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
+// Subjects can carry unsubscribe capability tokens; like getEmailDetail and getEmailContent, only manage callers read them.
+export function listedSubject<T extends { subject: string }>(a: Pick<Actor, 'permissions'>, row: T): T { return a.permissions.includes('manage') ? row : { ...row, subject: redactCapabilityText(row.subject) }; }
 // Draft sync polling reads only state columns, without materializing drafts or aggregating email counts.
 const campaignStateColumns = {
   id: campaigns.id, revision: campaigns.revision, updatedAt: campaigns.updatedAt,
@@ -1042,11 +1044,11 @@ export function registerSending(app: App) {
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
     )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(emailView), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(row => emailView(listedSubject(a, row))), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => {
-    const [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(actor(c), c.req.valid('param').id)).limit(1);
-    return c.json(emailView(row ?? notFound('Email')), 200);
+    const a = actor(c), [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(a, c.req.valid('param').id)).limit(1);
+    return c.json(emailView(listedSubject(a, row ?? notFound('Email'))), 200);
   });
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
