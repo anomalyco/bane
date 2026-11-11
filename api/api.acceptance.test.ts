@@ -835,7 +835,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const userBefore = (await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows;
       const subjectBefore = (await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows;
       const sessionsBefore = (await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows;
-      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL, disableRedirect: true });
+      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL, disableRedirect: true },undefined,{'x-bane-client-ip':`192.0.2.${fixtureEmails.indexOf(scenario.email)+1}`});
       const authorization = new URL(ok(start).url);
       assert.equal(authorization.origin, 'https://accounts.google.com');
       assert.deepEqual(authorization.searchParams.get('scope')!.split(' ').sort(), ['email', 'openid', 'profile']);
@@ -7122,6 +7122,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await local('GET','/v1/inbound/events?wait=30&after=0',undefined,'live',{authorization:`Bearer ${key.secret}`}),429,'REQUEST_RATE_LIMITED');
       assert.equal(query.mock.callCount(),2,'Only credential and reservation statements, no event query or wait.');
       query.mock.restore();
+    });
+  });
+
+  test('MCP login and consent share identity admission and OAuth state expires under a durable cap',async t=>{
+    const {guardPublicRequest}=await import('./src/core.js');
+    let reads=0; const peer=unique('identity-entry'),work=async()=>{reads++;return new Response(null,{status:200});};
+    for(let i=0;i<40;i++) assert.equal((await guardPublicRequest(i%2?'/api/auth/sign-in/social':'/mcp/login',new Headers(),peer,work)).status,200);
+    for(const path of ['/mcp/login','/mcp/consent']) assert.equal((await guardPublicRequest(path,new Headers(),peer,work)).status,429);
+    assert.equal(reads,40);
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {reserveSignIn}=await import('./src/google-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});
+      for(let i=0;i<8;i++) await reserveSignIn(runtime,headers);
+      await assert.rejects(reserveSignIn(runtime,headers),{code:'AUTH_STATE_LIMIT'});
+      const {digest}=await import('./src/core.js'); await db.query('UPDATE auth_state_slots SET expires_at=now() WHERE peer=$1',[await digest('192.0.2.255')]);
+      await reserveSignIn(runtime,headers);
     });
   });
 
