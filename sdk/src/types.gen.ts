@@ -514,6 +514,10 @@ export type BatchSendEmailItem = {
 };
 
 export type Email = {
+    /**
+     * True for mailbox replies, whose subject and quoted body can contain text from a received message.
+     */
+    untrustedContent: boolean;
     id: string;
     region: string;
     campaignId: string | null;
@@ -572,6 +576,10 @@ export type EmailEvent = {
 };
 
 export type EmailContent = {
+    /**
+     * True for mailbox replies, whose subject and quoted body can contain text from a received message.
+     */
+    untrustedContent: boolean;
     subject: string;
     html: string | null;
     text: string | null;
@@ -656,7 +664,7 @@ export type Campaign = {
 };
 
 /**
- * Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.
+ * Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.
  */
 export type CampaignDraft = {
     name: string;
@@ -1262,6 +1270,9 @@ export type WebhookPage = {
 
 export type Webhook = {
     id: string;
+    /**
+     * Write-only HTTPS endpoint. Only the last four characters are shown; omit url on update to keep the saved URL.
+     */
     url: string;
     description: string;
     eventTypes: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
@@ -1932,7 +1943,7 @@ export type Endpoint = {
      */
     call: string;
     /**
-     * Where it delivers. Chat credentials are masked; they are write-only.
+     * Where it delivers. Slack, Discord and webhook URLs are write-only; only the last four characters are shown.
      */
     target: string;
     policy: EndpointPolicy;
@@ -2766,6 +2777,10 @@ export type LogEntry = {
     id: string;
     direction: 'sent' | 'received';
     /**
+     * Received mail and sent mailbox replies can contain external sender content.
+     */
+    untrustedContent: boolean;
+    /**
      * When the email was created (sent) or received.
      */
     at: string;
@@ -3006,6 +3021,9 @@ export type InboundWebhookSecret = InboundWebhook & {
 
 export type InboundWebhook = {
     id: string;
+    /**
+     * Write-only HTTPS endpoint. Only the last four characters are shown; omit url on update to keep the saved URL.
+     */
     url: string;
     description: string;
     eventTypes: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded'>;

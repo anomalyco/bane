@@ -126,18 +126,19 @@ const ReplyAddressId = z.string().min(1).max(120).optional();
 const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 export const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
-const Email = z.object({ id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
+const UntrustedContent = z.boolean().describe('True for mailbox replies, whose subject and quoted body can contain text from a received message.');
+const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), simulated: z.boolean() }).openapi('EmailQueued');
 const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: SuppressionEventData }).openapi('EmailEvent');
-const EmailContent = z.object({ subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
+const EmailContent = z.object({ untrustedContent: UntrustedContent, subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string() }).openapi('Attachment');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
 const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
-const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
+const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
 const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
@@ -187,7 +188,14 @@ const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('Cam
 export type SendRequest = z.infer<typeof SendInput>;
 const now = () => new Date().toISOString();
 // Metadata routes must not materialize HTML, raw MIME or template data from the immutable snapshot.
+// Even an empty replyAuthors array identifies a mailbox reply. Older snapshots predate that marker:
+// use their threading headers, or the retained conversation for replies to mail without a Message-ID.
+export const sentUntrustedContent = sql<boolean>`CASE WHEN ${emails.campaignId} IS NOT NULL THEN false
+  WHEN ${emails.snapshot} ? 'replyAuthors' OR ${emails.snapshot}->'headers' @> '[{"Name":"In-Reply-To"}]'::jsonb THEN true
+  ELSE EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=sending_emails.workspace_id AND m.sending_email_id=sending_emails.id
+    AND EXISTS (SELECT FROM mail_messages p WHERE p.workspace_id=m.workspace_id AND p.thread_id=m.thread_id AND p.direction='inbound' AND p.created_at < m.created_at)) END`;
 const emailColumns = {
+  untrustedContent: sentUntrustedContent,
   id: emails.id, region: emails.region, campaignId: emails.campaignId,
   from: emails.from, fromName: sql<string | null>`coalesce(${emails.snapshot}->>'fromName',CASE WHEN ${emails.reviewId} IS NOT NULL THEN (SELECT draft->>'fromName' FROM sending_campaign_reviews cr WHERE cr.id=${emails.reviewId} AND cr.workspace_id=${emails.workspaceId}) END)`, kind: sql<'transactional' | 'marketing'>`${emails.snapshot}->>'kind'`,
   to: emails.to, cc: emails.cc, bcc: emails.bcc, subject: emails.subject, status: emails.status,
@@ -249,7 +257,7 @@ function nextCursor(rows: { id: string; createdAt: string }[], limit: number, bi
 export function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
 export const scope = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
 // A key restricted to sender domains reads only mail sent from those domains or their subdomains (L2).
-export function senderDomainWhere(column: AnyPgColumn, allowed: readonly string[]) {
+export function senderDomainWhere(column: AnyPgColumn | SQL, allowed: readonly string[]) {
   if (!allowed.length) return undefined;
   // Reverse the domain with its label separator: exact names and descendants
   // occupy one contiguous C-collation index range ('.' immediately before '/').
@@ -257,7 +265,7 @@ export function senderDomainWhere(column: AnyPgColumn, allowed: readonly string[
   return or(...allowed.map(value => { const prefix = [...value.toLowerCase()].reverse().join(''); return sql`(${domain} >= ${prefix+'.'} AND ${domain} < ${prefix+'/'})`; }));
 }
 export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'domains'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains));
-export const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
+export const campaignWhere = (a: Actor, campaignId?: string) => and(scope(campaigns, a), campaignId === undefined ? undefined : eq(campaigns.id, campaignId), senderDomainWhere(sql`${campaigns.draft}->>'from'`, a.domains));
 function keySender(a: Actor, from: string) {
   const domain = from.split('@')[1]!.toLowerCase();
   if (!senderDomainAllowed(a.domains, domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', 'from');
@@ -311,6 +319,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
 }
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!regionalSending(runtime)) region(runtime, draft.region);
+  if (!draft.from && a.domains.length) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', 'from');
   if (draft.from) keySender(a, draft.from);
 }
 async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
@@ -377,6 +386,14 @@ export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: A
       if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was already used with a different request.');
       // The unique insert waits for the other transaction; its result commits atomically with the row.
       if (!previous.result) throw new ApiError(500, 'IDEMPOTENCY_RESULT_MISSING', 'The stored idempotency result is unavailable.');
+      // A replay is a read, too. A draft can have changed sender since the receipt was saved,
+      // and a temporary token may share its parent grant's receipt with a narrower domain scope.
+      if (a.domains.length && (c.req.path === '/v1/campaigns' || c.req.path.startsWith('/v1/campaigns/'))) {
+        const receipt = previous.result as { id: string; draft?: CampaignDraft };
+        if (receipt.draft && !senderDomainAllowed(a.domains, receipt.draft.from.split('@')[1] ?? '')) notFound('Campaign');
+        const [visible] = await db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, c.req.param('id') ?? receipt.id));
+        if (!visible) notFound('Campaign');
+      }
       return previous.result as T;
     }
     const result = await work(db);
@@ -385,11 +402,11 @@ export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: A
   });
 }
 async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
-  const [row] = await db.select().from(emails).where(mailWhere(a, emailId));
+  const [row] = await db.select({ ...getTableColumns(emails), untrustedContent: sentUntrustedContent }).from(emails).where(mailWhere(a, emailId));
   if (!row) notFound('Email');
   return row;
 }
-async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.$inferSelect) {
+async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.$inferSelect, untrustedContent: boolean) {
   // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
   const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(runtime, a, row) : row.snapshot.deferredCampaign && !row.snapshot.attachments
     ? {...row.snapshot,subject:row.subject,attachments:(await runtime.db.execute<{ids:string[]}>(sql`SELECT draft->'attachments' AS ids FROM sending_campaign_reviews WHERE workspace_id=${a.workspaceId} AND id=${row.reviewId}`)).rows[0]?.ids??[]} : row.snapshot;
@@ -398,8 +415,8 @@ async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.
   // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
   const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
   // Sealed Bane notices (forward confirmations) carry a capability meant only for the recipient: withheld from every reader.
-  if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
-  return EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
+  if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ untrustedContent, subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
+  return EmailContent.parse({ untrustedContent, subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
 }
 function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
   return Event.parse({ ...row, data: a.permissions.includes('manage') ? row.data : redactCapabilityData(row.data) });
@@ -1058,21 +1075,21 @@ export function registerSending(app: App) {
     const a=actor(c), emailId=c.req.valid('param').id;
     // Single-table select fields render columns unqualified, which would bind to the subquery's own
     // table (events matching their own id; contacts matching any workspace). Name the outer row.
-    const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,
-      contact:sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
+    const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
+      contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
         WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
       timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t.id),'[]') FROM (
         SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
         WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY id LIMIT 101) t)`
     }).from(emails).where(mailWhere(a,emailId)).limit(1);
     if(!detail) return notFound('Email');
-    const {mail,contact,timeline}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail);
-    const email=emailView({...mail,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
+    const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
+    const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
     return c.json({email,content:{html,text,attachments},contact,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:timeline.length>100 ? timeline[99]!.id : null}},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
     const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
-    return c.json(await visibleEmailContent(c.env,a,row),200);
+    return c.json(await visibleEmailContent(c.env,a,row,row.untrustedContent),200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query');
@@ -1137,7 +1154,7 @@ export function registerSending(app: App) {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await timed(c, 'campaign-list-db', () => c.env.db.select(campaignSummaryColumns).from(campaigns).where(and(scope(campaigns, a),
+    const rows = await timed(c, 'campaign-list-db', () => c.env.db.select(campaignSummaryColumns).from(campaigns).where(and(campaignWhere(a),
       q.archived === 'true' ? isNotNull(campaigns.archivedAt) : isNull(campaigns.archivedAt),
       cursor ? sql`(${campaigns.createdAt}, ${campaigns.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.state ? eq(campaigns.state, q.state) : undefined,
@@ -1198,8 +1215,6 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
     const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    // A key restricted to sender domains renders only drafts that send from one of them.
-    if (a.domains.length && (!row.draft.from || !senderDomainAllowed(a.domains, row.draft.from.split('@')[1] ?? ''))) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key can only preview campaigns that send from its domains.', 'from');
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, a.workspaceId);
     const rendered = await renderCampaignContent(c.env, row.draft, false);

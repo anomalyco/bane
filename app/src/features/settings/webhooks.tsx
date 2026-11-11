@@ -19,19 +19,21 @@ function scopeText(scope: Webhook['regionIds']) { return scope === 'all' ? 'All 
 function validate(input: WebhookInput) {
   const errors: Record<string, string> = {}
   if (!input.name.trim()) errors.name = 'Enter an endpoint name.'
-  try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS endpoint URL.' }
+  if (!input.id || input.url.trim()) {
+    try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS endpoint URL.' }
+  }
   if (input.regionIds && input.regionIds !== 'all' && (input.regionIds.length === 0 || input.regionIds.some(region => !region.trim()))) errors.regionIds = 'Choose at least one region.'
   if (input.events.length === 0) errors.events = 'Choose at least one event.'
   return errors
 }
 
-function EndpointFields({ input, onChange, regions, errors, apiError, disabled, headers }: { input: WebhookInput; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: Webhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
+function EndpointFields({ input, urlHint, onChange, regions, errors, apiError, disabled, headers }: { input: WebhookInput; urlHint?: string; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: Webhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   // Hosted endpoints leave regionIds out: they cover every region and an update keeps the saved scope.
   const scope = input.regionIds
   return <div className="stack">
     <div className="form-grid">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
-      <Field label="Endpoint URL" htmlFor="endpoint-url" error={errors.url || fieldError(apiError, 'url')}><Input id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required disabled={disabled} placeholder="https://support.acme.com/hooks/email" /></Field>
+      <Field label="Endpoint URL" htmlFor="endpoint-url" hint={urlHint && 'Leave blank to keep the saved URL, or enter a replacement.'} error={errors.url || fieldError(apiError, 'url')}><Input id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={urlHint ?? 'https://support.acme.com/hooks/email'} /></Field>
     </div>
     {scope !== undefined && <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={scope === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={scope === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
     {scope !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = scope.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => onChange({ ...input, regionIds: next ? [...scope, region.region] : scope.filter(id => id !== region.region) })} /> })}</div>}</div>}
@@ -100,7 +102,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
   // Hosted users can't change the region scope, so their updates leave it out and keep the saved one.
-  const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: webhook.url, ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events })
+  const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: '', ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events })
   const deliveryColumnSet = deliveryColumns(multiTenant)
   const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -136,7 +138,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     const nextErrors = { ...validate(input), ...headerDraftErrors(headers) }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
-    try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim(), headers: headerPayload(headers, currentHeaders) }); setHeaders(null) } catch { /* Shown inline. */ }
+    try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim(), headers: headerPayload(headers, currentHeaders) }); setInput(value => ({ ...value, url: '' })); setHeaders(null) } catch { /* Shown inline. */ }
   }
   async function confirm() {
     if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null); historyPagination.reset()}
@@ -147,7 +149,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const actionDescription = action === 'rotate' ? 'The current secret stops working. The new one is shown once.' : action === 'delete' ? 'Future deliveries to this endpoint stop.' : action === 'pause' ? 'Stops deliveries to this endpoint.' : 'Resumes deliveries to this endpoint.'
   return <div className="stack settings-page">
     <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
-    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
+    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} urlHint={save.data?.url ?? webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
     <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
