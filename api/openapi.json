@@ -7337,6 +7337,26 @@
         },
         "additionalProperties": false
       },
+      "DeletedEndpoint": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+          },
+          "deleted": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "deleted"
+        ]
+      },
       "EndpointTest": {
         "type": "object",
         "properties": {
@@ -33768,7 +33788,7 @@
         "tags": [
           "Rituals"
         ],
-        "operationId": "setRitualEvaluation",
+        "operationId": "setOmenOptIns",
         "summary": "Set the domains and routes that may send inbound evidence to Jev",
         "parameters": [
           {
@@ -34034,7 +34054,7 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { setRitualEvaluation } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await setRitualEvaluation({\n  client,\n  body: {\n    \"evaluateDomains\": [],\n    \"evaluateRoutes\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { setOmenOptIns } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await setOmenOptIns({\n  client,\n  body: {\n    \"evaluateDomains\": [],\n    \"evaluateRoutes\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
@@ -34729,8 +34749,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Deleted."
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedEndpoint"
+                }
+              }
+            }
           },
           "400": {
             "description": "Request failed; use error.code and requestId to diagnose.",
@@ -35888,7 +35915,7 @@
         "tags": [
           "Rituals"
         ],
-        "operationId": "getRitualEntry",
+        "operationId": "getRitual",
         "summary": "Read one reusable script",
         "parameters": [
           {
@@ -36032,7 +36059,7 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getRitualEntry } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getRitualEntry({\n  client,\n  path: {\n    \"key\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getRitual } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getRitual({\n  client,\n  path: {\n    \"key\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
@@ -36056,7 +36083,7 @@
         "tags": [
           "Rituals"
         ],
-        "operationId": "putRitualEntry",
+        "operationId": "saveRitual",
         "summary": "Create or update one reusable script",
         "parameters": [
           {
@@ -36322,7 +36349,7 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { putRitualEntry } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await putRitualEntry({\n  client,\n  path: {\n    \"key\": \"example\"\n  },\n  body: {\n    \"key\": \"example\",\n    \"source\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { saveRitual } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await saveRitual({\n  client,\n  path: {\n    \"key\": \"example\"\n  },\n  body: {\n    \"key\": \"example\",\n    \"source\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
@@ -36346,7 +36373,7 @@
         "tags": [
           "Rituals"
         ],
-        "operationId": "deleteRitualEntry",
+        "operationId": "deleteRitual",
         "summary": "Remove a script and detach it everywhere",
         "parameters": [
           {
@@ -36587,7 +36614,7 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { deleteRitualEntry } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await deleteRitualEntry({\n  client,\n  path: {\n    \"key\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { deleteRitual } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await deleteRitual({\n  client,\n  path: {\n    \"key\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
@@ -36613,7 +36640,7 @@
         "tags": [
           "Rituals"
         ],
-        "operationId": "setRitualAttachments",
+        "operationId": "attachRituals",
         "summary": "Attach, reorder and detach rituals by replacing the ordered binding list",
         "parameters": [
           {
@@ -36889,7 +36916,7 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { setRitualAttachments } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await setRitualAttachments({\n  client,\n  body: {\n    \"attachments\": [\n      {\n        \"ritual\": \"example\",\n        \"target\": \"example\",\n        \"continue\": false\n      }\n    ]\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { attachRituals } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await attachRituals({\n  client,\n  body: {\n    \"attachments\": [\n      {\n        \"ritual\": \"example\",\n        \"target\": \"example\",\n        \"continue\": false\n      }\n    ]\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
@@ -37171,7 +37198,7 @@
         "tags": [
           "Rituals"
         ],
-        "operationId": "putRituals",
+        "operationId": "applyRituals",
         "summary": "Create, replace or remove rituals and ordered bindings in one version",
         "parameters": [
           {
@@ -37504,7 +37531,7 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { putRituals } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await putRituals({\n  client,\n  body: {\n    \"rituals\": [],\n    \"attachments\": [],\n    \"senderLists\": {},\n    \"evaluateDomains\": [],\n    \"evaluateRoutes\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { applyRituals } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await applyRituals({\n  client,\n  body: {\n    \"rituals\": [],\n    \"attachments\": [],\n    \"senderLists\": {},\n    \"evaluateDomains\": [],\n    \"evaluateRoutes\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",

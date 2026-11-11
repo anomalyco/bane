@@ -236,7 +236,7 @@ export function registerEndpoints(app: App) {
     });
     return c.json(await view(c.env, w, await findEndpoint(c.env.db, w, name)), 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no ritual or route uses', request: { params: NameParam }, responses: { 204: { description: 'Deleted.' }, ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no ritual or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name;
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
@@ -248,7 +248,7 @@ export function registerEndpoints(app: App) {
       if (used.route) throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${name}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
       await tx.delete(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
     });
-    return c.body(null, 204);
+    return c.json({ name, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/verification`, operationId: 'sendEndpointVerification', summary: 'Email a forward recipient a new confirmation link', description: 'For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.', request: { params: NameParam, body: json(z.object({ from: z.string().max(254).optional() }).strict()) }, responses: { 202: response(Endpoint), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');

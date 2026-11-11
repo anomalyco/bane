@@ -159,7 +159,12 @@ export function registerAuth(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security, request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json');
     const secret = randomSecret('bane_');
-    const [key] = await c.env.db.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+    const [key] = await c.env.db.transaction(async tx => {
+      const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+      // A key created by an MCP agent lives only as long as the approval that created it.
+      if (auth.credential === 'mcp' && auth.keyId.startsWith('mcp_')) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.keyId.slice(4)},${auth.workspaceId},'api_key',${rows[0]!.id})`);
+      return rows;
+    });
     return c.json({ ...keyView(key!), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {

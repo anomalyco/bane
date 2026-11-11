@@ -18,6 +18,7 @@ import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, Atta
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
 import { withRegionSettings } from './ses-region-state.js';
+import { mailboxCreates } from './idempotency.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -487,6 +488,8 @@ export function registerMailbox(app: App) {
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
   app.use('/v1/inboxes/*', mailboxAuth);
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
+  app.use('/v1/inbound/*', mailboxCreates);
+  app.use('/v1/inboxes/*', mailboxCreates);
   registerInboxes(app, access);
   registerMailObjects(app);
   app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address for reuse (workspace admin)',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
@@ -652,7 +655,8 @@ function registerInboundKeys(app: App) {
   app.openapi(createRoute({ method: 'post', path: base, operationId: 'createInboundKey', tags, security, summary: 'Create a key for an agent', description: 'Scope this credential to specific receiving addresses. If the filter is omitted it applies to every address, including future ones. The secret is returned once.',
     request: { body: json(body) }, responses: { 201: response(KeySchema.extend({ secret: z.string() }).openapi('InboundKeySecret')), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json');
-    if (!['apiKey', 'dashboard'].includes(c.get('actor')?.credential ?? '')) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Create inbound keys with a live API key or the dashboard.');
+    // An MCP agent may create one only with explicit receiving consent; the key is then revoked with that approval.
+    if (!['apiKey', 'dashboard', 'mcp'].includes(c.get('actor')?.credential ?? '')) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Create inbound keys with a live API key, the dashboard or an MCP approval with receiving consent.');
     const mailboxIds = input.addressIds ? [...new Set(input.addressIds)] : null;
     if(input.permissions.includes('create') && mailboxIds===null || mailboxIds?.length===0 && !input.permissions.includes('create'))throw new ApiError(422,'ADDRESS_SCOPE_REQUIRED','Provisioning keys need an explicit addressIds scope.');
     if (mailboxIds?.length) {
@@ -660,7 +664,11 @@ function registerInboundKeys(app: App) {
       if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', 'addressIds');
     }
     const secret = randomSecret('bane_mbx_');
-    const [row] = await c.env.db.insert(mailboxKeys).values({ id: id('mbk'), workspaceId: value.workspaceId, name: input.name, hash: await digest(secret), prefix: secret.slice(0, 14), mailboxIds, permissions: [...new Set(input.permissions)] }).returning();
+    const [row] = await c.env.db.transaction(async tx => {
+      const rows = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId: value.workspaceId, name: input.name, hash: await digest(secret), prefix: secret.slice(0, 14), mailboxIds, permissions: [...new Set(input.permissions)] }).returning();
+      await ownReceiving(tx, c, 'key', rows[0]!.id);
+      return rows;
+    });
     c.header('Cache-Control', 'no-store');
     return c.json({ ...keyView(row!), secret }, 201);
   });

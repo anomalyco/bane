@@ -16,7 +16,8 @@
     "docs:check": "bun run sdk && node scripts/check-doc-examples.mjs && tsx scripts/check-agent-docs.ts",
     "cf:dev": "wrangler dev --config wrangler.dev.jsonc",
     "cf:check": "wrangler deploy --config wrangler.prod.jsonc --dry-run",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "mcp:coverage": "tsx scripts/mcp-coverage.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1128.0",

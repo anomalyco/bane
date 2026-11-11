@@ -125,6 +125,16 @@ A typical run: `createInbox` → give the address to the sign-up form → `waitF
 
 ### Hosted toolsets and discovery
 
-One hosted endpoint serves both Code Mode and traditional MCP clients. **OpenCode Code Mode:** use `/mcp?toolsets=all`, search the catalog, then call the returned typed function. **Claude Desktop, Cursor and generic HTTP clients:** start with `/mcp` (small core), or `/mcp?toolsets=inboxes,rituals`. Other toolsets are `routing`, `endpoints`, `admin`. `bane_search_tools({query})` returns names and URLs for authorized operations; `bane_describe_tool({name})` returns the input and output schemas. Reconnect with a returned URL to advertise that set. Toolsets are presentation filters, never access grants.
+Every API operation an agent can perform is a hosted tool (156 today); [docs/mcp-coverage.md](../docs/mcp-coverage.md) maps each operation to its tool and toolset and lists the few human steps. One endpoint serves both kinds of client:
+
+| Client | URL | Lists |
+|---|---|---|
+| OpenCode Code Mode | `/mcp?toolsets=all` | Every tool this approval allows, with typed input and output schemas. |
+| Claude Desktop, Cursor, generic HTTP | `/mcp` | 15 everyday tools plus `search_tools` and `describe_tool`, under a 40 KB budget (output schemas omitted; results still carry `structuredContent`). |
+| Either, narrowed | `/mcp?toolsets=inboxes,rituals` | Those toolsets: `inboxes`, `routing`, `rituals`, `endpoints`, `sending`, `admin`. |
+
+`search_tools({query, toolset?})` finds any tool the approval allows, listed or not; `describe_tool({name})` returns its full schemas and the URL whose list includes it. A tool can be called by name even when the current list omits it. Toolsets change what is listed, never what a grant may call.
+
+Conventions on every tool: writes need literal `confirm: true`; creates accept `idempotencyKey` (a retry returns the original result, `Idempotent-Replayed: true`); versioned writes accept `ifMatch`; lists return `nextCursor`; errors return `{status, requestId, error: {code, message}}` with stable codes; results that start with a person (OAuth consent, a forward confirmation) return `status` and `nextStep`.
 
 To manage receiving, request `bane:manage` and explicitly approve receiving on the human OAuth screen. Old approvals do not silently acquire these tools. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).

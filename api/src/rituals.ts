@@ -144,7 +144,7 @@ export function registerRituals(app: App) {
   app.openapi(createRoute({...meta,method:'get',path:path+'/history',operationId:'listRitualVersions',summary:'List saved ritual versions, newest first',request:{query:z.object({cursor:z.coerce.number().int().positive().optional(),limit:z.coerce.number().int().min(1).max(100).default(25)})},responses:{200:response(z.object({data:z.array(z.object({version:z.number(),actor:z.string()})),nextCursor:z.number().nullable()})),...errors}}),async c=>{const w=ritualAdmin(c).workspaceId,q=c.req.valid('query'),rows=(await c.env.db.execute<{version:number;actor:string}>(sql`SELECT version,actor FROM mail_ritual_versions WHERE workspace_id=${w} AND version<${q.cursor??2147483647} ORDER BY version DESC LIMIT ${q.limit+1}`)).rows;return c.json({data:rows.slice(0,q.limit),nextCursor:rows.length>q.limit?rows[q.limit-1].version:null},200)});
   app.openapi(createRoute({...meta,method:'post',path:path+'/restore',operationId:'restoreRitualVersion',summary:'Recompile a retained version and restore it as a new version',request:{headers:versionHeader,body:json(z.object({version:z.number().int().positive()}))},responses:ok}),async c=>{const w=ritualAdmin(c,true).workspaceId,v=c.req.valid('json').version,row=(await c.env.db.execute<{config:Config}>(sql`SELECT config FROM mail_ritual_versions WHERE workspace_id=${w} AND version=${v}`)).rows[0];if(!row)throw new ApiError(404,'NOT_FOUND','Version no longer retained.');return c.json(await edit(c,()=>row.config),200)});
   const evalSettings=RitualConfig.pick({evaluateDomains:true,evaluateRoutes:true});
-  app.openapi(createRoute({...meta,method:'put',path:path+'/omens',operationId:'setRitualEvaluation',summary:'Set the domains and routes that may send inbound evidence to Jev',request:{headers:versionHeader,body:json(evalSettings)},responses:ok}),async c=>c.json(await edit(c,x=>({...x,...c.req.valid('json')})),200));
+  app.openapi(createRoute({...meta,method:'put',path:path+'/omens',operationId:'setOmenOptIns',summary:'Set the domains and routes that may send inbound evidence to Jev',request:{headers:versionHeader,body:json(evalSettings)},responses:ok}),async c=>c.json(await edit(c,x=>({...x,...c.req.valid('json')})),200));
   registerEndpoints(app);
   registerInboxConnection(app);
   const DiagnosticSchema = z.object({ ritual: z.string().optional(), line: z.number().int(), column: z.number().int(), endLine: z.number().int(), endColumn: z.number().int(), message: z.string(), hint: z.string().optional() }).openapi('RitualDiagnostic');
@@ -195,15 +195,15 @@ export function registerRituals(app: App) {
     }) }, 200);
   });
   const params=z.object({key:z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/)}),item=path+'/scripts/{key}';
-  app.openapi(createRoute({...meta,method:'get',path:item,operationId:'getRitualEntry',summary:'Read one reusable script',request:{params},responses:{200:response(Ritual),...errors}}),async c=>{const {key}=c.req.valid('param'),s=await current(c.env.db,ritualAdmin(c).workspaceId),r=s.config.rituals.find(x=>x.key===key);if(!r)throw new ApiError(404,'NOT_FOUND','Script not found.');return c.json(r,200)});
-  app.openapi(createRoute({...meta,method:'put',path:item,operationId:'putRitualEntry',summary:'Create or update one reusable script',request:{params,headers:versionHeader,body:json(Ritual)},responses:ok}),async c=>{const {key}=c.req.valid('param'),r=c.req.valid('json');if(key!==r.key)throw new ApiError(422,'INVALID_KEY','Script key must match the URL.');return c.json(await edit(c,s=>({...s,rituals:[...s.rituals.filter(h=>h.key!==key),r]})),200)});
-  app.openapi(createRoute({...meta,method:'delete',path:item,operationId:'deleteRitualEntry',summary:'Remove a script and detach it everywhere',request:{params,headers:versionHeader},responses:ok}),async c=>{const {key}=c.req.valid('param');return c.json(await edit(c,s=>({...s,rituals:s.rituals.filter(h=>h.key!==key),attachments:s.attachments.filter(h=>h.ritual!==key)})),200)});
+  app.openapi(createRoute({...meta,method:'get',path:item,operationId:'getRitual',summary:'Read one reusable script',request:{params},responses:{200:response(Ritual),...errors}}),async c=>{const {key}=c.req.valid('param'),s=await current(c.env.db,ritualAdmin(c).workspaceId),r=s.config.rituals.find(x=>x.key===key);if(!r)throw new ApiError(404,'NOT_FOUND','Script not found.');return c.json(r,200)});
+  app.openapi(createRoute({...meta,method:'put',path:item,operationId:'saveRitual',summary:'Create or update one reusable script',request:{params,headers:versionHeader,body:json(Ritual)},responses:ok}),async c=>{const {key}=c.req.valid('param'),r=c.req.valid('json');if(key!==r.key)throw new ApiError(422,'INVALID_KEY','Script key must match the URL.');return c.json(await edit(c,s=>({...s,rituals:[...s.rituals.filter(h=>h.key!==key),r]})),200)});
+  app.openapi(createRoute({...meta,method:'delete',path:item,operationId:'deleteRitual',summary:'Remove a script and detach it everywhere',request:{params,headers:versionHeader},responses:ok}),async c=>{const {key}=c.req.valid('param');return c.json(await edit(c,s=>({...s,rituals:s.rituals.filter(h=>h.key!==key),attachments:s.attachments.filter(h=>h.ritual!==key)})),200)});
   app.openapi(
     createRoute({
       ...meta,
       method: 'put',
       path: path + '/attachments',
-      operationId: 'setRitualAttachments',
+      operationId: 'attachRituals',
       summary: 'Attach, reorder and detach rituals by replacing the ordered binding list',
       request: { headers: versionHeader, body: json(z.object({ attachments: z.array(Binding).max(256) })) },
       responses: ok,
@@ -240,7 +240,7 @@ export function registerRituals(app: App) {
       ...meta,
       method: 'put',
       path,
-      operationId: 'putRituals',
+      operationId: 'applyRituals',
       summary: 'Create, replace or remove rituals and ordered bindings in one version',
       request: { headers: versionHeader, body: json(RitualConfig) },
       responses: ok,

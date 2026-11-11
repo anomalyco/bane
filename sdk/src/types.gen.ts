@@ -1968,6 +1968,14 @@ export type UpdateEndpoint = {
     url?: string;
 };
 
+export type DeletedEndpoint = {
+    /**
+     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     */
+    name: string;
+    deleted: true;
+};
+
 export type EndpointTest = {
     ok: boolean;
     status: number | null;
@@ -11663,7 +11671,7 @@ export type RestoreRitualVersionResponses = {
 
 export type RestoreRitualVersionResponse = RestoreRitualVersionResponses[keyof RestoreRitualVersionResponses];
 
-export type SetRitualEvaluationData = {
+export type SetOmenOptInsData = {
     body: {
         evaluateDomains?: Array<string>;
         /**
@@ -11679,7 +11687,7 @@ export type SetRitualEvaluationData = {
     url: '/v1/rituals/omens';
 };
 
-export type SetRitualEvaluationErrors = {
+export type SetOmenOptInsErrors = {
     /**
      * Request failed; use error.code and requestId to diagnose.
      */
@@ -11722,9 +11730,9 @@ export type SetRitualEvaluationErrors = {
     503: ApiError;
 };
 
-export type SetRitualEvaluationError = SetRitualEvaluationErrors[keyof SetRitualEvaluationErrors];
+export type SetOmenOptInsError = SetOmenOptInsErrors[keyof SetOmenOptInsErrors];
 
-export type SetRitualEvaluationResponses = {
+export type SetOmenOptInsResponses = {
     /**
      * Success
      */
@@ -11761,7 +11769,7 @@ export type SetRitualEvaluationResponses = {
     };
 };
 
-export type SetRitualEvaluationResponse = SetRitualEvaluationResponses[keyof SetRitualEvaluationResponses];
+export type SetOmenOptInsResponse = SetOmenOptInsResponses[keyof SetOmenOptInsResponses];
 
 export type ListEndpointsData = {
     body?: never;
@@ -11948,9 +11956,9 @@ export type DeleteEndpointError = DeleteEndpointErrors[keyof DeleteEndpointError
 
 export type DeleteEndpointResponses = {
     /**
-     * Deleted.
+     * Success
      */
-    204: void;
+    200: DeletedEndpoint;
 };
 
 export type DeleteEndpointResponse = DeleteEndpointResponses[keyof DeleteEndpointResponses];
@@ -12486,7 +12494,7 @@ export type ListRitualTemplatesResponses = {
 
 export type ListRitualTemplatesResponse = ListRitualTemplatesResponses[keyof ListRitualTemplatesResponses];
 
-export type DeleteRitualEntryData = {
+export type DeleteRitualData = {
     body?: never;
     headers?: {
         'if-match'?: string;
@@ -12498,7 +12506,7 @@ export type DeleteRitualEntryData = {
     url: '/v1/rituals/scripts/{key}';
 };
 
-export type DeleteRitualEntryErrors = {
+export type DeleteRitualErrors = {
     /**
      * Request failed; use error.code and requestId to diagnose.
      */
@@ -12541,9 +12549,9 @@ export type DeleteRitualEntryErrors = {
     503: ApiError;
 };
 
-export type DeleteRitualEntryError = DeleteRitualEntryErrors[keyof DeleteRitualEntryErrors];
+export type DeleteRitualError = DeleteRitualErrors[keyof DeleteRitualErrors];
 
-export type DeleteRitualEntryResponses = {
+export type DeleteRitualResponses = {
     /**
      * Success
      */
@@ -12580,9 +12588,9 @@ export type DeleteRitualEntryResponses = {
     };
 };
 
-export type DeleteRitualEntryResponse = DeleteRitualEntryResponses[keyof DeleteRitualEntryResponses];
+export type DeleteRitualResponse = DeleteRitualResponses[keyof DeleteRitualResponses];
 
-export type GetRitualEntryData = {
+export type GetRitualData = {
     body?: never;
     path: {
         key: string;
@@ -12591,7 +12599,7 @@ export type GetRitualEntryData = {
     url: '/v1/rituals/scripts/{key}';
 };
 
-export type GetRitualEntryErrors = {
+export type GetRitualErrors = {
     /**
      * Request failed; use error.code and requestId to diagnose.
      */
@@ -12634,9 +12642,9 @@ export type GetRitualEntryErrors = {
     503: ApiError;
 };
 
-export type GetRitualEntryError = GetRitualEntryErrors[keyof GetRitualEntryErrors];
+export type GetRitualError = GetRitualErrors[keyof GetRitualErrors];
 
-export type GetRitualEntryResponses = {
+export type GetRitualResponses = {
     /**
      * Success
      */
@@ -12646,9 +12654,9 @@ export type GetRitualEntryResponses = {
     };
 };
 
-export type GetRitualEntryResponse = GetRitualEntryResponses[keyof GetRitualEntryResponses];
+export type GetRitualResponse = GetRitualResponses[keyof GetRitualResponses];
 
-export type PutRitualEntryData = {
+export type SaveRitualData = {
     body: {
         key: string;
         source: string;
@@ -12663,7 +12671,7 @@ export type PutRitualEntryData = {
     url: '/v1/rituals/scripts/{key}';
 };
 
-export type PutRitualEntryErrors = {
+export type SaveRitualErrors = {
     /**
      * Request failed; use error.code and requestId to diagnose.
      */
@@ -12706,9 +12714,9 @@ export type PutRitualEntryErrors = {
     503: ApiError;
 };
 
-export type PutRitualEntryError = PutRitualEntryErrors[keyof PutRitualEntryErrors];
+export type SaveRitualError = SaveRitualErrors[keyof SaveRitualErrors];
 
-export type PutRitualEntryResponses = {
+export type SaveRitualResponses = {
     /**
      * Success
      */
@@ -12745,9 +12753,9 @@ export type PutRitualEntryResponses = {
     };
 };
 
-export type PutRitualEntryResponse = PutRitualEntryResponses[keyof PutRitualEntryResponses];
+export type SaveRitualResponse = SaveRitualResponses[keyof SaveRitualResponses];
 
-export type SetRitualAttachmentsData = {
+export type AttachRitualsData = {
     body: {
         attachments: Array<{
             ritual: string;
@@ -12769,7 +12777,7 @@ export type SetRitualAttachmentsData = {
     url: '/v1/rituals/attachments';
 };
 
-export type SetRitualAttachmentsErrors = {
+export type AttachRitualsErrors = {
     /**
      * Request failed; use error.code and requestId to diagnose.
      */
@@ -12812,9 +12820,9 @@ export type SetRitualAttachmentsErrors = {
     503: ApiError;
 };
 
-export type SetRitualAttachmentsError = SetRitualAttachmentsErrors[keyof SetRitualAttachmentsErrors];
+export type AttachRitualsError = AttachRitualsErrors[keyof AttachRitualsErrors];
 
-export type SetRitualAttachmentsResponses = {
+export type AttachRitualsResponses = {
     /**
      * Success
      */
@@ -12851,7 +12859,7 @@ export type SetRitualAttachmentsResponses = {
     };
 };
 
-export type SetRitualAttachmentsResponse = SetRitualAttachmentsResponses[keyof SetRitualAttachmentsResponses];
+export type AttachRitualsResponse = AttachRitualsResponses[keyof AttachRitualsResponses];
 
 export type GetRitualsData = {
     body?: never;
@@ -12946,7 +12954,7 @@ export type GetRitualsResponses = {
 
 export type GetRitualsResponse = GetRitualsResponses[keyof GetRitualsResponses];
 
-export type PutRitualsData = {
+export type ApplyRitualsData = {
     body: {
         rituals?: Array<{
             key: string;
@@ -12983,7 +12991,7 @@ export type PutRitualsData = {
     url: '/v1/rituals';
 };
 
-export type PutRitualsErrors = {
+export type ApplyRitualsErrors = {
     /**
      * Request failed; use error.code and requestId to diagnose.
      */
@@ -13026,9 +13034,9 @@ export type PutRitualsErrors = {
     503: ApiError;
 };
 
-export type PutRitualsError = PutRitualsErrors[keyof PutRitualsErrors];
+export type ApplyRitualsError = ApplyRitualsErrors[keyof ApplyRitualsErrors];
 
-export type PutRitualsResponses = {
+export type ApplyRitualsResponses = {
     /**
      * Success
      */
@@ -13065,7 +13073,7 @@ export type PutRitualsResponses = {
     };
 };
 
-export type PutRitualsResponse = PutRitualsResponses[keyof PutRitualsResponses];
+export type ApplyRitualsResponse = ApplyRitualsResponses[keyof ApplyRitualsResponses];
 
 export type TestRitualsData = {
     body: {

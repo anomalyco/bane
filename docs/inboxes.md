@@ -284,9 +284,9 @@ With the SDK it is `createInbox({ client, body: { type: 'sandbox' } })`, then `s
 On a manage connection approved for receiving, create an inbox and a bounded client config. An inbox-only agent cannot run the provisioning call itself.
 
 ```js
-const box = await tools.bane.inboxes_create({body:{type:'sandbox',clientId:'checkout-test'},confirm:true})
+const box = await tools.bane.createInbox({body:{type:'sandbox',clientId:'checkout-test'},confirm:true})
 const id = box.response.id
-const connection = await tools.bane.inboxes_connect({body:{inboxes:[id],client:'opencode',auth:'key',reply:false},confirm:true})
+const connection = await tools.bane.createInboxConnection({body:{inboxes:[id],client:'opencode',auth:'key',reply:false},confirm:true})
 // Give connection.response.config only to the intended client; it contains the one-time bearer secret.
 ```
 
