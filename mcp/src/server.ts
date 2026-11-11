@@ -10,6 +10,7 @@ const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookS
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // Unlike the legacy outbound catalog, inbound discovery is opt-in per operation.
 const INBOUND = new Map([
+  ['getRouting', 'get /v1/routing'], ['testRouting', 'post /v1/routing/test'], ['listRoutingVersions', 'get /v1/routing/versions'],
   ['listInboundDomains', 'get /v1/inbound/domains'], ['getInboundDomain', 'get /v1/inbound/domains/{id}'], ['enableInboundDomain', 'post /v1/inbound/domains/{id}/enable'],
   ['listInboundAddresses', 'get /v1/inbound/addresses'], ['createInboundAddress', 'post /v1/inbound/addresses'],
   ['getInboundAddress', 'get /v1/inbound/addresses/{addressId}'], ['updateInboundAddress', 'patch /v1/inbound/addresses/{addressId}'], ['deleteInboundAddress', 'delete /v1/inbound/addresses/{addressId}'],
@@ -240,14 +241,15 @@ async function main() {
       if (!METHODS.has(method) || !object(operation)) continue;
       const name = operation.operationId;
       if (typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) fail('INVALID_SPEC', 'Invalid OpenAPI operationId.');
-      const inbound = path === '/v1/inbound' || path.startsWith('/v1/inbound/');
+      const routing = path === '/v1/routing' || path.startsWith('/v1/routing/');
+      const inbound = routing || path === '/v1/inbound' || path.startsWith('/v1/inbound/');
       if (inbound || INBOUND.has(name)) {
         if (INBOUND.get(name) !== `${method} ${path}`) continue;
       }
-      if (config.addressKey && (!inbound || path.startsWith('/v1/inbound/domains') || (path.startsWith('/v1/inbound/addresses') && method !== 'get'))) continue;
+      if (config.addressKey && (routing || !inbound || path.startsWith('/v1/inbound/domains') || (path.startsWith('/v1/inbound/addresses') && method !== 'get'))) continue;
       if (EXCLUDED.has(name) || (path === '/v1/api-keys' && method !== 'get')) continue;
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
-      const write = method !== 'get';
+      const write = method !== 'get' && name !== 'testRouting';
       if (write && !config.allowWrites) continue;
       if (operations.has(name) || operations.size >= 256) fail('INVALID_SPEC', 'Duplicate operationId or too many tools.');
       const schema = inputSchema(spec, item as ObjectValue, operation, write);
