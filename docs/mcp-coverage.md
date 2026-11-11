@@ -159,6 +159,9 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `applyRituals` | `rituals` · `apply` · rituals |
 | `testRituals` | `rituals` · `test` · rituals |
 | `listInboxFolders` | `inboxes` · `folders` · inboxes |
+| `createInboxFolder` | `inboxes` · `createFolder` · inboxes |
+| `updateInboxFolder` | `inboxes` · `updateFolder` · inboxes |
+| `deleteInboxFolder` | `inboxes` · `deleteFolder` · inboxes |
 | `updateInboxMessage` | `messages` · `update` · inboxes |
 | `deleteInboxMessage` | `messages` · `delete` · inboxes |
 | `getInboxMessage` | `messages` · `get` · inboxes |
@@ -166,6 +169,9 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `copyInboxMessage` | `messages` · `copy` · inboxes |
 | `expungeInboxFolder` | `messages` · `expunge` · inboxes |
 | `getInboxChanges` | `inboxes` · `changes` · inboxes |
+| `createInboxAppPassword` | `inboxes` · `createPassword` · inboxes |
+| `listInboxAppPasswords` | `inboxes` · `passwords` · inboxes |
+| `revokeInboxAppPassword` | `inboxes` · `revokePassword` · inboxes |
 | `createInbox` | `inboxes` · `create` · inboxes |
 | `listInboxes` | `inboxes` · `list` · inboxes |
 | `getInbox` | `inboxes` · `get` · inboxes |

@@ -268,11 +268,12 @@ export function createLiveApi(): BaneApi {
       revokeKey: async (id, signal) => { await inboundCall(`/keys/${idPath(id)}/revoke`, 'POST', undefined, signal) },
     },
     inboxes: {
+      folders:(id,signal)=>call(`/inboxes/${idPath(id)}/folders`,'GET',undefined,signal),
       list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await call<{ data: Inbox[]; nextCursor: string | null }>(`/inboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       get: (id, signal) => call<Inbox>(`/inboxes/${idPath(id)}`, 'GET', undefined, signal),
       create: (input, signal) => call<CreatedInbox>('/inboxes', 'POST', input, signal),
       remove: async (id, signal) => { await call(`/inboxes/${idPath(id)}`, 'DELETE', undefined, signal) },
-      messages: (id, input, signal) => call<InboxMessagePage>(`/inboxes/${idPath(id)}/messages?${new URLSearchParams({ include: 'held', extract: 'codes,links', limit: '50', ...(input.after ? { after: input.after } : {}) })}`, 'GET', undefined, signal),
+      messages: (id, input, signal) => call<InboxMessagePage>(`/inboxes/${idPath(id)}/messages?${new URLSearchParams({ ...(input.folder?{folder:input.folder}:{include:'held'}), extract: 'codes,links', limit: '50', ...(input.after ? { after: input.after } : {}) })}`, 'GET', undefined, signal),
       message: (id, messageId, signal) => call<InboxMessageDetail>(`/inboxes/${idPath(id)}/messages/${idPath(messageId)}?extract=codes,links`, 'GET', undefined, signal),
     },
     inbound: {

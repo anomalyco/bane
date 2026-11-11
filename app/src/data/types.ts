@@ -239,11 +239,12 @@ export interface BaneApi {
     revokeKey(id: string, signal?: AbortSignal): Promise<void>
   }
   inboxes: {
+    folders(id:string,signal?:AbortSignal):Promise<{data:{id:string;role:string|null;path:string;subscribed:boolean;total:number;unseen:number}[]}>
     list(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<Inbox>>
     get(id: string, signal?: AbortSignal): Promise<Inbox>
     create(input: InboxInput, signal?: AbortSignal): Promise<CreatedInbox>
     remove(id: string, signal?: AbortSignal): Promise<void>
-    messages(id: string, input: { after?: string }, signal?: AbortSignal): Promise<InboxMessagePage>
+    messages(id: string, input: { after?: string;folder?:string }, signal?: AbortSignal): Promise<InboxMessagePage>
     message(id: string, messageId: string, signal?: AbortSignal): Promise<InboxMessageDetail>
   }
   inbound: {

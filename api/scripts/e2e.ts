@@ -94,6 +94,8 @@ Object.assign(SKIP, {
   testRituals: receivingMvp,
   createInbox: receivingMvp,
   listInboxes: receivingMvp,
+  createInboxFolder:receivingMvp,updateInboxFolder:receivingMvp,deleteInboxFolder:receivingMvp,listInboxAppPasswords:receivingMvp,
+  createInboxAppPassword:'Creates a billable inbox-day; exercise only on the isolated gateway fixture.',revokeInboxAppPassword:'Requires a run-owned protocol credential; exercised on the isolated gateway fixture.',
   getInbox: receivingMvp,
   listInboxFolders:receivingMvp, getInboxChanges:receivingMvp, copyInboxMessage:receivingMvp, moveInboxMessage:receivingMvp, deleteInboxMessage:receivingMvp, expungeInboxFolder:receivingMvp,
   updateInbox: receivingMvp,

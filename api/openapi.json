@@ -8194,14 +8194,24 @@
               "type": "object",
               "properties": {
                 "folder": {
-                  "type": "string",
-                  "enum": [
-                    "inbox",
-                    "sent",
-                    "junk",
-                    "archive",
-                    "trash"
-                  ]
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "inbox",
+                        "sent",
+                        "drafts",
+                        "junk",
+                        "archive",
+                        "trash"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^fld_[0-9a-f]{32}$"
+                    }
+                  ],
+                  "description": "Stable folder locator: a built-in role or a custom folder ID."
                 },
                 "uid": {
                   "type": "integer",
@@ -38368,18 +38378,46 @@
                       "items": {
                         "type": "object",
                         "properties": {
+                          "id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "inbox",
+                                  "sent",
+                                  "drafts",
+                                  "junk",
+                                  "archive",
+                                  "trash"
+                                ]
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^fld_[0-9a-f]{32}$"
+                              }
+                            ],
+                            "description": "Stable folder locator: a built-in role or a custom folder ID."
+                          },
                           "role": {
-                            "type": "string",
+                            "type": [
+                              "string",
+                              "null"
+                            ],
                             "enum": [
                               "inbox",
                               "sent",
+                              "drafts",
                               "junk",
                               "archive",
-                              "trash"
+                              "trash",
+                              null
                             ]
                           },
                           "path": {
                             "type": "string"
+                          },
+                          "subscribed": {
+                            "type": "boolean"
                           },
                           "uidValidity": {
                             "type": "integer",
@@ -38400,8 +38438,10 @@
                           }
                         },
                         "required": [
+                          "id",
                           "role",
                           "path",
+                          "subscribed",
                           "uidValidity",
                           "uidNext",
                           "highestModseq",
@@ -38535,6 +38575,667 @@
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/folders' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "createInboxFolder",
+        "summary": "Create a custom folder",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "inbox",
+                            "sent",
+                            "drafts",
+                            "junk",
+                            "archive",
+                            "trash"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^fld_[0-9a-f]{32}$"
+                        }
+                      ],
+                      "description": "Stable folder locator: a built-in role or a custom folder ID."
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createInboxFolder } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createInboxFolder({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"path\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/folders' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"path\": \"example\"\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/inboxes/{id}/folders/{folder}": {
+      "patch": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "updateInboxFolder",
+        "summary": "Rename a folder tree or change its subscription",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "inbox",
+                    "sent",
+                    "drafts",
+                    "junk",
+                    "archive",
+                    "trash"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^fld_[0-9a-f]{32}$"
+                }
+              ],
+              "description": "Stable folder locator: a built-in role or a custom folder ID."
+            },
+            "required": true,
+            "description": "Stable folder locator: a built-in role or a custom folder ID.",
+            "name": "folder",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "subscribed": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "subscribed"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "inbox",
+                            "sent",
+                            "drafts",
+                            "junk",
+                            "archive",
+                            "trash"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^fld_[0-9a-f]{32}$"
+                        }
+                      ],
+                      "description": "Stable folder locator: a built-in role or a custom folder ID."
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { updateInboxFolder } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await updateInboxFolder({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"folder\": \"inbox\"\n  },\n  body: {\n    \"path\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request PATCH \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/folders/inbox' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"path\": \"example\"\n}'"
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "deleteInboxFolder",
+        "summary": "Remove a custom folder; preserve otherwise orphaned mail in Trash",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "inbox",
+                    "sent",
+                    "drafts",
+                    "junk",
+                    "archive",
+                    "trash"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^fld_[0-9a-f]{32}$"
+                }
+              ],
+              "description": "Stable folder locator: a built-in role or a custom folder ID."
+            },
+            "required": true,
+            "description": "Stable folder locator: a built-in role or a custom folder ID.",
+            "name": "folder",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "inbox",
+                            "sent",
+                            "drafts",
+                            "junk",
+                            "archive",
+                            "trash"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^fld_[0-9a-f]{32}$"
+                        }
+                      ],
+                      "description": "Stable folder locator: a built-in role or a custom folder ID."
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { deleteInboxFolder } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await deleteInboxFolder({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"folder\": \"inbox\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request DELETE \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/folders/inbox' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
       }
     },
     "/v1/inboxes/{id}/messages/{messageId}": {
@@ -38585,14 +39286,24 @@
                 "type": "object",
                 "properties": {
                   "source": {
-                    "type": "string",
-                    "enum": [
-                      "inbox",
-                      "sent",
-                      "junk",
-                      "archive",
-                      "trash"
-                    ]
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "inbox",
+                          "sent",
+                          "drafts",
+                          "junk",
+                          "archive",
+                          "trash"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^fld_[0-9a-f]{32}$"
+                      }
+                    ],
+                    "description": "Stable folder locator: a built-in role or a custom folder ID."
                   },
                   "uid": {
                     "type": "integer",
@@ -38852,16 +39563,27 @@
           },
           {
             "schema": {
-              "type": "string",
-              "enum": [
-                "inbox",
-                "sent",
-                "junk",
-                "archive",
-                "trash"
-              ]
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "inbox",
+                    "sent",
+                    "drafts",
+                    "junk",
+                    "archive",
+                    "trash"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^fld_[0-9a-f]{32}$"
+                }
+              ],
+              "description": "Stable folder locator: a built-in role or a custom folder ID."
             },
             "required": false,
+            "description": "Stable folder locator: a built-in role or a custom folder ID.",
             "name": "source",
             "in": "query"
           },
@@ -39297,14 +40019,24 @@
                 "type": "object",
                 "properties": {
                   "source": {
-                    "type": "string",
-                    "enum": [
-                      "inbox",
-                      "sent",
-                      "junk",
-                      "archive",
-                      "trash"
-                    ]
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "inbox",
+                          "sent",
+                          "drafts",
+                          "junk",
+                          "archive",
+                          "trash"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^fld_[0-9a-f]{32}$"
+                      }
+                    ],
+                    "description": "Stable folder locator: a built-in role or a custom folder ID."
                   },
                   "uid": {
                     "type": "integer",
@@ -39316,14 +40048,24 @@
                     "pattern": "^(?:0|[1-9]\\d{0,17})$"
                   },
                   "folder": {
-                    "type": "string",
-                    "enum": [
-                      "inbox",
-                      "sent",
-                      "junk",
-                      "archive",
-                      "trash"
-                    ]
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "inbox",
+                          "sent",
+                          "drafts",
+                          "junk",
+                          "archive",
+                          "trash"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^fld_[0-9a-f]{32}$"
+                      }
+                    ],
+                    "description": "Stable folder locator: a built-in role or a custom folder ID."
                   }
                 },
                 "required": [
@@ -39539,14 +40281,24 @@
                 "type": "object",
                 "properties": {
                   "source": {
-                    "type": "string",
-                    "enum": [
-                      "inbox",
-                      "sent",
-                      "junk",
-                      "archive",
-                      "trash"
-                    ]
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "inbox",
+                          "sent",
+                          "drafts",
+                          "junk",
+                          "archive",
+                          "trash"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^fld_[0-9a-f]{32}$"
+                      }
+                    ],
+                    "description": "Stable folder locator: a built-in role or a custom folder ID."
                   },
                   "uid": {
                     "type": "integer",
@@ -39558,14 +40310,24 @@
                     "pattern": "^(?:0|[1-9]\\d{0,17})$"
                   },
                   "folder": {
-                    "type": "string",
-                    "enum": [
-                      "inbox",
-                      "sent",
-                      "junk",
-                      "archive",
-                      "trash"
-                    ]
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "inbox",
+                          "sent",
+                          "drafts",
+                          "junk",
+                          "archive",
+                          "trash"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^fld_[0-9a-f]{32}$"
+                      }
+                    ],
+                    "description": "Stable folder locator: a built-in role or a custom folder ID."
                   }
                 },
                 "required": [
@@ -39764,16 +40526,27 @@
           },
           {
             "schema": {
-              "type": "string",
-              "enum": [
-                "inbox",
-                "sent",
-                "junk",
-                "archive",
-                "trash"
-              ]
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "inbox",
+                    "sent",
+                    "drafts",
+                    "junk",
+                    "archive",
+                    "trash"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^fld_[0-9a-f]{32}$"
+                }
+              ],
+              "description": "Stable folder locator: a built-in role or a custom folder ID."
             },
             "required": true,
+            "description": "Stable folder locator: a built-in role or a custom folder ID.",
             "name": "folder",
             "in": "path"
           }
@@ -40131,6 +40904,603 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/changes?since=example' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inboxes/{id}/app-passwords": {
+      "post": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "createInboxAppPassword",
+        "summary": "Grant mail client access to a persistent inbox. Password shown once; a billable day starts immediately.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "protocols": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "imap",
+                        "smtp"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 2
+                  },
+                  "perDay": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2000
+                  },
+                  "perMonth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 62000
+                  }
+                },
+                "required": [
+                  "name",
+                  "protocols"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "protocols": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "imap",
+                          "smtp"
+                        ]
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "password": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "protocols",
+                    "createdAt",
+                    "password"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createInboxAppPassword } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createInboxAppPassword({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"name\": \"Example\",\n    \"protocols\": [\n      \"imap\"\n    ]\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/app-passwords' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"protocols\": [\n    \"imap\"\n  ]\n}'"
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "listInboxAppPasswords",
+        "summary": "List active app passwords without their secrets",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "protocols": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "imap",
+                                "smtp"
+                              ]
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "protocols",
+                          "createdAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listInboxAppPasswords } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listInboxAppPasswords({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/app-passwords' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inboxes/{id}/app-passwords/{passwordId}": {
+      "delete": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "revokeInboxAppPassword",
+        "summary": "Revoke a mail client password and invalidate sessions",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "passwordId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revoked": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "revoked"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { revokeInboxAppPassword } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await revokeInboxAppPassword({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"passwordId\": \"password_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request DELETE \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/app-passwords/password_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
@@ -41432,13 +42802,22 @@
           },
           {
             "schema": {
-              "type": "string",
-              "enum": [
-                "inbox",
-                "sent",
-                "junk",
-                "archive",
-                "trash"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "inbox",
+                    "sent",
+                    "drafts",
+                    "junk",
+                    "archive",
+                    "trash"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^fld_[0-9a-f]{32}$"
+                }
               ],
               "description": "Select one folder. In a folder, after and cursor are UIDs, not delivery cursors."
             },

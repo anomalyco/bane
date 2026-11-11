@@ -12,6 +12,7 @@ import type { ReadyConnection } from './provider-credentials.js';
 import { signedUrl } from './inbound-threads.js';
 import { displayText, visibleMail } from './inbox-content.js';
 import {registerInboxFolders,Role,Location,flagNames,flagsOf,inboxVisible as visible,locations} from './inbox-folders.js';
+import {registerInboxPasswords} from './inbox-passwords.js';
 import { replyText } from './mailbox-store.js';
 
 // Agent inboxes: `mailboxes` rows with kind='inbox'. One SQL function creates them; ingest and the
@@ -162,6 +163,7 @@ function project(row: Row, extract?: string) {
 }
 export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission) => MailboxAccess) {
   registerInboxFolders(app,access);
+  registerInboxPasswords(app,access);
   const created = Inbox.extend({
     credential: z.object({ id: z.string(), secret: z.string().describe('Shown once. A bearer token for this API and hosted MCP.'), permissions, expiresAt: z.string().nullable() }).optional(),
   }).openapi('CreatedInbox');

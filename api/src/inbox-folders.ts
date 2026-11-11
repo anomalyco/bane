@@ -3,7 +3,8 @@ import {sql} from 'drizzle-orm';
 import {ApiError,errors,json,response,security,type App,type Ctx,type MailboxAccess} from './core.js';
 import type {MailboxPermission} from './db/mailbox.js';
 
-export const Role=z.enum(['inbox','sent','junk','archive','trash']);
+const Special=z.enum(['inbox','sent','drafts','junk','archive','trash']);
+export const Role=z.union([Special,z.string().regex(/^fld_[0-9a-f]{32}$/)]).describe('Stable folder locator: a built-in role or a custom folder ID.');
 const key=z.string().min(1).max(120), uid=z.number().int().min(1).max(4294967295);
 const seq=z.string().regex(/^(?:0|[1-9]\d{0,17})$/);
 export const Location=z.object({folder:Role,uid,uidValidity:uid,modseq:z.string(),deleted:z.boolean()});
@@ -34,12 +35,21 @@ export function registerInboxFolders(app:App,access:(c:Ctx,p?:MailboxPermission)
   const {rows}=await c.env.db.execute<{r:z.infer<typeof result>}>(sql`SELECT inbox_mutate(b.workspace_id,b.id,${mid},${op},${JSON.stringify(p)}::jsonb) r FROM mailboxes b WHERE ${inboxVisible(v)} AND b.id=${bid}`);
   return unwrap(rows[0]?.r);
  };
- const folder=z.object({role:Role,path:z.string(),uidValidity:uid,uidNext:z.number(),highestModseq:z.string(),total:z.number(),unseen:z.number()});
+ const folder=z.object({id:Role,role:Special.nullable(),path:z.string(),subscribed:z.boolean(),uidValidity:uid,uidNext:z.number(),highestModseq:z.string(),total:z.number(),unseen:z.number()});
  app.openapi(createRoute({...meta,method:'get',path:`${base}/folders`,operationId:'listInboxFolders',summary:'List folders, stable UID namespaces and counts',request:{params:box},responses:{200:response(z.object({data:z.array(folder),state:z.string()})),...errors}}),async c=>{
   const v=access(c,'read'),{id}=c.req.valid('param');
-  const {rows}=await c.env.db.execute<{r:{data:z.infer<typeof folder>[];state:string}}>(sql`SELECT jsonb_build_object('state',s.modseq::text,'data',(SELECT jsonb_agg(jsonb_build_object('role',role,'path',CASE WHEN role='inbox' THEN 'INBOX' ELSE initcap(role) END,'uidValidity',uid_validity,'uidNext',uid_next,'highestModseq',highest_modseq::text,'total',total,'unseen',unseen) ORDER BY role) FROM inbox_folders WHERE inbox_id=b.id)) r FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id WHERE ${inboxVisible(v)} AND b.id=${id}`);
+  const {rows}=await c.env.db.execute<{r:{data:z.infer<typeof folder>[];state:string}}>(sql`SELECT jsonb_build_object('state',s.modseq::text,'data',(SELECT jsonb_agg(jsonb_build_object('id',role,'role',CASE WHEN custom_path IS NULL THEN role END,'path',inbox_folder_path(f),'subscribed',subscribed,'uidValidity',uid_validity,'uidNext',uid_next,'highestModseq',highest_modseq::text,'total',total,'unseen',unseen) ORDER BY role) FROM inbox_folders f WHERE inbox_id=b.id)) r FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id WHERE ${inboxVisible(v)} AND b.id=${id}`);
   return c.json(unwrap(rows[0]?.r),200);
  });
+ const fp=box.extend({folder:Role}),path=z.string().min(1).max(255),edited=z.object({id:Role,state:z.string()});
+ const edit=async(c:Ctx,bid:string,op:string,id:string|null,p:string|null,sub:boolean|null)=>{
+  const v=access(c,'modify');if(v.mailboxIds&&!v.mailboxIds.includes(bid))throw new ApiError(404,'NOT_FOUND','No such inbox.');
+  const r=(await c.env.db.execute<{r:z.infer<typeof edited>&{error?:string}}>(sql`SELECT inbox_edit_folder(${v.workspaceId},${bid},${op},${id},${p},${sub}) r`)).rows[0]!.r;
+  if(r.error)throw new ApiError(r.error==='NOT_FOUND'?404:409,r.error,'Folder operation refused.');return r;
+ };
+ app.openapi(createRoute({...meta,method:'post',path:`${base}/folders`,operationId:'createInboxFolder',summary:'Create a custom folder',request:{params:box,body:json(z.object({path}).strict())},responses:{201:response(edited),...errors}}),async c=>c.json(await edit(c,c.req.valid('param').id,'create',null,c.req.valid('json').path,null),201));
+ app.openapi(createRoute({...meta,method:'patch',path:`${base}/folders/{folder}`,operationId:'updateInboxFolder',summary:'Rename a folder tree or change its subscription',request:{params:fp,body:json(z.union([z.object({path}).strict(),z.object({subscribed:z.boolean()}).strict()]))},responses:{200:response(edited),...errors}}),async c=>{const {id,folder}=c.req.valid('param'),q=c.req.valid('json');return c.json('path'in q?await edit(c,id,'rename',folder,q.path,null):await edit(c,id,'subscribe',folder,null,q.subscribed),200)});
+ app.openapi(createRoute({...meta,method:'delete',path:`${base}/folders/{folder}`,operationId:'deleteInboxFolder',summary:'Remove a custom folder; preserve otherwise orphaned mail in Trash',request:{params:fp},responses:{200:response(edited),...errors}}),async c=>{const {id,folder}=c.req.valid('param');return c.json(await edit(c,id,'delete',folder,null,null),200)});
  app.openapi(createRoute({...meta,method:'patch',path:detail,operationId:'updateInboxMessage',summary:'Set read state or flags; deleted applies to one folder entry',request:{params,body:json(patch)},responses:{200:response(result),...errors}}),async c=>{
   const {id,messageId}=c.req.valid('param');return c.json(await mutate(c,id,messageId,'flags',c.req.valid('json')),200);
  });

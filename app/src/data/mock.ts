@@ -925,6 +925,7 @@ export function createMockApi(): BaneApi {
     },
     // The demo has no receiving host or sandbox store, so it shows the empty state.
     inboxes: {
+      folders:(_id,signal)=>run(signal,false,()=>({data:[]})),
       list: (_input, signal) => run(signal, false, () => Object.assign([], { nextCursor: null })),
       get: (_id, signal) => run(signal, false, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
       create: (_input, signal) => run(signal, true, () => { throw new ApiError('Agent inboxes need a live workspace.', 'INBOXES_UNAVAILABLE') }),

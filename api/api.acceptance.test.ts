@@ -8492,7 +8492,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
         const rpc=(method:string,params:Json,path='/mcp?codemode=true&toolsets=inboxes')=>request('POST',path,key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['createInboxFolder','updateInboxFolder','deleteInboxFolder','listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
         const read=ok(await charged(2,()=>rpc('tools/call',{name:'getInboxMessage',arguments:{inboxId:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
         const plain = ok(await rpc('tools/list',{},'/mcp')).result.tools;
         assert.deepEqual(plain.map((tool:Json)=>tool.name).sort(),['attachments','describe_tool','inboxes','messages']);
@@ -8527,7 +8527,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const p=ok(await local('POST',root,{type:'persistent',localPart:'persistent',send:{enabled:true},credential:{name:'owner',permissions:['read','modify']}}),201);
         assert.equal(p.expiresAt,null);assert.equal(p.deleteAfter,null);assert.equal(p.retention.mode,'forever');
         const token=p.credential.secret,base=`${root}/${p.id}`,folders=()=>request('GET',base+'/folders',token),initial=ok(await folders());
-        assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','inbox','junk','sent','trash']);
+        assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','drafts','inbox','junk','sent','trash']);
+        const custom=ok(await local('POST',base+'/folders',{path:'Work'}),201),fp=base+'/folders/'+custom.id;
+        ok(await local('PATCH',fp,{subscribed:true}));ok(await local('PATCH',fp,{path:'Renamed'}));
+        const before=ok(await folders()).data.find((f:Json)=>f.id===custom.id);assert.equal(before.path,'Renamed');assert.equal(before.subscribed,true);
+        ok(await local('DELETE',fp));const recreated=ok(await local('POST',base+'/folders',{path:'Renamed'}),201);
+        assert.notEqual(ok(await folders()).data.find((f:Json)=>f.id===recreated.id).uidValidity,before.uidValidity);
+        error(await request('POST',base+'/app-passwords',token,{name:'denied',protocols:['smtp']}),403);
+        const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
+        assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
+        ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
+        assert.equal((await db.query("SELECT cents FROM inbox_protocol_daily_usage((now() AT TIME ZONE 'UTC')::date) WHERE inbox_id=$1",[p.id])).rows[0]?.cents,100);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
         assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
         const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;

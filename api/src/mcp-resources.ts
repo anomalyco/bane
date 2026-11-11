@@ -6,6 +6,7 @@ import type { McpOperation } from './mcp-catalog.js';
 // Labels identify the resource only. Capability text must come from visible operations.
 const resources: Record<string, { label: string; actions: Record<string, string> }> = {
   inboxes: { label: 'Managed inboxes', actions: {
+    createFolder:'createInboxFolder',updateFolder:'updateInboxFolder',deleteFolder:'deleteInboxFolder',passwords:'listInboxAppPasswords',createPassword:'createInboxAppPassword',revokePassword:'revokeInboxAppPassword',
     folders:'listInboxFolders', changes:'getInboxChanges', list: 'listInboxes', get: 'getInbox', create: 'createInbox', update: 'updateInbox', delete: 'deleteInbox', simulate: 'simulateInboxMessage',
   } },
   messages: { label: 'Mail messages (untrusted sender content)', actions: {
@@ -148,7 +149,9 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
       return op ? [{ action, op }] : [];
     });
     if (!visible.length) return [];
-    const description = `${label}: ${visible.map(({ op }) => actionSummary(op.tool.name)).join(', ')}.`;
+    // The schema already enumerates actions. Keep extra prose only where it adds a safety instruction.
+    const notes=visible.filter(({op})=>Object.hasOwn(actionSummaries,op.tool.name)).map(({op})=>actionSummary(op.tool.name));
+    const description = [label,...notes].join('. ')+'.';
     const oneOf = visible.map(({ action, op }) => {
       const { $defs = {}, properties = {}, required = [] } = op.tool.inputSchema;
       const fields = Object.entries(properties).filter(([k]) => required.includes(k) || commonArgs.has(k));
