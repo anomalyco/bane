@@ -393,14 +393,14 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
     const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`id=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address IN (${recipient},regexp_replace(${recipient},'[+][^@]*@','@')) ORDER BY (address=${recipient}) DESC LIMIT 1)`));
     if (!box || box.kind === 'inbox' || box.expiresAt) throw new ApiError(422, 'FORWARD_SENDER_REQUIRED', 'Forward from a permanent receiving address.');
     // One forward per message and endpoint, decided in the same transaction as the send.
-    if (!(await tx.execute(sql`INSERT INTO mail_forward_once VALUES(${w},${m.id},${hook}) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
+    if (!(await tx.execute(sql`INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,grants) VALUES(${w},${m.id},${hook},${JSON.stringify((h.payload as {grants?:string[]}).grants??[])}::jsonb) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
     await debit(tx, w, 'forward-daily', 1000, 'day');
     await debit(tx, w, 'forward-hourly:' + hook, 200, 'hour');
     // Any incoming loop token blocks a forward (above), including tokens from other installations.
     const loop = await crypto.subtle.importKey('raw', Buffer.from(runtime.config.encryptionKey, 'hex'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const token = Buffer.from(await crypto.subtle.sign('HMAC', loop, new TextEncoder().encode(w + ':' + m.id))).toString('base64url');
     const sender = (((m.verdicts as { ritualVerified?: boolean }).ritualVerified && m.fromName) || m.fromAddress || 'Sender').replaceAll('@', ' at ').replace(/[\x00-\x1f<>\x7f]/g, ' ').slice(0, 100);
-    await sendFromMailbox(runtime, tx, {
+    const sent=await sendFromMailbox(runtime, tx, {
       actor: { workspaceId: w, keyId: 'forward:' + hook, permissions: ['send'], domains: [] },
       scope: { workspaceId: w }, mailbox: box, from: box.address,
       fromName: `${sender} via ${(box.displayName || box.address.split('@')[0]!).replace(/[\x00-\x1f@<>\x7f]/g, ' ').slice(0, 80)}`,
@@ -411,6 +411,7 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
       headers: [{ name: 'X-Bane-Loop', value: 'v1.1.' + token }],
       attachments: [],
     });
+    await tx.execute(sql`UPDATE mail_forward_once SET email_id=${sent.message.sendingEmailId} WHERE workspace_id=${w} AND message_id=${m.id} AND endpoint=${hook}`);
   });
   return { status: 202 };
 }
