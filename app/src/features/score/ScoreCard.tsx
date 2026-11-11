@@ -48,19 +48,19 @@ const art = {
 const micro = 'BANE · SENDER SCORE · '.repeat(12)
 
 // A stable four-digit serial per workspace, for the certificate feel.
-function serial(id: string | undefined) {
+export function serial(id: string | undefined) {
   let hash = 2166136261
   for (const char of id ?? 'bane') hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
   return String(1000 + (hash >>> 0) % 9000)
 }
 const reduceMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
-function follow(event: PointerEvent<HTMLElement>) {
+export function follow(event: PointerEvent<HTMLElement>) {
   if (reduceMotion()) return
   const box = event.currentTarget.getBoundingClientRect()
   event.currentTarget.style.setProperty('--sx', ((event.clientX - box.left) / box.width).toFixed(3))
   event.currentTarget.style.setProperty('--sy', ((event.clientY - box.top) / box.height).toFixed(3))
 }
-function rest(event: PointerEvent<HTMLElement>) { event.currentTarget.style.removeProperty('--sx'); event.currentTarget.style.removeProperty('--sy') }
+export function rest(event: PointerEvent<HTMLElement>) { event.currentTarget.style.removeProperty('--sx'); event.currentTarget.style.removeProperty('--sy') }
 const share = (value: number) => ({ '--share': `${Math.round(Math.min(1, Math.max(0, value)) * 1000) / 10}%` }) as CSSProperties
 
 function Medal({ size, letter, progress }: { size: 'full' | 'compact'; letter: ReactNode; progress?: number }) {

@@ -8,7 +8,7 @@ import type { Domain } from '../../data/types'
 import { number } from '../../lib/format'
 import { gradeBands, gradeFor, gradeKey, nextStep, WARMUP_EMAILS, type ScoreReport } from '../../lib/sender-score'
 import { useSenderScore } from './use-score'
-import { ScoreCard } from './ScoreCard'
+import { optionHasBreakdown, ScoreOption, useCardOption } from './options'
 import './score.css'
 
 type Graded = Extract<ScoreReport, { state: 'graded' }>
@@ -23,6 +23,7 @@ const width = (share: number) => ({ '--share': `${Math.round(share * 1000) / 10}
 //  c: report — badge, score and one mark per factor, like subjects on a report card
 export function SidebarScore({ variant }: { variant: 'a' | 'b' | 'c' }) {
   const { report } = useSenderScore()
+  const option = useCardOption()
   if (!report) return <div className={`score-side score-side--${variant}`} aria-hidden="true" />
   const warmup = report.state === 'warmup'
   const label = warmup ? `Sender score: ${report.emails} of ${WARMUP_EMAILS} emails before your first grade` : `Sender score ${whole(report.score)}, grade ${report.grade}`
@@ -41,7 +42,7 @@ export function SidebarScore({ variant }: { variant: 'a' | 'b' | 'c' }) {
       <span className="score-marks" aria-hidden="true">{warmup ? ladder.map((band, index) => <span key={band.grade} className="score-mark" data-grade="none" data-filled={report.emails / WARMUP_EMAILS * ladder.length >= index + 1 || undefined} />) : report.factors.map(factor => { const grade = gradeFor(factor.score); return <span key={factor.key} className="score-mark" data-grade={gradeKey(grade)} title={`${factor.label}: ${grade}`}>{grade[0]}</span> })}</span>
     </span>
   </Link>
-  return <ScoreCard report={report} size="compact" />
+  return <ScoreOption report={report} size="compact" option={option} />
 }
 // The last 14 daily scores; the score climbs at most 2 points a day, so this is the incremental progress.
 function History({ report, caption = true }: { report: Graded; caption?: boolean }) {
@@ -76,11 +77,12 @@ function Warmup({ report }: { report: Extract<ScoreReport, { state: 'warmup' }> 
 // The full report card on Overview, in three layouts.
 export function ReportCard({ variant }: { variant: 'column' | 'band' | 'hero' }) {
   const { report, domains } = useSenderScore()
+  const option = useCardOption()
   if (!report) return <section id="sender-score" className={`score-report score-report--${variant}`} aria-busy="true" />
   const heading = <h2 className="score-report__title">Sender score</h2>
   if (variant === 'column') return <section id="sender-score" className="score-report score-report--card" aria-label="Sender score">
-    <ScoreCard report={report} size="full" />
-    {report.state === 'graded' && <div className="score-breakdown">
+    <ScoreOption report={report} size="full" option={option} />
+    {report.state === 'graded' && optionHasBreakdown(option) && <div className="score-breakdown">
       <div className="score-breakdown__head"><h2>Breakdown</h2><span className="muted">{trendText(report)}</span></div>
       <History report={report} caption={false} />
       <ul className="score-factors score-factors--compact">{report.factors.map(factor => <li key={factor.key} title={factor.source}><span>{factor.label}</span><FactorBar score={factor.score} /><span className="muted">{factor.format(factor.value)}</span></li>)}</ul>

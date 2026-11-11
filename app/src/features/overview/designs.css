@@ -80,7 +80,7 @@
 }
 
 /* Sidebar (pitch): the score card spans the sidebar's full inner width at the bottom. */
-.sidebar-footer > :is(.score-side, .score-card), .score-side-placeholder { margin-inline: calc(-1 * var(--space-12)); }
+.sidebar-footer > :is(.score-side, .score-card, .score-opt), .score-side-placeholder { margin-inline: calc(-1 * var(--space-12)); }
 .score-side-placeholder { height: 56px; }
 
 /* B: split sidebar. Setup steps sit between navigation and the score card until setup is done. */

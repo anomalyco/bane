@@ -26,3 +26,15 @@ export function readScoreOverride(search = window.location.search): number | nul
 }
 // Re-read on navigation so a new ?design= takes effect without a reload.
 export function useDesign(): Design { return readDesign(useLocation().search) }
+// `?card=1|2|3|4` picks a score card option (sticks for the tab); without it, pass 2's certificate.
+export type CardOption = 'cert' | '1' | '2' | '3' | '4'
+const cardKey = 'bane.card-pitch'
+export function readCardOption(search = window.location.search): CardOption {
+  if (!enabled) return 'cert'
+  const value = new URLSearchParams(search).get('card')
+  const parse = (raw: string | null) => (['cert', '1', '2', '3', '4'] as const).find(option => option === raw) ?? null
+  try {
+    if (parse(value)) { sessionStorage.setItem(cardKey, value!); return parse(value)! }
+    return parse(sessionStorage.getItem(cardKey)) ?? 'cert'
+  } catch { return parse(value) ?? 'cert' }
+}
