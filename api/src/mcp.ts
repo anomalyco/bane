@@ -143,6 +143,11 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Ac
       if(inbox && name==='sendInboundThread' && args.mode!=='reply')fail('EPHEMERAL_REPLY_ONLY','Inboxes may only reply.');
       const value = await invoke(op, args);
       status = value.status; apiRequestId = value.requestId;
+       // Send image bytes once, as an MCP image block, not three times in JSON and content.
+       if(name==='getInboxAttachment' && typeof value.response?.image==='string'){
+         const {image:data,...metadata}=value.response;
+         value.image={data,mimeType:metadata.contentType};value.response=metadata;
+       }
        const { image, ...payload } = value;
        const output = result(payload, false, image);
        if(op.untrustedContent){

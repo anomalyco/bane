@@ -385,7 +385,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config.multiTenant,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
   if(!receipt)return;
   if(receipt.delivery?.drop){
-    const update=sql`retired AS (UPDATE mail_receipts SET status='processed',error='EPHEMERAL_RETIRED',processed_at=now(),dropped_recipients=jsonb_array_length(recipients) WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
+    const update=sql`retired AS (UPDATE mail_receipts SET status='processed',error='EPHEMERAL_RETIRED',processed_at=now(),dropped_recipients=jsonb_array_length(recipients) WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb ${job.recordWithSettlement?sql`AND EXISTS(SELECT FROM settled)`:sql``})`;
     if(job.recordWithSettlement)job.recordWithSettlement(update);else await runtime.db.execute(sql`WITH ${update} SELECT 1`);
     return;
   }

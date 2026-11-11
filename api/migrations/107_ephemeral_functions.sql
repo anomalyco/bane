@@ -161,10 +161,11 @@ BEGIN
 END $$;
 
 CREATE FUNCTION inbox_retention_batch(batch_size int) RETURNS int LANGUAGE plpgsql AS $$
-DECLARE b mailboxes; n int:=0; remaining int:=5000; removed int;
+DECLARE b mailboxes; candidate record; n int:=0; remaining int:=5000; removed int;
 BEGIN
- FOR b IN SELECT * FROM mailboxes WHERE retention_mode='ephemeral' AND delete_after<=now() ORDER BY workspace_id,id LIMIT least(batch_size,25) FOR UPDATE SKIP LOCKED LOOP
-  INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(b.workspace_id,'ingest'),(b.workspace_id,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+ FOR candidate IN SELECT batch.id,batch.workspace_id FROM (SELECT id,workspace_id FROM mailboxes WHERE retention_mode='ephemeral' AND delete_after<=now() ORDER BY delete_after LIMIT least(batch_size,25)) batch ORDER BY workspace_id,id LOOP
+  INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(candidate.workspace_id,'ingest'),(candidate.workspace_id,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+  SELECT * INTO b FROM mailboxes WHERE id=candidate.id AND retention_mode='ephemeral' AND delete_after<=now() FOR UPDATE SKIP LOCKED; IF NOT FOUND THEN CONTINUE; END IF;
   WITH gone AS (DELETE FROM mailbox_messages WHERE mailbox_id=b.id AND message_id IN(SELECT message_id FROM mailbox_messages WHERE mailbox_id=b.id LIMIT remaining) RETURNING workspace_id,message_id),
   gc AS (INSERT INTO mail_gc_candidates(workspace_id,message_id) SELECT workspace_id,message_id FROM gone ON CONFLICT DO NOTHING) SELECT count(*) INTO removed FROM gone;
   remaining:=remaining-removed;

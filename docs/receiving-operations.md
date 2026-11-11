@@ -158,3 +158,9 @@ aws service-quotas request-service-quota-increase --service-code ses --quota-cod
 ```
 
 Alert on nonempty `AWS/SQS ApproximateNumberOfMessagesVisible` for `bane-inbound-dead-letters`, `AWS/SNS NumberOfNotificationsFailedToRedriveToDlq`, oldest pending receipt vs staging expiry, failed receipt/job counts, expired proof, and `MAILBOX_SWEEP_COMPLETE.elapsedMs`. `MAILBOX_MESSAGE_INGESTED` reports workspace lag, AWS raw I/O latency and SQL lock wait/hold. A healthy `/health` is not a delivery-latency SLO. Webhook receivers must deduplicate by `Webhook-Id`; a 2xx lost before durable settlement can repeat. Scoped failed deliveries can be redelivered with `POST /v1/inbound/webhooks/{id}/deliveries/{deliveryId}/retry`.
+
+## Mail-store rollout and rollback
+
+Hosted raw MIME and extracted files are private mail content. After the R2 switch, new shared-pool content is stored in Cloudflare R2; SES staging and quarantine remain in Amazon S3. Apply migrations 104–107 before switching Workers. Provision the protected stage-specific mail bucket and lifecycle rules before binding it. Do not share buckets between stages.
+
+Dev specifies `BANE_MAIL_STORE=r2`; production specifies `s3` until rollout. To roll back writes, unset the switch, **not** the binding: `r2:` rows and outstanding download links still need `MAIL`. Old S3 rows remain readable. For S3-backed ephemeral mail, check the operator-managed data-plane role can delete its workspace's retained objects. This feature does not expand AWS IAM grants. Failed deletions keep their key lists in `mail.deleteObjects` jobs for operator retry. Do not advertise completed erasure while these jobs are failed.

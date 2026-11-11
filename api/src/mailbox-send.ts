@@ -10,7 +10,7 @@ import { regionalSending, unverifiedSender, verifiedClaim } from './domain-claim
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
-import { mailObjectsFor } from './mail-objects.js';
+import { readMailBytes,mailObjectsFor } from './mail-objects.js';
 import { readableMailboxKey,sentAttachmentKey, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
@@ -53,7 +53,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
         const key=!s3 ? file.file.storageKey : await readableMailboxKey(runtime,scope.workspaceId,file.region,file.file.bucket,file.file.storageKey,'att',runtime.db,s3);
         const store=mailObjectsFor(runtime,scope.workspaceId,file.file.bucket,s3);
         if(file.file.sizeBytes>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','The attachment is too large.');
-        const object=await store.get(key);if(!object)throw new Error('Missing attachment');bytes=new Uint8Array(await new Response(object).arrayBuffer());
+        const object=await store.get(key);if(!object)throw new Error('Missing attachment');bytes=await readMailBytes(object,file.file.sizeBytes,MAX_TOTAL_ATTACHMENT_BYTES);
       } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3?.destroy();}
       out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
     } else {

@@ -112,3 +112,21 @@ All tests below live in `api/api.acceptance.test.ts`.
 | Orphan storage and bounded maintenance | `api/src/mailbox-ingest.ts:388`; `api/src/mailbox-staging.ts:90`; `api/src/mailbox-events.ts:85`; `api/src/inbound-threads.ts:132` | `deduplicated uploads are reclaimed without expiring the owned attachment`; `inbound migration is repeatable and retention drains only terminal receipts and holds past 30 days` |
 
 Limits are deliberate: 600k messages / 64 GiB per UTC hour and 50k pending/running ingest jobs per workspace by default. A rejected new receipt leaves a private terminal reason, no workspace copy or normal hook. The oversize check, MIME limits, original-owner hold fence, staged object checks, signature and topic pinning remain. Only an authorized production canary can verify the deployed end-to-end path.
+
+## Inboxes phase 1: isolated acceptance evidence
+
+The `agent inbox contracts and storage budgets` tests count actual pg driver calls, excluding fixture setup. Both hosted R2 and S3 write paths were exercised without making any network calls to a storage provider.
+
+| Path | Wire statements |
+|---|---:|
+| SNS admission | 1 |
+| Claimed ingest, no files / files | 2 / 3, excluding claim and settlement |
+| Create (including replay), list, detail, immediate message page, read message, mark read, delete | 2 including credential |
+| Long poll, first poll finds a result | 3 including credential and wait debit; one more per empty retry |
+| MCP list tools / read message | 1 / 2 including credential |
+| Object download / R2 delete job handler | 0; download performs one bucket GET |
+| Retention / GC | 1 per ≤25 inboxes (≤5,000 memberships) / 1 per ≤1,000 candidates |
+
+The `BANE_BENCH=1` 10,000-due-inbox fixture ran 400 batches in 707 ms on local Postgres. That fixture measures inbox/retired-address bookkeeping, not 10,000 remote deletes. The cursor test uses independent database sessions and overlapping transactions. The membership retains its event sequence beyond the 30-day event-log window, so the final days of a long lease do not lose their pagination history. These tests do not certify live SES, Hyperdrive, R2, or production IAM.
+
+The opt-in `inbox ingest benchmark: compare v1 and v2 on a 100k-address receiving host` ran the original and new store routines interleaved against identical rows (one warm-up, three timed executions each, savepoint rollback). A plain-address delivery with no files took **1.38–1.45 ms** inside v1 versus **1.74–1.84 ms** inside v2. Both take **one wire statement** for the store. This isolates the store, not the S3/R2 transfer or end-to-end latency.
