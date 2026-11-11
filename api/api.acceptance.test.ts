@@ -7948,9 +7948,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('R2 mail store: deduplicated candidate uploads are deleted without touching the owned attachment',async()=>{
         await deliver('r2-duplicate',[box.address],true,true,'r2-first');const row=(await db.query("UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1 AND ses_message_id='r2-duplicate' RETURNING keys",[wid])).rows[0];assert.ok(stored.has(row.keys[0]));await assert.rejects(mailboxIngestJobs['mailbox.cleanUploads'](runtime,{},{id:'clean',workspaceId:wid,attempts:1}),(await import('./src/jobs.js')).JobDeferred);assert.ok(!stored.has(row.keys[0]));assert.ok([...stored.keys()].some(k=>k.startsWith(`e/${wid}/${box.id}/${first.id}/`)));
       });
-      await t.test('R2 mail store: expiring tenant-bound PASS-only attachment downloads use zero DB trips',async()=>{
+      await t.test('R2 mail store: inbox downloads check eligibility before reading PASS-only attachments',async()=>{
         const m=ok(await charged(2,()=>request('GET',`${url}/${first.id}`,key))),link=m.attachments[0].url;
-        const before=gets,res=await charged(0,()=>Promise.resolve(app.fetch(new Request(link),runtime)));assert.equal(gets-before,1);assert.equal(await res.text(),'fixture');assert.match(res.headers.get('content-disposition')!,/^attachment/);assert.equal(res.headers.get('content-security-policy'),"sandbox; default-src 'none'");assert.equal(res.headers.get('cache-control'),'private, no-store');assert.equal(res.headers.get('x-content-type-options'),'nosniff');
+        const before=gets,res=await charged(1,()=>Promise.resolve(app.fetch(new Request(link),runtime)));assert.equal(gets-before,1);assert.equal(await res.text(),'fixture');assert.match(res.headers.get('content-disposition')!,/^attachment/);assert.equal(res.headers.get('content-security-policy'),"sandbox; default-src 'none'");assert.equal(res.headers.get('cache-control'),'private, no-store');assert.equal(res.headers.get('x-content-type-options'),'nosniff');
         assert.equal((await app.fetch(new Request(link+'x'),runtime)).status,404);assert.throws(()=>assertMailKey('other',first.raw_key));assert.throws(()=>assertMailKey(wid,`e/${wid}/../secret`));
         const real=Date.now,clock=t.mock.method(Date,'now',()=>real()-310000);const old=mailObjectUrl(runtime,wid,first.raw_key,'a.eml','message/rfc822');clock.mock.restore();assert.equal((await app.fetch(new Request(old.url),runtime)).status,404);
         await db.query("UPDATE mail_messages SET verdicts=verdicts||'{\"virus\":\"GRAY\"}' WHERE id=$1",[first.id]);assert.equal(ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url,null);await db.query("UPDATE mail_messages SET verdicts=verdicts||'{\"virus\":\"PASS\"}' WHERE id=$1",[first.id]);
@@ -7996,8 +7996,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         error(await request('DELETE',release,provision),403);error(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}),409,'ADDRESS_RETIRED');ok(await local('DELETE',release));ok(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}));
       });
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
+        const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
+        const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
         for(const p of [url,`${url}/${first.id}`,`/v1/inbound/messages/${first.id}`,`/v1/inbound/threads/${first.thread_id}`]){error(await request('GET',p,scoped),404);error(await local('GET',p),404);}
         const file=(await db.query('SELECT id FROM mail_attachments WHERE message_id=$1',[first.id])).rows[0];
         for(const suffix of ['raw',`parts/${file.id}`])error(await local('GET',`/v1/inbound/messages/${first.id}/${suffix}`),404);

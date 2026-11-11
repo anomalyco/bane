@@ -295,7 +295,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     try {
       const attachments = await Promise.all(r.files.map(async f => ({
         id: f.id, filename: displayText(f.filename), contentType: f.content_type, size: f.size_bytes,
-        ...(scanned ? await signedUrl(c.env, v.workspaceId, 'att', r.region, f.bucket, f.storage_key, f.filename, undefined, s3) : { url: null, expiresAt: null }),
+        ...(scanned ? await signedUrl(c.env, v.workspaceId, 'att', r.region, f.bucket, f.storage_key, f.filename, undefined, s3,id) : { url: null, expiresAt: null }),
       })));
       return c.json({ ...message, text, replyText: replyText(text), html: q.includeHtml === 'true' && r.html ? safeForwardHtml(r.html) : null, attachments }, 200);
     } finally { s3?.destroy(); }
@@ -312,7 +312,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     )).rows[0];
     if (!f) throw absent();
     return c.json(await withMailObjects(c.env, v.workspaceId, f.region, f.bucket, async (objects, s3) => {
-      const out = { filename: displayText(f.filename), contentType: f.content_type, ...await signedUrl(c.env, v.workspaceId, 'att', f.region, f.bucket, f.storage_key, f.filename, undefined, s3) };
+      const out = { filename: displayText(f.filename), contentType: f.content_type, ...await signedUrl(c.env, v.workspaceId, 'att', f.region, f.bucket, f.storage_key, f.filename, undefined, s3,id) };
       const text = f.content_type === 'text/plain' && f.size_bytes <= 1048576, image = /^image\/(png|jpeg|gif|webp)$/.test(f.content_type) && f.size_bytes <= 5242880;
       if (!text && !image) return out;
       const stream = await objects.get(f.storage_key, { offset: 0, length: Math.max(1, f.size_bytes) });
