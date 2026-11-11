@@ -1,4 +1,6 @@
 import type {Verdicts} from './db/mailbox.js';
+import { mailObjectUrl } from './mail-object-route.js';
+import { boundMailBucket, isS3Bucket } from './mail-objects.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
@@ -120,10 +122,10 @@ async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter,
   return { messages: rows.slice(0, limit).reverse().map(item => messageView(item.row, item.addressIds,item.read)), nextCursor: rows.length > limit && last ? encodeCursor(last.at, last.row.id) : null };
 }
 
-import { mailObjectUrl } from './mail-object-route.js';
 export async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client) {
-  if(bucket.startsWith('r2:')){
-    if(bucket!==`r2:${runtime.mailR2?.name}`)throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The mail object was not found.');
+  if(!isS3Bucket(bucket)){
+    // Bane-signed links stream from the R2 binding; sandbox objects in local storage have none.
+    if(bucket!==boundMailBucket(runtime))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The mail object was not found.');
     if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive);
     return mailObjectUrl(runtime,wid,key,filename??'attachment',kind==='raw'?'message/rfc822':'application/octet-stream');
   }
@@ -141,7 +143,7 @@ async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect
   if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
   // Only outbound copies have no SES receiving scan by design.
   if (!region || !bucket || (row.verdicts.virus ?? (row.direction==='outbound'?'PASS':null))!=='PASS') return { rawUrl: null,rawExpiresAt, urls: files.map(() => null) };
-  const client = bucket.startsWith('r2:') ? undefined : await mailboxS3(runtime, row.workspaceId, region, bucket);
+  const client = isS3Bucket(bucket) ? await mailboxS3(runtime, row.workspaceId, region, bucket) : undefined;
   try {
     if (files.some(f => f.sourceId)) await archiveMailboxFiles(runtime, row.workspaceId, row.id, client);
     const link = async (kind:'att'|'raw', key:string, filename:string) => (await signedUrl(runtime, row.workspaceId, kind, region, bucket, key, filename, undefined, client)).url;

@@ -95,7 +95,8 @@ export const cleanCandidates:JobHandler=async(runtime)=>{
   const {rows:[snapshot]}=await runtime.db.execute<{missing:string[]}>(sql`SELECT ARRAY(SELECT key FROM unnest(${sql.param(u.keys)}::text[]) key WHERE NOT EXISTS(SELECT FROM mail_attachments WHERE workspace_id=${u.workspace_id} AND message_id=${u.message_id} AND bucket=${u.bucket} AND storage_key=key)) AS missing WHERE ${terminal}`);
   if(!snapshot)throw new JobDeferred(new Date().toISOString());
   const missing=snapshot.missing;
-  if(missing.length && u.bucket.startsWith('r2:')){
+  // R2 has no object tags; deletes are free, so orphans there go now instead of by a tag rule.
+  if(missing.length && u.bucket.includes(':')){
     const {mailObjectsFor}=await import('./mail-objects.js');
     await mailObjectsFor(runtime,u.workspace_id,u.bucket).delete(missing.slice(0,8));
   } else if(missing.length){

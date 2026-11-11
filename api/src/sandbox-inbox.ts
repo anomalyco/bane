@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, id, type Runtime } from './core.js';
-import { assertMailKey, r2MailObjects } from './mail-objects.js';
+import { mailKey, sandboxMailStore } from './mail-objects.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 
 // Only literal, validated fields cross this boundary. There is no SMTP, DNS, SES or URL fetch.
@@ -26,7 +26,7 @@ export async function simulateInbox(
       'Limit: 50 simulated messages per inbox and 1,000 per workspace per UTC day.',
     );
   const mid = id('msg'),
-    key = `e/${wid}/${bid}/${mid}.eml`,
+    key = mailKey(wid, 'ephemeral', bid, mid),
     boundary = `bane_${crypto.randomUUID()}`;
   const b64 = (s: string) =>
     Buffer.from(s)
@@ -39,10 +39,8 @@ export async function simulateInbox(
   const wire = Buffer.from(
     `From: ${input.from}\r\nTo: ${box.address}\r\nSubject: =?UTF-8?B?${subject}?=\r\nMIME-Version: 1.0\r\n${input.html ? `Content-Type: multipart/alternative; boundary="${boundary}"\r\n\r\n--${boundary}\r\n${part('plain', input.text)}\r\n--${boundary}\r\n${part('html', input.html)}\r\n--${boundary}--` : part('plain', input.text)}\r\n`,
   );
-  assertMailKey(wid, key);
-  // On Node the configured private object adapter is S3; a workspace need not own a receiving bucket.
-  const bucket = runtime.mailR2 ? `r2:${runtime.mailR2.name}` : 'sandbox:local';
-  const objects = runtime.mailR2 ? r2MailObjects(wid, runtime.mailR2.bucket) : runtime.storage;
+  // A workspace need not own a receiving bucket: on Node this is the private object storage.
+  const { bucket, objects } = sandboxMailStore(runtime, wid);
   await objects.put(key, wire, 'message/rfc822');
   await storeIncoming(
     runtime.db,
