@@ -890,6 +890,15 @@ export function createMockApi(): BaneApi {
       }),
       revokeKey: (keyId, signal) => run(signal, true, s => { find(s.mailboxKeys ??= demoMailboxAccess().keys, keyId, 'Key').revokedAt = now() }),
     },
+    // The demo has no receiving host or sandbox store, so it shows the empty state.
+    inboxes: {
+      list: (_input, signal) => run(signal, false, () => Object.assign([], { nextCursor: null })),
+      get: (_id, signal) => run(signal, false, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
+      create: (_input, signal) => run(signal, true, () => { throw new ApiError('Agent inboxes need a live workspace.', 'INBOXES_UNAVAILABLE') }),
+      remove: (_id, signal) => run(signal, true, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
+      messages: (_id, _input, signal) => run(signal, false, () => ({ data: [], cursor: '0', hasMore: false })),
+      message: (_id, _messageId, signal) => run(signal, false, () => { throw new ApiError('Message not found.', 'NOT_FOUND') }),
+    },
     inbound: {
       addresses: (input, signal) => run(signal, false, s => {
         const search = input.search?.trim().toLowerCase()
@@ -1004,15 +1013,6 @@ export function createMockApi(): BaneApi {
       deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
       rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
       webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),
-    },
-    // The demo has no receiving host or sandbox store, so it shows the empty state.
-    inboxes: {
-      list: (_input, signal) => run(signal, false, () => Object.assign([], { nextCursor: null })),
-      get: (_id, signal) => run(signal, false, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
-      create: (_input, signal) => run(signal, true, () => { throw new ApiError('Agent inboxes need a live workspace.', 'INBOXES_UNAVAILABLE') }),
-      remove: (_id, signal) => run(signal, true, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
-      messages: (_id, _input, signal) => run(signal, false, () => ({ data: [], cursor: '0', hasMore: false })),
-      message: (_id, _messageId, signal) => run(signal, false, () => { throw new ApiError('Message not found.', 'NOT_FOUND') }),
     },
     webhooks: {
       list: signal => run(signal, false, s => s.webhooks.map(webhook => ({ ...webhook, headers: webhook.headers ?? [] }))),

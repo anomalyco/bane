@@ -60,6 +60,41 @@ $$;
 
 -- Keep lock acquisition and its subsequent fresh READ COMMITTED snapshot on the server.
 -- This replaces BEGIN, the lane lock, the store CTE and COMMIT with one parameterized call.
+-- Inbox gates under the store's lanes, before its snapshot. Ingest predicted the storage class at
+-- claim; if ownership changed since, the job retries with a fresh claim. Simulated sandbox mail has
+-- no SES receipt, so it gets one here, inside the store's transaction.
+CREATE FUNCTION mail_inbox_precheck(wid text, msg jsonb) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ IF msg->>'lifecycle'='ephemeral' AND inbox_delivery(wid,msg->'envelope_to')->>'lifecycle' IS DISTINCT FROM 'ephemeral' THEN RAISE EXCEPTION 'Inbox ownership changed; reclaim receipt' USING ERRCODE='40001'; END IF;
+ IF msg#>>'{verdicts,simulated}'='true' THEN
+  IF NOT EXISTS(SELECT FROM mailboxes WHERE workspace_id=wid AND address=msg#>>'{envelope_to,0}' AND create_request->>'type'='sandbox' AND delete_after>now()) THEN RAISE EXCEPTION 'Sandbox no longer exists'; END IF;
+  INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES(wid,msg->>'ses_message_id','sandbox',msg->>'raw_bucket',msg->>'raw_key',msg->'envelope_to','{"simulated":true}');
+ END IF;
+END $$;
+
+-- The wait cursor lives on the membership, because the event log keeps 30 days and a lease plus
+-- grace can outlast it. It is the delivery's event seq, or a fresh seq when the delivery emits no
+-- event, taken under the events lane so cursor order is commit order.
+CREATE FUNCTION mail_inbox_cursor(wid text, published jsonb) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ IF published IS NULL THEN RETURN; END IF;
+ INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'events') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+ UPDATE mailbox_messages l SET inbox_seq=coalesce(p.seq,nextval(pg_get_serial_sequence('mailbox_events','seq'))) FROM jsonb_to_recordset(published) p(bid text,mid text,seq bigint) WHERE l.mailbox_id=p.bid AND l.message_id=p.mid;
+END $$;
+
+-- mail_store_incoming_v2 is mail_store_incoming (096) plus these inbox changes, by CTE:
+--   lanes: also the address lane for ephemeral mail; then mail_inbox_precheck.
+--   extended/promoted_files: a reopened receipt keeps the longest-lived class (default wins) and
+--     moves e/ files to the default store's keys; known: dedupe only within compatible classes;
+--     stored: the lifecycle column.
+--   routes: a retired column; sandbox hosts route only simulated mail; an inbox receives even
+--     after its lease (the hold decides). misses/resolved: retired addresses never auto-create and
+--     resolve to no box; unrouted: skips retired and ephemeral-only mail.
+--   locked_inboxes (new): inbox_state rows locked by ID. added: held_reason (expired or quota).
+--   counters (new). summaries: held memberships skip threads. done: dropped_recipients and
+--     EPHEMERAL_RETIRED. items: message.held and the first inbox.quota_exceeded. events: simulated
+--     flag. owned_files: the batch is key segment -2 (a v1 bug: -5 never matched).
+--   after the statement: mail_inbox_cursor.
 CREATE FUNCTION mail_store_incoming_v2(msg jsonb, file_items jsonb, refs_json jsonb, envelopes jsonb, authenticated_from boolean, can_create boolean)
 RETURNS TABLE(queued_count integer,wait_ms double precision,hold_ms double precision) LANGUAGE plpgsql VOLATILE AS $$
 DECLARE wid text:=msg->>'workspace_id'; received timestamptz:=(msg->>'received_at')::timestamptz; dmarc text:=msg#>>'{verdicts,dmarc}'; is_spam boolean:=(msg->>'spam')::boolean;
@@ -68,11 +103,7 @@ BEGIN
  INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'ingest') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
  can_create:=can_create AND NOT is_spam AND EXISTS(SELECT FROM jsonb_to_recordset(envelopes) AS v(addr text) JOIN mailbox_domains d ON d.workspace_id=wid AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND d.catch_all='create_mailbox' WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=wid AND a.address IN (addr,regexp_replace(addr,'[+][^@]*@','@'))));
  IF can_create OR msg->>'lifecycle'='ephemeral' THEN INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false; END IF;
- IF msg->>'lifecycle'='ephemeral' AND inbox_delivery(wid,msg->'envelope_to')->>'lifecycle' IS DISTINCT FROM 'ephemeral' THEN RAISE EXCEPTION 'Inbox ownership changed; reclaim receipt' USING ERRCODE='40001'; END IF;
- IF msg#>>'{verdicts,simulated}'='true' THEN
-  IF NOT EXISTS(SELECT FROM mailboxes WHERE workspace_id=wid AND address=msg#>>'{envelope_to,0}' AND create_request->>'type'='sandbox' AND delete_after>now()) THEN RAISE EXCEPTION 'Sandbox no longer exists'; END IF;
-  INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES(wid,msg->>'ses_message_id','sandbox',msg->>'raw_bucket',msg->>'raw_key',msg->'envelope_to','{"simulated":true}');
- END IF;
+ PERFORM mail_inbox_precheck(wid,msg);
  locked:=clock_timestamp();
  WITH delivery AS MATERIALIZED (
     SELECT x.* FROM jsonb_populate_record(NULL::mail_messages,msg::jsonb) x
@@ -152,11 +183,7 @@ BEGIN
   queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.fanout',workspace_id,jsonb_object_agg(seq::text,hooks) FROM subscriptions GROUP BY workspace_id RETURNING 1),
   owned_files AS (DELETE FROM mail_candidate_uploads u USING stored s WHERE u.batch=split_part(file_items->0->>'storageKey','/',-2) AND u.workspace_id=s.workspace_id AND u.message_id=s.id AND u.keys[1]=file_items->0->>'storageKey')
   SELECT (SELECT count(*)::int FROM queued),(SELECT jsonb_agg(jsonb_build_object('bid',a.mailbox_id,'mid',a.message_id,'seq',e.seq)) FROM added a JOIN locked_inboxes l ON l.inbox_id=a.mailbox_id LEFT JOIN events e ON e.mailbox_id=a.mailbox_id AND e.message_id=a.message_id AND e.type IN ('message.received','message.held')) INTO queued_count,published;
- -- Keep the commit-ordered cursor on the membership: the event log has a shorter TTL than a 30-day lease plus grace.
- IF published IS NOT NULL THEN
-  INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'events') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
-  UPDATE mailbox_messages l SET inbox_seq=coalesce(p.seq,nextval(pg_get_serial_sequence('mailbox_events','seq'))) FROM jsonb_to_recordset(published) p(bid text,mid text,seq bigint) WHERE l.mailbox_id=p.bid AND l.message_id=p.mid;
- END IF;
+ PERFORM mail_inbox_cursor(wid,published);
  wait_ms:=extract(epoch FROM locked-started)*1000; hold_ms:=extract(epoch FROM clock_timestamp()-locked)*1000; RETURN NEXT;
 END $$;
 

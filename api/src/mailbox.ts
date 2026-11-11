@@ -91,7 +91,6 @@ const InboundSubdomainSchema = z.object({
   dns: z.array(MxRecord).describe('The parent’s wildcard MX record, which receives this subdomain.'), mx: MxReportSchema.nullable(), addressCount: z.number().int(), createdAt: z.string(), updatedAt: z.string(),
 }).openapi('InboundSubdomain');
 const InboundAddressSchema = z.object({
-  kind:z.enum(['address','inbox']),
   id: z.string(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
   publicAddress: z.string().nullable().describe('Send-only address used as the default From. Null to send from the receiving address.'),
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
@@ -99,6 +98,7 @@ const InboundAddressSchema = z.object({
   stats: z.object({ threads: z.number().int(), unreadThreads: z.number().int(), lastMessageAt: z.string().nullable() }),
   sendLimits: z.object({ perHour: z.number().int(), perDay: z.number().int(), perRecipientPerHour: z.number().int(), perThreadPer10Minutes: z.number().int() }).describe('Outbound limits that guard against runaway agents and reply loops.'),
   requireDmarc: z.boolean().describe('When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received.'),
+  kind: z.enum(['address', 'inbox']).describe('inbox: an agent inbox; manage it with /v1/inboxes.'),
 }).openapi('InboundAddress');
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
@@ -160,10 +160,10 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
   ]);
   return rows.map(row => {
     const stat = stats.find(item => item.mailboxId === row.id);
-    return { id: row.id, kind:row.kind, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
+    return { id: row.id, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
       publicAddress: addresses.find(item => item.mailboxId === row.id && item.kind === 'public')?.address ?? null,
       aliases: addresses.filter(item => item.mailboxId === row.id && item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
-      createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc };
+      createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc, kind: row.kind };
   });
 }
 type MessageRow = typeof mailMessages.$inferSelect;
@@ -467,12 +467,14 @@ function registerAddresses(app: App) {
 import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
-  registerMailObjects(app);
-  app.use('/v1/inboxes/*',mailboxAuth);
-  app.use('/v1/inboxes/*',async(c,next)=>{await boundRequestBody(c);await next();});
-  registerInboxes(app,access);
   app.use('/v1/inbound/*', mailboxAuth);
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
+
+  // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
+  app.use('/v1/inboxes/*', mailboxAuth);
+  app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
+  registerInboxes(app, access);
+  registerMailObjects(app);
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');
   app.openapi(createRoute({method:'get',path:'/v1/inbound/policy',operationId:'getInboundScanPolicy',tags:['Inbound domains'],security,responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c);const {rows}=await c.env.db.execute<{spam:'store'|'quarantine'}>(sql`SELECT spam_policy AS spam FROM mail_receive_limits WHERE workspace_id=${workspaceId}`);return c.json({spam:rows[0]?.spam??'store'},200);});
   app.openapi(createRoute({method:'patch',path:'/v1/inbound/policy',operationId:'updateInboundScanPolicy',tags:['Inbound domains'],security,description:'Non-PASS virus scans are always quarantined. Store non-PASS spam scans without normal receipt notifications, or quarantine them privately.',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c),{spam}=c.req.valid('json');await c.env.db.execute(sql`INSERT INTO mail_receive_limits(workspace_id,spam_policy) VALUES(${workspaceId},${spam}) ON CONFLICT(workspace_id) DO UPDATE SET spam_policy=excluded.spam_policy`);return c.json({spam},200);});
