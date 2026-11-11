@@ -178,10 +178,12 @@ const issueTitles: Record<ReceivingIssue['code'], (host: string) => string> = {
   cname: host => `Can’t receive at ${host}`, foreign_mx: host => `Move mail for ${host}?`, split: host => `Mail for ${host} may be split`,
   wildcard: host => `A wildcard record answers for ${host}`, bane_record: host => `${host} is one of Bane’s own records`, host_taken: host => `${host} is already in use`, claimed: host => `${host} belongs to another workspace`, delegated: host => `${host} is a separate zone`,
   mx_missing: host => `The MX record on ${host} is gone`, wrong_region: host => `${host} points to another SES region`, null_mx: host => `${host} refuses all mail`,
+  proof_stale: host => `Recheck ownership of ${host}`, identity_stale: host => `Recheck the SES identity for ${host}`,
 }
 // What the API's DNS checks found for the receiving host: blocking issues in red, the rest as warnings.
 export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
-  return <div className="dns-issue"><Alert tone={issue.blocking ? 'danger' : 'warning'} title={issueTitles[issue.code](issue.host)}>{issue.message}</Alert></div>
+  // A code added to the API before the dashboard knows it still shows, with a plain title.
+  return <div className="dns-issue"><Alert tone={issue.blocking ? 'danger' : 'warning'} title={issueTitles[issue.code]?.(issue.host) ?? `Receiving at ${issue.host} needs attention`}>{issue.message}</Alert></div>
 }
 
 // Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
