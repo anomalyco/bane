@@ -53,6 +53,21 @@ new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, j
   ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"], // ENAM; creation-only.
 });
 
+// Hosted received mail (raw MIME and files) once BANE_MAIL_STORE=r2; agent inbox mail always.
+// Created here, not adopted. Keys start with their class: d/ default (raw kept 90 days, as in
+// S3), a/ attachments (no expiry, as today), e/ agent inboxes (the app erases them; 45 days is
+// the backstop past the 30-day lease plus 7 days of grace), k/ kept mail (phase 2, app-managed).
+const mailBucket = `${stage.prefix}-mail`;
+const mailR2 = new cf.R2Bucket("mail", { accountId: cloudflareAccountId, name: mailBucket, jurisdiction: "default", location: "enam", storageClass: "Standard" }, {
+  provider: cloudflare, protect: true, ignoreChanges: ["location"], // Creation-only, like attachments.
+});
+const day = 86400;
+new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, bucketName: mailR2.name, jurisdiction: "default", rules: [
+  { id: "default-raw-90d", enabled: true, conditions: { prefix: "d/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 90 * day } } },
+  { id: "ephemeral-safety-45d", enabled: true, conditions: { prefix: "e/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 45 * day } } },
+  { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
+] }, { provider: cloudflare, protect: true });
+
 // The Hyperdrive config is not managed here. Cloudflare never returns origin.password, and
 // Pulumi fails to import the resource because the read state lacks that required property.
 

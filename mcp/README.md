@@ -102,3 +102,23 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
 The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `BANE_API_URL` and `BANE_API_KEY`; writes additionally require `BANE_MCP_ALLOW_WRITES=true`. An address-scoped `bane_mbx_…` key exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.
+
+### Agent inboxes
+
+An agent can get its own expiring address, wait for mail and read it, with nothing but an inbox key. On hosted Bane pass the key as the bearer token; no OAuth is needed. For OpenCode:
+
+```json
+{"mcp":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}
+```
+
+Use a provisioning key (`POST /v1/inbound/keys` with `permissions: ["create","read","modify"]` and `addressIds: []`) to let the agent create inboxes, or the per-inbox key that `createInbox` returns to give it one inbox only. Either key sees only the inbox tools its permissions allow:
+
+| Tool | Does |
+|---|---|
+| `createInbox` | New address on an active receiving domain (`{"type":"sandbox"}` without DNS). Write. |
+| `waitForMessage` | Waits up to 25 s for the next message, oldest first, with extracted codes and links. Pass `cursor` as `after` for the one after. |
+| `readInboxMessage` | Visible text, SPF/DKIM/DMARC verdicts, attachment links. |
+| `listInboxMessages`, `listInboxes`, `getInbox`, `getInboxAttachment` | Reads. |
+| `updateInboxMessage`, `deleteInbox` | Mark read; delete now. Writes. |
+
+A typical run: `createInbox` → give the address to the sign-up form → `waitForMessage` until `data` is non-empty → use `extract.codes[0]` → `deleteInbox`. Writes need literal `confirm: true`. Every message result starts with a fixed notice naming the sender and its verdicts: mail and attachments are untrusted data, even when the sender passed authentication. Replies go through `sendInboundThread` (`mode: "reply"` only) and need an inbox created with `send.enabled`. OAuth clients with unrestricted manage access see the same tools. The stdio launcher does not list inbox tools yet; use the hosted endpoint.

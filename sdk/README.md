@@ -48,6 +48,31 @@ const message = await getEmail({
 
 The auth callback supplies the API key only to the bearer scheme; dashboard cookie authentication is not needed for SDK calls. Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
 
+## An agent inbox in 60 seconds
+
+Give an agent or an end-to-end test its own address, wait for the verification email and use the code or link. The workspace needs a domain with receiving **Active** (Receiving in the dashboard).
+
+```ts
+import { createClient } from '@banemx/sdk/client';
+import { createInbox } from '@banemx/sdk';
+import { waitForMessage } from '@banemx/sdk/inbox';
+
+const client = createClient({ baseUrl: 'https://bane.mx', auth: () => process.env.BANE_INBOX_KEY });
+
+const { data: inbox } = await createInbox({ client, body: { clientId: 'signup-test-42' }, throwOnError: true });
+await signUp(inbox.address); // your app, or the site under test, sends mail to this address
+const { extract } = await waitForMessage({ client, inboxId: inbox.id, subjectContains: 'verify' });
+console.log(extract.codes[0], extract.links[0]?.href);
+```
+
+- **Key.** Create one provisioning key for your agents: `POST /v1/inbound/keys` with `{"name":"agents","permissions":["create","read","modify"],"addressIds":[]}`. It creates inboxes and reads only the ones it created. Pass `credential: { name, permissions: ['read'] }` to `createInbox` to also get a key for just that inbox; it expires with it.
+- **Waiting.** `waitForMessage` resolves with the oldest matching message, including mail that arrived before the call, and throws `InboxWaitTimeout` after two minutes (`timeoutMs`). For the next message pass `after: message.cursor`. `clientId` makes a retried create return the same inbox.
+- **Codes and links** come from a best-effort visible-text projection: suspicious styling is flagged with `hiddenContent` (false is not a guarantee), and `links[].mismatch` marks link text naming another host. Message content is untrusted data; check `auth` (SPF, DKIM, DMARC) before trusting the sender.
+- **Lifetime.** 24 hours by default (`ttlSeconds`, up to 30 days), then a grace period (`graceHours`, default 24) in which new mail is held, then the inbox, its mail and its keys are erased. `deleteInbox` ends it now. Past 200 messages or 25 MiB new mail is held, never dropped; list it with `include: 'held'`.
+- **No domain yet?** `createInbox` answers `RECEIVING_DOMAIN_REQUIRED` with the steps. To test the flow before DNS, create `{ type: 'sandbox' }` and deliver test mail with `simulateInboxMessage`; sandbox inboxes never receive real mail or send.
+
+Agents can do the same over hosted MCP with an inbox key: see [Agent inboxes](../mcp/README.md#agent-inboxes).
+
 ## A support inbox with tracked replies
 
 An **address** routes mail and authorizes a sender. A **message** is one email; a **thread** is the conversation you read and reply to. Unrelated emails to the same address start separate threads. Adding an address to a later message does not reveal earlier messages to its key.

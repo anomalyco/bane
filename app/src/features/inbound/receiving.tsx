@@ -138,6 +138,7 @@ export function ReceivingPage() {
     <PageHeader title="Receiving" actions={<Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox" {...intent('/receiving/inbox')}>Inbox</Link>} />
     <div className="receiving-sections">
       {canAdminister && <DomainsSection onOpen={setOpenDomain} />}
+      <section className="section stack" aria-labelledby="receiving-inboxes"><SectionHeader title={<span id="receiving-inboxes">Agent inboxes</span>} actions={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/inboxes" {...intent('/receiving/inboxes')}>View inboxes</Link>} /><p className="muted">Expiring addresses that agents and end-to-end tests create, wait on and read through the API or MCP.</p></section>
       <RoutesSection onOpenDomain={setOpenDomain} />
       <AddressesSection domains={domains.data} />
     </div>

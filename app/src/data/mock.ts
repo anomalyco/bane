@@ -890,6 +890,15 @@ export function createMockApi(): BaneApi {
       }),
       revokeKey: (keyId, signal) => run(signal, true, s => { find(s.mailboxKeys ??= demoMailboxAccess().keys, keyId, 'Key').revokedAt = now() }),
     },
+    // The demo has no receiving host or sandbox store, so it shows the empty state.
+    inboxes: {
+      list: (_input, signal) => run(signal, false, () => Object.assign([], { nextCursor: null })),
+      get: (_id, signal) => run(signal, false, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
+      create: (_input, signal) => run(signal, true, () => { throw new ApiError('Agent inboxes need a live workspace.', 'INBOXES_UNAVAILABLE') }),
+      remove: (_id, signal) => run(signal, true, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
+      messages: (_id, _input, signal) => run(signal, false, () => ({ data: [], cursor: '0', hasMore: false })),
+      message: (_id, _messageId, signal) => run(signal, false, () => { throw new ApiError('Message not found.', 'NOT_FOUND') }),
+    },
     inbound: {
       addresses: (input, signal) => run(signal, false, s => {
         const search = input.search?.trim().toLowerCase()

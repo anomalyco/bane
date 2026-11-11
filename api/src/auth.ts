@@ -16,6 +16,11 @@ function rememberFingerprint(hash:string) {
   verifiedFingerprints.delete(hash);verifiedFingerprints.set(hash,Date.now()+60_000);
   if(verifiedFingerprints.size>1024)verifiedFingerprints.delete(verifiedFingerprints.keys().next().value!);
 }
+const delegatedMailbox=Symbol('mcpInbox');
+export const delegatedInbox=(runtime:Runtime)=>(runtime as Runtime & {[delegatedMailbox]?:import('./core.js').MailboxAccess})[delegatedMailbox];
+export function dispatchAsMailboxAccess(app:Pick<App,'fetch'>,request:Request,runtime:Runtime,access:import('./core.js').MailboxAccess){
+  const delegated={...runtime,[delegatedMailbox]:access}; return app.fetch(request,delegated);
+}
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
 export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
   if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');

@@ -1,4 +1,5 @@
-.mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; }
+.mailbox-address > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Inbound reader: conversations on the left, the open conversation on the right. */
 .mailbox-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }

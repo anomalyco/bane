@@ -1,3 +1,6 @@
+import type {Verdicts} from './db/mailbox.js';
+import { mailObjectUrl } from './mail-object-route.js';
+import { boundMailBucket, isS3Bucket } from './mail-objects.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
@@ -23,6 +26,7 @@ const Thread = z.object({
   addressIds: z.array(z.string()), messageCount: z.number().int().describe('Distinct messages visible within the requested address scope.'),
 }).openapi('InboundThread');
 const Message = z.object({
+  simulated:z.boolean().optional(),
   id: z.string(), threadId: z.string(), addressIds: z.array(z.string()), direction: z.enum(['inbound', 'outbound']), status: z.string(),
   from: Address, to: z.array(Address), cc: z.array(Address), replyTo: z.array(Address), subject: z.string(), snippet: z.string(),
   text: z.string(), replyText: z.string(), receivedAt: z.string(), bodyTruncated: z.boolean(), attachmentCount: z.number().int(), read:z.boolean(), errorCode:z.string().nullable(), suppressionReason:SuppressionReason.nullable().optional(),
@@ -47,16 +51,17 @@ function decodeCursor(value?: string) {
 const encodeCursor = (time: string, id: string) => Buffer.from(JSON.stringify([time, id])).toString('base64url');
 
 type Filter = { addressId?: string; threadId?: string; messageId?: string };
+const liveBox=(bid:SQLWrapper)=>sql`NOT EXISTS(SELECT FROM mailboxes ended WHERE ended.id=${bid} AND ended.delete_after<=statement_timestamp())`;
 function visibleLinks(value: MailboxAccess, filter: Filter) {
   if (filter.addressId && value.mailboxIds && !value.mailboxIds.includes(filter.addressId)) throw new ApiError(404, 'NOT_FOUND', 'Address was not found.');
-  return and(eq(links.workspaceId, value.workspaceId),
+  return and(liveBox(links.mailboxId),sql`${links.heldReason} IS NULL`,eq(links.workspaceId, value.workspaceId),
     filter.addressId ? eq(links.mailboxId, filter.addressId) : value.mailboxIds ? inArray(links.mailboxId, value.mailboxIds) : undefined,
     filter.threadId ? eq(links.threadId, filter.threadId) : undefined, filter.messageId ? eq(links.messageId, filter.messageId) : undefined);
 }
 
 export function visibleThreadAddresses(value: MailboxAccess, threadId: string, addressId?: string) {
   if (addressId && value.mailboxIds && !value.mailboxIds.includes(addressId)) throw new ApiError(404,'NOT_FOUND','Address was not found.');
-  return and(eq(mailboxThreads.threadId,threadId),eq(mailboxThreads.workspaceId,value.workspaceId),
+  return and(liveBox(mailboxThreads.mailboxId),eq(mailboxThreads.threadId,threadId),eq(mailboxThreads.workspaceId,value.workspaceId),
     addressId ? eq(mailboxThreads.mailboxId,addressId) : value.mailboxIds ? inArray(mailboxThreads.mailboxId,value.mailboxIds) : undefined);
 }
 
@@ -72,7 +77,7 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
   const rows = await db.execute<{ id: string; subject: string; snippet: string; at: string; address_ids: string[]; message_count: number }>(sql`
     WITH threads AS MATERIALIZED (
       SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids
-      FROM ${t} WHERE ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
+      FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
         filter.addressId ? eq(t.mailboxId,filter.addressId) : value.mailboxIds ? inArray(t.mailboxId,value.mailboxIds) : undefined)}
         ${options.q ? sql`AND ${t.threadId} IN (SELECT ${links.threadId} FROM ${links} JOIN ${messages} ON ${messages.id} = ${links.messageId} WHERE ${visibility} AND mail_messages.search @@ websearch_to_tsquery('simple', ${options.q}))` : sql``}
       GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
@@ -81,7 +86,7 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
     ) SELECT threads.id, m.subject, m.snippet, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
       FROM threads CROSS JOIN LATERAL (SELECT count(DISTINCT mm.message_id)::int AS message_count,
         (array_agg(mm.message_id ORDER BY mm.received_at DESC, mm.message_id DESC))[1] AS latest_id
-        FROM mailbox_messages mm WHERE mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) detail
+        FROM mailbox_messages mm WHERE mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) detail
       JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
   const last = rows.rows[options.limit - 1];
   return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
@@ -95,14 +100,14 @@ function messageWindow(db: DbExecutor, value: MailboxAccess, filter: Filter, lim
     .from(links).where(and(visibleLinks(value, filter), after ? sql`(${links.receivedAt}, ${links.messageId}) < (${after[0]}::timestamptz, ${after[1]})` : undefined))
     .groupBy(links.receivedAt, links.messageId).orderBy(desc(links.receivedAt), desc(links.messageId)).limit(limit).as('visible');
 }
-const metadataFields = { id: messages.id, threadId: messages.threadId, direction: messages.direction, status: messages.status, suppressionReason: messages.suppressionReason,
+const metadataFields = { simulated:sql<boolean>`coalesce((${messages.verdicts}->>'simulated')::boolean,false)`, id: messages.id, threadId: messages.threadId, direction: messages.direction, status: messages.status, suppressionReason: messages.suppressionReason,
   subject: messages.subject, snippet: messages.snippet, receivedAt: messages.receivedAt, attachmentCount: messages.attachmentCount };
 const messageFields = { ...metadataFields, errorCode: messages.errorCode, fromName: messages.fromName, fromAddress: messages.fromAddress,
   to: messages.to, cc: messages.cc, replyTo: messages.replyTo, text: messages.text, html: messages.html, bodyTruncated: messages.bodyTruncated,
   sendingEmailId: messages.sendingEmailId, messageId: messages.messageId, inReplyTo: messages.inReplyTo, references: messages.references };
-function messageView(row: Pick<typeof messages.$inferSelect, keyof typeof messageFields>, addressIds: string[], read = true) {
+function messageView(row: Pick<typeof messages.$inferSelect, Exclude<keyof typeof messageFields,'simulated'>> & {simulated?:boolean;verdicts?:Verdicts}, addressIds: string[], read = true) {
   const text = row.text ?? (row.html ? htmlToPlain(row.html) : '');
-  return { id: row.id, threadId: row.threadId, addressIds, direction: row.direction, status: row.status, read, errorCode:row.errorCode, suppressionReason:row.suppressionReason,
+  return { simulated:row.simulated??row.verdicts?.simulated??false,id: row.id, threadId: row.threadId, addressIds, direction: row.direction, status: row.status, read, errorCode:row.errorCode, suppressionReason:row.suppressionReason,
     from: { name: row.fromName, address: row.fromAddress }, to: row.to, cc: row.cc, replyTo: row.replyTo, subject: row.subject, snippet: row.snippet,
     text, replyText: replyText(text), receivedAt: timestamp(row.receivedAt), bodyTruncated: row.bodyTruncated, attachmentCount: row.attachmentCount,
     emailId: row.sendingEmailId, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references };
@@ -118,7 +123,13 @@ async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter,
   return { messages: rows.slice(0, limit).reverse().map(item => messageView(item.row, item.addressIds,item.read)), nextCursor: rows.length > limit && last ? encodeCursor(last.at, last.row.id) : null };
 }
 
-async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client) {
+export async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client) {
+  if(!isS3Bucket(bucket)){
+    // Bane-signed links stream from the R2 binding; sandbox objects in local storage have none.
+    if(bucket!==boundMailBucket(runtime))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The mail object was not found.');
+    if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive);
+    return mailObjectUrl(runtime,wid,key,filename??'attachment',kind==='raw'?'message/rfc822':'application/octet-stream');
+  }
   const [[{ GetObjectCommand }, { getSignedUrl }], s3] = await Promise.all([loadS3Presign(), client ? Promise.resolve(client) : mailboxS3(runtime,wid,region,bucket)]);
   try {
     if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive,s3);
@@ -133,12 +144,12 @@ async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect
   if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
   // Only outbound copies have no SES receiving scan by design.
   if (!region || !bucket || (row.verdicts.virus ?? (row.direction==='outbound'?'PASS':null))!=='PASS') return { rawUrl: null,rawExpiresAt, urls: files.map(() => null) };
-  const client = await mailboxS3(runtime, row.workspaceId, region, bucket);
+  const client = isS3Bucket(bucket) ? await mailboxS3(runtime, row.workspaceId, region, bucket) : undefined;
   try {
     if (files.some(f => f.sourceId)) await archiveMailboxFiles(runtime, row.workspaceId, row.id, client);
     const link = async (kind:'att'|'raw', key:string, filename:string) => (await signedUrl(runtime, row.workspaceId, kind, region, bucket, key, filename, undefined, client)).url;
     return {rawExpiresAt, rawUrl: row.rawKey && rawExpiresAt && Date.parse(rawExpiresAt)>Date.now() ? await link('raw', row.rawKey, `${row.id}.eml`) : null, urls: await Promise.all(files.map(f => link('att', f.storageKey, f.filename))) };
-  } finally { client.destroy(); }
+  } finally { client?.destroy(); }
 }
 
 export function registerInboundThreadReads(app: App, access: (c: Ctx, permission: 'read') => MailboxAccess) {
@@ -162,7 +173,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
   const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
-    v.admin && !f.addressId ? undefined : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
+    v.admin && !f.addressId ? sql`(${messages.lifecycle}<>'ephemeral' OR EXISTS(SELECT FROM mailbox_messages l WHERE l.message_id=${messages.id} AND ${liveBox(sql`l.mailbox_id`)}))` : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
   // Never grant this projection to an address key, even a key that can read every address.
   const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (dashboard or unrestricted live manage access only).');
@@ -187,7 +198,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const last=rows[q.limit-1];return c.json({data:rows.slice(0,q.limit).map(({at,fromName,fromAddress,...row})=>({...row,receivedAt:timestamp(at),from:{name:fromName,address:fromAddress}})),nextCursor:rows.length>q.limit&&last?encodeCursor(last.at,last.id):null},200);
   });
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
-  const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.string())}).partial();
+  const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
     request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;

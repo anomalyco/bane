@@ -1,5 +1,6 @@
 import { ApiError, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
+import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage } from './types'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The dashboard's selected workspace (multi-tenant installations only). Sent with every request.
@@ -263,8 +264,16 @@ export function createLiveApi(): BaneApi {
       createKey: async (input, signal) => { const { secret, ...key } = await inboundCall<MailboxKey & { secret: string }>('/keys', 'POST', { name: input.name, permissions: input.permissions, ...(input.addressIds ? { addressIds: input.addressIds } : {}) }, signal); return { key, secret } },
       revokeKey: async (id, signal) => { await inboundCall(`/keys/${idPath(id)}/revoke`, 'POST', undefined, signal) },
     },
+    inboxes: {
+      list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await call<{ data: Inbox[]; nextCursor: string | null }>(`/inboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      get: (id, signal) => call<Inbox>(`/inboxes/${idPath(id)}`, 'GET', undefined, signal),
+      create: (input, signal) => call<CreatedInbox>('/inboxes', 'POST', input, signal),
+      remove: async (id, signal) => { await call(`/inboxes/${idPath(id)}`, 'DELETE', undefined, signal) },
+      messages: (id, input, signal) => call<InboxMessagePage>(`/inboxes/${idPath(id)}/messages?${new URLSearchParams({ include: 'held', extract: 'codes,links', limit: '50', ...(input.after ? { after: input.after } : {}) })}`, 'GET', undefined, signal),
+      message: (id, messageId, signal) => call<InboxMessageDetail>(`/inboxes/${idPath(id)}/messages/${idPath(messageId)}?extract=codes,links`, 'GET', undefined, signal),
+    },
     inbound: {
-      addresses: async (input, signal) => { const query = new URLSearchParams({ limit: '100', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await inboundCall<{ data: InboundAddress[]; nextCursor: string | null }>(`/addresses?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      addresses: async (input, signal) => { const query = new URLSearchParams({ limit: '100', ...(input.kind ? { kind: input.kind } : {}), ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await inboundCall<{ data: InboundAddress[]; nextCursor: string | null }>(`/addresses?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       address: (id, signal) => inboundCall<InboundAddress>(`/addresses/${idPath(id)}`, 'GET', undefined, signal),
       createAddress: (input, signal) => inboundCall<InboundAddress>('/addresses', 'POST', input, signal),
       updateAddress: (id, patch, signal) => inboundCall<InboundAddress>(`/addresses/${idPath(id)}`, 'PATCH', patch, signal),

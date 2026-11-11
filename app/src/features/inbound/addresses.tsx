@@ -1,7 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
-import { queries } from '../../data/queries'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -72,8 +71,8 @@ export function AddressesSection({ domains }: { domains?: MailboxDomain[] }) {
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
   const q = search.trim()
-  // The unfiltered first page is the same request as the address options the routes use.
-  const addresses = useApiQuery(q || cursor ? ['inbound-addresses', q, cursor] : queries.inboundAddressOptions().key, (api, signal) => api.inbound.addresses({ search: q || undefined, cursor }, signal), { interval: 60_000 })
+  // Agent inboxes have their own page; this list is the addresses people set up.
+  const addresses = useApiQuery(['inbound-addresses', 'address', q, cursor ?? null], (api, signal) => api.inbound.addresses({ kind: 'address', search: q || undefined, cursor }, signal), { interval: 60_000 })
   return <section className="section stack" aria-labelledby="receiving-addresses">
     <SectionHeader title={<span id="receiving-addresses">Addresses</span>} actions={<>
       <Input className="receiving-search" type="search" aria-label="Search addresses" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />

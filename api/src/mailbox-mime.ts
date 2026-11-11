@@ -1,4 +1,5 @@
 import type { S3Client } from '@aws-sdk/client-s3';
+import type { MailObjects } from './mail-objects.js';
 import { ApiError, lazyModule } from './core.js';
 
 const loadS3Commands = lazyModule(() => import('@aws-sdk/client-s3'));
@@ -36,7 +37,7 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
 }
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
-export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string,reserve?:(bytes:number)=>Promise<void>) {
+export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string,reserve?:(bytes:number)=>Promise<void>,objects?:MailObjects) {
   const { HeadObjectCommand, GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
   const location={Bucket:bucket,Key:source};
   const head=await client.send(new HeadObjectCommand(location));
@@ -57,6 +58,18 @@ export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:stri
   const headerLimit=()=>new ApiError(422,'MAILBOX_RAW_HEADERS_TOO_LARGE','The raw headers exceed the bounded workspace scrub budget.');
   if(large && !hasEnd(original)){original=await get(0,FIRST_PART,true);if(!hasEnd(original))throw headerLimit();}
   const bytes=workspaceMime(original,region,recipients),removed=original.length-bytes.length;
+  if(objects){
+    if(!large) await objects.put(key,bytes,'message/rfc822');
+    else {
+      const start=original.length;
+      const rest=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,Range:`bytes=${start}-${size-1}`,ResponseContentEncoding:'identity'}));
+      if(!rest.Body || rest.ContentRange!==`bytes ${start}-${size-1}/${size}`)throw new Error('Incomplete S3 range');
+      const reader=rest.Body.transformToWebStream().getReader();
+      const stream=new ReadableStream<Uint8Array>({start:c=>c.enqueue(bytes),async pull(c){const part=await reader.read();if(part.done)c.close();else c.enqueue(part.value);},cancel:r=>reader.cancel(r)});
+      await objects.put(key,{stream,length:size-removed},'message/rfc822');
+    }
+    return {bytes,sizeBytes:size-removed,large};
+  }
   const destination={Bucket:bucket,Key:key,Tagging:`bane-kind=${kind}`};
   const copy={CopySource:`${bucket}/${source}`,CopySourceIfMatch:head.ETag};
   if(!removed) await client.send(new CopyObjectCommand({...destination,...copy,TaggingDirective:'REPLACE'}));
