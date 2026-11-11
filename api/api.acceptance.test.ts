@@ -2585,6 +2585,14 @@ describe('Hosted MCP OAuth and tools', () => {
       await run('email.dispatch');
       for(const emailId of [second,mailboxEmail])assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[emailId])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[control])).rows[0].status,'accepted');
+      // Non-deleting lapse: the client and both key rows remain live, but the
+      // approving user no longer has management authority in this workspace.
+      await db.query('UPDATE oauth_client SET disabled=false WHERE client_id=$1',[clientId]);
+      const afterDemotion=await queue(child.secret);
+      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[wid,consentId]);
+      assert.equal((await db.query('SELECT FROM api_keys WHERE id=$1 AND revoked_at IS NULL',[child.id])).rowCount,1);
+      assert.equal(await allowed(child.id),false);assert.equal(await allowed(mbk.id,box.address),false);
+      await run('email.dispatch');assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[afterDemotion])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
     });
   });
 
