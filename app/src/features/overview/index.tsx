@@ -11,8 +11,15 @@ import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, S
 import { date, number, percent, label } from '../../lib/format'
 import { OverviewBodySkeleton, OverviewRouteSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
 import { SendingLimitBar, SetupCard } from './setup'
+import { PitchOverview } from './designs'
+import { useDesign } from '../../lib/design'
 
+// `?design=a|b|c` (dev and pitch builds only) renders a proposed layout; see ./designs.tsx.
 export function OverviewPage() {
+  const design = useDesign()
+  return design === 'current' ? <CurrentOverview /> : <PitchOverview design={design} />
+}
+function CurrentOverview() {
   const { regionId } = useRegion()
   const api = useApi()
   const live = api.mode === 'live'
@@ -68,7 +75,7 @@ function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefi
 function Metric({ title, value, note, tone }: { title: string; value: string; note: string; tone?: string }) { return <div className="metric"><div className="muted">{title}</div><div className={`metric-value ${tone ? `text-${tone}` : ''}`}>{value}</div><div className="muted cell-caption">{note}</div></div> }
 // Three whole-number steps so every gridline label is a distinct integer.
 function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 ** Math.floor(Math.log10(raw)), step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * base).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw); return step * 3 }
-function ActivityChart({ points, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
+export function ActivityChart({ points, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
   const [active, setActive] = useState<number | null>(null)
   const container = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: 1080, height: 260 })

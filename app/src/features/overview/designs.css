@@ -1,0 +1,97 @@
+/* Pitch Overview layouts (?design=a|b|c). Hairlines and whitespace only; no cards, no side rules. */
+.ov-controls { flex-wrap: nowrap; gap: var(--space-12); }
+.ov-controls .ui-tabs { min-height: var(--control-height); border-bottom: 0; }
+.ov-controls .ui-tab { height: var(--control-height); }
+.ov-controls .ui-select-trigger { width: auto; min-width: 128px; }
+
+/* Four numbers, label above value. */
+.ov-numbers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-24); }
+.ov-numbers__cell { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; color: inherit; text-decoration: none; }
+.ov-numbers__label { display: flex; align-items: baseline; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ov-numbers__value { font-size: var(--text-xl); line-height: var(--leading-xl); font-weight: 500; letter-spacing: -.04em; white-space: nowrap; }
+.ov-numbers--links { gap: 0; margin: calc(-1 * var(--space-8)) calc(-1 * var(--space-12)) 0; }
+.ov-numbers--links .ov-numbers__cell { padding: var(--space-12); border-radius: var(--radius-sm); transition: background var(--motion-duration); }
+.ov-numbers--links .ov-numbers__cell:hover { background: var(--color-hover); }
+.ov-numbers__go { display: inline-flex; align-items: center; gap: 2px; font-size: var(--text-xs); line-height: var(--leading-xs); opacity: 0; transition: opacity var(--motion-duration); }
+.ov-numbers--links .ov-numbers__cell:hover .ov-numbers__go, .ov-numbers--links .ov-numbers__cell:focus-visible .ov-numbers__go { opacity: 1; }
+
+.ov-chart { flex: none; padding-top: 0; min-height: 0; }
+.ov-chart .activity-chart { flex: none; height: 280px; min-height: 0; }
+.ov-chart .ui-empty-state { padding-block: var(--space-32); }
+.ov-chart__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--leading-sm); margin-bottom: var(--space-8); }
+.ov-chart__head:has(> .chart-legend:only-child) { justify-content: flex-end; }
+.ov-chart__title { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.ov-campaigns { flex-shrink: 0; }
+.ui-table-scroll.ov-table { --table-row-height: 53px; }
+.ov-stack { display: flex; flex: 1; flex-direction: column; gap: var(--space-24); min-height: 0; }
+
+/* A: split, main column plus a 320px detail column (as Console's 400px right column). */
+.ov-split { display: grid; flex: 1; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--space-40); min-height: 0; }
+.ov-split__main { display: flex; flex-direction: column; gap: var(--space-28); min-width: 0; }
+.ov-split__main .ov-numbers { padding-bottom: var(--space-24); border-bottom: 1px solid var(--color-border-muted); }
+.ov-split__aside { display: flex; flex-direction: column; gap: var(--space-32); min-width: 0; }
+.ov-split__aside > * + * { padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+
+/* Setup as numbered steps in the detail column; only the current step is open. */
+.setup-rail { display: flex; flex-direction: column; gap: var(--space-12); }
+.setup-rail__head { display: flex; align-items: baseline; justify-content: space-between; }
+.setup-rail__head h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.setup-rail__head .muted { font-size: var(--text-xs); }
+.setup-rail ol { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.setup-rail li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--space-12); padding-block: var(--space-8); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.setup-rail__mark { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-muted); font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; }
+[data-done] > .setup-rail__mark { background: var(--color-contrast); box-shadow: none; color: var(--color-on-contrast); }
+.setup-rail li[data-done] .setup-rail__body > span:first-child { color: var(--color-muted); }
+.setup-rail__body { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.setup-rail__body > .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.setup-rail__action { margin-top: var(--space-8); }
+.setup-rail__action .first-send-test { flex-direction: column; align-items: flex-start; gap: var(--space-6); }
+.setup-rail__action .first-send-test .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* B: next steps as one row of links. */
+.ov-next-row { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-32); margin-top: calc(-1 * var(--space-8)); }
+.ov-next-row a { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--color-text); text-decoration: none; font-size: var(--text-sm); }
+.ov-next-row a > :first-child { text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 4px; }
+.ov-next-row a:hover > :first-child { text-decoration-color: currentColor; }
+.ov-next-row a .muted { font-size: var(--text-xs); }
+.ov-next-row svg { color: var(--color-muted); }
+
+/* C: setup as one split panel, steps on the left and the open step on the right. */
+.setup-split { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 196px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px var(--color-border); overflow: hidden; }
+.setup-split__steps { margin: 0; padding: var(--space-8); list-style: none; background: var(--color-layer-1); }
+.setup-split__steps button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: var(--space-12); width: 100%; min-height: 40px; padding: 0 var(--space-8); border: 0; border-radius: 4px; background: transparent; color: var(--color-muted); text-align: left; font-size: var(--text-sm); }
+.setup-split__steps button:hover { color: var(--color-text); background: var(--color-hover); }
+.setup-split__steps button[aria-current] { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.setup-split__steps button .muted { font-size: var(--text-xs); font-weight: var(--font-weight-regular); }
+.setup-split__detail { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); padding: var(--space-24) var(--space-28); min-width: 0; }
+.setup-split__detail > .muted:first-child { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.setup-split__detail h2 { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); letter-spacing: -.18px; }
+.setup-split__detail p { max-width: 520px; }
+.setup-split__action { margin-top: var(--space-12); }
+
+@media (max-width: 1200px) {
+  .ov-split { grid-template-columns: minmax(0, 1fr) 280px; gap: var(--space-28); }
+  .ov-numbers__value { font-size: 26px; }
+}
+@media (max-width: 960px) {
+  .ov-split { grid-template-columns: minmax(0, 1fr); }
+  .ov-numbers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .setup-split { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Sidebar (pitch): the score card spans the sidebar's full inner width at the bottom. */
+.sidebar-footer > .score-side, .score-side-placeholder { margin-inline: calc(-1 * var(--space-12)); }
+.score-side-placeholder { height: 56px; }
+
+/* B: split sidebar. Setup steps sit between navigation and the score card until setup is done. */
+.sidebar-steps { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-4); padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+.sidebar-steps__head { display: flex; justify-content: space-between; padding: 0 var(--space-12) var(--space-4); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-bold); }
+.sidebar-steps__head .muted { font-weight: var(--font-weight-regular); }
+.sidebar-steps ol { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.sidebar-steps a { display: flex; align-items: center; gap: var(--space-8); min-height: 32px; padding-inline: var(--space-12) var(--space-8); border-radius: 4px; color: var(--color-muted); text-decoration: none; font-size: var(--text-sm); }
+.sidebar-steps a > span:nth-child(2) { flex: 1; }
+.sidebar-steps a .muted { font-size: var(--text-xs); }
+.sidebar-steps a:hover { color: var(--color-text); background: var(--color-hover); }
+.sidebar-steps a[data-current] { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.sidebar-steps a[data-done] > span:nth-child(2) { text-decoration: line-through; text-decoration-color: var(--color-border-strong); }
+.sidebar-steps .setup-rail__mark { width: 18px; height: 18px; font-size: 10px; }

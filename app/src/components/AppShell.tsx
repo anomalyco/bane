@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
@@ -8,6 +8,10 @@ import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText }
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { useDesign } from '../lib/design'
+
+// Design pitch (?design=a|b|c): the sidebar's score card and, for B, its setup steps. Loaded only when asked for.
+const PitchSidebar = lazy(() => import('./PitchSidebar'))
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -18,6 +22,8 @@ export function AppShell() {
   const session = useSession()
   const access = useWorkspaceAccess()
   const location = useLocation()
+  const design = useDesign()
+  const pitch = design !== 'current' && access.multiTenant ? design : null
   // Hosted workspaces view every region at once, so no page waits on a selected region.
   const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
   const regions = useRegionCatalog()
@@ -99,7 +105,9 @@ export function AppShell() {
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
       </div>
       <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
+      {pitch && <Suspense fallback={null}><PitchSidebar design={pitch} part="middle" /></Suspense>}
       <div className="sidebar-footer">
+        {pitch && <Suspense fallback={<div className="score-side-placeholder" />}><PitchSidebar design={pitch} part="footer" /></Suspense>}
         {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
       <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
         <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>

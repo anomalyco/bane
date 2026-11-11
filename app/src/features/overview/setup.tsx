@@ -35,17 +35,18 @@ export function SendingLimitBar() {
   </section>
 }
 
-type Step = { key: string; done: boolean; title: string; detail: ReactNode; action?: ReactNode; optional?: boolean }
+export type SetupStep = { key: string; done: boolean; title: string; short: string; detail: ReactNode; action?: ReactNode; optional?: boolean; to: string }
 
 // Hosted admins until the first email is sent: each step read from server state, not from this browser.
-export function SetupCard() {
+// Shared by today's setup card and the pitch layouts (right column, sidebar, split panel).
+export function useSetupSteps(): { steps: SetupStep[]; current: SetupStep | undefined } | null {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
   const domains = useApiQuery(['domains', 'setup-card'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal), { enabled })
   const keys = useApiQuery(['keys', 'setup-card'], (api, signal) => api.keys.list(signal, undefined, false), { enabled })
   const emails = useApiQuery(['emails', 'setup-card'], (api, signal) => api.emails.list({ page: 1, pageSize: 1 }, signal), { enabled })
-  // A test sent from this card keeps the card up, with its result, until the next visit.
+  // A test sent from the setup steps keeps them up, with its result, until the next visit.
   const [testId, setTestId] = useState<string | null>(null)
   if (!enabled || domains.isPending || keys.isPending || emails.isPending || domains.error || keys.error || emails.error) return null
   const items = domains.data.items
@@ -54,17 +55,24 @@ export function SetupCard() {
   const receiving = items.find(domain => domain.receiving === 'verified')
   const sent = emails.data.items.length > 0 || !!testId
   if (verified && keys.data.length > 0 && sent && !testId) return null
-  const steps: Step[] = [
-    { key: 'domain', done: !!verified, title: 'Verify a domain',
+  const steps: SetupStep[] = [
+    { key: 'domain', done: !!verified, title: 'Verify a domain', short: 'Domain', to: pending ? `/domains/${pending.id}` : '/domains',
       detail: verified ? `${verified.name} can send.` : pending ? `${pending.name} is waiting for its DNS records.` : 'Add the domain you send from and publish its DNS records.',
       action: !verified && <Link className="ui-button ui-button--secondary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
-    { key: 'key', done: keys.data.length > 0, title: 'Create an API key', detail: keys.data.length > 0 ? 'Your app or agent can authenticate.' : 'A Send only key restricted to your domain is enough.',
+    { key: 'key', done: keys.data.length > 0, title: 'Create an API key', short: 'API key', to: '/api-keys', detail: keys.data.length > 0 ? 'Your app or agent can authenticate.' : 'A Send only key restricted to your domain is enough.',
       action: keys.data.length === 0 && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Create key</Link> },
-    { key: 'send', done: sent, title: 'Send your first email', detail: testId ? <>Test email queued to {identity?.email}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : sent ? 'It’s in Logs.' : verified ? <>Send a test to yourself, or use the cURL and SDK examples in <Link to="/docs">Docs</Link>.</> : 'Possible once a domain is verified.',
+    { key: 'send', done: sent, title: 'Send your first email', short: 'First email', to: '/docs', detail: testId ? <>Test email queued to {identity?.email}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : sent ? 'It’s in Logs.' : verified ? <>Send a test to yourself, or use the cURL and SDK examples in <Link to="/docs">Docs</Link>.</> : 'Possible once a domain is verified.',
       action: !sent && verified && <TestSend domain={verified} onSent={setTestId} /> },
-    { key: 'receive', done: !!receiving, optional: true, title: 'Receive email', detail: receiving ? `${receiving.name} receives mail.` : 'Add the receiving MX record from a domain’s page.',
+    { key: 'receive', done: !!receiving, optional: true, title: 'Receive email', short: 'Receiving', to: (verified ?? pending) ? `/domains/${(verified ?? pending)!.id}` : '/domains', detail: receiving ? `${receiving.name} receives mail.` : 'Add the receiving MX record from a domain’s page.',
       action: !receiving && (verified ?? pending) && <Link className="ui-button ui-button--ghost ui-button--md" to={`/domains/${(verified ?? pending)!.id}`}>Set up</Link> },
   ]
+  return { steps, current: steps.find(step => !step.done && !step.optional) ?? steps.find(step => !step.done) }
+}
+
+export function SetupCard() {
+  const setup = useSetupSteps()
+  if (!setup) return null
+  const { steps } = setup
   return <section className="setup-card" aria-label="Get set up">
     <SectionHeader title="Get set up" />
     <ol className="setup-steps">{steps.map((step, index) => <li key={step.key} data-done={step.done || undefined}>
