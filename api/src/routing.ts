@@ -659,6 +659,7 @@ export function registerRouting(app: App) {
         received = new Date().toISOString(),
         message: { from: string | null; subject: string | null } | null = null;
       if (input.messageId) {
+        actor(c,'manage');
         const row = (
           await c.env.db.execute<{ to: string[]; spam: string | null; dmarc: string | null; at: string; from: string | null; subject: string }>(
             sql`SELECT envelope_to AS "to",verdicts->>'spam' AS spam,verdicts->>'dmarc' AS dmarc,received_at::text AS at,from_address AS "from",subject FROM mail_messages WHERE workspace_id=${w} AND id=${input.messageId} AND direction='inbound' AND ${retainedMail()}`,

@@ -55,18 +55,18 @@ export function checkBudget(c: Ctx, used: number, maxRequests: number) {
   throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
 }
 
+export async function chargeGrantBudget(runtime:Runtime,w:string,id:string){
+  const max=runtime.config.apiRateLimitPerMinute;
+  return (await runtime.db.execute<{used:number}>(sql`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES(${w},${id},date_trunc('minute',now()),1)
+    ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN api_request_budgets.window_start=excluded.window_start THEN least(api_request_budgets.used+1,${max+1}) ELSE 1 END,window_start=excluded.window_start RETURNING used`)).rows[0]!.used;
+}
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const delegated = (c.env as DelegatedRuntime)[delegatedActor];
   const authorization = c.req.header('authorization');
   if (delegated) {
     c.set('actor', delegated);
     const maxRequests = c.env.config.apiRateLimitPerMinute;
-    const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-      VALUES (${delegated.workspaceId}, ${delegated.keyId}, date_trunc('minute', now()), 1)
-      ON CONFLICT (workspace_id, key_id) DO UPDATE SET
-        used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${maxRequests + 1}) ELSE 1 END,
-        window_start = excluded.window_start RETURNING used`));
-    checkBudget(c, budget.rows[0]!.used, maxRequests);
+    checkBudget(c,await timed(c,'budget-db',()=>chargeGrantBudget(c.env,delegated.workspaceId,delegated.keyId)),maxRequests);
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');

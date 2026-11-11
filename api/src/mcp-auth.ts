@@ -197,6 +197,9 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
     const tokenScopes = stripLegacyScope(claims.scope).split(' ').filter(scope => grant.scopes.includes(scope));
     const granted = grantPermissions(tokenScopes);
     if (!granted.length) return deniedToken(runtime);
+    if(grant.inboxIds && await (await import('./auth.js')).chargeGrantBudget(runtime,grant.actor.workspaceId,grant.actor.keyId)>runtime.config.apiRateLimitPerMinute){
+      const limited=oauthError(429,'slow_down','The inbox approval exceeded its minute request budget.');limited.headers.set('Retry-After','60');return limited;
+    }
     actor = grant.inboxIds?{workspaceId:grant.actor.workspaceId,keyId:grant.actor.keyId,admin:false,mailboxIds:grant.inboxIds,permissions:['read',...(granted.includes('send')||granted.includes('manage')?['send' as const]:[])]}:{ ...grant.actor, permissions: granted };
   } catch {
     log('warn', { operation: 'mcp-authorization', code: 'AUTH_UNAVAILABLE' });

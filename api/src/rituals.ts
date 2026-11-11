@@ -294,6 +294,7 @@ export function registerRituals(app: App) {
       let email: ReturnType<typeof projectEmail>,
         scores = q.scores;
       if (q.messageId) {
+        actor(c,'manage');
         const [m] = await c.env.db
           .select()
           .from(mailMessages)

@@ -2495,6 +2495,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async()=>{
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getContext'||x.name==='applyRituals'||x.name==='createAgentToken'));
+      const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
       const denied=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const search=await rpc(token,'tools/call',{name:'search_tools',arguments:{query:'applyRituals'}});assert.deepEqual(search.structuredContent.tools,[]);
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
@@ -2509,6 +2510,7 @@ describe('Hosted MCP OAuth and tools', () => {
       secrets.add(parent.secret);grantKeys.push(parent.id);
       const child=ok(await http('POST','/v1/api-keys',parent.secret,{name:'read fixture',permissions:['read']}),201);
       secrets.add(child.secret);grantKeys.push(child.id);
+      error(await http('POST','/v1/rituals/test',child.secret,{messageId:'msg_fixture'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
       await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
       assert.equal(await live(),false);
@@ -7997,6 +7999,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
+        const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
@@ -11311,7 +11314,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);
           CREATE TABLE \${schema}.mail_receipts (LIKE public.mail_receipts INCLUDING ALL);
           CREATE TABLE \${schema}.mail_receive_limits (LIKE public.mail_receive_limits INCLUDING ALL);
-          CREATE FUNCTION \${schema}.mail_route_input(text,jsonb) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb';
+          CREATE FUNCTION \${schema}.mail_route_input(text,jsonb,boolean,jsonb) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb';
           CREATE TABLE \${schema}.mailbox_regions (LIKE public.mailbox_regions INCLUDING ALL);
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
