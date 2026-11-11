@@ -3,6 +3,7 @@ import { receivedMailStore, withMailObjects } from './mail-objects.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { matchRouting, plusBase } from './routing-match.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
+import { platformHost } from './domain-claims.js';
 import { receivingPolicy,ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
@@ -509,7 +510,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
   if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualVerified:verifiedAuthor,ritualScores:evaluated.answers,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});}
-  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config));
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };

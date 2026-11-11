@@ -199,13 +199,13 @@ async function step<T>(name: string, work: () => Promise<T>) {
     }
   });
 }
-async function until<T>(label: string, read: () => Promise<T>, ready: (value: T) => boolean, describe: (value: T) => string, maxMs = 90_000) {
+async function until<T>(label: string, read: () => Promise<T>, ready: (value: T) => boolean, describe: (value: T) => string | Promise<string>, maxMs = 90_000) {
   const end = Math.min(Date.now() + maxMs, deadline);
   for (;;) {
     const value = await read();
     if (ready(value)) return value;
     const remaining = end - Date.now();
-    check(remaining > 0, `timed out waiting for ${label}; last: ${describe(value)}`);
+    if (remaining <= 0) throw new Error(`timed out waiting for ${label}; last: ${await describe(value)}`);
     await delay(Math.min(2000, remaining));
   }
 }
@@ -525,7 +525,12 @@ async function campaign(audience: Audience, templateId?: string) {
   await until(`campaign ${item.id} done`, () => api('getCampaignState', { path }), c => {
     check(!['failed', 'canceled', 'paused'].includes(c.state), `campaign ${item.id} ${c.state}`);
     return c.state === 'done';
-  }, c => c.state);
+  }, async c => {
+    // State polling is intentionally cheap. Read the hold before cleanup clears it.
+    const stats = await api('getCampaignStats', { path }).catch(() => null);
+    const d = stats?.delivery;
+    return d ? `${c.state}, released ${d.expanded}/${d.total}${d.waiting ? `, ${d.waiting.reason} until ${d.waiting.until}` : ''}` : c.state;
+  });
   const stats = await api('getCampaignStats', { path });
   check(stats.totals.accepted === 1 && stats.counts.total === 1 && stats.totals.simulated === 0, 'campaign done without one live acceptance');
   const logs = await api('listEmails', { query: { campaignId: item.id } });

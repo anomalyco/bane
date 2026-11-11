@@ -5865,6 +5865,206 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     ok(await api('DELETE','/v1/connection'));assert.equal(calls.length,mark);assert.equal(members.size,14);
   });
 
+  test('Platform domain: only the configured workspace owns, sends and receives as it, after an operator adopts its existing identity',async t=>{
+    const [{nodeRuntime},{createApp},{adoptPlatformDomain,revokePlatformDomain},{operationJobs},{acceptInboundNotification},{ensureRegionSettings},{SESv2Client},{render},{regionalSender,platformValidationMailbox},{storeIncoming},{sql},{JobDeferred}]=await Promise.all([
+      import('./src/adapters/node.js'),import('./src/app.js'),import('./scripts/adopt-platform-domain.js'),import('./src/operations.js'),import('./src/mailbox-ingest.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sesv2'),
+      import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),import('./src/domain-claims.js'),import('./src/mailbox-ingest-store.js'),import('drizzle-orm'),import('./src/jobs.js')]);
+    const db=await fixtureDatabase(t),oh='us-east-2',acct='000033334444',host=`${unique('platform')}.test`,publicUrl=`https://${host}`;
+    const [owner,other]=[0,1].map(()=>'ws_'+randomUUID().replaceAll('-','')) as [string,string];
+    const tenant=`bane-probation-${owner}`,arn=`arn:aws:ses:${oh}:${acct}:identity/${host}`,inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,feedback=`arn:aws:sns:${oh}:${acct}:bane-feedback`,bucket=`bane-${acct}-mail-${oh}`;
+    const env={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
+    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',
+      AUTH_ALLOWED_DOMAINS:'example.com',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+    const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)',[owner,other]);
+    cleanup(t,async()=>{
+      for (const table of ['jobs','sending_emails','mailboxes','mailbox_domains','operation_domains','domain_claims','hosted_operator_audit','api_request_budgets','api_keys','ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=ANY($1)`,[[owner,other]]);
+      await db.query('DELETE FROM provider_pool_regions WHERE region=$1 AND aws_account_id=$2',[oh,acct]);await db.query('DELETE FROM provider_feedback_history WHERE topic_arn=$1',[feedback]);
+      await db.query('DELETE FROM workspaces WHERE id=ANY($1)',[[owner,other]]);
+    });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,receiving_state,feedback_topic_arn,inbound_topic_arn,inbound_bucket) VALUES($1,$2,'ready','ready',$3,$4,$5)`,[oh,acct,feedback,inbound,bucket]);
+    const keys:Record<string,string>={};
+    for (const w of [owner,other]) {
+      await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:w,regions:[oh]});
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,managed_tenant,pool_tenant_name) VALUES($1,$1,$2,'ready','shared',$3,'ready',true,$4)`,[w,oh,acct,`bane-probation-${w}`]);
+      const secret='bane_'+randomUUID().replaceAll('-','')+randomUUID().replaceAll('-','');keys[w]=secret;
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$2,'Platform fixture',$3,$4,'["read","send","manage"]','[]')`,[unique('key'),w,createHash('sha256').update(secret).digest('hex'),secret.slice(0,14)]);
+    }
+    const api=(w:string,method:string,path:string,body?:Json)=>http(method,path,keys[w],body,{},5_000,publicUrl,req=>app.fetch(req,runtime));
+    // Every send is cleared at once, so nothing is left for a dispatcher.
+    const send=async(w:string,from:string,status=202,code?:string)=>{const reply=await api(w,'POST','/v1/emails/send',{from,to:'success@simulator.amazonses.com',subject:'Platform',text:'Platform fixture.'});
+      if(status!==202)return error(reply,status,code);const {id}=ok(reply,202);await db.query('DELETE FROM sending_emails WHERE id=$1',[id]);};
+    // The operator's hand-made Easy DKIM identity: Bane may associate it with a tenant, never create, change or delete it.
+    const dkim=['platformdkima','platformdkimb','platformdkimc'],identity:Json={IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,Tags:[],
+      DkimAttributes:{SigningEnabled:true,Status:'SUCCESS',SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:[...dkim]}};
+    const children=new Map<string,Json>(),members=new Map<string,string>(),writes:string[]=[];let afterRuntimeRead:(()=>Promise<void>)|undefined;
+    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+      const i=cmd.input,n=cmd.constructor.name;assert.equal(await this.config.region(),oh);
+      if(!/^(Get|List)/.test(n))writes.push(`${n}:${i.EmailIdentity??i.ResourceArn}`);
+      switch(n){
+        case 'GetEmailIdentityCommand':{
+          if(i.EmailIdentity!==host){if(!children.has(i.EmailIdentity))throw Object.assign(new Error('missing'),{name:'NotFoundException'});return children.get(i.EmailIdentity);}
+          // A one-shot hook runs right after the runtime (never the operator) has read the identity.
+          const value=structuredClone(identity),hook=afterRuntimeRead && this!==op ? afterRuntimeRead : undefined;
+          if(hook){afterRuntimeRead=undefined;await hook();}
+          return value;
+        }
+        case 'CreateEmailIdentityCommand':assert.notEqual(i.EmailIdentity,host);children.set(i.EmailIdentity,{...identity,VerificationStatus:'PENDING',VerifiedForSendingStatus:false,Tags:i.Tags});return {DkimAttributes:identity.DkimAttributes,Tags:i.Tags};
+        case 'ListResourceTenantsCommand':return {ResourceTenants:members.has(i.ResourceArn)?[{TenantName:members.get(i.ResourceArn),TenantId:'tenant-fixture',ResourceArn:i.ResourceArn}]:[]};
+        case 'CreateTenantResourceAssociationCommand':assert.ok(!members.has(i.ResourceArn));members.set(i.ResourceArn,i.TenantName);return {};
+        case 'DeleteTenantResourceAssociationCommand':assert.equal(members.get(i.ResourceArn),i.TenantName);members.delete(i.ResourceArn);return {};
+        case 'DeleteEmailIdentityCommand':assert.notEqual(i.EmailIdentity,host);children.delete(i.EmailIdentity);return {};
+        default:assert.fail(n);
+      }
+    });
+    let mx=false;const queried:string[]=[];
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{
+      const u=new URL(String(input)),name=u.searchParams.get('name')!,type=u.searchParams.get('type');assert.equal(u.hostname,'cloudflare-dns.com');queried.push(`${type} ${name}`);
+      if(type==='MX' && name===host && mx)return Response.json({Status:0,Answer:[{name:host+'.',type:15,data:'10 inbound-smtp.us-east-2.amazonaws.com.'}]});
+      if(type==='TXT' && name===`_dmarc.${host}`)return Response.json({Status:0,Answer:[{name,type:16,data:'"v=DMARC1; p=reject; sp=reject; adkim=r; aspf=r"'}]});
+      return Response.json({Status:3});
+    });
+
+    // Every other workspace is refused the platform domain and its subdomains, as before.
+    for (const name of [host,`notify.${host}`,`e2e.${host}`]) error(await api(other,'POST','/v1/domains',{name}),422,'DOMAIN_NOT_ALLOWED');
+    // The configured workspace never gets the platform's own hosts, and nothing else before the operator's adoption.
+    for (const name of [`dev.${host}`,`imap.dev.${host}`,`tracker.dev.${host}`,`e2e.${host}`,`e2e-va.${host}`,`e2e-trusted.${host}`,`in.${host}`,`slug.in.${host}`,`domainconnect.${host}`,`imap.${host}`,`tracker.${host}`])
+      error(await api(owner,'POST','/v1/domains',{name}),422,'DOMAIN_NOT_ALLOWED');
+    for (const name of [host,`notify.${host}`]) error(await api(owner,'POST','/v1/domains',{name}),409,'OPERATOR_ADOPTION_REQUIRED');
+    assert.deepEqual(writes,[],'Refusals never reach SES.');
+    // An operator release fixture holding its own e2e* claim (another workspace) keeps sending from it, and only from it.
+    const fixture=`e2e.${host}`;
+    await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[fixture,other]);
+    await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',['dom_'+randomUUID().replaceAll('-',''),other,fixture,oh]);
+    await send(other,`release@${fixture}`);await send(other,`release@run.${fixture}`);
+    for (const from of [`ceo@${host}`,`ceo@notify.${host}`]) await send(other,from,403,'SENDER_DOMAIN_NOT_VERIFIED');
+
+    const operator=`arn:aws:sts::${acct}:assumed-role/platform-operator/fixture`,op=new SESv2Client({region:oh,credentials:runtime.config.aws!});cleanup(t,async()=>op.destroy());
+    const {adoptionFacts,adoptionFingerprint}=await import('./src/adopted-identity.js'),reviewed=adoptionFingerprint(adoptionFacts(identity as any));
+    const adopt=(apply:boolean,overrides:Record<string,string|undefined>={},who=operator,fingerprint=reviewed)=>adoptPlatformDomain(db,op,owner,who,apply?{apply,fingerprint}:{},{...env,...overrides});
+    await assert.rejects(adopt(true,{BANE_PLATFORM_DOMAIN_WORKSPACE:undefined}),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
+    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed},env),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
+    await assert.rejects(adopt(true,{},`arn:aws:iam::${acct}:user/bane-runtime`),/operator role/);
+    identity.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];await assert.rejects(adopt(false),/domain claim created/);identity.Tags=[];
+    identity.Policies={delegate:'{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"ses:SendEmail"}]}'};
+    await assert.rejects(adopt(false),/sending authorization policies first: delegate/);delete identity.Policies;
+    // The fixture's claim under the platform domain stops the adoption and stays as it was.
+    await assert.rejects(adopt(true),/Other workspaces hold claims/);
+    assert.deepEqual((await db.query('SELECT superseded,sending_state FROM domain_claims WHERE workspace_id=$1',[other])).rows,[{superseded:false,sending_state:'verified'}]);
+    await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[other]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[other]);
+    assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);assert.deepEqual(writes,[]);
+
+    // The dry run shows what to review; --apply pins exactly that fingerprint and nothing else.
+    const planned=await adopt(false);
+    assert.deepEqual([planned.fingerprint,planned.tenant,planned.action,planned.dkimTokens,planned.receiving],[reviewed,tenant,'associate and adopt',[...dkim].sort(),{name:host,type:'MX',priority:10,value:'inbound-smtp.us-east-2.amazonaws.com'}]);
+    assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0,'A dry run writes nothing.');
+    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true},env),/Review the dry run first/);
+    await assert.rejects(adopt(true,{},operator,'0'.repeat(64)),/no longer matches the reviewed fingerprint/);assert.deepEqual(writes,[]);
+    const adopted={domainId:(await adopt(true)).domainId!};
+    assert.deepEqual(writes,[`CreateTenantResourceAssociationCommand:${arn}`],'Adoption only joins the existing identity to the workspace tenant.');assert.equal(members.get(arn),tenant);
+    const claim=async()=>(await db.query(`SELECT token,sending_state,receiving_state,receiving_host,ever_proven,identity->'adopted'->>'arn' AS adopted,identity->>'receivingChoice' AS choice FROM domain_claims WHERE workspace_id=$1 AND name=$2`,[owner,host])).rows[0];
+    const {token,...state}=await claim();
+    assert.deepEqual(state,{sending_state:'verified',receiving_state:'off',receiving_host:null,ever_proven:true,adopted:arn,choice:host});
+    const audit=(await db.query('SELECT action,details FROM hosted_operator_audit WHERE workspace_id=$1 ORDER BY at',[owner])).rows;
+    assert.deepEqual(audit.map(r=>[r.action,r.details.fingerprint,r.details.dkimTokens]),[['platform-domain-intent',reviewed,[...dkim].sort()],['platform-domain-adopted',reviewed,[...dkim].sort()]]);
+    assert.equal(ok(await api(owner,'POST','/v1/domains',{name:host}),201).id,adopted.domainId,'Adding the adopted root again is idempotent.');
+    // After adoption an ordinary subdomain is a normal claim with its own tagged identity.
+    const sub=ok(await api(owner,'POST','/v1/domains',{name:`notify.${host}`}),201);ok(await api(owner,'DELETE',`/v1/domains/${sub.id}`));
+    assert.deepEqual(writes.slice(1),[`CreateEmailIdentityCommand:notify.${host}`,`DeleteEmailIdentityCommand:notify.${host}`]);
+
+    // Sending: the configured workspace sends as the root and ordinary subdomains, never from a platform host.
+    await send(owner,`security@${host}`);await send(owner,`noreply@notify.${host}`);
+    for (const from of [`noreply@dev.${host}`,`x@tracker.dev.${host}`,`fixture@e2e.${host}`,`va@e2e-va.${host}`,`slug@x.in.${host}`,`x@imap.${host}`,`x@domainconnect.${host}`]) await send(owner,from,403,'PLATFORM_SENDER_REFUSED');
+    error(await api(owner,'POST','/v1/emails/batch',{emails:[{from:`a@${host}`,to:'success@simulator.amazonses.com',subject:'A',text:'A'},{from:`b@dev.${host}`,to:'success@simulator.amazonses.com',subject:'B',text:'B'}]}),403,'PLATFORM_SENDER_REFUSED');
+    assert.equal((await db.query('SELECT FROM sending_emails WHERE workspace_id=$1',[owner])).rowCount,0,'A refused batch admits nothing.');
+    // Removing or moving the configuration stops it at once: admission, campaign reviews, replies and dispatch all read regional_sender.
+    const route=async()=>(await runtime.db.execute<{verified:boolean;platform_refused:boolean}>(sql`SELECT verified,platform_refused FROM ${regionalSender(runtime,owner,host)} r`)).rows[0];
+    assert.deepEqual(await route(),{verified:true,platform_refused:false});
+    for (const configured of [undefined,other]) {
+      runtime.config.platformDomainWorkspace=configured;
+      await send(owner,`security@${host}`,403,'PLATFORM_SENDER_REFUSED');await send(owner,`noreply@notify.${host}`,403,'PLATFORM_SENDER_REFUSED');
+      assert.deepEqual(await route(),{verified:false,platform_refused:true});
+    }
+    runtime.config.platformDomainWorkspace=owner;await send(owner,`security@${host}`);
+
+    // Receiving: only the root MX is left to publish, unknown recipients are stored unrouted, never made into addresses.
+    const verify=async()=>{await db.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");await operationJobs['domain.verify']!(runtime,{domainId:adopted.domainId,token},{workspaceId:owner,id:'platform-verify',attempts:1});};
+    const read=async()=>ok(await api(owner,'GET',`/v1/domains/${adopted.domainId}`));
+    await verify();let domain=await read();
+    assert.deepEqual([domain.sending,domain.receiving],['verified','pending']);
+    assert.deepEqual(domain.dns.map((r:Json)=>[r.type,r.name,r.value,r.priority,r.status]),[['MX',host,'inbound-smtp.us-east-2.amazonaws.com',10,'pending']],'Only the root MX is left to publish.');
+    assert.deepEqual((await db.query('SELECT receiving_host,catch_all FROM mailbox_domains WHERE workspace_id=$1',[owner])).rows,[{receiving_host:host,catch_all:'store'}]);
+    for (const local of ['abuse','postmaster','security','dmarc']) ok(await api(owner,'POST','/v1/inbound/addresses',{address:`${local}@${host}`}),201);
+    error(await api(owner,'POST',`/v1/domains/${adopted.domainId}/receiving-host`,{host:`e2e.${host}`}),409,'RECEIVING_HOST_RESERVED');
+    const rollback=new Error('rollback');
+    const probe=async(address:string)=>{let routed=-1;const mid=unique('platform-mail');
+      await runtime.db.transaction(async tx=>{routed=await acceptInboundNotification({...runtime,db:tx},{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:mid},receipt:{timestamp:new Date().toISOString(),recipients:[address],action:{type:'S3',bucketName:bucket,topicArn:inbound,objectKey:'staging/'+mid}}}});throw rollback;}).catch(e=>{if(e!==rollback)throw e;});
+      return routed;};
+    assert.equal(await probe(`abuse@${host}`),0,'Nothing routes before the MX record is published.');
+    const mxCheck=()=>operationJobs['domain.mx']!(runtime,{domainId:adopted.domainId,token},{workspaceId:owner,id:'platform-mx',attempts:1});
+    mx=true;await mxCheck();
+    domain=await read();assert.deepEqual([domain.receiving,domain.dns[0].status],['verified','verified']);
+    for (const local of ['abuse','postmaster','security','dmarc']) assert.equal(await probe(`${local}@${host}`),1);
+    assert.equal(await probe(`fixture@e2e.${host}`),0,'The root never receives for the platform’s own hosts.');
+    assert.ok(!queried.some(q=>q.endsWith(`_bane.${host}`) || q.endsWith(`_opensend.${host}`)),'The attestation replaces the ownership TXT.');
+    // Ingest: an inbox created on purpose receives; nothing else becomes an address, and the validation mailboxes
+    // a certificate authority could use never do, even after someone switches the catch-all back to creating addresses.
+    const stored=async(recipients:string[],catchAll:'store'|'create_mailbox')=>{let result:Json={};const mid=unique('platform-ingest'),message=unique('msg');
+      await runtime.db.transaction(async tx=>{
+        await tx.execute(sql`UPDATE mailbox_domains SET catch_all=${catchAll} WHERE workspace_id=${owner} AND name=${host}`);
+        await tx.execute(sql`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES(${owner},${mid},${oh},${bucket},${'staging/'+mid},${JSON.stringify(recipients)}::jsonb,'{}'::jsonb)`);
+        await storeIncoming(tx,{id:message,workspaceId:owner,direction:'inbound',region:oh,sesMessageId:mid,messageId:`<${mid}@ca.example>`,inReplyTo:null,references:[],subject:'Validation',
+          fromAddress:'validation@ca.example',fromName:null,to:[],cc:[],bcc:[],replyTo:[],envelopeFrom:'validation@ca.example',envelopeTo:recipients,sentAt:null,receivedAt:new Date().toISOString(),
+          text:'Validation.',html:null,bodyTruncated:false,snippet:'Validation.',headers:[],attachmentCount:0,sizeBytes:100,rawBucket:bucket,rawKey:`workspaces/${owner}/raw/${mid}.eml`,verdicts:{},spam:false,automated:false,status:'received'} as any,[],true,true,false,null,undefined,host);
+        const rows=async(q:ReturnType<typeof sql>)=>(await tx.execute<{address:string}>(q)).rows.map(r=>r.address).sort();
+        result={created:await rows(sql`SELECT address FROM mailboxes WHERE workspace_id=${owner} AND origin='auto'`),
+          delivered:await rows(sql`SELECT b.address FROM mailbox_messages m JOIN mailboxes b ON b.id=m.mailbox_id WHERE m.workspace_id=${owner} AND m.message_id=${message}`),
+          unrouted:await rows(sql`SELECT address FROM mail_unrouted WHERE workspace_id=${owner} AND message_id=${message}`)};
+        throw rollback;}).catch(e=>{if(e!==rollback)throw e;});
+      return result;};
+    const validation=[`admin@${host}`,`administrator@${host}`,`hostmaster@${host}`,`webmaster+x@${host}`,`root@${host}`];
+    assert.deepEqual(await stored([`postmaster@${host}`,`stranger@${host}`,...validation],'store'),{created:[],delivered:[`postmaster@${host}`],unrouted:[`stranger@${host}`,...validation].sort()});
+    assert.deepEqual(await stored([`stranger@${host}`,...validation],'create_mailbox'),{created:[`stranger@${host}`],delivered:[`stranger@${host}`],unrouted:[...validation].sort()});
+    assert.deepEqual([platformValidationMailbox('Admin@'+host,host),platformValidationMailbox(`postmaster@mail.${host}`,host),platformValidationMailbox('admin@customer.example',host),platformValidationMailbox(`admins@${host}`,host)],[true,true,false,false]);
+
+    // A rerun only re-attests. Drift stops sending and receiving at the next check, until the operator attests again.
+    const settled=writes.length;await adopt(true);assert.equal(writes.length,settled);assert.equal((await claim()).sending_state,'verified');
+    identity.DkimAttributes.Tokens=['rotateda','rotatedb','rotatedc'];await verify();
+    assert.deepEqual([(await claim()).sending_state,(await claim()).receiving_state,await probe(`abuse@${host}`)],['pending','off',0]);
+    await send(owner,`security@${host}`,403,'SENDER_DOMAIN_NOT_VERIFIED');
+    identity.DkimAttributes.Tokens=[...dkim];await verify();assert.equal((await claim()).sending_state,'pending','Only the operator restores a revoked adoption.');
+    await adopt(true);await verify();assert.deepEqual([(await claim()).sending_state,(await read()).receiving,await probe(`abuse@${host}`)],['verified','verified',1]);
+    // A verify that read SES before an operator's re-attestation never overrides it.
+    const rotated=['rotatedd','rotatede','rotatedf'];identity.DkimAttributes.Tokens=[...rotated];
+    const renewed=adoptionFingerprint(adoptionFacts(identity as any));let raced=false;
+    afterRuntimeRead=async()=>{raced=true;await adopt(true,{},operator,renewed);};
+    await assert.rejects(verify(),JobDeferred);assert.ok(raced);
+    assert.equal((await claim()).sending_state,'verified');await verify();assert.equal((await claim()).sending_state,'verified');
+    // Without the configuration nothing renews the attestation either: receiving ends with the usual proof grace.
+    runtime.config.platformDomainWorkspace=undefined;await verify();await mxCheck();assert.equal(await probe(`abuse@${host}`),1);
+    await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '73 hours' WHERE token=$1",[token]);await verify();await mxCheck();
+    assert.deepEqual([(await claim()).receiving_state,await probe(`abuse@${host}`)],['lost',0]);runtime.config.platformDomainWorkspace=owner;
+
+    // Deleting the claim leaves the identity and its tenant association alone; the runtime key couldn't change them anyway.
+    ok(await api(owner,'DELETE',`/v1/domains/${adopted.domainId}`));assert.equal(writes.length,settled);assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);
+    const statements=Object.values(render('--fresh',{account:acct,origin:publicUrl}) as Record<string,{Statement:IamStatement[]}>).flatMap(d=>d.Statement);
+    for (const action of ['ses:DeleteEmailIdentity','ses:PutEmailIdentityMailFromAttributes','ses:PutEmailIdentityDkimSigningAttributes','ses:PutEmailIdentityDkimAttributes','ses:CreateTenantResourceAssociation','ses:DeleteTenantResourceAssociation'])
+      assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh}),false,`${action} on the untagged platform identity`);
+    assert.equal(iamAllows(statements,'ses:GetEmailIdentity',arn,{'aws:RequestedRegion':oh}),true);
+    // Revoke: the operator undo releases the claim and leaves the workspace's tenant, even once the configuration has moved on.
+    await adopt(true,{},operator,renewed);assert.equal(members.get(arn),tenant);
+    runtime.config.platformDomainWorkspace=undefined;
+    const revokePlan=await revokePlatformDomain(db,op,owner,operator,false,env);
+    assert.equal(revokePlan.action,`release the adopted claim, then remove the identity from ${tenant}`);assert.equal(members.get(arn),tenant);
+    await assert.rejects(revokePlatformDomain(db,op,owner,`arn:aws:iam::${acct}:user/bane-runtime`,true,env),/operator role/);
+    await revokePlatformDomain(db,op,owner,operator,true,{...env,BANE_PLATFORM_DOMAIN_WORKSPACE:undefined});
+    assert.equal(members.has(arn),false);assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);
+    assert.deepEqual(writes.slice(settled),[`DeleteTenantResourceAssociationCommand:${arn}`],'Revoking never touches the identity itself.');
+    assert.equal((await db.query("SELECT details->>'tenant' AS tenant FROM hosted_operator_audit WHERE workspace_id=$1 AND action='platform-domain-revoked'",[owner])).rows[0].tenant,tenant);
+    assert.equal((await revokePlatformDomain(db,op,owner,operator,false,env)).action,'nothing to revoke');
+    runtime.config.platformDomainWorkspace=owner;
+  });
+
   test('MX regional delivery: legacy backfill, closest claim, mixed batch and frozen dispatch',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       const {readFile}=await import('node:fs/promises'),{runDispatcher}=await import('./src/dispatcher.js');
@@ -6600,6 +6800,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.match(error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `reply.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT').message, /needs its own MX to feedback-smtp/);
         error(await choose(d, `inbound.${d.name}`), 409, 'RECEIVING_HOST_ACTIVE');
       });
+    });
+  });
+
+  test('dev E2E: finite operator override releases a held simulator campaign without exempting it', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
+      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333';
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const claim=(host:string)=>db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[host,wid]);
+      await claim(domain);
+      const script=await readFile(new URL('./scripts/set-dev-e2e-send-cap.sql',import.meta.url),'utf8');
+      const apply=()=>db.query(script.replace(":'workspace_id'",'$1'),[wid]);
+      assert.equal((await apply()).rowCount,0,'A Hosted workspace without both verified fixture domains is unchanged');
+      await claim('e2e-va.bane.mx');
+      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),91)`,[wid]);
+      const list=ok(await local('POST','/v1/lists',{name:'E2E fixture'}),201);
+      await db.query(`WITH contact AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ('e2e-cap-fixture',$1,'success@simulator.amazonses.com','subscribed') RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM contact`,[wid,list.id]);
+      const c=ok(await local('POST','/v1/campaigns',{name:'E2E fixture',from:`sender@${domain}`,subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}}),201);
+      const path=`/v1/campaigns/${c.id}`, delivery=async()=>ok(await local('GET',path)).delivery;
+      ok(await local('POST',path+'/send',{revision:c.revision}),202);await run('campaign.run');
+      const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
+      assert.equal((await apply()).rows[0].details.new,500);assert.equal((await apply()).rowCount,0);
+      await run('campaign.run');assert.equal((await delivery()).expanded,1);
+      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
+        [{used:'92',marketing:'450',burst:50,pending_cap_override:null,exempt_hosted_quotas:false}]);
     });
   });
 

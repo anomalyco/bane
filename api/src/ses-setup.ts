@@ -85,6 +85,8 @@ export function mxResourceName(suffix:string) {
   if (!/^[a-zA-Z0-9_-]+$/.test(suffix)) throw new Error('Invalid MX resource suffix');
   return `bane-${suffix}`;
 }
+/** The SES tenant a Hosted claim's identity joins: the connection's persisted pool tenant, else the workspace's own. */
+export const claimTenantName = (connection:{pool_tenant_name?:string|null},wid:string) => connection.pool_tenant_name ?? mxResourceName(wid);
 export function poolTenantName(wid:string,tier:'trusted'|'probation') {
   if (!/^ws_[0-9a-f]{32}$/.test(wid)) throw new ApiError(409,'INVALID_TENANT_NAME','Expected an exact Hosted workspace ID.');
   return mxResourceName(`${tier}-${wid}`);

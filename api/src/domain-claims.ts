@@ -15,15 +15,48 @@ export const claimName = z.preprocess(value=>{
   if (typeof value==='string' && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$/i.test(value.trim())) throw notAllowed();
   return value;
 },domainName);
-export async function claimNameAllowed(name:string,publicUrl:string) {
-  const host=new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
-  return name.includes('.') && name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)
+/** The installation's own domain: PUBLIC_URL's host (bane.mx in production). */
+export const platformHost = (publicUrl:string) => new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
+// Operator hosts under the platform domain that not even its owning workspace may claim, receive on or send from,
+// with everything below them: another installation's zone (dev.), release fixtures (e2e., e2e-va., e2e-trusted.),
+// the shared inbound zone (in.), the Domain Connect key (domainconnect.) and service hosts (imap., tracker.). Add
+// new platform hosts here before they go live. A release fixture holding its own e2e* claim keeps sending.
+const fixtureLabel=/^e2e(?:-[a-z0-9-]+)?$/;
+const platformLabel=/^(?:dev|e2e(?:-[a-z0-9-]+)?|in|domainconnect|imap|tracker)$/;
+export function reservedPlatformName(name:string,publicUrl:string) {
+  const host=platformHost(publicUrl);
+  return name.endsWith('.'+host) && platformLabel.test(name.slice(0,-host.length-1).split('.').at(-1)!);
+}
+/** The mailboxes a certificate authority may use to validate the platform domain (CA/B BR 3.2.2.4.4, and root@).
+ * Bane never creates them automatically: only an inbox someone creates on purpose receives that mail. */
+export function platformValidationMailbox(address:string,host:string|null) {
+  const [local='',domain='']=address.toLowerCase().split('@');
+  return !!host && (domain===host || domain.endsWith('.'+host)) && /^(?:admin|administrator|hostmaster|postmaster|webmaster|root)$/.test(local.replace(/\+.*$/,''));
+}
+type PlatformConfig = Pick<Runtime['config'],'multiTenant'|'regionalSending'|'platformDomainWorkspace'|'publicUrl'>;
+/** Only the operator-configured workspace owns the platform domain; every other workspace is always refused. Its
+ * sending policy lives in regional_sender, so it needs regional sending. */
+export const platformDomainOwner = (config:Omit<PlatformConfig,'publicUrl'>,workspace:string) =>
+  config.multiTenant && config.regionalSending===true && !!config.platformDomainWorkspace && config.platformDomainWorkspace===workspace;
+/** The sender policy every regional_sender call applies (migration 107): read from the running configuration, so
+ * changing or removing BANE_PLATFORM_DOMAIN_WORKSPACE takes effect on the next send and the next dispatch. */
+export const platformPolicy = (config:PlatformConfig) => config.multiTenant ? JSON.stringify({host:platformHost(config.publicUrl),
+  owner:config.regionalSending===true ? config.platformDomainWorkspace ?? null : null,reserved:platformLabel.source,fixtures:fixtureLabel.source}) : null;
+export async function claimNameAllowed(name:string,publicUrl:string,platformOwner=false) {
+  const host=platformHost(publicUrl), platform=name===host || name.endsWith('.'+host);
+  return name.includes('.') && (platform ? platformOwner && !reservedPlatformName(name,publicUrl) : !host.endsWith('.'+name))
     && !reservedRoots.some(root=>name===root || name.endsWith('.'+root)) && (await placementRoot(name)).root!==null;
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
 // A hosted workspace has exactly one connection, so the region may be omitted and defaults to it.
 export async function reserveClaim(runtime: Runtime, workspace: string, name: string, region?: string) {
-  if (!await claimNameAllowed(name,runtime.config.publicUrl)) throw notAllowed();
+  const owner=platformDomainOwner(runtime.config,workspace), root=platformHost(runtime.config.publicUrl);
+  if (!await claimNameAllowed(name,runtime.config.publicUrl,owner)) throw notAllowed();
+  // The platform domain's SES identity predates every claim and carries no claim tag: only the operator's adoption
+  // (scripts/adopt-platform-domain.ts) creates the root's claim, and nothing under it is claimed before that.
+  // Re-adding the root afterwards is idempotent.
+  if (owner && (name===root || name.endsWith('.'+root)) && !(await runtime.db.execute(sql`SELECT FROM domain_claims WHERE workspace_id=${workspace} AND name=${root} AND identity ? 'adopted'`)).rowCount)
+    throw new ApiError(409,'OPERATOR_ADOPTION_REQUIRED','An operator must adopt the platform domain’s existing SES identity first.','name');
   assertSesConfigured(runtime);
   // The statement's snapshot predates the function's own insert, so a brand-new claim joins to nothing: that is
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
@@ -73,10 +106,14 @@ export const regionalSending = (runtime: Pick<Runtime,'config'>) => runtime.conf
 // Dispatch/recovery readers always understand a persisted binding, including on flag rollback.
 export const sendingConnections = (runtime: Runtime) => sql.identifier(`regional_${isSimulatedSes(runtime) ? 'simulated' : 'sending'}_connections`);
 export type SendingBinding = { domain: string; connection: string; generation: number; account:string; topic:string|null };
-export type SenderRoute = { region: string; verified: boolean; binding: SendingBinding; connection: (ReadyConnection & { region:string; tenant_state:TenantState; pause_reason:string|null }) | null };
+export type SenderRoute = { region: string; verified: boolean; binding: SendingBinding; connection: (ReadyConnection & { region:string; tenant_state:TenantState; pause_reason:string|null }) | null; platform_refused?: boolean };
+/** Every sender check (admission, campaigns, mailbox replies, dispatch) reads its closest claim through this call,
+ * which also applies the running platform-domain policy; a refused route is never verified. */
+export const regionalSender = (runtime:Runtime,wid:SQL|string,host:SQL|string) => sql`regional_sender(${wid},${host},${isSimulatedSes(runtime)},${platformPolicy(runtime.config)}::jsonb)`;
 export const senderRoutes = (runtime:Runtime,wid:string,hosts:string[]) => sql`(SELECT coalesce(jsonb_object_agg(h.host,to_jsonb(r)),'{}'::jsonb)
-  FROM jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb) h(host) CROSS JOIN LATERAL regional_sender(${wid},h.host,${isSimulatedSes(runtime)}) r)`;
+  FROM jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb) h(host) CROSS JOIN LATERAL ${regionalSender(runtime,wid,sql`h.host`)} r)`;
 export function checkRoute(runtime: Runtime, route: SenderRoute | undefined, requested?: string) {
+  if (route?.platform_refused) throw new ApiError(403,'PLATFORM_SENDER_REFUSED','Only the workspace configured to own Bane’s own domain sends from it, and never from Bane’s platform hosts.','from');
   if (!route?.verified) throw unverifiedSender();
   if (requested !== undefined && requested !== route.region) throw new ApiError(422,'SENDER_REGION_MISMATCH','The requested region does not match this sender domain.', 'region');
   if (!route.connection) throw new ApiError(409,'CONNECTION_REQUIRED','The sending connection is not ready in the bound region.');

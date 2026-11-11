@@ -41,6 +41,8 @@ export interface Config {
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   platformAccount?: string;
+  /** The one Hosted workspace that may own the installation's own domain (PUBLIC_URL's host). */
+  platformDomainWorkspace?: string;
   regionalSending?: boolean;
   trustedPool?: boolean;
   receivingRedrive?:boolean;

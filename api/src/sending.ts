@@ -15,7 +15,7 @@ import { actor, ApiError, AudienceSpec, chargeRenderBudget, digest, errors, getS
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
-import { checkRoute, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
+import { checkRoute, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
 import { dmarcView } from './dmarc.js';
 import type { IdentityFacts } from './states.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
@@ -286,7 +286,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   const host=from.split('@')[1]!.toLowerCase(), bulk=bulkColumns(runtime,a.workspaceId,marketing?[host]:[]);
   if (regionalSending(runtime)) {
     keySender(a,from);
-    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`SELECT r.* ${bulk} FROM ses_installation_settings s CROSS JOIN LATERAL regional_sender(s.workspace_id,${host},${isSimulatedSes(runtime)}) r WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
+    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`SELECT r.* ${bulk} FROM ses_installation_settings s CROSS JOIN LATERAL ${regionalSender(runtime,sql`s.workspace_id`,host)} r WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
     const route=checkRoute(runtime,row,requested);
     checkBulk(runtime,route.connection!.kind,marketing,host,row?.bulk);
     a.dispatchAccount={aws_account_id:route.connection!.aws_account_id,kind:route.connection!.kind};
@@ -790,7 +790,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   const {rows:[result]}=await c.env.db.execute<{id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number;max_requests:number;s:State|{previous:typeof receipt;hash:string}|null}>(sql`WITH ${'credential' in identity?sql`${identity.credential},`:sql``} state AS MATERIALIZED (
     SELECT k.*, CASE WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN
       key_admission_decision(k.workspace_id,k.id,k.domains,${c.req.path},${key??null},${hash},${JSON.stringify(receipt)}::jsonb,${JSON.stringify(wanted)}::jsonb,${JSON.stringify(assetIds)}::jsonb,
-        ${sim},${cost},${marketing},${caps.firstWeek},${caps.secondWeek},${caps.mature},${cfg.dispatch.dailyHeadroomPercent},${regional},${!!cfg.trustedPool},${!!cfg.requireDmarcForBulk},${!prepError}) END s FROM (${principal}) k
+        ${sim},${cost},${marketing},${caps.firstWeek},${caps.secondWeek},${caps.mature},${cfg.dispatch.dailyHeadroomPercent},${regional},${!!cfg.trustedPool},${!!cfg.requireDmarcForBulk},${!prepError},${platformPolicy(cfg)}::jsonb) END s FROM (${principal}) k
     ), submitted AS MATERIALIZED (SELECT workspace_id,k.id AS actor_id,m.id,m.hash,m.email,
       ${regional?sql`m.snapshot||jsonb_build_object('region',r->>'region','binding',r->'binding')`:sql`jsonb_set(m.snapshot,'{region}',to_jsonb(coalesce(nullif(m.snapshot->>'region',''),s->>'default_region')))`} snapshot
       FROM state k,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text,hash text,email text,snapshot jsonb)
@@ -1779,7 +1779,7 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
 }
 const staleReview = () => new ApiError(409,'SENDER_BINDING_CHANGED','The reviewed sending binding is no longer ready.');
 async function assertReviewBinding(runtime:Runtime,db:DbExecutor,a:Actor,draft:CampaignDraft) {
-  if (!(await db.execute(sql`SELECT 1 FROM regional_sender(${a.workspaceId},${draft.from.split('@')[1]!.toLowerCase()},${isSimulatedSes(runtime)}) r
+  if (!(await db.execute(sql`SELECT 1 FROM ${regionalSender(runtime,a.workspaceId,draft.from.split('@')[1]!.toLowerCase())} r
     WHERE r.verified AND r.region=${draft.region} AND r.connection IS NOT NULL AND r.binding=${JSON.stringify(draft.binding)}::jsonb
       AND (${isSimulatedSes(runtime)} OR r.connection->>'kind'<>'shared' OR r.connection->>'tenant_state'='ready')`)).rowCount) throw staleReview();
 }

@@ -145,11 +145,15 @@ export async function applyClaim(db: DbExecutor, claim: ClaimRef, next: ClaimSta
   }
   const mx = facts.mx;
   const status = projectedMailboxStatus(next);
+  // A new host, including the operator-adopted platform domain, takes the column default catch_all='store'
+  // (migration 120): mail for unknown recipients stays unrouted, so only inboxes created on purpose (abuse@,
+  // postmaster@ …) receive. Later changes are kept.
   await db.execute(sql`WITH claim AS (UPDATE domain_claims SET sending_state=${next.sending_state},receiving_state=${next.receiving_state},receiving_host=${next.receiving_host},
       lost_since=${next.lost_since}::timestamptz,receiving_lost_since=${next.receiving_lost_since}::timestamptz,identity=${JSON.stringify(facts)}::jsonb
       WHERE name=${claim.name} AND token=${claim.token} AND connection_id=${claim.connectionId} RETURNING workspace_id,claim_scope)
     INSERT INTO mailbox_domains AS m(id,workspace_id,domain_id,name,region,receiving_host,status,enabled_at,mx,checked_at)
-    SELECT ${id('mdom')},workspace_id,${claim.domainId},${claim.name},${claim.region},${suggestedHost},${status},CASE WHEN ${!!next.receiving_host} THEN now() END,${mx ? JSON.stringify(mx) : null}::jsonb,${mx?.checkedAt ?? null}::timestamptz FROM claim WHERE claim_scope<>'account'
+    SELECT ${id('mdom')},workspace_id,${claim.domainId},${claim.name},${claim.region},${suggestedHost},${status},CASE WHEN ${!!next.receiving_host} THEN now() END,${mx ? JSON.stringify(mx) : null}::jsonb,${mx?.checkedAt ?? null}::timestamptz
+      FROM claim WHERE claim_scope<>'account'
     ON CONFLICT ON CONSTRAINT mailbox_domains_name DO UPDATE SET domain_id=excluded.domain_id,parent_id=NULL,region=excluded.region,receiving_host=excluded.receiving_host,status=excluded.status,last_error=NULL,
       enabled_at=CASE WHEN excluded.enabled_at IS NOT NULL AND m.enabled_at IS NOT NULL AND m.status='active' THEN m.enabled_at ELSE excluded.enabled_at END,
       mx=coalesce(excluded.mx,m.mx),checked_at=coalesce(excluded.checked_at,m.checked_at),updated_at=now()`);
