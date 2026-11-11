@@ -453,7 +453,7 @@ function registerAddresses(app: App) {
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: detail, operationId: 'deleteInboundAddress', description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.', request: { params }, responses: { 200: response(Ok), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
-    if(mailbox.kind==='inbox'){await c.env.db.execute(sql`UPDATE mailboxes SET expires_at=least(expires_at,now()),delete_after=now() WHERE workspace_id=${scope.workspaceId} AND id=${mailbox.id}`);return c.json({ok:true as const},200);}
+    if(mailbox.kind==='inbox'){await endInbox(c.env.db,sql`b.workspace_id=${scope.workspaceId} AND b.id=${mailbox.id}`);return c.json({ok:true as const},200);}
     const runnable = await c.env.db.transaction(async tx => {
       await tx.delete(mailboxThreads).where(eq(mailboxThreads.mailboxId, mailbox.id));
       await tx.delete(mailboxes).where(eq(mailboxes.id, mailbox.id));
@@ -464,7 +464,7 @@ function registerAddresses(app: App) {
   });
 }
 
-import { registerInboxes } from './inboxes.js';
+import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
   registerMailObjects(app);

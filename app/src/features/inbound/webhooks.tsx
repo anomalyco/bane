@@ -15,6 +15,8 @@ const eventInfo: Partial<Record<MailboxEventType, string>> = {
   'message.delivered': 'The recipient server accepted it', 'message.delayed': 'Delivery is being retried',
   'message.complained': 'The recipient reported spam', 'message.failed': 'The message was rejected, suppressed or canceled',
   'thread.updated': 'A conversation was archived, starred, trashed or relabeled', 'address.created': 'An address was created (including automatically)',
+  'inbox.created': 'An agent inbox was created', 'inbox.deleted': 'An agent inbox was erased', 'message.held': 'Mail was stored but held: over an inbox’s limits or after it expired',
+  'inbox.quota_exceeded': 'An agent inbox reached its message or byte limit',
 }
 const blank: InboundWebhookInput = { url: '', description: '', eventTypes: ['message.received'], addressIds: null }
 function validate(input: InboundWebhookInput) {

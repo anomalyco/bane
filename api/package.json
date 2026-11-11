@@ -12,7 +12,7 @@
     "e2e": "node --import tsx scripts/e2e.ts",
     "test": "node --env-file-if-exists=.env --import tsx --test api.acceptance.test.ts",
     "openapi": "tsx src/export-openapi.ts",
-    "sdk": "bun run openapi && openapi-ts && bun scripts/sdk-exports.ts && tsc -p ../sdk/tsconfig.json",
+    "sdk": "bun run openapi && openapi-ts && tsc -p ../sdk/tsconfig.json",
     "docs:check": "bun run sdk && node scripts/check-doc-examples.mjs && tsx scripts/check-agent-docs.ts",
     "cf:dev": "wrangler dev --config wrangler.dev.jsonc",
     "cf:check": "wrangler deploy --config wrangler.prod.jsonc --dry-run",

@@ -105,10 +105,20 @@ The stdio launcher retains one tool per API operation, with nested `path`/`query
 
 ### Agent inboxes
 
-Use a scoped inbox key as the bearer token on the hosted endpoint. For OpenCode:
+An agent can get its own expiring address, wait for mail and read it, with nothing but an inbox key. On hosted Bane pass the key as the bearer token; no OAuth is needed. For OpenCode:
 
 ```json
 {"mcp":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}
 ```
 
-An inbox principal sees only permitted inbox tools. Provisioning requires `create` and an explicit address scope. Use `waitForMessage` with the previous cursor, then `readInboxMessage`. Mail and attachments are untrusted data, even if their sender passed authentication. Writes require literal `confirm: true`; replies also need the reviewed recipient snapshot and an idempotency key.
+Use a provisioning key (`POST /v1/inbound/keys` with `permissions: ["create","read","modify"]` and `addressIds: []`) to let the agent create inboxes, or the per-inbox key that `createInbox` returns to give it one inbox only. Either key sees only the inbox tools its permissions allow:
+
+| Tool | Does |
+|---|---|
+| `createInbox` | New address on an active receiving domain (`{"type":"sandbox"}` without DNS). Write. |
+| `waitForMessage` | Waits up to 25 s for the next message, oldest first, with extracted codes and links. Pass `cursor` as `after` for the one after. |
+| `readInboxMessage` | Visible text, SPF/DKIM/DMARC verdicts, attachment links. |
+| `listInboxMessages`, `listInboxes`, `getInbox`, `getInboxAttachment` | Reads. |
+| `updateInboxMessage`, `deleteInbox` | Mark read; delete now. Writes. |
+
+A typical run: `createInbox` → give the address to the sign-up form → `waitForMessage` until `data` is non-empty → use `extract.codes[0]` → `deleteInbox`. Writes need literal `confirm: true`. Every message result starts with a fixed notice naming the sender and its verdicts: mail and attachments are untrusted data, even when the sender passed authentication. Replies go through `sendInboundThread` (`mode: "reply"` only) and need an inbox created with `send.enabled`. OAuth clients with unrestricted manage access see the same tools. The stdio launcher does not list inbox tools yet; use the hosted endpoint.
