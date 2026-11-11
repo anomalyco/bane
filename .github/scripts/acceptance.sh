@@ -42,6 +42,15 @@ shard() (
     sleep .1
   done
   curl -fsS --max-time 1 "$PUBLIC_URL/health" >/dev/null
+  # /health only serves the base app. Wait for this shard's lazy auth router
+  # before starting the tests: the first authenticated /v1/me in the shared
+  # before hook otherwise spends its 5s request budget importing the router.
+  # No cookie: the ready route must reject us, not redirect or return success.
+  status=$(curl -sS --max-time 45 -o "$HOME/auth-readiness.json" -w '%{http_code}' "$PUBLIC_URL/v1/me")
+  if [[ $status != 401 ]] || ! jq -e '.error.code == "AUTH_REQUIRED"' "$HOME/auth-readiness.json" >/dev/null; then
+    echo "${1}: auth readiness expected 401 AUTH_REQUIRED, got HTTP $status" >&2
+    exit 1
+  fi
   timeout 8m node --import tsx --test --test-reporter=spec "$5" api.acceptance.test.ts
 )
 # Complementary filters: new suites run in the HTTP shard by default.

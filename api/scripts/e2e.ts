@@ -705,6 +705,13 @@ async function prepare() {
   check(hasId(await api('listDomains', { query: { refresh: 'false', region, limit: 10 } }), domainId), 'domain absent from scoped catalog');
   await api('verifyDomain', { path });
   await until('verified sending domain', () => api('getDomain', { path }), d => d.ready && d.sending === 'verified', d => `${d.sending}/${d.verificationStatus}/${d.dkimStatus}`, 110_000);
+  // Onboarding endpoints, exercised without changing the shared fixture: a host outside the domain is
+  // refused before any DNS read or write; dashboard-only routes refuse bearer keys; stats are public.
+  await expectDenial(() => api('chooseReceivingHost', { path, body: { host: `${prefix}.invalid`, confirm: false } }), 422, 'RECEIVING_HOST_INVALID');
+  await expectDenial(() => api('sendDomainTestEmail', { path }), 401, 'AUTH_REQUIRED');
+  await expectDenial(() => api('getWorkspaceInvitation', { path: { id: `inv_${randomUUID().replace(/-/g, '')}` } }), 401, 'AUTH_REQUIRED');
+  const stats = await api('getPublicStats', {});
+  check(typeof stats.available === 'boolean', 'public stats missing availability');
   return true;
 }
 
