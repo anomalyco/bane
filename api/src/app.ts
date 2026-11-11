@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { ApiError, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
+import { ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -170,7 +170,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
+    const transient = !known && !invalidJson && transientDatabaseError(error);
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
+      : transient ? databaseUnavailable()
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
@@ -182,9 +185,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
     const unexpected = !known && responseError.status >= 500;
     if (!invalidJson) log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
-      errorType: unexpected ? error.name : undefined, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined,
+      errorType: unexpected ? error.name : undefined, databaseCode: databaseCodeOf(error),
       stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
+    else if (transient) c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
