@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
+import { platformHost } from './domain-claims.js';
 import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
@@ -472,7 +473,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: receipt.bucket, rawKey,
         verdicts, spam, automated: automated(email, raw, from.address), status,
-      },attachments,verifiedFrom,!receipt.notification.stagingEtag);
+      },attachments,verifiedFrom,!receipt.notification.stagingEtag,runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
