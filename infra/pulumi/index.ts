@@ -11,11 +11,13 @@ const stages = {
     account: "905840579680", origin: "https://dev.bane.mx", prefix: "bane-dev", worker: "bane-dev",
     cloudflareAccountId: "d8e944f537ceef3f06a5bd3aec1d7a53",
     queues: { work: "b2a85efa75214d8291a61eb0bf4c608a", feedback: "002ff3b09e2040d6a1fe09fa13e36387" },
+    extraQueues: { webhooks: "a25aa21928d846c4a5531b7e523901a8", "feedback-dlq": "94a4269c23644e93851be3b28bb55b72" } as Record<string, string>,
   },
   production: {
     account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
     cloudflareAccountId: "15d29c8639fd3733b1b5486a2acfd968",
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
+    extraQueues: {} as Record<string, string>,
   },
 };
 
@@ -48,7 +50,10 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
 // Queue settings (including retention) use installation defaults. Never auto-drain the
 // feedback DLQ: an operator replays only after the ingestion fault has been repaired.
 for (const purpose of ['webhooks','feedback-dlq']) {
-  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, { provider: cloudflare, protect: true });
+  const id = stage.extraQueues?.[purpose];
+  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, {
+    ...(id ? adopt(`${cloudflareAccountId}/${id}`, cloudflare) : { provider: cloudflare, protect: true }),
+  });
 }
 const bucket = `${stage.prefix}-attachments`;
 // Dev's bucket is created in anomaly-dev; only production's existing bucket is adopted.

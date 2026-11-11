@@ -26,7 +26,8 @@
     "BANE_REGIONAL_SENDING": "true",
     "BANE_TRUSTED_POOL": "true",
     "BANE_REQUIRE_DMARC_FOR_BULK": "true",
-    "BANE_HOSTED_SCREEN": "true",
+    // Dev has no Typesafe screening key; hosted content screening is a production control.
+    "BANE_HOSTED_SCREEN": "false",
     "BANE_RECEIVING_REDRIVE": "true",
     // Dev only: the pools become ready in the SES sandbox, so dev can send to the mailbox simulator and verified addresses.
     "BANE_ALLOW_SES_SANDBOX": "true",
