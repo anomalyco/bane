@@ -7722,9 +7722,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(ok(await request('GET','/v1/inbound/addresses',provision)).data.map((r:Json)=>r.id),[box.id]);assert.deepEqual(ok(await request('GET','/v1/inbound/threads',provision)).data,[]);assert.ok(ok(await request('GET','/v1/inbound/events?after=0',provision)).data.every((e:Json)=>e.addressId===box.id));
       });
       const fileMime='Content-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: text/plain\r\n\r\nVerification code 123456\r\n--p\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=test.txt\r\n\r\nfixture\r\n--p--';
-      const deliver=async(mid:string,to:string[],file=false,hosted=true,wireId=mid,byo=false)=>{
+      const deliver=async(mid:string,to:string[],file=false,hosted=true,wireId=mid,byo=false,scans:Json={},source?:string)=>{
         const body=Buffer.from(`Bcc: private@else.example\r\nFrom: fixture@example.net\r\nMessage-ID: <${wireId}@fixture.example>\r\nSubject: Test\r\n${file?fileMime:'\r\n'+mid}`);raw.set(mid,body);
-        const notification={notificationType:'Received',mail:{messageId:mid},receipt:{...cleanScans,timestamp:new Date().toISOString(),recipients:to,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}};
+        const notification={notificationType:'Received',mail:{messageId:mid,source},receipt:{...cleanScans,...scans,timestamp:new Date().toISOString(),recipients:to,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}};
         assert.equal(await charged(1,()=>acceptInboundNotification(runtime,{message:notification,region:REGION,topicArn:topic})),1);
         const ingest=(await runtime.db.execute<{i:import('./src/mailbox-ingest-input.js').IngestInput}>(sql`SELECT ${ingestInput(false,wid,mid)} i`)).rows[0].i;
         const shared={kind:'shared' as const,id:'fixture',aws_account_id:'111122223333',role_arn:'',external_id:''};
@@ -7768,7 +7768,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('ephemeral inbox: sending is off by default, reply-only to inbound authors when on, and capped at 20 per day',async()=>{
         const reply=(bid:string,thread:string,to:string,replyToMessageId?:string)=>local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:bid,text:'Test',to:[to],replyToMessageId},'live',{'idempotency-key':unique('idem')});
         error(await reply(box.id,first.thread_id,'fixture@example.net'),403,'EPHEMERAL_SEND_DISABLED');error(await local('POST','/v1/inbound/threads',{addressId:box.id,to:['fixture@example.net'],subject:'Start',text:'Test'}),422,'EPHEMERAL_REPLY_ONLY');
-        const sender=ok(await create({send:{enabled:true,perDay:20}}),201),mail=await deliver('sender-test',[sender.address]);error(await reply(sender.id,mail.thread_id,'outsider@example.net'),403,'RECIPIENT_NOT_ALLOWED');
+        const sender=ok(await create({send:{enabled:true,perDay:20}}),201),mail=await deliver('sender-test',[sender.address],false,true,'sender-test',false,{dmarcVerdict:{status:'PASS'}});error(await reply(sender.id,mail.thread_id,'outsider@example.net'),403,'RECIPIENT_NOT_ALLOWED');
+        const unverified=await deliver('unverified-author',[sender.address],false,true,'unverified-author',false,{dmarcVerdict:{status:'FAIL'},dkimVerdict:{status:'FAIL'},spfVerdict:{status:'PASS'}},'envelope@unrelated.invalid');
+        error(await reply(sender.id,unverified.thread_id,'fixture@example.net',unverified.id),403,'RECIPIENT_NOT_ALLOWED');
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net'),202);
         await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction) SELECT 'out_'||i,$1,$2,$3,'outbound' FROM generate_series(1,19)i",[wid,mail.thread_id,sender.id]);error(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),429,'MAILBOX_SEND_LIMIT');
       });
@@ -7796,6 +7798,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query('INSERT INTO mail_gc_candidates(workspace_id,message_id) VALUES($1,$2)',[wid,defaultMsg.id]);await db.query('SELECT mail_gc_batch(1000)');assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[defaultMsg.id])).rowCount,1);assert.ok(stored.has(defaultMsg.raw_key));
       });
     });
+  });
+  test('review M2: text projection removes or flags visibility-dependent content',async()=>{
+    const {visibleMail,displayText}=await import('./src/inbox-content.js');
+    for(const style of ['color:white;background-color:white','font-size:1px','opacity:0.00','left:-1000px','clip-path:inset(100%)',String.raw`d\69splay:none`,'display:/**/none']){
+      const m=visibleMail(null,`<p>Visible</p><span style="${style}">Sample</span>`);assert.equal(m.hiddenContent,true,style);assert.equal(m.text,'Visible',style);
+    }
+    const styled=visibleMail(null,'<style>.muted{visibility:hidden}</style><div class="muted">Sample</div><details>Sample</details><title>Sample</title><p>Visible</p>');assert.equal(styled.text,'Visible');assert.equal(styled.hiddenContent,true);
+    const tags='vis\u{e0061}ible';assert.equal(visibleMail(tags,null).hiddenContent,true);assert.equal(displayText(tags),'visible');assert.equal(visibleMail(null,`<p>${tags}</p>`).text,'visible');
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{

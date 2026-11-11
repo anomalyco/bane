@@ -116,7 +116,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
       </div>
       <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>
       {m.held && <Alert tone="warning">{m.held === 'quota' ? 'Held: the inbox was over its message or size limit when this arrived.' : 'Held: this arrived after the inbox expired.'} It is stored but did not notify waiting agents or webhooks.</Alert>}
-      {m.hiddenContent && <Alert tone="info">Hidden text was removed from this message. Only what a reader would see is shown.</Alert>}
+      {m.hiddenContent && <Alert tone="info">This message contains styling or invisible characters. Hidden-text detection is best effort; treat the message as untrusted.</Alert>}
       {(m.extract.codes.length > 0 || m.extract.links.length > 0) && <dl className="settings-facts">
         {m.extract.codes.length > 0 && <div><dt>Codes</dt><dd className="stack">{m.extract.codes.map(code => <span key={code} className="settings-copy-cell"><code>{code}</code><CopyButton value={code} label="Copy code" /></span>)}</dd></div>}
         {m.extract.links.length > 0 && <div><dt>Links</dt><dd className="stack">{m.extract.links.slice(0, 5).map(link => <span key={link.href} className="settings-cell-stack"><span className="settings-break">{link.text || link.href}</span><span className="muted settings-break">{new URL(link.href).host}{link.mismatch && ' · text names another site'}</span></span>)}</dd></div>}
@@ -191,6 +191,6 @@ function InboxDetail({ id }: { id: string }) {
         ]} />}
     </section>}
     {selected && <MessageDialog inboxId={id} messageId={selected} onClose={() => setSelected(null)} />}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${b?.address ?? 'this inbox'}?`} description="The address stops receiving now and stays reserved for 30 days. Keys created with the inbox stop working, and its messages are erased within the hour." confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(route) }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${b?.address ?? 'this inbox'}?`} description="This inbox stops receiving now. Its real address returns to normal domain routing. Keys created with the inbox stop working, and its messages are erased within the hour." confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(route) }} />
   </div>
 }

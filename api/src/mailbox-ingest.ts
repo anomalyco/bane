@@ -26,11 +26,7 @@ const HEADER_LIMIT = 64 * 1024;
 const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
   .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
 const verdict = (value: { status?: string } | undefined) => typeof value?.status === 'string' ? value.status : undefined;
-function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
-  const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
-  if (!dmarcPass && !(noDmarc && verdicts.dkim === 'PASS')) return false;
-  // DKIM signs the bottommost occurrence; the MIME parser reads the first Date. Reject ambiguity.
-  if (!email || !ADDRESS.test(address) || email.headers.filter(h => h.key === 'date').length !== 1) return false;
+function singleFrom(email:Email,address:string,mail:ReceivedNotification['mail']) {
   const from = email.headers.filter(h => h.key === 'from');
   const sesFrom = mail?.commonHeaders?.from;
   const matches = (value: string) => {
@@ -43,7 +39,27 @@ function authenticatedFrom(email: Email | null, address: string, mail: ReceivedN
     const display = field.slice(0,-angle.length).trim();
     return !/[()<>@,;:\\"\[\]\x00-\x1f]/.test(display) || /^"(?:[^"\\\r\n]|\\[^\r\n])*"$/.test(display);
   };
-  if (from.length !== 1 || !matches(from[0]!.value) || (sesFrom && (sesFrom.length !== 1 || !matches(sesFrom[0]!)))) return false;
+  return from.length===1 && matches(from[0]!.value) && (!sesFrom || (sesFrom.length===1 && matches(sesFrom[0]!)));
+}
+// SES authenticates domains, not display names or Reply-To. An aggregate DKIM
+// PASS cannot identify which of several differently aligned signatures passed.
+function replyAuthorVerified(email:Email|null,address:string,mail:ReceivedNotification['mail'],v:Verdicts){
+  if(!email || !ADDRESS.test(address) || !singleFrom(email,address,mail))return false;
+  if(v.dmarc==='PASS')return true;
+  const domain=address.split('@')[1],source=mail?.source?.toLowerCase();
+  if(v.spf==='PASS' && source && ADDRESS.test(source) && source.split('@')[1]===domain)return true;
+  const signatures=email.headers.filter(h=>h.key==='dkim-signature');
+  return v.dkim==='PASS' && signatures.length===1 && withinFieldLimit(signatures[0].value) && (()=>{
+    const tags=signatures[0].value.split(';').map(t=>t.trim()).filter(t=>/^d\s*=/i.test(t));
+    return tags.length===1 && /^d[ \t]*=[ \t]*([^\s]+)$/i.exec(tags[0])?.[1]?.toLowerCase()===domain;
+  })();
+}
+function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
+  const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
+  if (!dmarcPass && !(noDmarc && verdicts.dkim === 'PASS')) return false;
+  // DKIM signs the bottommost occurrence; the MIME parser reads the first Date. Reject ambiguity.
+  if (!email || !ADDRESS.test(address) || email.headers.filter(h => h.key === 'date').length !== 1) return false;
+  if(!singleFrom(email,address,mail))return false;
   const signatures = email.headers.filter(h => h.key === 'dkim-signature');
   const domain = address.split('@')[1];
   // DMARC through SPF authenticates this delivery. If it could instead be a replay of a
@@ -474,7 +490,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: store.bucket, rawKey: store.rawKey, lifecycle: store.lifecycle,
         verdicts, spam, automated: automated(email, raw, from.address), status,
-      },attachments,verifiedFrom,!receipt.notification.stagingEtag);
+      },attachments,verifiedFrom,!receipt.notification.stagingEtag,replyAuthorVerified(email,from.address,notification.mail,verdicts));
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };

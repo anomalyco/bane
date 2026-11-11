@@ -151,7 +151,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const [locked] = await tx.select({box:mailboxes,replyAuthors:message.threadId ? sql<string[]>`ARRAY(
     SELECT DISTINCT m.from_address FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=l.workspace_id
     WHERE l.workspace_id=${message.scope.workspaceId} AND l.mailbox_id=${message.mailbox.id} AND l.thread_id=${message.threadId}
-      AND l.direction='inbound' AND l.held_reason IS NULL AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
+      AND l.direction='inbound' AND (mailboxes.kind<>'inbox' OR l.reply_author_verified) AND l.held_reason IS NULL AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
       AND m.from_address=ANY(${sql.param(recipients.map(r=>r.toLowerCase()))}::text[]))` : sql<null>`NULL`
   }).from(mailboxes).where(eq(mailboxes.id, message.mailbox.id)).for('no key update');
   const current = locked?.box;

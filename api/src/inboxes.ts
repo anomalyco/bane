@@ -10,7 +10,7 @@ import { mailboxS3 } from './mailbox-setup.js';
 import { storageBinding } from './mailbox-ingest-input.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { signedUrl } from './inbound-threads.js';
-import { visibleMail } from './inbox-content.js';
+import { displayText, visibleMail } from './inbox-content.js';
 import { replyText } from './mailbox-store.js';
 
 // Agent inboxes: `mailboxes` rows with kind='inbox'. One SQL function creates them; ingest and the
@@ -79,9 +79,9 @@ const Message = z.object({
   attachmentCount: z.number(),
   auth: z.object({ spf: z.string().optional(), dkim: z.string().optional(), dmarc: z.string().optional() }).describe('SES verdicts for the sender: PASS, FAIL, GRAY or NONE.'),
   simulated: z.boolean().describe('Created by POST /v1/inboxes/{id}/simulate, not received over SMTP.'),
-  hiddenContent: z.boolean().describe('Hidden HTML (display:none, zero-size text, zero-width characters) was removed from text and snippet.'),
+  hiddenContent: z.boolean().describe('Best-effort detection of hidden, styled or invisible content. False does not guarantee visibility.'),
   extract: z.object({
-    codes: z.array(z.string()).describe('Up to 5 one-time codes near words like code, verify or OTP, in visible text only.'),
+    codes: z.array(z.string()).describe('Up to 5 one-time codes near words like code, verify or OTP, in the best-effort text projection.'),
     links: z.array(Link).describe('Up to 20 http(s) links from visible text. Nothing is fetched.'),
   }).describe('Filled when requested with extract.'),
 }).openapi('InboxMessage');
@@ -142,10 +142,12 @@ type Row = {
 };
 function project(row: Row, extract?: string) {
   const p = visibleMail(row.text, row.html, extract);
+  const clean=(s:string)=>{const out=displayText(s);if(out!==s)p.hiddenContent=true;return out;};
+  const name=row.from_name===null?null:clean(row.from_name),subject=clean(row.subject),to=row.to.map(a=>({...a,name:a.name===null?null:clean(a.name)}));
   return {
     message: {
-      id: row.id, threadId: row.thread_id, cursor: String(row.inbox_seq ?? 0), from: { name: row.from_name, address: row.from_address }, to: row.to,
-      subject: row.subject, snippet: p.text.slice(0, 240), receivedAt: new Date(row.received_at).toISOString(), read: row.read, junk: row.spam, held: row.held_reason,
+      id: row.id, threadId: row.thread_id, cursor: String(row.inbox_seq ?? 0), from: { name, address: row.from_address }, to,
+      subject, snippet: p.text.slice(0, 240), receivedAt: new Date(row.received_at).toISOString(), read: row.read, junk: row.spam, held: row.held_reason,
       attachmentCount: row.attachment_count, auth: { spf: row.verdicts.spf, dkim: row.verdicts.dkim, dmarc: row.verdicts.dmarc }, simulated: row.verdicts.simulated === true,
       hiddenContent: p.hiddenContent, extract: p.extract,
     },
@@ -283,12 +285,13 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     )).rows[0];
     if (!r) throw absent();
     const { message, text } = project(r, q.extract), first = r.files[0], scanned = r.verdicts.virus === 'PASS';
+    if(r.files.some(f=>displayText(f.filename)!==f.filename))message.hiddenContent=true;
     if (r.files.some(f => f.bucket !== first!.bucket)) throw absent();
     // One S3 client for every link; R2 links are Bane-signed and need no client or query.
     const s3 = first && scanned && isS3Bucket(first.bucket) ? await mailboxS3(c.env, v.workspaceId, r.region, first.bucket, c.env.db, r.binding) : undefined;
     try {
       const attachments = await Promise.all(r.files.map(async f => ({
-        id: f.id, filename: f.filename, contentType: f.content_type, size: f.size_bytes,
+        id: f.id, filename: displayText(f.filename), contentType: f.content_type, size: f.size_bytes,
         ...(scanned ? await signedUrl(c.env, v.workspaceId, 'att', r.region, f.bucket, f.storage_key, f.filename, undefined, s3) : { url: null, expiresAt: null }),
       })));
       return c.json({ ...message, text, replyText: replyText(text), html: q.includeHtml === 'true' && r.html ? safeForwardHtml(r.html) : null, attachments }, 200);
@@ -306,7 +309,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     )).rows[0];
     if (!f) throw absent();
     return c.json(await withMailObjects(c.env, v.workspaceId, f.region, f.bucket, async (objects, s3) => {
-      const out = { filename: f.filename, contentType: f.content_type, ...await signedUrl(c.env, v.workspaceId, 'att', f.region, f.bucket, f.storage_key, f.filename, undefined, s3) };
+      const out = { filename: displayText(f.filename), contentType: f.content_type, ...await signedUrl(c.env, v.workspaceId, 'att', f.region, f.bucket, f.storage_key, f.filename, undefined, s3) };
       const text = f.content_type === 'text/plain' && f.size_bytes <= 1048576, image = /^image\/(png|jpeg|gif|webp)$/.test(f.content_type) && f.size_bytes <= 5242880;
       if (!text && !image) return out;
       const stream = await objects.get(f.storage_key, { offset: 0, length: Math.max(1, f.size_bytes) });
