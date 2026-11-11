@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Button, ConfirmDialog, ControlSkeleton, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, FieldSkeleton, Input, SectionHeader, Select } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SectionHeader, Select } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
@@ -9,26 +9,8 @@ import { fieldError, MutationError } from './shared'
 
 const roleOptions = (owner: boolean) => (owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => ({ value: role, label: roleLabel[role] }))
 
-function WorkspaceName({ canEdit }: { canEdit: boolean }) {
-  const session = useSession()
-  const workspaces = useApiDef(queries.workspaces())
-  const current = workspaces.data?.find(workspace => workspace.id === session?.identity?.workspaceId)
-  return <section id="workspace" className={`section stack settings-group${canEdit ? ' settings-rule' : ''}`}>
-    {workspaces.error ? <><SectionHeader title="Workspace" /><ErrorState error={workspaces.error} onRetry={() => void workspaces.refetch()} /></> : !current ? <div className="stack"><SectionHeader title="Workspace" actions={canEdit && <ControlSkeleton width={58} />} /><FieldSkeleton label="Name" /></div> : <WorkspaceNameForm key={current.id} name={current.name} canEdit={canEdit} />}
-  </section>
-}
-function WorkspaceNameForm({ name: initial, canEdit }: { name: string; canEdit: boolean }) {
-  const [name, setName] = useState(initial)
-  const save = useApiMutation((_api, value: string) => workspaceApi.rename(value), 'Saved')
-  async function submit(event: FormEvent) { event.preventDefault(); try { await save.mutateAsync(name.trim()) } catch { /* inline */ } }
-  return <form className="stack" onSubmit={submit}>
-    <SectionHeader title="Workspace" actions={canEdit && <Button type="submit" loading={save.isPending} disabled={!name.trim() || name.trim() === initial} variant="primary">Save</Button>} />
-    <MutationError error={save.error} />
-    <Field label="Name" htmlFor="workspace-name" error={fieldError(save.error, 'name')} hint={canEdit ? undefined : 'Only owners and admins can rename the workspace.'}><Input id="workspace-name" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} readOnly={!canEdit} required /></Field>
-  </form>
-}
 
-function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
+export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
   const session = useSession()
   const members = useApiDef(queries.workspaceMembers())
   const update = useApiMutation((_api, input: { id: string; role: WorkspaceRole }) => workspaceApi.updateMember(input.id, input.role), 'Role updated')
@@ -51,7 +33,7 @@ function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) 
   </section>
 }
 
-function Invitations({ owner }: { owner: boolean }) {
+export function Invitations({ owner }: { owner: boolean }) {
   const invitations = useApiDef(queries.workspaceInvitations())
   const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
@@ -67,7 +49,7 @@ function Invitations({ owner }: { owner: boolean }) {
   </section>
 }
 
-function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boolean; onOpenChange: (open: boolean) => void }) {
+export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boolean; onOpenChange: (open: boolean) => void }) {
   const create = useApiMutation((_api, input: { email: string; role: WorkspaceRole }) => workspaceApi.invite(input), 'Invitation created')
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<WorkspaceRole>('member')
@@ -93,13 +75,3 @@ function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boo
   </Dialog>
 }
 
-// Multi-tenant workspace name, members and invitations.
-export function WorkspaceSections() {
-  const access = useWorkspaceAccess()
-  const [inviting, setInviting] = useState(false)
-  const owner = access.role === 'owner'
-  return <>
-    <WorkspaceName canEdit={access.canAdminister} />
-    {access.canAdminister && <><Members owner={owner} onInvite={() => setInviting(true)} /><Invitations owner={owner} /><InviteDialog open={inviting} owner={owner} onOpenChange={setInviting} /></>}
-  </>
-}
