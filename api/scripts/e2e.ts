@@ -717,10 +717,11 @@ async function inbound() {
   const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
   check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
   if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
-    const url = new URL(link.url);
-    check(/(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port && !url.username && !url.password,'refusing non-S3 attachment URL');
+    // S3 presigned while mail stays in S3; a Bane-signed /v1/objects link on this origin once it is in R2.
+    const url = new URL(link.url), own = url.origin === base.origin && /^\/v1\/objects\/[A-Za-z0-9_.-]+$/.test(url.pathname);
+    check((own || /(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port) && !url.username && !url.password,'refusing an attachment URL that is neither S3 nor this deployment’s object link');
     const res=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(12000)});
-    const trace=ctx.getStore()!; trace.last='S3 GetObject'; trace.requestId=res.headers.get('x-amz-request-id');
+    const trace=ctx.getStore()!; trace.last=own?'GET /v1/objects':'S3 GetObject'; trace.requestId=res.headers.get(own?'x-request-id':'x-amz-request-id');
     check(res.ok && hash(new Uint8Array(await res.arrayBuffer()))===hash(pixelPng()),'inbound attachment SHA-256 mismatch');
     const imported=await api('importTemplateImage',{body:{url:link.url,contentId:prefix,filename:`${prefix}.png`}});
     const path={id:imported.asset.id}; defer(`delete imported PNG ${path.id}`,()=>api('deleteTemplateAsset',{path}));
