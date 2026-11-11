@@ -8483,6 +8483,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
+        await db.query("UPDATE sending_idempotency SET result=NULL WHERE request_key='addr-1'");
+        error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_IN_PROGRESS');
         const route=await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1');assert.equal(route.status,201);assert.equal((await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1')).body.id,route.body.id);
         error(await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'not a url'},'ep-1'),422);
         const made=await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'https://hooks.example.org/replay'},'ep-1');assert.equal(made.status,201,JSON.stringify(made.body));assert.match(made.body.secret,/^whsec_/);

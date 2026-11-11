@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm';
-import { ApiError, digest, type Ctx, type Database } from './core.js';
+import { ApiError, digest, type Ctx } from './core.js';
 import { sendingIdempotency } from './db/sending.js';
 
 /**
@@ -7,8 +7,8 @@ import { sendingIdempotency } from './db/sending.js';
  * launches and domain creation implement it in their own handlers; this middleware covers the
  * rest with the same table and the same rules: the same key and body return the original result
  * (with Idempotent-Replayed: true), a different body is 409 IDEMPOTENCY_CONFLICT, and a
- * concurrent duplicate waits for the first request. The claim, the create and the stored result
- * commit in one transaction, so a crash cannot leave a create without its result.
+ * concurrent duplicate gets a retryable conflict. A committed reservation prevents a second
+ * create if the worker loses the result after the handler commits. No pool slot spans the handler.
  *
  * A result that carries a secret (API key, token, webhook secret, inbox key) is never stored.
  * Replaying it returns 409 IDEMPOTENT_SECRET_WITHHELD naming what was created, so the caller can
@@ -36,7 +36,6 @@ function carriesSecret(value: unknown, depth = 0): boolean {
   if (!value || typeof value !== 'object') return false;
   return Object.entries(value).some(([k, v]) => (SECRET_FIELDS.has(k) && typeof v === 'string' && v.length > 0) || carriesSecret(v, depth + 1));
 }
-class Discard extends Error {}
 
 function idempotentCreates(paths: RegExp[]) {
   return async (c: Ctx, next: () => Promise<void>) => {
@@ -47,39 +46,32 @@ function idempotentCreates(paths: RegExp[]) {
     const text = await c.req.text();
     let parsed: unknown = text;
     try { parsed = text ? JSON.parse(text) : null; } catch { /* hash the raw body */ }
-    const requestHash = await digest(canonical(parsed));
-    const identity = { workspaceId: principal.workspaceId, actorKeyId: principal.keyId, path: c.req.path, requestKey: key };
+    const requestHash = await digest(canonical([parsed,principal.permissions,c.get('actor')?.domains??c.get('mailboxAccess')?.mailboxIds,'receivingConsent' in principal?principal.receivingConsent??false:false]));
+    const identity = { workspaceId: principal.workspaceId, actorKeyId: c.get('actor')?.tokenId??principal.keyId, path: c.req.path, requestKey: key };
     const where = and(eq(sendingIdempotency.workspaceId, identity.workspaceId), eq(sendingIdempotency.actorKeyId, identity.actorKeyId), eq(sendingIdempotency.path, identity.path), eq(sendingIdempotency.requestKey, identity.requestKey));
-    const env = c.env;
-    try {
-      return await env.db.transaction(async tx => {
-        // A concurrent first attempt holds the unique row; this insert waits for it to commit or roll back.
-        const claimed = await tx.insert(sendingIdempotency).values({ ...identity, requestHash }).onConflictDoNothing().returning({ claimed: sql`1` });
-        if (!claimed.length) {
-          const [previous] = await tx.select().from(sendingIdempotency).where(where);
-          if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
-          const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; id?: string | null } | null;
-          if (!stored?.status) throw new ApiError(409, 'IDEMPOTENCY_RESULT_MISSING', 'The original request with this key has no stored result.');
-          if (stored.withheld) throw new ApiError(409, 'IDEMPOTENT_SECRET_WITHHELD', `This Idempotency-Key already created ${stored.id ?? 'the resource'}. Its secret was shown once and is not stored; revoke it and create another if it was lost.`);
-          c.header('Idempotent-Replayed', 'true');
-          return c.json(stored.body as object, stored.status as 200);
-        }
-        c.env = { ...env, db: tx as unknown as Database };
-        try { await next(); } finally { c.env = env; }
-        const status = c.res.status;
-        if (status < 200 || status >= 300) throw new Discard();
-        let body: unknown = null;
-        try { body = await c.res.clone().json(); } catch { body = null; }
-        const withheld = carriesSecret(body);
-        const id = body && typeof body === 'object' && typeof (body as { id?: unknown }).id === 'string' ? (body as { id: string }).id : null;
-        await tx.update(sendingIdempotency).set({ result: withheld ? { status, withheld: true, id } : { status, body } }).where(where);
-        return c.res;
-      });
-    } catch (e) {
-      // The create failed: its claim rolls back with it, so the caller may retry with the same key.
-      if (e instanceof Discard) return c.res;
-      throw e;
+    const db=c.env.db;
+    const claimed = await db.insert(sendingIdempotency).values({ ...identity, requestHash }).onConflictDoNothing().returning({ claimed: sql`1` });
+    if (!claimed.length) {
+      const [previous] = await db.select().from(sendingIdempotency).where(where);
+      if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
+      const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; id?: string | null } | null;
+      if (!stored?.status) { c.header('Retry-After','1');throw new ApiError(409,'IDEMPOTENCY_IN_PROGRESS','The original request has not recorded a result. Retry with the same key; do not repeat the create with a new key.',undefined,true); }
+      if (stored.withheld) throw new ApiError(409, 'IDEMPOTENT_SECRET_WITHHELD', `This Idempotency-Key already created ${stored.id ?? 'the resource'}. Its secret was shown once and is not stored; revoke it and create another if it was lost.`);
+      c.header('Idempotent-Replayed', 'true');
+      return c.json(stored.body as object, stored.status as 200);
     }
+    await next();
+    const status = c.res.status;
+    if (status < 200 || status >= 300) {
+      if(status>=400&&status<500)await db.delete(sendingIdempotency).where(where);
+      return c.res;
+    }
+    let body: unknown = null;
+    try { body = await c.res.clone().json(); } catch { body = null; }
+    const withheld = carriesSecret(body);
+    const id = body && typeof body === 'object' && typeof (body as { id?: unknown }).id === 'string' ? (body as { id: string }).id : null;
+    await db.update(sendingIdempotency).set({ result: withheld ? { status, withheld: true, id } : { status, body } }).where(where);
+    return c.res;
   };
 }
 export const authenticatedCreates = idempotentCreates(AUTHENTICATED_CREATES);

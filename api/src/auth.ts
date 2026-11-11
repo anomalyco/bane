@@ -83,7 +83,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
           AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
           AND permissions = ${JSON.stringify(temporary.permissions)}::jsonb AND domains = ${JSON.stringify(temporary.domains)}::jsonb`));
       if (!tracked) throw invalid();
-      c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
+      c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken',tokenId:temporary.id });
     } else {
       if (!/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
