@@ -3,6 +3,7 @@ import * as cf from "@pulumi/cloudflare";
 import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
+import { mailGateway } from "./mail-gateway.js";
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
 import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
 
@@ -109,6 +110,7 @@ const account = stage.account, region = 'us-east-2', bucketName = `bane-${accoun
 const inboundArn = `arn:aws:sns:${region}:${account}:bane-inbound`;
 const opts = (id:string,provider:pulumi.ProviderResource) => imports.includes(id)?adopt(id,provider):{provider,protect:true};
 const tags = (purpose:string) => ({'bane:installation-id':'bane:pool','bane:purpose':purpose});
+export const mailGatewayEndpoint = mailGateway(stack, stage.account, cloudflareAccountId, config, ohio, iam, cloudflare, tags("mail-gateway"));
 const mail = new aws.s3.Bucket('pool-mail',{bucket:bucketName,tags:tags('mailbox-inbound')},opts(bucketName,ohio));
 const protectedOhio = {provider:ohio,protect:true};
 const block = new aws.s3.BucketPublicAccessBlock('pool-mail-private',{bucket:mail.id,blockPublicAcls:publicAccessBlock.BlockPublicAcls,
