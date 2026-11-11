@@ -240,7 +240,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     await tx.insert(attachmentLinks).values(files.map(f=>({...message.scope,attachmentId:f.sourceId,ownerType:'mailbox' as const,ownerId:f.id})));
   }
   await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
-  if(current.kind==='inbox'&&!message.protocolArchive)await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
+  if(current.kind==='inbox'&&(!message.protocolArchive||files.length))await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
   const queued = await recordEvents(tx, message.scope.workspaceId, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
   return { message: row!, runnable: queued };
 }

@@ -94,8 +94,7 @@ Object.assign(SKIP, {
   testRituals: receivingMvp,
   createInbox: receivingMvp,
   listInboxes: receivingMvp,
-  createInboxFolder:receivingMvp,updateInboxFolder:receivingMvp,deleteInboxFolder:receivingMvp,listInboxAppPasswords:receivingMvp,
-  createInboxAppPassword:'Creates a billable inbox-day; exercise only on the isolated gateway fixture.',revokeInboxAppPassword:'Requires a run-owned protocol credential; exercised on the isolated gateway fixture.',
+  ...(!destructive?{createInboxFolder:receivingMvp,updateInboxFolder:receivingMvp,deleteInboxFolder:receivingMvp,listInboxAppPasswords:receivingMvp,createInboxAppPassword:'A real password starts a billable day. Isolated positive test; dev probes a nonexistent inbox.',revokeInboxAppPassword:receivingMvp}:{}),
   getInbox: receivingMvp,
   listInboxFolders:receivingMvp, getInboxChanges:receivingMvp, copyInboxMessage:receivingMvp, moveInboxMessage:receivingMvp, deleteInboxMessage:receivingMvp, expungeInboxFolder:receivingMvp,
   updateInbox: receivingMvp,
@@ -234,6 +233,14 @@ async function workspaceReads() {
   await expectDenial(() => api('discoverRegion', { path: { region } }), 409, 'CONNECTION_MANAGED_REGION');
 }
 async function devBoundaries() {
+  // Exercise the deployed routes without enabling billing or modifying a shared inbox.
+  const missingInbox={id:'mbx_'+randomUUID().replaceAll('-','')},missingFolder={...missingInbox,folder:'drafts'};
+  await expectDenial(()=>api('createInboxFolder',{path:missingInbox,body:{path:'Check'}}),404,'NOT_FOUND');
+  await expectDenial(()=>api('updateInboxFolder',{path:missingFolder,body:{subscribed:false}}),404,'NOT_FOUND');
+  await expectDenial(()=>api('deleteInboxFolder',{path:missingFolder}),404,'NOT_FOUND');
+  check(!(await api('listInboxAppPasswords',{path:missingInbox})).data.length,'unexpected password listing');
+  await expectDenial(()=>api('createInboxAppPassword',{path:missingInbox,body:{name:'Check',protocols:['imap']}}),409,'INBOX_UNAVAILABLE');
+  await expectDenial(()=>api('revokeInboxAppPassword',{path:{...missingInbox,passwordId:'app_missing'}}),404,'NOT_FOUND');
   // Valid inputs, nonexistent IDs where possible. A 403/404 covers isolation, NOT the
   // dashboard/BYO happy path: report these operations separately from 2xx coverage.
   const fake = {id:prefix}, path = {id:domainId}, child = {...path, subdomainId:prefix};

@@ -115,7 +115,8 @@ def real_services():
         db = f"postgres://postgres@127.0.0.1:{port(pg, 5432)}/fixture"
         until = time.monotonic() + 30
         while sp.run(
-            ["docker", "exec", pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True
+            ["docker", "exec", pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+            capture_output=True,
         ).returncode:
             assert time.monotonic() < until
             time.sleep(0.1)
@@ -746,6 +747,19 @@ def budgets(tmp):
                 assert b"\\Seen" in c.readline()
 
         measure("IDLE wake, 2 sessions", 1, wake)
+        sql(
+            "SELECT inbox_revoke_password('default','mbx_fixture','app_fixture')",
+            "fixture_observer",
+        )
+        for c in (a, b):
+            assert c.readline().startswith(b"* BYE"), "open session survived revocation"
+        denied = open_client()
+        try:
+            denied.login(USER, PASS)
+        except imaplib.IMAP4.error:
+            pass
+        else:
+            raise AssertionError("revoked password survived warm login cache")
 
 
 def main():

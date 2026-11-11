@@ -1,6 +1,6 @@
-# Bane mail gateway — loopback prototype
+# Bane mail gateway
 
-`python3 e2e.py` builds both Rust binaries and runs the black-box gate. `just e2e` also runs the deterministic unit and property tests. Use `cargo clippy --all-targets --locked -- -D warnings` for the lint gate. Run these from `gateway/`.
+`python3 e2e.py --real` builds the gateway, launches an isolated Postgres, MinIO and Bane API with SES simulation, and runs the black-box gate plus SQL-budget and revocation checks. Add Bun and Node 24 to the prerequisites below. `python3 e2e.py` runs the same protocol scenarios on the memory adapter. `just e2e` also runs the deterministic unit and property tests. Use `cargo clippy --all-targets --locked -- -D warnings` for the lint gate. Run these from `gateway/`.
 
 Requirements: stable Rust with edition 2024, Python 3.11+, OpenSSL 3, swaks, NeoMutt, git and Docker Desktop or OrbStack with `host.docker.internal` reaching Mac loopback. The harness pulls digest-pinned Dovecot and imaptest images and fetches the pinned upstream compliance scripts. It generates a fresh certificate, password and ports; no SES, cloud credentials, DNS or real email. A missing required client is a failure, not a skip.
 
@@ -14,8 +14,8 @@ Requirements: stable Rust with edition 2024, Python 3.11+, OpenSSL 3, swaks, Neo
 
 ## Scope and handoff
 
-`core` has no sockets or timers: an IMAP or SMTP session consumes validated commands and returns reply octets and transport actions. `mailgw` owns TLS, deadlines, admission and a coalescing change signal. It binds **only to loopback**, on 993/143 and 465/587 by default. `MAILGW_CERT`, `MAILGW_KEY` and `MAILGW_FIXTURE_PASSWORD` are required. IMAP stays off unless `MAILGW_IMAP_ENABLED=true`. This is a synthetic single-inbox adapter, not an authentication service.
+`core` has no sockets or timers: an IMAP or SMTP session consumes validated commands and returns reply octets and transport actions. `mailgw` owns TLS, deadlines, admission and a coalescing change signal. The memory fixture binds **only to loopback**, on 993/143 and 465/587 by default. `MAILGW_CERT`, `MAILGW_KEY` and `MAILGW_FIXTURE_PASSWORD` are required. IMAP stays off unless `MAILGW_IMAP_ENABLED=true`. This is a synthetic single-inbox adapter, not an authentication service.
 
 The IMAP subset uses rev1 grammar, LITERAL+, SASL-IR, UIDPLUS, MOVE, IDLE, NAMESPACE, ID and SPECIAL-USE. It does **not** advertise full IMAP4rev2, UTF8=ACCEPT, CONDSTORE or QRESYNC. Before enabling rev2, cover its required extensions (notably ESEARCH, extended LIST, BINARY and UTF-8 mailbox handling) and run the rev2 suite. No client should be offered a capability just to pass discovery.
 
-Phase 2 must supply a credential-scoped async read model, immutable byte-range reads and atomic mutations; `MailStore` currently exposes the in-memory folder snapshot. Keep mailbox entries, not message IDs, as the sequence-number source. A transfer allocates a new folder UID; ordinary flags are shared by the inbox membership, `\Deleted` is per entry, and MODSEQ is inbox-wide. Replace local snapshot comparison with the commit-ordered changes/vanished feed before using Postgres. Replace the fixture account and `Submitter` sink with app-password lookup/revocation and the HMAC-signed APPEND/submit routes. Keep daily/monthly caps, domain verification, balance and billing decisions authoritative in the API. Before external traffic: bounded async response streaming, keyed multi-inbox admission, production certificate management and NLB source-IP verification.
+For the real API adapter, task environment, migration ordering, measured budgets and current limits, see [Phase 2](PHASE2.md).

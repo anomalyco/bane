@@ -51,6 +51,7 @@ struct Snapshot {
 }
 type WakeCache = HashMap<(String, Option<String>), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
 pub struct Api {
+    pub online: std::sync::atomic::AtomicBool,
     wakes: Mutex<WakeCache>,
     client: reqwest::Client,
     url: String,
@@ -68,6 +69,7 @@ impl Api {
             "invalid gateway API configuration"
         );
         Ok(Self {
+            online: false.into(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .redirect(reqwest::redirect::Policy::none())
@@ -122,6 +124,9 @@ impl Api {
         }
     }
     fn login(&self, user: &str, password: &str, proto: Protocol) -> Option<Principal> {
+        if !self.online.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
         let p = if proto == Protocol::Imap {
             "imap"
         } else {
@@ -309,6 +314,9 @@ impl MailStore for Store {
         self.folders.keys().cloned().collect()
     }
     fn edit_folder(&mut self, p: &str, op: FolderOp<'_>) -> Result<(), store::Error> {
+        if matches!(op, FolderOp::Create) && self.keys.contains_key(p) {
+            return Err(store::Error::Exists);
+        }
         if !matches!(op, FolderOp::Create) && !self.keys.contains_key(p) {
             return Err(store::Error::Missing);
         }
@@ -386,7 +394,25 @@ pub async fn listen(
     let tls = tokio_rustls::rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let cfg = url.parse::<tokio_postgres::Config>()?;
+    // tokio-postgres calls TLS "require"; the rustls connector still verifies the CA and DNS name.
+    let mut dsn = reqwest::Url::parse(url)?;
+    let opts: Vec<_> = dsn
+        .query_pairs()
+        .filter(|(k, v)| !(k == "sslrootcert" && v == "system"))
+        .map(|(k, v)| {
+            let value = if k == "sslmode" && v == "verify-full" {
+                "require".into()
+            } else {
+                v.into_owned()
+            };
+            (k.into_owned(), value)
+        })
+        .collect();
+    dsn.set_query(None);
+    if !opts.is_empty() {
+        dsn.query_pairs_mut().extend_pairs(opts);
+    }
+    let cfg = dsn.as_str().parse::<tokio_postgres::Config>()?;
     ensure!(cfg.get_ssl_mode()==tokio_postgres::config::SslMode::Require || cfg.get_hosts().iter().all(|h|matches!(h,tokio_postgres::config::Host::Tcp(s) if s=="localhost"||s=="127.0.0.1")),"database TLS required");
     let (client, mut connection) = tokio::time::timeout(
         Duration::from_secs(10),
@@ -409,5 +435,5 @@ pub async fn listen(
         }
         Err::<(), _>(anyhow!("listener ended"))
     };
-    tokio::select! {r=pump=>r,r=async{client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth").await?;api.clear();ready.send_replace(true);std::future::pending::<Result<()>>().await}=>r}
+    tokio::select! {r=pump=>r,r=async{client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth").await?;api.clear();api.online.store(true,std::sync::atomic::Ordering::Release);ready.send_replace(true);std::future::pending::<Result<()>>().await}=>r}
 }

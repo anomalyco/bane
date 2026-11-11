@@ -173,11 +173,19 @@ impl Gateway {
                     tokio::task::block_in_place(|| -> Result<Reply> {
                         let now = chrono::Utc::now().fixed_offset();
                         if let Some(store) = backend.as_mut() {
+                            let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
+                                w.eq_ignore_ascii_case(b"SELECT")
+                                    || w.eq_ignore_ascii_case(b"EXAMINE")
+                            });
                             if matches!(core, Core::Imap(_))
+                                && !selects
                                 && (stale || store.stamp.elapsed() > Duration::from_secs(240))
                             {
                                 store.refresh()?;
                                 stale = false
+                            }
+                            if selects {
+                                stale = false;
                             }
                             Ok(match &mut core {
                                 Core::Imap(i) => i.step(&bytes, identity, store, now),
@@ -365,6 +373,8 @@ async fn main() -> Result<()> {
             loop {
                 if remote::listen(&db, &events, &api, &ready).await.is_err() {
                     ready.send_replace(false);
+                    api.online
+                        .store(false, std::sync::atomic::Ordering::Release);
                     tracing::warn!("protocol notification connection unavailable");
                     api.clear();
                     drop(events.send((String::new(), true)));
