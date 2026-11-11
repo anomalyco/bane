@@ -163,3 +163,9 @@ Dry runs (`POST /v1/routing/test`) with unsaved routes or an earlier version app
 **Not versioned yet:** webhook delivery settings (format, junk, include, timeout, retries) and domain catch-all settings. Restoring a version restores routes only; the restore description says so.
 
 Review follow-up, warm local PostgreSQL: median single `SELECT mail_route_input(...)` round trip (one unmeasured warmup, eight observations, one host and recipient) was **0.039 ms off**, **0.476 ms on**, versus **0.035 ms** for `SELECT NULL::jsonb`. The cached PL/pgSQL early return makes unconfigured lookup negligible in this fixture. **Configured lookup is still over the +0.05 ms target.** These are isolated lookup timings, not whole-claim measurements on the 100k queue.
+
+## Rituals MVP · local acceptance
+
+The isolated `pgdata-mvp` foreground harness ran 301 tests: **295 passed, zero failed, six skipped**, 44.51 s Node duration / **46.16 s wall**. The Omen provider and external transports were synthetic. The route-enabled budget fixture saves an attached ritual, asserts **one DB call for admission**, then **two ingest calls without files or three with files** (four/five including outer job claim and settlement). Stored dry-run output matches the receipt. No additional handler-source fetch at ingest.
+
+Warm-IR Node CPU measurements, 2,000 warmups and 30,000 iterations per case (`BANE_BENCH=1`, `rituals: microbenchmarks`): subject predicate **3.71 µs / 10 steps**; reshaped webhook **5.94 µs / 45 steps**; RE2 predicate on 720 characters **3.06 µs / 369 steps**. This is isolated interpreter CPU, not database latency, parsing, inference or cold Worker startup. Per-run / per-message step ceilings: 50,000 / 250,000. The default manager MCP catalog test measured 14 tools including discovery, about 50,000 serialized characters.

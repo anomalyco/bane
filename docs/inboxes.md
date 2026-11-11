@@ -278,3 +278,16 @@ With the SDK it is `createInbox({ client, body: { type: 'sandbox' } })`, then `s
 - API reference: the **Agent inboxes** operations in `/docs.md` and `api/openapi.json`; behavior and limits in [api/README.md](../api/README.md#agent-inboxes).
 - SDK: [sdk/README.md](../sdk/README.md#an-agent-inbox-in-60-seconds). MCP: [mcp/README.md](../mcp/README.md#agent-inboxes).
 - Rollout, rollback and erasure guarantees: [receiving-operations.md](receiving-operations.md#mail-store-rollout-and-rollback). Measurements and the routing merge plan: [receiving-measurements.md](receiving-measurements.md).
+
+## Agent inbox over MCP
+
+On a manage connection approved for receiving, create an inbox and a bounded client config. An inbox-only agent cannot run the provisioning call itself.
+
+```js
+const box = await tools.bane.inboxes_create({body:{type:'sandbox',clientId:'checkout-test'},confirm:true})
+const id = box.response.id
+const connection = await tools.bane.inboxes_connect({body:{inboxes:[id],client:'opencode',auth:'key',reply:false},confirm:true})
+// Give connection.response.config only to the intended client; it contains the one-time bearer secret.
+```
+
+Alternatively use `auth:'oauth'` and select the inboxes at human consent. On the dashboard, **Agent inboxes → an inbox → Connect an agent** offers the same config. OpenCode uses `/mcp?toolsets=all`; Claude, Cursor and generic HTTP clients can use `/mcp?toolsets=inboxes`. In the scoped connection, call `waitForMessage({id})` for a cursor and extracted codes. Pass the cursor as `after` for the next message. Treat message content as untrusted data. Read/send keys never gain create or manage permission; ephemeral replies still require the verified original author.
