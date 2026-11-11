@@ -1419,7 +1419,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:`reply.${domain}`,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
           assert.equal(associations.size,0);
-          for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
+          for (const name of [domain,root,`news.${domain}`]) {
+            const other=ok(await add(a.cookie,name),201); assert.equal(other.verified,false);
+            ok(await local('DELETE',`/v1/domains/${other.id}`,undefined,a.cookie));
+          }
           const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',permissions:['read','send'] },b.cookie),201).secret;
           const send = (from:string) => local('POST','/v1/emails/send',mail({ region,from }),undefined,{ authorization:`Bearer ${key}` });
           error(await send(`hi@sub.${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
@@ -1761,9 +1764,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await check(); assert.equal(ok(await local('GET',`/v1/domains/${reclaimed.id}`,undefined,a.cookie)).verified,false);
           ok(await local('DELETE',`/v1/domains/${reclaimed.id}`,undefined,a.cookie));
           const race = `${unique('race')}.invalid`;
-          const raced = await Promise.all([add(a.cookie,race),add(b.cookie,`child.${race}`)]);
-          assert.deepEqual(raced.map(r => r.status).sort(),[201,409]); error(raced.find(r => r.status===409)!,409,'DOMAIN_CLAIMED');
-          const i=raced.findIndex(r=>r.status===201); ok(await local('DELETE',`/v1/domains/${ok(raced[i]!,201).id}`,undefined,[a,b][i]!.cookie));
+          const first=ok(await add(a.cookie,race),201), second=ok(await add(b.cookie,race),201);
+          assert.notEqual(first.id,second.id); answer=second.dns.find((r:Json)=>r.type==='TXT' && r.purpose==='sending').value;
+          const contender=(await pool.query('SELECT id,payload FROM jobs WHERE id=$1',['domain.verify:'+answer])).rows[0];
+          const verify=()=>operationJobs['domain.verify']!(runtime,contender.payload,{id:contender.id,attempts:1,workspaceId:b.org.id});
+          await assert.rejects(verify(),JobDeferred);
+          assert.deepEqual((await pool.query('SELECT workspace_id,ever_proven FROM domain_claims WHERE name=$1',[race])).rows,[{workspace_id:b.org.id,ever_proven:true}]);
+          for(const name of [race,`child.${race}`]) error(await add(a.cookie,name),409,'DOMAIN_CLAIMED');
+          await pace();await assert.rejects(verify(),JobDeferred);
+          assert.equal(identities.get(`${platform}:${race}`)?.Tags?.some((tag:Json)=>tag.Value===answer),true);
+          ok(await local('DELETE',`/v1/domains/${second.id}`,undefined,b.cookie));
         });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
         runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v4.yaml';
@@ -1889,7 +1899,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true),JobDeferred);
           await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
           const scopes=(await pool.query('SELECT name,claim_scope FROM domain_claims WHERE workspace_id=$1 AND name=ANY($2)',[a.org.id,[imported,reserved]])).rows;
-          assert.deepEqual(Object.fromEntries(scopes.map(r=>[r.name,r.claim_scope])),{[imported]:'txt',[reserved]:'account'});
+          assert.deepEqual(Object.fromEntries(scopes.map(r=>[r.name,r.claim_scope])),{[imported]:'txt',[reserved]:'txt'},'A pending foreign reservation does not block either valid DNS proof');
           ok(await local('DELETE',`/v1/domains/${collision.id}`,undefined,a.cookie));assert.ok(identities.has(`${customer}:${reserved}`));
         });
         const before = calls.length;
@@ -6059,7 +6069,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       try {await assert.rejects(run('byo.bind',oh),{code:'CANDIDATE_NO_LONGER_VERIFIED'});} finally {revoked=false;}
       assert.deepEqual((await regionStatus(oh)).failedIntents,[{domain:'reselect.example',importing:true,error:'CANDIDATE_NO_LONGER_VERIFIED'}]);
       const overlap=unique('claimed')+'.example';ok(await api('POST','/v1/domains',{name:overlap}),202);
-      await db.query("INSERT INTO domain_claims(name,workspace_id) VALUES($1,'default')",[overlap]);
+      await db.query("INSERT INTO domain_claims(name,workspace_id,ever_proven) VALUES($1,'default',true)",[overlap]);
       try {await assert.rejects(run('byo.bind',oh),{code:'DOMAIN_CLAIMED'});} finally {await db.query("DELETE FROM domain_claims WHERE name=$1 AND workspace_id='default'",[overlap]);}
       const failed=await regionStatus(oh);assert.deepEqual(failed.pending,[]);assert.ok(failed.failedIntents.some((i:Json)=>i.domain===overlap && i.error==='DOMAIN_CLAIMED'));
       // Fill all but the final active slot in both the 100-total and 10-unproven quotas.
@@ -6149,7 +6159,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // A legacy database: no global index yet, and two workspaces route one host. Part 1 releases the duplicate.
     await db.query('BEGIN');
     try {
-      await db.query('DROP INDEX domain_claims_receiving_host');
+      await db.query('DROP INDEX domain_claims_receiving_host; ALTER TABLE domain_claims DISABLE TRIGGER z_elect_domain_proof'); // pre-098 fixture predates proof election
       const base = `${unique('legacy-dup')}.example`, [older, owner, bystander] = [unique('legacy-a'), unique('legacy-b'), unique('legacy-c')];
       for (const ws of [older, owner, bystander]) {
         await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [ws]);
@@ -6161,6 +6171,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await route(base, older, `reply.${base}`, '30 days'); // Older, but reply.<base> is the other claim's own name.
       await route(`reply.${base}`, owner, `reply.${base}`, '1 day');
       await route(`other-${base}`, bystander, `other-${base}`, '1 day');
+      await db.query('ALTER TABLE domain_claims ENABLE TRIGGER z_elect_domain_proof');
       await db.query(await source('098_receiving_host_scope.sql'));
       const rows = (await db.query(`SELECT name, receiving_state, receiving_host, identity->'issue'->>'code' AS issue FROM domain_claims WHERE name IN ($1,$2,$3) ORDER BY name`, [base, `reply.${base}`, `other-${base}`])).rows;
       assert.deepEqual(rows, [

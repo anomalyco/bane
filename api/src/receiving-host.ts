@@ -70,7 +70,7 @@ async function hostOwners(db: Pick<DbExecutor, 'execute'>, hosts: string[], wid:
   const [routed, claims] = await Promise.all([
     db.execute<{ host: string; own: boolean; name: string }>(sql`SELECT receiving_host AS host,workspace_id=${wid} AS own,name FROM domain_claims
       WHERE receiving_host IN (SELECT jsonb_array_elements_text(${JSON.stringify(hosts)}::jsonb)) AND NOT (workspace_id=${wid} AND name=${domain})`),
-    names.length ? db.execute<{ name: string }>(sql`SELECT DISTINCT name FROM domain_claims WHERE name IN (SELECT jsonb_array_elements_text(${JSON.stringify(names)}::jsonb)) AND workspace_id<>${wid}`) : { rows: [] },
+    names.length ? db.execute<{ name: string }>(sql`SELECT DISTINCT name FROM domain_claims WHERE name IN (SELECT jsonb_array_elements_text(${JSON.stringify(names)}::jsonb)) AND workspace_id<>${wid} AND (ever_proven OR claim_scope='account')`) : { rows: [] },
   ]);
   const claimed = new Set(claims.rows.map(row => row.name));
   return {
