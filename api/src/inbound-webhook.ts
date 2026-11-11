@@ -229,7 +229,7 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
     timestamp = String(Math.floor(Date.now() / 1000));
   if(Buffer.byteLength(body)>POST_LIMIT)throw new ApiError(413,'WEBHOOK_BODY_TOO_LARGE','Webhook metadata exceeds 512 KiB. Read the stored message instead.');
   Object.assign(headers, {
-    ...('ritualAction' in event?{'Idempotency-Key':h.delivery_id}:{}),
+    ...(h.routed||'ritualAction' in event?{'Idempotency-Key':h.delivery_id}:{}),
     'Webhook-Id': event.id,
     'Webhook-Timestamp': timestamp,
     'Webhook-Signature': 'v1,' + (await hmac(secret, `${event.id}.${timestamp}.${body}`)),

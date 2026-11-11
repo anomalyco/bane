@@ -8426,6 +8426,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           runtime.webhookFetch=timeout;await assert.rejects(attempt(first,2),{code:'ACTION_UNKNOWN',retryable:false});assert.equal(await state(first),'unknown');
           assert.deepEqual((await call('PATCH','/v1/endpoints/triage',{retryOnTimeout:true})).policy,{perMinute:30,retryOnTimeout:true,idempotent:false});error(await local('PATCH','/v1/endpoints/triage',{idempotent:true}),422,'UNSUPPORTED_IDEMPOTENCY');
           const second=await deliveryFor('chat-timeout');await assert.rejects(attempt(second,1),(e:unknown)=>e instanceof ActionRetry&&e.code==='ACTION_UNKNOWN');runtime.webhookFetch=async()=>({status:200});await attempt(second,2);assert.equal(await state(second),'delivered');
+          const routed=await deliveryFor('route-policy');await db.query("UPDATE mailbox_webhook_deliveries SET routed=true,payload=payload-'ritualAction' WHERE id=$1",[routed]);
+          runtime.webhookFetch=async()=>({status:429,retryAfter:'2'});await assert.rejects(attempt(routed,1),(e:unknown)=>e instanceof ActionRetry&&e.afterMs===2000);
+          await db.query("UPDATE api_request_budgets SET used=30,window_start=date_trunc('minute',now()) WHERE workspace_id=$1 AND key_id=$2",[wid,'ritual:'+row.hook_id]);
+          await assert.rejects(attempt(routed,2),(await import('./src/jobs.js')).JobDeferred);
         }finally{runtime.webhookFetch=prev;await call('PUT',path,{})}
       });
       await t.test('rituals: forwards require recipient verification, rewrite From via the inbox and suppress loops and repeats',async()=>{

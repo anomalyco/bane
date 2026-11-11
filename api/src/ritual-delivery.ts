@@ -11,8 +11,7 @@ type Sent = { status: number; retryAfter?: string | null };
  * Order: grant still active → endpoint policy → per-action fence → per-endpoint rate slot → send.
  * Retries all leave through ActionRetry, so backoff, jitter and Retry-After are identical for
  * every endpoint type. An attempt with an unknown outcome is replayed only when the endpoint is
- * idempotent or opted in to retryOnTimeout. Route deliveries (no ritualAction) keep their own
- * webhook semantics and skip this wrapper.
+ * idempotent or opted in to retryOnTimeout. Plain event subscriptions keep their webhook semantics.
  */
 export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebhook, send: () => Promise<Sent>): Promise<Sent> {
   const grants = (h.payload as { grants?: string[] }).grants;
@@ -24,7 +23,7 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
     }
   }
   const action = (h.payload as { ritualAction?: string }).ritualAction;
-  if (!action) return send();
+  if (!action && !h.routed) return send();
   const fence = await runtime.db.transaction(async tx => {
     const row = (await tx.execute<{ type: EndpointType | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null }>(sql`
       SELECT nullif(split_part(d.ref,':',1),'') AS type,p.per_minute,p.retry_on_timeout,p.idempotent
