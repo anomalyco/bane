@@ -1016,6 +1016,9 @@ function trustedSnsUrl(value: string, host: string, certificate: boolean) {
 }
 // Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
 const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
+// Only a valid signature may pin a signer. Unverified candidates, 404s and
+// peer throttles never replace these entries. Drop expired certificates only.
+const verifiedSigners = new Map<string, X509Certificate>();
 const missingCertificates=new Map<string,number>();
 // Node has no edge rate-limit binding. Reserve a miss synchronously, before I/O;
 // at capacity refuse new miss buckets rather than evicting a live peer's budget.
@@ -1078,19 +1081,24 @@ async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) 
   const values = envelope as Record<string, unknown>;
   if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
   const cached = snsCertificates.get(url.href);
-  let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
+  const pinned = verifiedSigners.get(url.href);
+  let cert = pinned && Date.parse(pinned.validTo)>Date.now() ? pinned : cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
   if (!cert) {
     if((missingCertificates.get(url.href)??0)>Date.now()) throw new ApiError(403,'SNS_INVALID_CERTIFICATE','The SNS signing certificate does not exist.');
     if (!(runtime.allowSnsCertMiss ? await runtime.allowSnsCertMiss(peer) : allowLocalCertMiss(peer))) throw certMissLimited();
     cert=await isolateCertMissBudget.run(() => fetchSnsCert(url,certificateTimeout));
   }
   if (Date.now() < Date.parse(cert.validFrom) || Date.now() > Date.parse(cert.validTo) || cert.publicKey.asymmetricKeyType !== 'rsa') throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is expired or invalid.');
-  if (!cached || cached.expiresAt <= Date.now()) {
+  if (cert !== pinned && (!cached || cached.expiresAt <= Date.now())) {
     if (snsCertificates.size >= 8) snsCertificates.delete(snsCertificates.keys().next().value!);
     snsCertificates.set(url.href, { cert, expiresAt: Math.min(Date.now() + 300000, Date.parse(cert.validTo)) });
   }
   const canonical = fields.map(field => `${field}\n${values[field]}\n`).join('');
   if (!verify(envelope.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1', Buffer.from(canonical), cert.publicKey, signature)) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature verification failed.');
+  if (cert !== pinned) {
+    for(const [key,value] of verifiedSigners) if(Date.parse(value.validTo)<=Date.now()) verifiedSigners.delete(key);
+    verifiedSigners.set(url.href,cert);
+  }
   return trusted;
 }
 function verifySesAccount(runtime: Runtime, message: unknown, topicArn: string) {

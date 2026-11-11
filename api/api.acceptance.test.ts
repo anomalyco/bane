@@ -4646,11 +4646,11 @@ describe('Operational configuration and public event boundaries', () => {
       const host=`https://sns.${REGION}.amazonaws.com/`, positive=snsCertName(), negative=snsCertName();
       const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
       const pem=await selfSignedPem(privateKey);
-      let hold=false, active=0, started!:()=>void, release!:()=>void;
+      let candidates=false,hold=false, active=0, started!:()=>void, release!:()=>void;
       const allStarted=new Promise<void>(resolve=>{started=resolve;}), gate=new Promise<void>(resolve=>{release=resolve;});
       const transport=t.mock.method(globalThis,'fetch',async(input:URL)=>{
         if(hold){ if(++active===4) started(); await gate; }
-        assert.equal(input.origin+'/',host);return input.href===host+positive ? new Response(pem) : new Response(null,{status:404});
+        assert.equal(input.origin+'/',host);return candidates || input.href===host+positive ? new Response(pem) : new Response(null,{status:404});
       });
       const wire=t.mock.method(db,'query');
       const envelope={Type:'Notification',MessageId:'fixture',TopicArn:`arn:aws:sns:${REGION}:111122223333:fixture`,Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:Buffer.alloc(256).toString('base64')};
@@ -4669,17 +4669,20 @@ describe('Operational configuration and public event boundaries', () => {
       t.diagnostic('SNS: 200 cold certificate paths in one /64, 60 mocked fetches, 0 SQL');
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,'111122223333','ready',$2)`,[REGION,envelope.TopicArn]);
-      hold=true;
+      const fields={Message:'fixture',MessageId:'cached',SubscribeURL:host,Timestamp:envelope.Timestamp,Token:'fixture',TopicArn:envelope.TopicArn,Type:'UnsubscribeConfirmation'};
+      const signature=Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(fields).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64');
+      const signed=()=>local('POST','/v1/events/ses',{...fields,SignatureVersion:'2',Signature:signature,SigningCertURL:host+positive});
+      ok(await signed(),202); candidates=true;
       const fresh=()=>check(snsCertName(),'2001:db8:124::1');
+      for(let i=0;i<9;i++) error(await fresh(),403,'SNS_INVALID_SIGNATURE');
+      candidates=false;hold=true;
       const pending=Array.from({length:4},fresh);
       try {
         await allStarted;
         error(await fresh(),429,'SNS_CERTIFICATE_RATE_LIMITED');
-        const fields={Message:'fixture',MessageId:'cached',SubscribeURL:host,Timestamp:envelope.Timestamp,Token:'fixture',TopicArn:envelope.TopicArn,Type:'UnsubscribeConfirmation'};
-        const signature=Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(fields).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64');
-        ok(await local('POST','/v1/events/ses',{...fields,SignatureVersion:'2',Signature:signature,SigningCertURL:host+positive}),202);
+        for(let i=0;i<11;i++) ok(await signed(),202);
         error(await check(negative),403,'SNS_INVALID_CERTIFICATE');
-        assert.equal(transport.mock.callCount(),65,'Only four additional cold fetches; signed cache hit still succeeds');
+        assert.equal(transport.mock.callCount(),74,'All eleven signed callbacks use the pin without a new fetch');
       } finally { release(); await Promise.all(pending); }
     }));
   });
