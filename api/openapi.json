@@ -7335,13 +7335,6 @@
       "InboundAddress": {
         "type": "object",
         "properties": {
-          "kind": {
-            "type": "string",
-            "enum": [
-              "address",
-              "inbox"
-            ]
-          },
           "id": {
             "type": "string"
           },
@@ -7450,10 +7443,17 @@
           "requireDmarc": {
             "type": "boolean",
             "description": "When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "address",
+              "inbox"
+            ],
+            "description": "inbox: an agent inbox; manage it with /v1/inboxes."
           }
         },
         "required": [
-          "kind",
           "id",
           "address",
           "displayName",
@@ -7468,7 +7468,8 @@
           "expiresAt",
           "stats",
           "sendLimits",
-          "requireDmarc"
+          "requireDmarc",
+          "kind"
         ]
       },
       "CreateInboundAddress": {

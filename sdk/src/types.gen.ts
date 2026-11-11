@@ -1946,7 +1946,6 @@ export type InboundAddressPage = {
 };
 
 export type InboundAddress = {
-    kind: 'address' | 'inbox';
     id: string;
     address: string;
     displayName: string | null;
@@ -1985,6 +1984,10 @@ export type InboundAddress = {
      * When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received.
      */
     requireDmarc: boolean;
+    /**
+     * inbox: an agent inbox; manage it with /v1/inboxes.
+     */
+    kind: 'address' | 'inbox';
 };
 
 export type CreateInboundAddress = {
