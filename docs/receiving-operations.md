@@ -161,6 +161,37 @@ Alert on nonempty `AWS/SQS ApproximateNumberOfMessagesVisible` for `bane-inbound
 
 ## Mail-store rollout and rollback
 
-Hosted raw MIME and extracted files are private mail content. After the R2 switch, new shared-pool content is stored in Cloudflare R2; SES staging and quarantine remain in Amazon S3. Apply migrations 104–107 before switching Workers. Provision the protected stage-specific mail bucket and lifecycle rules before binding it. Do not share buckets between stages.
+Inboxes phase 1 moves new hosted received mail (raw MIME and extracted files) from the SES pool bucket to the R2 bucket `bane-<stage>-mail`, and turns on agent inboxes. SES staging (3 days) and quarantine (30 days) stay in S3. BYO and self-hosted mail stays in its S3 bucket. One Worker variable, `BANE_MAIL_STORE`, switches both; the `MAIL` binding must stay bound once any `r2:` row exists.
 
-Dev specifies `BANE_MAIL_STORE=r2`; production specifies `s3` until rollout. To roll back writes, unset the switch, **not** the binding: `r2:` rows and outstanding download links still need `MAIL`. Old S3 rows remain readable. For S3-backed ephemeral mail, check the operator-managed data-plane role can delete its workspace's retained objects. This feature does not expand AWS IAM grants. Failed deletions keep their key lists in `mail.deleteObjects` jobs for operator retry. Do not advertise completed erasure while these jobs are failed.
+| Stage | `MAIL` binding | `BANE_MAIL_STORE` | Effect |
+|---|---|---|---|
+| dev | `bane-dev-mail` | `r2` | Shared-pool mail and inbox mail in R2; inboxes on |
+| production, at deploy | `bane-prod-mail` | `s3` | No change: mail stays in S3, `POST /v1/inboxes` answers `503 INBOXES_UNAVAILABLE` |
+| production, after the flip | `bane-prod-mail` | `r2` | As dev |
+
+### Dev
+
+1. Before merging, preview the `dev` stack (`pulumi preview --stack dev` from `infra/pulumi` with the deploy role, or a `Deploy` dispatch with `preview: true`) and check the plan is exactly two creates in the Cloudflare account: `cf:R2Bucket mail` (`bane-dev-mail`, ENAM, protected) and `cf:R2BucketLifecycle mail-lifecycle` (`default-raw-90d` on `d/`, `ephemeral-safety-45d` on `e/`, `abort-multipart-1d`), with no replacements or deletes. The minted Cloudflare token must be allowed to create R2 buckets and write their lifecycle (Workers R2 Storage: Edit); if it isn't, create `bane-dev-mail` once by hand in ENAM and adopt it with an `import` option like the attachments bucket.
+2. Merge to `dev`. The deploy applies Pulumi first (`infra/pulumi` changed), then migrations 104–107, then the Worker with the `MAIL` binding. A Worker deploy that binds a missing bucket fails, so Pulumi must succeed first.
+3. Verify on `dev.bane.mx`:
+   - The receiving canary passes. Its `mail_messages` row has `raw_bucket = 'r2:bane-dev-mail'` and `raw_key = 'd/<workspace>/<message>.eml'`; the only new S3 object is under `staging/`.
+   - An inbox on the dev receiving host (`POST /v1/inboxes`) receives a real message, `waitForMessage` returns it within 5 seconds of the SES receipt, and its attachment downloads through `/v1/objects/…`.
+   - After `DELETE /v1/inboxes/{id}` and the next hourly sweep, its rows are gone and `npx wrangler r2 object get bane-dev-mail/e/<workspace>/<inbox>/<message>.eml --remote` answers not found.
+   - OpenCode connected to `https://dev.bane.mx/mcp` with an inbox key runs create → wait → read → delete.
+
+### Production (after Ryan approves)
+
+4. Push `dev` to `production` as usual. Pulumi creates `bane-prod-mail` and its lifecycle first (same plan as step 1), the migrations run, and the Worker deploys with `BANE_MAIL_STORE=s3`: nothing changes for mail yet.
+5. The flip: change `BANE_MAIL_STORE` to `"r2"` in `api/wrangler.prod.jsonc`, merge it through `dev` and push to `production`. New shared-pool mail goes to R2 and agent inboxes turn on.
+6. Run the production receiving canary and check its row says `r2:bane-prod-mail`. Add Cloudflare R2 as a storage location for hosted mail to the privacy notice.
+
+### Rollback
+
+Set `BANE_MAIL_STORE` back to `"s3"` and deploy. **Keep the `MAIL` binding and the bucket:** `r2:` rows and outstanding download links read through it. New default mail goes back to S3, new inboxes are refused with `503`, and existing inboxes keep working: their mail and erasure stay in R2 while `MAIL` is bound. Legacy S3 rows stay readable throughout.
+
+### IAM and erasure
+
+- **Hosted shared pool: no change.** Inbox mail always goes to R2, and R2 deletes go through the binding, so the runtime needs no `s3:DeleteObject`. Default-class raw MIME in R2 expires after 90 days by the `d/` rule, as in S3; extracted attachments do not expire, as today.
+- **BYO connections:** inbox mail stays in the customer’s bucket, and the BYO template (v4) grants no delete. Erasing such an inbox removes its rows; its objects stay (raw MIME expires at 90 days through the bucket rule) and the `mail.deleteObjects` job fails with `MAIL_DELETE_DENIED`, keeping its keys. A future template version can grant `s3:DeleteObject` on `workspaces/*/raw/*` and `workspaces/*/att/*`.
+- **Self-hosted:** the operator’s S3 credentials need `s3:DeleteObject` on the same two prefixes.
+- Watch `SELECT workspace_id,last_error,count(*) FROM jobs WHERE type='mail.deleteObjects' AND status='failed' GROUP BY 1,2` and `RETENTION_PARTIAL` logs. Don’t advertise completed erasure while deletes are failing.
