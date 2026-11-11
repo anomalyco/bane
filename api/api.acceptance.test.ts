@@ -2525,6 +2525,29 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
   });
 
+  test('R1: grant edits preserve the human attachment chain across revocation', async t => {
+    await simulatedSesFixture(t,async({db,local,request})=>{
+      const {token,consentId}=await oauthGrant(t,db,writableScope,request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      const box=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
+      const rituals=[{key:'guard',source:'export default function route(email){block()}'},{key:'note',source:'export default function route(email){label("note")}'},{key:'extra',source:'export default function route(email){label("extra")}'}];
+      const binding=(ritual:string)=>({target:box.address,ritual,continue:false});
+      const attachments=[binding('guard'),binding('note')];
+      const path='/v1/rituals', saved=ok(await local('PUT',path,{rituals,attachments}));
+      const result=ok(await request('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R1 fixture',permissions:['manage']}}}},rpcHeaders)).result.structuredContent;
+      const key=result.response.secret;secrets.add(key);
+      const attach=(list:typeof attachments)=>request('PUT',path+'/attachments',key,{attachments:list});
+      for(const change of [[...attachments].reverse(),attachments.slice(1),[{...attachments[0],continue:true},attachments[1]]])
+        error(await attach(change),403,'RITUAL_BINDING_NOT_OWNED');
+      assert.equal(ok(await local('GET',path)).version,saved.version);
+      ok(await attach([binding('extra'),...attachments]));
+      const dry=async()=>ok(await local('POST',path+'/test',{mime:`To: ${box.address}\r\nSubject: fixture\r\n\r\nfixture`})).recipients[0];
+      assert.ok((await dry()).labels.includes('extra'));
+      ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
+      assert.equal((await dry()).dropped,true,'Only the grant-owned addition disappears; the original first guard still blocks.');
+    });
+  });
+
   test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });

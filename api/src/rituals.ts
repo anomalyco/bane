@@ -107,13 +107,23 @@ async function save(tx: DbExecutor, c: Ctx, w: string, config: Config, version: 
   const p = await prepare(tx, w, config),
     next = version + 1;
   const prior=(await tx.execute<{config:Config;owners:Record<string,string|null>}>(sql`SELECT config,owners FROM mail_ritual_configs WHERE workspace_id=${w} FOR UPDATE`)).rows[0];
+  const bindingKey=(b:Config['attachments'][number])=>'attachment:'+b.target+':'+b.ritual;
   const parts=(cfg:Config)=>new Map<string,string>([
     ...cfg.rituals.map(r=>['ritual:'+r.key,r.source] as const),
-    ...cfg.attachments.map(b=>['attachment:'+b.target+':'+b.ritual,String(b.continue)] as const),
+    ...cfg.attachments.map(b=>[bindingKey(b),String(b.continue)] as const),
     ...Object.entries(cfg.senderLists).map(([k,v])=>['list:'+k,JSON.stringify(v)] as const),
     ...cfg.evaluateDomains.map(k=>['domain:'+k,k] as const),...cfg.evaluateRoutes.map(k=>['route:'+k,k] as const),
   ]);
   const before=prior&&parts(prior.config), grant=c.get('actor').grantId??null;
+  if (prior && grant && !preview) {
+    // Ignore additions and this approval's own bindings. What remains must be the
+    // same chain, including continue flags: the first action can stop later guards.
+    const protectedBindings=prior.config.attachments.filter(b=>prior.owners[bindingKey(b)]!==grant);
+    const protectedKeys=new Set(protectedBindings.map(bindingKey));
+    const retained=config.attachments.filter(b=>protectedKeys.has(bindingKey(b)));
+    if (retained.length!==protectedBindings.length || retained.some((b,i)=>bindingKey(b)!==bindingKey(protectedBindings[i]) || b.continue!==protectedBindings[i].continue))
+      throw new ApiError(403,'RITUAL_BINDING_NOT_OWNED','This approval cannot remove, change, or reorder another owner’s ritual attachments.','attachments');
+  }
   p.owners=Object.fromEntries([...parts(config)].map(([k,v])=>[k,before?.get(k)===v?prior?.owners[k]??null:preview?null:grant]));
   await tx.execute(
     sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},${next}) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version`,
