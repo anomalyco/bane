@@ -4281,6 +4281,60 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { ...expected, total: 3, unknown: 0 });
     assert.deepEqual(ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts, { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 });
   });
+
+  test('sender score: warm-up until 100 real emails, measured and neutral factors, the replayed daily limit and workspace-wide reads', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs.
+      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; from?: string; daysAgo?: number } = {}) => db.query(
+        `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
+         SELECT $1 || n, $2, $3, 'fixture', $4, '["recipient@example.com"]', '[]', '[]', 'Score fixture', '{}', $5, $6::text, CASE WHEN $6::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $7, $8, date_trunc('day', now(), 'UTC') - make_interval(days => $10::int) + make_interval(secs => n)
+         FROM generate_series(1, $9::int) n`,
+        [unique('score-'), wid, REGION, options.from ?? 'Sender <hello@score.example>', options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0]);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
+      const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
+      // Simulated mail never counts; 99 real emails (5 three days ago, 5 two days ago) are still warming up, with no score, grade or history.
+      await insert(500, { simulated: true }); await insert(5, { daysAgo: 3 }); await insert(5, { daysAgo: 2 }); await insert(89);
+      const warm = await read();
+      assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history], ['warmup', 99, 100, null, null, []]);
+      // Self-hosted has no stored domain records and no hosted screen: both are neutral and drop out of the weighting.
+      assert.deepEqual(warm.factors.filter((f: Json) => f.source === 'neutral').map((f: Json) => f.key), ['content', 'auth']);
+      // The 100th email grades it. Empty days hold the prior (75); the small early days nudge it to 75.3 and 75.6;
+      // today's target is 79.7, but a day rises at most 2. Today's 90 against two 5-email days counts as 4.5× (floor 20).
+      await insert(1);
+      const first = await read();
+      assert.deepEqual([first.state, first.score, first.grade, first.target, first.emails.last30Days], ['graded', 77.6, 'C', 79.7, 100]);
+      assert.deepEqual([first.history.length, first.history[9].score, first.history[10].score, first.history[12].score, first.history.at(-1).score], [14, 75, 75.3, 75.6, 77.6]);
+      assert.deepEqual(first.band, { min: 70, max: 80 }); assert.deepEqual(first.next, { grade: 'B', at: 80 });
+      const factor = (body: Json, name: string) => body.factors.find((f: Json) => f.key === name);
+      assert.deepEqual([factor(first, 'complaints').score, factor(first, 'bounces').score, factor(first, 'hygiene').score, factor(first, 'consistency').value], [100, 100, 100, 4.5]);
+      // A burst of complaints and bounces the same day: the target falls to 41.9, but a day falls at most 15.
+      await insert(200, { status: 'complained', outcomes: 11 }); await insert(200, { status: 'bounced', outcomes: 5 });
+      const burst = await read();
+      assert.deepEqual([burst.target, burst.score, burst.grade, factor(burst, 'complaints').score, factor(burst, 'bounces').score, factor(burst, 'consistency').score], [41.9, 60.6, 'D', 0, 0, 0]);
+      // Hosted and screened: content and volume-weighted authentication are measured from stored results only.
+      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [], hostedScreen: true, screen: { apiKey: 'synthetic', endpoint: 'https://screen.invalid', model: 'synthetic', mode: 'reject', threshold: 0.7 } });
+      const connection = unique('conn'), signed = unique('score') + '.example', loose = unique('score') + '.example';
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')", [connection, wid, REGION]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,identity) VALUES
+        ($1,$3,$4,'verified',jsonb_build_object('ses',jsonb_build_object('DkimAttributes',jsonb_build_object('Status','SUCCESS','SigningEnabled',true),'MailFromAttributes',jsonb_build_object('MailFromDomainStatus','SUCCESS')),'dmarc',jsonb_build_object('status','reject'))),
+        ($2,$3,$4,'verified',jsonb_build_object('ses',jsonb_build_object('DkimAttributes',jsonb_build_object('Status','SUCCESS','SigningEnabled',true)),'dmarc',jsonb_build_object('status','none')))`, [signed, loose, wid, connection]);
+      await db.query('UPDATE sending_emails SET from_address=$2 WHERE workspace_id=$1 AND NOT simulated', [wid, `Sender <hello@mail.${signed}>`]);
+      await insert(25, { status: 'rejected', outcomes: 0, error: 'CONTENT_REJECTED_SPAM', from: `hello@${signed}` });
+      await insert(75, { status: 'suppressed', outcomes: 0, from: `hello@${signed}` });
+      const hosted = await read();
+      assert.deepEqual(hosted.factors.filter((f: Json) => f.source === 'neutral'), []);
+      // All the mail is from the fully authenticated domain (a subdomain counts towards its claim), so the half-set-up one weighs nothing.
+      assert.deepEqual([factor(hosted, 'auth').value, factor(hosted, 'auth').score], [1, 100]);
+      assert.deepEqual([factor(hosted, 'content').value, factor(hosted, 'hygiene').value], [25 / 600, 75 / 600].map(v => Math.round(v * 1e6) / 1e6));
+      assert.equal(hosted.emails.last30Days, 600);
+      // Workspace-wide: keys restricted to domains are refused; dashboard reads share a short cache.
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped score reader', permissions: ['read'], domains: [signed] }), 201); secrets.add(scoped.secret);
+      assert.equal(error(await request('GET', '/v1/sender-score', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
+      const dashboard = await local('GET', '/v1/sender-score'), again = await local('GET', '/v1/sender-score');
+      assert.deepEqual([dashboard.status, dashboard.headers.get('x-bane-sender-score-cache'), again.headers.get('x-bane-sender-score-cache')], [200, 'miss', 'hit']);
+    });
+  });
 });
 
 describe('Personalization context boundaries', () => {

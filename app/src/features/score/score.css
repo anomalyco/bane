@@ -1,0 +1,95 @@
+/* Sender score. Flat instrument styling on the surface; the only texture is faint grain and a tick ruler.
+   Every block has a fixed height in every state (loading, calibrating, graded), so loading never shifts layout. */
+[data-grade='aplus'] { --grade-fill: var(--grade-aplus); }
+[data-grade='a'] { --grade-fill: var(--grade-a); }
+[data-grade='b'] { --grade-fill: var(--grade-b); }
+[data-grade='c'] { --grade-fill: var(--grade-c); }
+[data-grade='d'] { --grade-fill: var(--grade-d); }
+[data-grade='f'] { --grade-fill: var(--grade-f); }
+
+.gauge-card {
+  /* Grain: fractal noise turned into an alpha mask, tinted with the text colour, so it follows the theme. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .7 .7 .7 0 -.62'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  /* Ruler: a minor tick every 4px and a major tick every 24px. */
+  --ruler: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='8'%3E%3Cpath d='M.5 0v8M4.5 5v3M8.5 5v3M12.5 3v5M16.5 5v3M20.5 5v3' stroke='%23000' stroke-width='1'/%3E%3C/svg%3E");
+  position: relative; isolation: isolate; display: block; overflow: hidden; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); color: var(--color-text); text-decoration: none; font-variant-numeric: tabular-nums;
+}
+.gauge-card > :not(.gauge-grain, .gauge-ruler) { position: relative; z-index: 1; }
+.gauge-grain { position: absolute; inset: 0; background: var(--color-text); -webkit-mask: var(--grain) 0 0 / 140px 140px; mask: var(--grain) 0 0 / 140px 140px; opacity: .05; pointer-events: none; }
+:root[data-theme='dark'] .gauge-grain { opacity: .07; }
+.gauge-ruler { position: absolute; inset: auto 0 0; height: 8px; background: var(--color-border-strong); -webkit-mask: var(--ruler) 0 100% / 24px 8px repeat-x; mask: var(--ruler) 0 100% / 24px 8px repeat-x; opacity: .7; pointer-events: none; }
+.gauge-skeleton { position: absolute; inset: 0; border-radius: inherit; background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
+
+.gauge-dial { display: block; overflow: visible; }
+.gauge-band { fill: none; stroke: var(--grade-fill); opacity: .26; transition: opacity 240ms var(--ease-out-strong); }
+.gauge-band[data-on] { opacity: 1; }
+.gauge-band[data-grade='none'] { stroke: var(--color-layer-3); opacity: 1; }
+.gauge-progress { fill: none; stroke: var(--color-text); }
+.gauge-tick { stroke: var(--color-border-strong); stroke-width: 1; }
+.gauge-tick--major { stroke: var(--color-muted); stroke-width: 1.4; }
+.gauge-label { fill: var(--color-muted); font-family: var(--font-mono); font-size: 9px; font-weight: 700; }
+.gauge-num { fill: var(--color-muted); font-family: var(--font-mono); font-size: 8px; }
+/* The needle sweeps in once and eases between scores; transform only. */
+.gauge-needle { transform-box: view-box; transform-origin: var(--hub); transform: rotate(var(--turn)); transition: transform 600ms var(--ease-out-strong); animation: gauge-sweep 900ms var(--ease-out-strong) both; }
+.gauge-needle line { stroke: var(--color-text); stroke-width: 2; stroke-linecap: round; }
+.gauge-needle circle { fill: var(--color-text); }
+.gauge-needle[data-rest] { opacity: .4; animation: none; }
+@keyframes gauge-sweep { from { transform: rotate(0deg); } }
+
+.gauge-eyebrow, .gauge-head { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; letter-spacing: .12em; text-transform: uppercase; }
+.gauge-grade { font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+
+/* Compact: the sidebar card, full sidebar width and 56px tall. */
+.gauge-card--compact { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 10px; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
+.gauge-card--compact:active { transform: scale(.98); }
+@media (hover: hover) and (pointer: fine) { a.gauge-card--compact:hover { background: var(--color-layer-1); } }
+.gauge-card--compact .gauge-ruler { height: 5px; opacity: .5; }
+.gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
+.gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.gauge-card--compact .gauge-eyebrow { font-size: 9px; line-height: 12px; letter-spacing: .14em; }
+.gauge-readout { display: flex; align-items: baseline; gap: 8px; }
+.gauge-readout b { display: inline-block; min-width: 1.5em; font-size: 21px; line-height: 24px; font-weight: 600; letter-spacing: -.03em; }
+.gauge-readout small { color: var(--color-muted); font-size: 11px; }
+.gauge-readout .gauge-grade { font-size: 13px; letter-spacing: .04em; }
+
+/* Full: Overview's report card. */
+.score-report { display: flex; flex-direction: column; gap: var(--space-16); scroll-margin-top: var(--space-24); }
+.gauge-card--full { display: flex; flex-direction: column; height: 262px; padding: 12px 14px 20px; }
+.gauge-head { display: flex; justify-content: space-between; }
+.gauge-card--full .gauge-dial { width: 100%; max-width: 252px; height: 134px; margin: 12px auto 0; }
+.gauge-center { display: flex; flex-direction: column; align-items: center; height: 54px; margin-top: 2px; }
+.gauge-center b { font-size: 38px; line-height: 40px; font-weight: 600; letter-spacing: -.045em; }
+.gauge-center small { color: var(--color-muted); font-size: 12px; line-height: 14px; }
+.gauge-foot { display: flex; justify-content: space-between; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--color-border-muted); color: var(--color-muted); font-size: 12px; line-height: 16px; }
+
+/* Breakdown: a 14-day trend and the six factors, 236px tall in every state. */
+.score-breakdown { display: flex; flex-direction: column; gap: var(--space-8); height: 236px; }
+.score-breakdown--loading { border-radius: var(--radius-sm); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
+.score-breakdown__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-8); }
+.score-breakdown__head h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.score-breakdown__head .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.score-history { display: flex; align-items: flex-end; gap: 2px; height: 20px; }
+.score-history > span { flex: 1; height: 100%; border-radius: 1px; background: var(--color-layer-3); transform-origin: bottom; transition: transform 240ms var(--ease-out-strong); }
+.score-history > span[data-last] { background: var(--color-contrast); }
+.score-factors { margin: 0; padding: 0; list-style: none; }
+.score-factors > li { display: grid; grid-template-columns: minmax(0, 1fr) 72px 52px; align-items: center; gap: var(--space-12); height: 30px; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); }
+.score-factors > li > :last-child { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.score-bar { position: relative; display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
+.score-bar > i { position: absolute; inset: 0 auto 0 0; width: var(--share, 0%); border-radius: inherit; background: var(--color-contrast); opacity: .78; }
+.score-bar[data-low] > i { background: var(--color-danger-marker); opacity: 1; }
+
+/* Next steps: a short list of places to go; rows fade up in sequence. */
+.next-steps { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.next-steps__title { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.next-steps ul { margin: 0; padding: 0; list-style: none; }
+.next-steps li { animation: row-enter 220ms var(--ease-out-strong) both; animation-delay: calc(var(--i, 0) * 40ms); }
+.next-steps li + li { border-top: 1px solid var(--color-border-muted); }
+.next-steps a { display: flex; align-items: center; gap: var(--space-8); min-height: 36px; color: var(--color-text); text-decoration: none; font-size: var(--text-sm); }
+.next-steps a > :first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.next-steps a .muted { font-size: var(--text-xs); white-space: nowrap; }
+.next-steps a svg { flex-shrink: 0; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong); }
+@media (hover: hover) and (pointer: fine) {
+  .next-steps a:hover > :first-child { text-decoration: underline; text-underline-offset: 4px; }
+  .next-steps a:hover svg { transform: translate(2px, -2px); }
+}

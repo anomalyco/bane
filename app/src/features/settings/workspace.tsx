@@ -6,9 +6,8 @@ import type { Workspace } from '../../data/types'
 import { fieldError, MutationError } from './shared'
 import { SesSendingSkeleton, WorkspaceFormSkeleton } from './skeletons'
 import { RegionSetup } from './region-setup'
-import { SendingConnection } from './sending'
+import { HostedSettings } from './hosted'
 import { useWebhooks, WebhooksSection } from './webhooks'
-import { WorkspaceSections } from './workspace-members'
 import { roleLabel } from '../../data/workspaces'
 
 function WorkspaceForm({workspace, ruled}: {workspace: Workspace; ruled: boolean}) {
@@ -23,8 +22,13 @@ function SignedInSection() {
   if (!session?.identity) return null
   return <section className="section stack settings-group settings-rule"><SectionHeader title="Signed in" actions={<Button onClick={() => session.logout()}>Sign out</Button>} /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>{access.multiTenant ? 'Role' : 'Access'}</dt><dd>{access.role ? roleLabel[access.role] : session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl></section>
 }
-// Sending, webhooks and the workspace live on one page; old tab links arrive as #webhooks or #workspace.
+// Hosted workspaces get the grouped settings (./hosted.tsx). Self-hosted keeps one page: SES regions, webhooks and the
+// workspace; old tab links arrive as #webhooks or #workspace.
 export function SettingsPage() {
+  const { multiTenant } = useWorkspaceAccess()
+  return multiTenant ? <HostedSettings /> : <SelfHostedSettings />
+}
+function SelfHostedSettings() {
   const access = useWorkspaceAccess()
   const { hash } = useLocation()
   useEffect(() => {
@@ -41,9 +45,9 @@ export function SettingsPage() {
   return <div className="stack settings-ses settings-page">
     <PageHeader title="Settings" />
     {!access.multiTenant && workspace.isPending ? <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></> : <>
-      {access.canAdminister && (access.multiTenant ? <SendingConnection /> : <RegionSetup />)}
+      {access.canAdminister && <RegionSetup />}
       {access.canAdminister && <WebhooksSection />}
-      {access.multiTenant ? <WorkspaceSections /> : workspace.error ? <section id="workspace" className={`section stack settings-group${access.canAdminister ? ' settings-rule' : ''}`}><SectionHeader title="Workspace" /><ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /></section> : workspace.data && <WorkspaceForm key={workspace.data.id} workspace={workspace.data} ruled={access.canAdminister} />}
+      {workspace.error ? <section id="workspace" className={`section stack settings-group${access.canAdminister ? ' settings-rule' : ''}`}><SectionHeader title="Workspace" /><ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /></section> : workspace.data && <WorkspaceForm key={workspace.data.id} workspace={workspace.data} ruled={access.canAdminister} />}
       <SignedInSection />
     </>}
   </div>

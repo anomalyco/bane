@@ -41,7 +41,7 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled, 
 }
 
 export const useWebhooks = (cursor?: string, enabled = true) => useApiDef(queries.webhooks(cursor), { enabled, keepPrevious: true })
-export function WebhooksSection() {
+export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   const navigate = useNavigate()
   const pagination = useCursorPagination()
   const webhooks = useWebhooks(pagination.cursor)
@@ -49,7 +49,7 @@ export function WebhooksSection() {
   const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <p className="muted settings-section-note">For outcomes of email you send through the API (<code>email.*</code> events). For received mail and replies on inbound addresses, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</p>
+    {note && <p className="muted settings-section-note">For outcomes of email you send through the API (<code>email.*</code> events). For received mail and replies on inbound addresses, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</p>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
       ...multiTenant ? [] : [{ ...column(columns, 'scope'), render: (webhook: Webhook) => scopeText(webhook.regionIds) }],

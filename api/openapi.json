@@ -5699,6 +5699,224 @@
           "daily"
         ]
       },
+      "SenderScore": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "warmup",
+              "graded"
+            ],
+            "description": "warmup until the workspace has sent its first 100 non-simulated emails."
+          },
+          "emails": {
+            "type": "object",
+            "properties": {
+              "firstEmails": {
+                "type": "integer",
+                "description": "Non-simulated emails ever created, counted up to 100."
+              },
+              "last30Days": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "firstEmails",
+              "last30Days"
+            ]
+          },
+          "needed": {
+            "type": "integer",
+            "description": "Emails before the first grade (100)."
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "0–100, one decimal; null while warming up."
+          },
+          "grade": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "A+",
+              "A",
+              "B",
+              "C",
+              "D",
+              "F",
+              null
+            ]
+          },
+          "target": {
+            "type": "number",
+            "description": "Where the score is heading: the 30-day result shrunk towards 75 by volume."
+          },
+          "raw": {
+            "type": "number",
+            "description": "The 30-day weighted factor result before shrinkage."
+          },
+          "band": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "min": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "min",
+              "max"
+            ],
+            "description": "The current grade band."
+          },
+          "next": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "grade": {
+                "type": "string",
+                "enum": [
+                  "A+",
+                  "A",
+                  "B",
+                  "C",
+                  "D",
+                  "F"
+                ]
+              },
+              "at": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "grade",
+              "at"
+            ],
+            "description": "The next grade up and the score it starts at."
+          },
+          "factors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SenderScoreFactor"
+            }
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string",
+                  "description": "UTC day, YYYY-MM-DD."
+                },
+                "score": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "date",
+                "score"
+              ]
+            },
+            "description": "The replayed daily score, oldest first; the last entry is today."
+          },
+          "computedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "state",
+          "emails",
+          "needed",
+          "score",
+          "grade",
+          "target",
+          "raw",
+          "band",
+          "next",
+          "factors",
+          "history",
+          "computedAt"
+        ]
+      },
+      "SenderScoreFactor": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "complaints",
+              "bounces",
+              "content",
+              "auth",
+              "hygiene",
+              "consistency"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "description": "Share of the score, out of 100, when every factor is measured."
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "The measured rate or ratio for the 30 days to today; null when neutral."
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "0–100 for this factor; null when neutral."
+          },
+          "points": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "weight × score ÷ 100; null when neutral."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "measured",
+              "neutral"
+            ],
+            "description": "Neutral factors are left out and the measured ones re-weighted."
+          },
+          "basis": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "weight",
+          "value",
+          "score",
+          "points",
+          "source",
+          "basis"
+        ]
+      },
       "RegionCatalog": {
         "type": "object",
         "properties": {
@@ -30423,6 +30641,150 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/metrics' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/sender-score": {
+      "get": {
+        "operationId": "getSenderScore",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 non-simulated emails. The score moves at most +2 or −15 a day towards its target. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SenderScore"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getSenderScore } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getSenderScore({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/sender-score' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }

@@ -39,3 +39,26 @@ export function LiveStatus({ state, labels, plain = false }: { state: LiveState;
     <span className="live-status__label">{liveStates.map(key => <span key={key} data-active={key === state || undefined} aria-hidden={key === state ? undefined : true}>{labels?.[key] ?? liveLabels[key]}</span>)}</span>
   </span>
 }
+
+// Eases a number from its previous value to the next one (240 ms, ease-out). The first defined value shows at once,
+// so loading never animates; later changes (a new range, a refetch) tween. Instant under reduced motion.
+export function useTween(target: number | undefined, duration = 240): number {
+  const [shown, setShown] = useState(target ?? 0)
+  const current = useRef<number | undefined>(target)
+  useEffect(() => {
+    if (target === undefined) return
+    const from = current.current
+    if (from === undefined || from === target || matchMedia('(prefers-reduced-motion: reduce)').matches) { current.current = target; setShown(target); return }
+    const start = performance.now()
+    let frame = 0
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / duration), eased = 1 - (1 - t) ** 3
+      current.current = from + (target - from) * eased
+      setShown(current.current)
+      if (t < 1) frame = requestAnimationFrame(step)
+    }
+    frame = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(frame)
+  }, [target, duration])
+  return target === undefined ? shown : current.current === undefined ? target : shown
+}

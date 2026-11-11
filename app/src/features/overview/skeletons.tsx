@@ -1,8 +1,8 @@
 import { ArrowUpRight } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
-import type { RegionCatalogEntry, TimeRange } from '../../data/types'
+import type { RegionCatalogEntry } from '../../data/types'
 import { label } from '../../lib/format'
-import { Button, ControlSkeleton, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
+import { LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
 import './overview.css'
 
 // Hosted mail manages its region, so it shows no status; a bring-your-own connection shows its own state,
@@ -14,21 +14,29 @@ export function RegionStatus({ current }: { current?: RegionCatalogEntry }) {
   return current ? <StatusBadge status={label(current.discoveryStatus)} tone={current.discoveryStatus === 'ready' ? 'success' : current.discoveryStatus === 'blocked' ? 'danger' : 'warning'} /> : <Skeleton width={84} height={20} />
 }
 
-export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '48%', skeleton: <><SkeletonText /><SkeletonText width="45%" lineHeight={18} /></> }, { key: 'sent', label: 'Recipients', width: '26%', align: 'right' as const }, { key: 'delivered', label: 'Delivered', width: '26%', align: 'right' as const }]
-export function OverviewBodySkeleton({ range = '24h', live = false }: { range?: TimeRange; live?: boolean }) {
-  const sent = live ? 'Created' : 'Sent'
-  return <LoadingRegion label="Loading overview">
-    <div className="metrics-grid">{[sent, 'Delivered', 'Bounced', 'Complaints'].map(title => <div className="metric" key={title}><div className="muted">{title}</div><div className="metric-value"><SkeletonText width="55%" lineHeight={36} /></div><div className="muted cell-caption"><SkeletonText width="80%" lineHeight={18} /></div></div>)}</div>
-    <section className="chart-section"><SectionHeader title={`${live ? 'Emails created' : 'Email activity'} per ${range === '30d' ? 'day' : 'hour'}`} actions={<div className="chart-legend"><span><i className="legend-sent" />{sent}</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span><span>UTC</span></div>} /><div className="chart-skeleton" aria-hidden="true"><div className="cluster between"><span>{sent}</span><span>Exceptions</span></div><div className="chart-skeleton-grid">{[0, 1, 2, 3].map(i => <div key={i}><Skeleton width={28} /><span /><Skeleton width={18} /></div>)}</div><div className="chart-skeleton-ticks">{[0, 1, 2, 3, 4, 5, 6].map(i => <Skeleton key={i} width={40} />)}</div></div></section>
-    <div className="dashboard-bottom"><section><SectionHeader title="Recent campaigns" actions={<Button variant="ghost" size="sm" disabled>View all <ArrowUpRight size={16} /></Button>} /><TableSkeleton columns={recentCampaignColumns} rows={4} /></section><section className="sending-streams"><SectionHeader title="Sending streams" actions={<Button variant="ghost" size="sm" disabled>View logs <ArrowUpRight size={16} /></Button>} />{['Transactional', 'Marketing'].map(name => <div className="stream-row" key={name}><div className="cluster between"><span>{name}</span><Skeleton width={70} /></div><div className="stream-track"><Skeleton height={4} /></div></div>)}</section></div>
-  </LoadingRegion>
+export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as const
+export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '60%' }, { key: 'sent', label: 'Recipients', width: '20%', align: 'right' as const }, { key: 'delivered', label: 'Delivered', width: '20%', align: 'right' as const }]
+export const latestColumns = [{ key: 'status', label: 'Status', width: 116 }, { key: 'subject', label: 'Subject' }, { key: 'stream', label: 'Stream', width: 116 }, { key: 'time', label: 'UTC', width: 88, align: 'right' as const }]
+
+// Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.
+export function FactsSkeleton() {
+  return <dl className="ov-facts" aria-hidden="true">{factTitles.map(title => <div key={title}><dt><span>{title}</span></dt><dd><span className="ov-facts__value"><Skeleton width={72} height={22} /></span><span className="ov-spark ov-spark--skeleton" /></dd></div>)}</dl>
 }
+export function ChartSkeleton() {
+  return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head"><h2>Activity</h2></div><div className="ov-chart__plot ov-chart__plot--loading" /></section>
+}
+export function AsideSkeleton() {
+  return <div className="ov-aside-skeleton" aria-hidden="true"><span /><span /></div>
+}
+// The route-level placeholder while the Overview code loads: the same header, columns and blocks.
 export function OverviewRouteSkeleton() {
   const { regionId } = useRegion()
-  // The sidebar's region selector names the region for admins; members have no selector.
   const { multiTenant, canAdminister } = useWorkspaceAccess()
-  // Keep the same placeholder through region selection, route loading and the first metrics response.
-  // The chart and table heights depend on the data; only reserve the controls whose layout is known.
-  if (multiTenant) return <><PageHeader title="Overview" /><LoadingRegion label="Loading overview"><div className="overview-toolbar"><ControlSkeleton width={200} /><ControlSkeleton width={138} /></div></LoadingRegion></>
-  return <><PageHeader title="Overview" actions={<div className="cluster">{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></div>} /><div className="overview-toolbar"><Tabs value="24h" onValueChange={() => {}} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label"><Skeleton width={195} /></span><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div></div><OverviewBodySkeleton /></>
+  return <>
+    <PageHeader title="Overview" actions={<div className="cluster ov-controls">{!multiTenant && <>{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></>}<Tabs value="24h" onValueChange={() => {}} disabled items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" /><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div>} />
+    <LoadingRegion label="Loading overview"><div className="ov-split">
+      <div className="ov-split__main"><FactsSkeleton /><ChartSkeleton /><section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <ArrowUpRight size={16} /></span>} /><TableSkeleton className="ov-table" columns={latestColumns} rows={7} /></section></div>
+      <aside className="ov-split__aside"><AsideSkeleton /></aside>
+    </div></LoadingRegion>
+  </>
 }

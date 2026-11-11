@@ -135,13 +135,19 @@
   --page-inset: 8px;
   --page-gap: var(--space-20);
   --motion-duration: 85ms;
+  /* Micro-interactions: strong ease-out for enters and feedback (120–250 ms), ease-in-out for on-screen moves. */
+  --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
+  --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
   --shadow-raised: 0 2px 4px rgb(0 0 0 / 4%), 0 1px 2px -1px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 4%), 0 8px 16px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
+  /* Sender score grade bands (the gauge's arcs). */
+  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: #3B5CF6; --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
 }
 
 :root[data-theme='dark'] {
+  --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: #A2BCFF; --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
   color-scheme: dark;
   --color-deep: #080808;
   --color-canvas: #080808;

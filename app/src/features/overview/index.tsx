@@ -1,77 +1,138 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiDef, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import { useRouteIntent } from '../../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
-import { campaignEditable, type ChartPoint, type SesDiscovery, type TimeRange } from '../../data/types'
+import { campaignEditable, type ChartPoint, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
-import { date, number, percent, label } from '../../lib/format'
-import { OverviewBodySkeleton, OverviewRouteSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
-import { SendingLimitBar, SetupCard } from './setup'
+import { useTween } from '../../components/motion'
+import { date, label, number, percent, time } from '../../lib/format'
+import { NextSteps, ReportCard, useNextSteps, useSenderScore } from '../score'
+import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns, recentCampaignColumns, RegionStatus } from './skeletons'
+import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
 
+// Overview: four facts with their own series, the activity chart and the latest emails on the left; a detail column
+// on the right with setup (until the first email), the sender score and up to three next steps.
+// Every async block reserves its final size, and refetches keep the previous data on screen.
 export function OverviewPage() {
   const { regionId } = useRegion()
-  const api = useApi()
-  const live = api.mode === 'live'
+  const live = useApi().mode === 'live'
   const [range, setRange] = useState<TimeRange>('24h')
   const [searchParams, setSearchParams] = useSearchParams()
-  const requestedStream = searchParams.get('stream')
-  const stream = requestedStream === 'transactional' || requestedStream === 'marketing' ? requestedStream : 'all'
-  function setStream(value: string) {
-    setSearchParams(previous => {
-      const next = new URLSearchParams(previous)
-      if (value === 'transactional' || value === 'marketing') next.set('stream', value)
-      else next.delete('stream')
-      return next
-    })
-  }
-  const navigate = useNavigate()
-  const intent = useRouteIntent()
-  // Each refresh runs one created-cohort metrics aggregation (chart, previous period and streams in a single request); aggregates over hours or days do not need
-  // the 3-second polling used for live queues, and a hidden tab should not keep the database busy.
+  const requested = searchParams.get('stream')
+  const stream = requested === 'transactional' || requested === 'marketing' ? requested : 'all'
+  // Each refresh runs one created-cohort aggregation; a minute is fresh enough, and a hidden tab stays quiet.
   const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
   const regions = useRegionCatalog()
   const current = regions.data?.data.find(region => region.region === regionId)
-  // Hosted workspaces have no SES discovery; their connection manages the region.
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const discovery = useRegionDiscovery(multiTenant ? undefined : current)
+  const controls = <div className="cluster ov-controls">
+    {!multiTenant && <><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></>}
+    <Tabs value={range} onValueChange={value => setRange(value as TimeRange)} items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" />
+    <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
+  </div>
   const data = query.data
-  if (multiTenant && query.isPending) return <OverviewRouteSkeleton />
-  const filterBar = <div className="overview-toolbar"><Tabs value={range} onValueChange={v => setRange(v as TimeRange)} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label">{data && `${date(data.periodStart, { month: 'short', day: 'numeric', timeZone: 'UTC' })} – ${date(data.periodEnd)}`}</span><Select aria-label="Email stream" value={stream} onValueChange={setStream} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div></div>
-  return <><PageHeader title="Overview" actions={<div className="cluster"><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && !multiTenant && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></div>} /><SetupCard /><SendingLimitBar />{filterBar}
-    {query.isPending ? <OverviewBodySkeleton range={range} live={live} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : data && <div className="overview-content">
-      <div className="metrics-grid">
-        <Metric title={live ? "Created" : "Sent"} value={number(data.sent)} note={data.previousSent ? `${percent((data.sent - data.previousSent) / data.previousSent, 1)} vs. previous period` : 'No emails in the previous period'} tone={data.sent ? 'accent' : undefined} />
-        {/* Rates only take a colour once there is something to rate. */}
-        <Metric title="Delivered" value={data.sent ? percent(data.delivered / data.sent) : '—'} note={`${number(data.delivered)} ${data.delivered === 1 ? 'email' : 'emails'}`} />
-        <Metric title="Bounced" value={data.sent ? percent(data.bounced / data.sent) : '—'} note={`${number(data.bounced)} ${data.bounced === 1 ? 'email' : 'emails'}`} tone={data.bounced ? 'warning' : undefined} />
-        <Metric title="Complaints" value={data.sent ? percent(data.complaints / data.sent) : '—'} note={`${number(data.complaints)} ${data.complaints === 1 ? 'email' : 'emails'}`} tone={data.complaints ? 'danger' : undefined} />
+  return <>
+    <PageHeader title="Overview" actions={controls} />
+    <div className="ov-split">
+      <div className="ov-split__main">
+        {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
+          {data ? <Facts data={data} /> : <FactsSkeleton />}
+          {data ? <Chart data={data} range={range} live={live} /> : <ChartSkeleton />}
+        </>}
+        <LatestEmails />
+        {data && data.recentCampaigns.length > 0 && <Campaigns data={data} />}
       </div>
-      <section className="chart-section" aria-label="Sending activity"><SectionHeader title={live ? `Emails created per ${range === '30d' ? 'day' : 'hour'}` : `Email activity per ${range === '30d' ? 'day' : 'hour'}`} actions={<div className="chart-legend"><span><i className="legend-sent" />{live ? 'Created' : 'Sent'}</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span><span>UTC</span></div>} />{data.sent ? <ActivityChart key={range} points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</section>
-      <div className="dashboard-bottom"><section><SectionHeader title="Recent campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')} {...intent('/campaigns')}>View all <ArrowUpRight size={16} /></Button>} /><DataTable minRows={4} rows={data.recentCampaigns} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`)} columns={[{ ...recentCampaignColumns[0], render: row => <div><span>{row.name}</span><div className="muted cell-caption">{['sent', 'done'].includes(row.status) ? '' : `${label(row.status)} · `}{date(row.updatedAt)}</div></div> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? <span className="text-success">{percent(row.recipients ? row.delivered / row.recipients : 0)}</span> : <span className="muted">—</span>, align: 'right' }]} empty={<EmptyState title="No campaigns yet" action={<Button onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} /></section>
-      <section className="sending-streams"><SectionHeader title="Sending streams" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/logs')} {...intent('/logs')}>View logs <ArrowUpRight size={16} /></Button>} />{data.streams.map(item => <div className="stream-row" key={item.name}><div className="cluster between"><span>{label(item.name)}</span><span>{number(item.sent)}</span></div><div className={`stream-track stream-track--${item.name}`}><span style={{ width: `${data.streams.reduce((sum, stream) => sum + stream.sent, 0) ? item.sent / data.streams.reduce((sum, stream) => sum + stream.sent, 0) * 100 : 0}%` }} /></div></div>)}</section></div>
-    </div>}
+      <Aside />
+    </div>
   </>
 }
+
+// The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
+function Aside() {
+  const score = useSenderScore()
+  const setup = useSetupSteps()
+  const next = useNextSteps(score.data)
+  const ready = (score.data || score.isError) && !setup.loading && next.ready
+  return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
+    {setup.steps && <SetupRail steps={setup.steps} current={setup.current} />}
+    {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : <ReportCard report={score.data} />}
+    <SendingLimitRow />
+    {!setup.steps && <NextSteps items={next.items} />}
+  </>}</aside>
+}
+
+const rate = (part: number, whole: number) => whole ? percent(part / whole) : '—'
+const delta = (data: Overview) => data.previousSent ? `${data.sent >= data.previousSent ? '+' : ''}${percent((data.sent - data.previousSent) / data.previousSent, 0)}` : ''
+
+// Four facts (Console-style): a hairline, a label row with a count or delta, and the value beside its own series.
+function Facts({ data }: { data: Overview }) {
+  const sent = useTween(data.sent), delivered = useTween(data.sent ? data.delivered / data.sent : 0), bounced = useTween(data.sent ? data.bounced / data.sent : 0), complaints = useTween(data.sent ? data.complaints / data.sent : 0)
+  const facts = [
+    { title: factTitles[0], value: number(Math.round(sent)), aside: delta(data), series: data.points.map(p => p.sent), tone: 'sent' },
+    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(data.delivered), series: data.points.map(p => p.delivered), tone: 'delivered' },
+    { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(data.bounced), series: data.points.map(p => p.bounced), tone: 'bounces', warn: data.sent > 0 && data.bounced / data.sent >= 0.05 },
+    { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(data.complaints), series: data.points.map(p => p.complaints), tone: 'complaints', warn: data.sent > 0 && data.complaints / data.sent >= 0.001 },
+  ]
+  return <dl className="ov-facts">{facts.map(fact => <div key={fact.title}>
+    <dt><span>{fact.title}</span><span className="muted">{fact.aside}</span></dt>
+    <dd><span className={`ov-facts__value${fact.warn ? ' text-warning' : ''}`}>{fact.value}</span><Spark values={fact.series} tone={fact.tone} /></dd>
+  </div>)}</dl>
+}
+function Spark({ values, tone }: { values: number[]; tone: string }) {
+  const max = Math.max(1, ...values), slot = 100 / Math.max(1, values.length)
+  return <svg className={`ov-spark ov-spark--${tone}`} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+    {values.map((value, i) => { const h = Math.max(value ? 2 : 1, value / max * 24); return <rect key={i} className={value ? undefined : 'ov-spark__zero'} x={i * slot + slot * .18} width={slot * .64} y={24 - h} height={h} /> })}
+  </svg>
+}
+
+function Chart({ data, range, live }: { data: Overview; range: TimeRange; live: boolean }) {
+  return <section className="ov-chart" aria-label="Sending activity">
+    <div className="ov-chart__head"><h2>Activity</h2><div className="chart-legend"><span><i className="legend-sent" />Emails</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></div></div>
+    <div className="ov-chart__plot">{data.sent ? <ActivityChart key={range} points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</div>
+  </section>
+}
+
+// The latest emails always reserve seven 53px rows: loading, short and full lists are the same height.
+function LatestEmails() {
+  const navigate = useNavigate()
+  const emails = useApiQuery(['emails', 'overview-latest'], (api, signal) => api.emails.list({ page: 1, pageSize: 7 }, signal), { interval: 60_000, keepPrevious: true })
+  return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
+    {emails.isError && !emails.data ? <ErrorState error={emails.error} onRetry={() => emails.refetch()} /> : <DataTable className="ov-table" loading={emails.isPending} skeletonRows={7} minRows={7} rows={emails.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${encodeURIComponent(row.id)}`)} empty={<EmptyState title="No emails yet" />} columns={[
+      { ...latestColumns[0], render: row => <StatusBadge status={row.status} /> },
+      { ...latestColumns[1], render: row => <span className="ov-latest__subject">{row.subject}<span className="muted"> · {row.to}</span></span> },
+      { ...latestColumns[2], render: row => <span className="muted">{label(row.stream)}</span> },
+      { ...latestColumns[3], render: row => <span className="muted">{time(row.sentAt)}</span> },
+    ]} />}
+  </section>
+}
+function Campaigns({ data }: { data: Overview }) {
+  const navigate = useNavigate()
+  return <section className="ov-latest"><SectionHeader title="Campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>All <ArrowUpRight size={16} /></Button>} />
+    <DataTable className="ov-table" rows={data.recentCampaigns.slice(0, 3)} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`)} columns={[{ ...recentCampaignColumns[0], render: row => <span>{row.name}<span className="muted"> · {['sent', 'done'].includes(row.status) ? date(row.updatedAt) : label(row.status)}</span></span> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? percent(row.recipients ? row.delivered / row.recipients : 0) : '—', align: 'right' }]} />
+  </section>
+}
+
 const severity = { neutral: 0, info: 0, success: 1, warning: 2, danger: 3 } as const
+// Self-hosted only: the SES account's own reputation, from the region's discovery report.
 function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefined; regionId: string }) {
   const reputation = report?.reputation
   if (!report?.account || !reputation?.available) return null
   const worst = [accountStatus(report.account.enforcementStatus), rateStatus('bounceRate', reputation.bounceRate), rateStatus('complaintRate', reputation.complaintRate)].filter(status => status.label !== 'No data' && status.label !== 'Unknown').sort((a, b) => severity[b.tone] - severity[a.tone])[0]
   return <Link className="overview-reputation" to={`/settings?region=${encodeURIComponent(regionId)}`} title="SES account reputation">
-    <span className="muted">Reputation</span>{worst && <StatusBadge status={worst.label} tone={worst.tone} />}<span className="muted">{ratePercent(reputation.bounceRate)} bounce · {ratePercent(reputation.complaintRate)} complaint</span>
+    <span className="muted">SES</span>{worst && <StatusBadge status={worst.label} tone={worst.tone} />}<span className="muted">{ratePercent(reputation.bounceRate)} bounce · {ratePercent(reputation.complaintRate)} complaint</span>
   </Link>
 }
-function Metric({ title, value, note, tone }: { title: string; value: string; note: string; tone?: string }) { return <div className="metric"><div className="muted">{title}</div><div className={`metric-value ${tone ? `text-${tone}` : ''}`}>{value}</div><div className="muted cell-caption">{note}</div></div> }
+
 // Three whole-number steps so every gridline label is a distinct integer.
 function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 ** Math.floor(Math.log10(raw)), step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * base).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw); return step * 3 }
-function ActivityChart({ points, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
+export function ActivityChart({ points, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
   const [active, setActive] = useState<number | null>(null)
   const container = useRef<HTMLDivElement>(null)
-  const [size, setSize] = useState({ width: 1080, height: 260 })
+  const [size, setSize] = useState({ width: 1080, height: 196 })
   useLayoutEffect(() => {
     const element = container.current
     if (!element) return

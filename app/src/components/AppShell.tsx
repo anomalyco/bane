@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
@@ -8,6 +8,9 @@ import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText }
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+
+// The sender score card (hosted): its code loads after the shell, into a slot that already has its final size.
+const SidebarScore = lazy(() => import('../features/score').then(module => ({ default: module.SidebarScore })))
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -100,6 +103,7 @@ export function AppShell() {
       </div>
       <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">
+        {access.multiTenant && <div className="sidebar-score-slot"><Suspense fallback={null}><SidebarScore /></Suspense></div>}
         {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
       <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
         <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
