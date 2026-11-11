@@ -70,7 +70,7 @@ export function renderChat(type: string, body: unknown) {
   if (typeof s !== 'string' || !s.length) throw fail();
   return type === 'slack'
     ? { text: s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').slice(0, 3000), mrkdwn: false, unfurl_links: false, unfurl_media: false }
-    : { content: s.replace(/([\\*_~`|>])/g, '\\$1').slice(0, 2000), allowed_mentions: { parse: [] } };
+    : { content: s.replace(/([\\*_~`|>\[\]()#])/g, '\\$1').replace(/^(\s*)-/gm,'$1\\-').slice(0, 2000), allowed_mentions: { parse: [] }, flags:4 };
 }
 
 type Row = {
