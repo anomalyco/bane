@@ -110,6 +110,7 @@ type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: s
 function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
   const where = r.domain ?? input.domain;
   switch (r.error) {
+    case 'ADMIN_REQUIRED': return new ApiError(403, r.error, `${where} automatically creates an address for incoming mail. Creating an inbox here needs an admin using the dashboard or an unrestricted manage key. Choose a receiving domain without an auto-create catch-all, or create a sandbox inbox.`, 'domain');
     case 'RECEIVING_DOMAIN_REQUIRED': return input.domain
       ? new ApiError(409, r.error, `${input.domain} is not a receiving host of this workspace. Omit domain to use the oldest active one, or pick a host from GET /v1/inbound/domains.`, 'domain')
       : new ApiError(409, r.error, 'This workspace has no receiving domain yet. Add a domain, enable receiving on it and publish its MX record (Domains in the dashboard, or POST /v1/inbound/domains/{id}/enable), then retry once its status is active. To test without DNS, create an inbox with {"type":"sandbox"} and send it mail with POST /v1/inboxes/{id}/simulate.');

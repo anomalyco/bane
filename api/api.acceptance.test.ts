@@ -7929,7 +7929,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const pick=await db.query('SELECT create_ephemeral_inbox($1) AS r',[{wid,admin:false,manageAddress:false,actor:'synthetic',hosted:false,input:{type:'ephemeral',ttlSeconds:60,graceHours:1},locals:['leased']}]);assert.equal(pick.rows[0].r.error,'ADDRESS_TAKEN');
         const named=ok(await local('POST',root,{localPart:'leased'}),201);ok(await local('DELETE',`${root}/${named.id}`),202);
         const after=await deliver('fallback-wildcard',[named.address]);assert.deepEqual((await db.query('SELECT mailbox_id FROM mailbox_messages WHERE message_id=$1',[after.id])).rows,[{mailbox_id:team.id}]);
-        await db.query("UPDATE mailboxes SET rules='[]' WHERE id=$1",[team.id]);await db.query("UPDATE mailbox_domains SET catch_all='create_mailbox' WHERE id=$1",[domain]);error(await create({}),409,'ADDRESS_TAKEN');await db.query("UPDATE mailbox_domains SET catch_all='store' WHERE id=$1",[domain]);
+        for(const at of [named.createdAt,named.expiresAt,named.deleteAfter])assert.equal(at,new Date(at).toISOString());
+        await db.query("UPDATE mailboxes SET rules='[]' WHERE id=$1",[team.id]);await db.query("UPDATE mailbox_domains SET catch_all='create_mailbox' WHERE id=$1",[domain]);error(await create({}),403,'ADMIN_REQUIRED');await db.query("UPDATE mailbox_domains SET catch_all='store' WHERE id=$1",[domain]);
         await db.query("INSERT INTO mail_retired_addresses VALUES($1,$2,now()+interval '1 day')",[wid,'reserved@'+host]);const release='/v1/inbound/retired/reserved@'+host;
         error(await request('DELETE',release,provision),403);error(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}),409,'ADDRESS_RETIRED');ok(await local('DELETE',release));ok(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}));
       });
