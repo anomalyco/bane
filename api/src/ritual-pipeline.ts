@@ -139,7 +139,7 @@ export function projectEmail(
     visibleText: visible.text.slice(0, 65536),
     hiddenContent: visible.hiddenContent,
     links: visible.extract.links,
-    html: m.html ? safeForwardHtml(m.html).slice(0,65536) : null,
+    html: m.html ? safeForwardHtml(m.html)?.slice(0,65536) ?? null : null,
     attachments,
     images: attachments.filter((f) => f.isImage),
     auth: {
