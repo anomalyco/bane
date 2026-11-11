@@ -112,3 +112,19 @@ All tests below live in `api/api.acceptance.test.ts`.
 | Orphan storage and bounded maintenance | `api/src/mailbox-ingest.ts:388`; `api/src/mailbox-staging.ts:90`; `api/src/mailbox-events.ts:85`; `api/src/inbound-threads.ts:132` | `deduplicated uploads are reclaimed without expiring the owned attachment`; `inbound migration is repeatable and retention drains only terminal receipts and holds past 30 days` |
 
 Limits are deliberate: 600k messages / 64 GiB per UTC hour and 50k pending/running ingest jobs per workspace by default. A rejected new receipt leaves a private terminal reason, no workspace copy or normal hook. The oversize check, MIME limits, original-owner hold fence, staged object checks, signature and topic pinning remain. Only an authorized production canary can verify the deployed end-to-end path.
+
+## Route-enabled receiving (phase 1)
+
+The acceptance fixture runs the real queue claim and settlement against PostgreSQL, with synthetic SES envelopes and a mocked S3 transport. The exact route targets an inbox and a webhook also subscribed to that address. It produces **one** membership and **one** delivery, not two deliveries. Stored-message dry runs use the same matcher; the test compares the entire result with `mail_receipts.routing`.
+
+| Stage | Plain message | With files |
+|---|---:|---:|
+| Admission | 1 | 1 |
+| Claim, including route input | 1 | 1 |
+| Claimed handler (byte debit, optional attachment journal, store) | **2** | **3** |
+| Fenced job settlement | 1 | 1 |
+| Claim through settlement | **4** | **5** |
+
+No subscriptions are expanded or webhook bodies rendered in the ingest lane. Envelope-only drops can settle with the claim's job fence without touching S3. `mail_route_input` returns NULL for a workspace without routing state; only the routed path uses the seven-argument store. Migration 120 checks for possible legacy plus-base dependencies at install time, without reading stored message content. The existing domain catch-all column is **not** backfilled.
+
+The companion inboxes branch changes storage and adds lifecycle/quota handling to `mail_store_incoming_v2`. When integrating the branches, keep its R2 object access, held/retired gates and membership counters in **both** paths, and run the combined fixture. The six-argument and seven-argument stores here are for the address schema at `b0dbc95`, not a substitute for those gates. Query counts above are measured; the design's latency targets on a 100k queue are not measurements of this change.
