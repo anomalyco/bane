@@ -5323,6 +5323,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     }
     if(source.startsWith('-- bane:batched\n')){
       let cursor='';do{cursor=(await db.query(source,[cursor])).rows[0].cursor;}while(cursor);
+      if(file!=='120_routing_backfill.sql')continue;
       await t.test('routing M1/M2: upgrading overlapping legacy rules preserves the legacy store and skips oversize domains',async()=>{
         assert.equal((await db.query(`SELECT mail_route_input('default','["sales-eu-x@upgrade.example"]') p`)).rows[0].p,null);
         assert.equal((await db.query("SELECT FROM mail_routing_state")).rowCount,0);assert.equal((await db.query("SELECT FROM mail_route_plan_issues WHERE domain_id='r-big' AND bytes>262144")).rowCount,1);
@@ -8300,7 +8301,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('review M4: sweep reports an exhausted slice and isolates a failed phase',async t=>{
     await simulatedSesFixture(t,async({runtime})=>{const {sweepInboxes}=await import('./src/maintenance.js');let calls=0;
       const mock=t.mock.method(runtime.db,'execute',async()=>{if(++calls===1)throw Error('synthetic failure');return {rows:[{n:0}]};});
-      try {assert.equal(await sweepInboxes(runtime,1000),false);assert.equal(calls,3);let tick=0;assert.equal(await sweepInboxes(runtime,1,()=>tick++),false);assert.equal(calls,3);}finally{mock.mock.restore();}
+      try {assert.equal(await sweepInboxes(runtime,1000),false);assert.equal(calls,4);let tick=0;assert.equal(await sweepInboxes(runtime,1,()=>tick++),false);assert.equal(calls,4);}finally{mock.mock.restore();}
     });
   });
   test('ephemeral inbox: hourly sweep drains 10,000 due inboxes in bounded batches',{skip:!BENCH},async t=>{
@@ -8320,6 +8321,49 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const ids=[unique('msg'),unique('msg')];for(const mid of ids)await a.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','fixture',jsonb_build_array($4::text),'{}')",[wid,mid,REGION,addr]);
     const insert=(db:pg.Client,mid:string)=>db.query("SELECT * FROM mail_store_incoming_v2($1,'[]','[]',$2,false,false)",[JSON.stringify({id:mid,workspace_id:wid,ses_message_id:mid,lifecycle:'ephemeral',envelope_to:[addr],direction:'inbound',subject:mid,from_address:'author@example.net',to:[],cc:[],bcc:[],reply_to:[],references:[],received_at:new Date().toISOString(),body_truncated:false,snippet:mid,headers:[],size_bytes:42,attachment_count:0,verdicts:{},spam:false,automated:false,status:'received'}),JSON.stringify([{addr,n:0,valid:true}])]);
     await a.query('BEGIN');try{await insert(a,ids[0]);const later=insert(b,ids[1]);const path=`/v1/inboxes/${bid}/messages`;const waiting=http('GET',path+'?wait=2&limit=1',token);await a.query('COMMIT');await later;const first=ok(await waiting);assert.deepEqual(first.data.map((m:Json)=>m.id),[ids[0]]);const page=ok(await http('GET',path+'?after='+first.cursor,token));assert.deepEqual(page.data.map((m:Json)=>m.id),[ids[1]]);assert.ok(BigInt(page.cursor)>BigInt(first.cursor));}finally{await a.query('ROLLBACK');}
+  });
+  test('folder UID and MODSEQ follow commit order, rollbacks never publish a wake',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),wid=unique('folder-w'),bid=unique('mbx'),mid=unique('msg'),tid=unique('thr');
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'folder.invalid',$3,'active','store')",[bid,wid,REGION]);
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'folder@example.invalid','inbox','forever')",[bid,wid]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,wid]);await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'outbound','kept')",[mid,wid,tid]);
+    await a.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read) VALUES($1,$2,$3,$4,'outbound',now(),true)",[wid,bid,mid,tid]);
+    const wakes:string[]=[];b.on('notification',event=>wakes.push(event.payload!));await b.query('LISTEN bane_inbox_changed');
+    const copy=(cx:pg.Client)=>cx.query("SELECT inbox_mutate($1,$2,$3,'copy','{\"source\":\"sent\",\"uid\":1,\"folder\":\"archive\"}') r",[wid,bid,mid]);
+    await a.query('BEGIN');try{await copy(a);await a.query('ROLLBACK');await b.query('SELECT 1');assert.equal(wakes.length,0);
+      await a.query('BEGIN');const first=(await copy(a)).rows[0].r,later=copy(b);await a.query('COMMIT');const second=(await later).rows[0].r;
+      assert.equal(first.uid,1);assert.equal(second.uid,2);assert.ok(BigInt(second.modseq)>BigInt(first.modseq));assert.ok(wakes.includes(bid));
+    }finally{await a.query('ROLLBACK');await b.query('UNLISTEN bane_inbox_changed');}
+  });
+  test('H1: permanent removal holds the ingest lane; a reopened envelope delivers only the new membership',async t=>{
+    const writer=await fixtureDatabase(t),peer=await fixtureDatabase(t),w=unique('reopen'),domain=unique('mdom'),mid=unique('msg');
+    const bids=[unique('mbx'),unique('mbx')],addrs=['a@reopen.invalid','b@reopen.invalid'];
+    const {randomSecret,digest}=await import('./src/core.js'),tokens=[randomSecret('bane_mbx_'),randomSecret('bane_mbx_')];
+    await writer.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'reopen.invalid',$3,'active','store')",[domain,w,REGION]);
+    for(const [i,bid] of bids.entries()){
+      await writer.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')",[bid,w,domain,addrs[i]]);
+      await writer.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addrs[i],bid]);
+      await writer.query('INSERT INTO inbox_state(workspace_id,inbox_id) VALUES($1,$2)',[w,bid]);
+      await writer.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'reader',$3,'fixture',jsonb_build_array($4::text),'["read"]')`,[unique('mbk'),w,await digest(tokens[i]!),bid]);
+    }
+    const received=new Date().toISOString();
+    const store=(addresses:string[])=>peer.query("SELECT * FROM mail_store_incoming($1,'[]','[]',$2,false,false,NULL,NULL)",[
+      {id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:addresses,direction:'inbound',subject:'Synthetic receipt',from_address:'fixture@example.invalid',to:[],cc:[],bcc:[],reply_to:[],references:[],received_at:received,body_truncated:false,snippet:'fixture',headers:[],size_bytes:42,attachment_count:0,verdicts:{},spam:false,automated:false,status:'received'},JSON.stringify(addresses.map((addr,n)=>({addr,n,valid:true})))]);
+    await peer.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','fixture',$4,'{}')",[w,mid,REGION,JSON.stringify(addrs.slice(0,1))]);
+    await store(addrs.slice(0,1));
+    await peer.query("UPDATE mail_receipts SET status='pending',recipients=$3 WHERE workspace_id=$1 AND ses_message_id=$2",[w,mid,JSON.stringify(addrs)]);
+    await writer.query('BEGIN');try{
+      const removed=(await writer.query("SELECT inbox_mutate($1,$2,$3,'expunge','{}') r",[w,bids[0],mid])).rows[0].r;
+      assert.equal(removed.removed,true);
+      // Prove exclusion directly, without relying on a timer or racing a content read.
+      await assert.rejects(peer.query("SELECT FROM mailbox_write_lanes WHERE workspace_id=$1 AND lane='ingest' FOR UPDATE NOWAIT",[w]),{code:'55P03'});
+      await writer.query('COMMIT');
+    }finally{await writer.query('ROLLBACK');}
+    await store(addrs);
+    error(await http('GET',`/v1/inboxes/${bids[0]}/messages/${mid}`,tokens[0]!),404);
+    assert.equal(ok(await http('GET',`/v1/inboxes/${bids[1]}/messages/${mid}`,tokens[1]!)).id,mid);
+    assert.deepEqual((await peer.query("SELECT total,uid_next::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bids[0]])).rows,[{total:0,uid_next:2}]);
   });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
@@ -8371,6 +8415,39 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(ingest.delivery?.drop)assert.equal(reads,before);return (await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
       };
       const first=await deliver('r2-first',[box.address],true),defaultMsg=await deliver('r2-mixed',[other.address,'ordinary@'+host],true);
+      await t.test('M1: a previous-generation writer cannot commit unjournaled inbox or thread state',async()=>{
+        const snapshot=async()=>ok(await request('GET',path+'/folders',key));
+        const before=await snapshot();
+        for(const [statement,id] of [
+          ['UPDATE mailbox_messages SET read=true WHERE mailbox_id=$1 AND message_id=$2',first.id],
+          ["UPDATE mailbox_threads SET archived=true,starred=true,labels=ARRAY['fixture'] WHERE mailbox_id=$1 AND thread_id=$2",first.thread_id],
+        ] as const){
+          await db.query('SAVEPOINT previous_writer');
+          try{await assert.rejects(db.query(statement,[box.id,id]),{code:'40001'});}finally{await db.query('ROLLBACK TO previous_writer; RELEASE previous_writer');}
+        }
+        assert.deepEqual(await snapshot(),before);
+        assert.equal(ok(await request('GET',`${url}/${first.id}`,key)).read,false);
+        assert.deepEqual(ok(await request('GET',path+'/changes?since='+before.state,key)).changed,[]);
+        ok(await request('PATCH',`${url}/${first.id}`,key,{read:true}));
+        assert.equal((await snapshot()).data.find((f:Json)=>f.role==='inbox').unseen,0);
+        assert.deepEqual(ok(await request('GET',path+'/changes?since='+before.state,key)).changed,[first.id]);
+        ok(await request('PATCH',`${url}/${first.id}`,key,{read:false}));
+      });
+      await t.test('M2: persistent creation and receipt binding require the verified BYO role and bucket',async()=>{
+        await db.query('SAVEPOINT policy_fixture');
+        try{
+          const cid=unique('conn'),account='444455556666',role=`arn:aws:iam::${account}:role/Bane-fixture`;
+          await db.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn) VALUES($1,$2,$3,'ready','byo',$4,gen_random_uuid(),'v4',$5,'fixture-platform')",[cid,wid,REGION,account,role]);
+          await db.query('UPDATE mailbox_regions SET account_id=$2 WHERE workspace_id=$1',[wid,account]);
+          const p={wid,hosted:true,admin:true,input:{type:'persistent',domain:'not-provisioned.invalid'}},refusal=async()=>(await db.query('SELECT create_managed_inbox($1) r',[p])).rows[0].r.error;
+          const {storageBinding}=await import('./src/mailbox-ingest-input.js');const verified=async()=>(await runtime.db.execute<{b:{kept_policy_v1:boolean}}>(sql`SELECT ${storageBinding(wid,REGION,bucket)} b`)).rows[0].b.kept_policy_v1;
+          assert.equal(await refusal(),'BYO_KEPT_POLICY_REQUIRED');assert.equal(await verified(),false);
+          await db.query('INSERT INTO mail_kept_policy_v1(connection_id,role_arn,region,bucket) VALUES($1,$2,$3,$4)',[cid,role,REGION,'different-bucket']);
+          assert.equal(await refusal(),'BYO_KEPT_POLICY_REQUIRED');assert.equal(await verified(),false);
+          await db.query('UPDATE mail_kept_policy_v1 SET bucket=$2 WHERE connection_id=$1',[cid,bucket]);
+          assert.equal(await verified(),true);assert.equal(await refusal(),'RECEIVING_DOMAIN_REQUIRED');
+        }finally{await db.query('ROLLBACK TO policy_fixture; RELEASE policy_fixture');}
+      });
       await t.test('R2 mail store: hosted ingest writes scrubbed raw and attachments with unchanged DB trips',async()=>{
         assert.equal(first.raw_bucket,'r2:fixture-r2');assert.equal(first.raw_key,`e/${wid}/${box.id}/${first.id}.eml`);assert.deepEqual(stored.get(first.raw_key),Buffer.from(raw.get('r2-first')!.toString().split('\r\n').slice(1).join('\r\n')));assert.equal(defaultMsg.raw_key,`d/${wid}/${defaultMsg.id}.eml`);assert.ok([...stored.keys()].some(k=>k.startsWith(`a/${wid}/${defaultMsg.id}/`)));assert.equal(s3mail.size,0);
       });
@@ -8415,11 +8492,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
         const rpc=(method:string,params:Json,path='/mcp?codemode=true&toolsets=inboxes')=>request('POST',path,key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
         const read=ok(await charged(2,()=>rpc('tools/call',{name:'getInboxMessage',arguments:{inboxId:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
         const plain = ok(await rpc('tools/list',{},'/mcp')).result.tools;
         assert.deepEqual(plain.map((tool:Json)=>tool.name).sort(),['attachments','describe_tool','inboxes','messages']);
-        assert.deepEqual(plain.find((tool:Json)=>tool.name==='messages').inputSchema.properties.action.enum.sort(),['get','list','update','wait']);
+        assert.deepEqual(plain.find((tool:Json)=>tool.name==='messages').inputSchema.properties.action.enum.sort(),['copy','delete','expunge','get','list','move','update','wait']);
         const merged = ok(await charged(2,()=>rpc('tools/call',{name:'messages',arguments:{action:'get',inboxId:box.id,messageId:first.id}},'/mcp'))).result;
         assert.equal(merged.isError,false); assert.equal(merged.content[0].text,read.content[0].text);
         for (const [path,name,args] of [['/mcp','messages',{action:'getInbound'}],['/mcp?codemode=true','getInboundMessage',{}]] as const) {
@@ -8445,6 +8522,38 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         error(await reply(sender.id,unverified.thread_id,'fixture@example.net',unverified.id),403,'RECIPIENT_NOT_ALLOWED');
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net'),202);
         await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction) SELECT 'out_'||i,$1,$2,$3,'outbound' FROM generate_series(1,19)i",[wid,mail.thread_id,sender.id]);error(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),429,'MAILBOX_SEND_LIMIT');
+      });
+      await t.test('folder entries keep independent UIDs and shared flags, not shared state across inboxes',async()=>{
+        const p=ok(await local('POST',root,{type:'persistent',localPart:'persistent',send:{enabled:true},credential:{name:'owner',permissions:['read','modify']}}),201);
+        assert.equal(p.expiresAt,null);assert.equal(p.deleteAfter,null);assert.equal(p.retention.mode,'forever');
+        const token=p.credential.secret,base=`${root}/${p.id}`,folders=()=>request('GET',base+'/folders',token),initial=ok(await folders());
+        assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','inbox','junk','sent','trash']);
+        const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
+        assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
+        const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
+        const url=`${base}/messages/${m.id}`,v=(await page('inbox'))[0];assert.equal(v.uid,1);assert.equal(v.uidValidity,initial.data.find((f:Json)=>f.role==='inbox').uidValidity);
+        const post=(action:string,body:Json)=>request('POST',`${url}/${action}`,token,body);
+        const c1=ok(await charged(2,()=>post('copy',{folder:'archive',source:'inbox',uid:1})));assert.equal(c1.uid,1);
+        const c2=ok(await post('copy',{folder:'archive',source:'inbox',uid:1}));assert.equal(c2.uid,2);assert.deepEqual((await page('archive')).map((x:Json)=>x.uid),[1,2]);
+        error(await request('PATCH',url,token,{read:true,ifModseq:v.modseq}),409,'MODIFIED');
+        const updated=ok(await request('PATCH',url,token,{read:true,flagged:true,answered:true,addLabels:['followup']}));assert.ok(BigInt(updated.modseq)>BigInt(c2.modseq));
+        assert.ok((await page('archive')).every((x:Json)=>x.read&&x.flags.includes('flagged')&&x.labels.includes('followup')));
+        assert.equal(ok(await local('GET',`${root}/${other.id}/messages/${m.id}`)).read,false);
+        const moved=ok(await post('move',{source:'inbox',uid:1,folder:'trash'}));assert.equal(moved.uid,1);assert.deepEqual(await page('inbox'),[]);
+        ok(await local('PATCH',`/v1/inbound/threads/${m.thread_id}`,{addressId:p.id,starred:false}));assert.ok(!(await page('trash'))[0].flags.includes('flagged'));
+        error(await post('move',{source:'inbox',uid:1,folder:'sent'}),404,'MESSAGE_GONE');
+        ok(await request('PATCH',url,token,{source:'archive',uid:2,deleted:true}));
+        const exp=ok(await request('POST',base+'/folders/archive/expunge',token,{}));assert.equal(exp.expunged,1);
+        assert.equal((await page('archive')).length,1);assert.equal((await page('trash'))[0].folders.length,2);
+        const reply=ok(await local('POST',`/v1/inbound/threads/${m.thread_id}/reply`,{addressId:p.id,replyToMessageId:m.id,to:['fixture@example.net'],text:'Sent copy'},'live',{'idempotency-key':unique('idem')}),202);
+        assert.deepEqual((await page('sent')).map((x:Json)=>x.id),[reply.id]);const sent=(await db.query('SELECT raw_key,size_bytes FROM mail_messages WHERE id=$1',[reply.id])).rows[0];assert.ok(sent.raw_key);assert.equal(s3mail.get(sent.raw_key)!.length,sent.size_bytes);assert.match(s3mail.get(sent.raw_key)!.toString(),/Sent copy/);
+        const since=ok(await folders()).state;
+        for(const role of ['archive','trash'])ok(await request('DELETE',`${url}?permanent=true&source=${role}&uid=1`,token));
+        assert.deepEqual(ok(await request('GET',base+'/changes?since='+since,token)).removed,[m.id]);
+        assert.equal(ok(await local('GET',`${root}/${other.id}/messages/${m.id}`)).id,m.id);
+        const later=await deliver('kept-later',[p.address]);assert.equal((await page('inbox'))[0].uid,2);assert.notEqual(later.id,m.id);
+        error(await request('GET',`${root}/${other.id}/folders`,token),404);
+        ok(await request('DELETE',base,token),202);await db.query('SELECT inbox_retention_batch(25)');
       });
       const sharedMail=await deliver('two-inboxes',[box.address,other.address]);
       await t.test('review H1: generated addresses cannot shadow existing routing; retirement is admin-releasable',async()=>{
@@ -9113,6 +9222,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(rows.some(s=>s.Action.includes('s3:AbortMultipartUpload') && s.Effect==='Allow' && s.Resource.startsWith(bucket+'/workspaces/') && s.Resource.endsWith('/raw/?*.eml')));
     }
     assert.ok(all.some(s=>s.Effect==='Deny' && s.Action?.includes('s3:ListBucket') && s.Condition?.StringNotEquals?.['s3:ResourceAccount']===account));
+  });
+
+  test('M2: direct and promoted kept S3 raw use the versioned receiving grants, not the ordinary expiry tag',async t=>{
+    const {receivedMailStore}=await import('./src/mail-objects.js'),{copyWorkspaceRaw}=await import('./src/mailbox-mime.js'),{S3Client}=await import('@aws-sdk/client-s3');
+    const {load}=await import('js-yaml'),{render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href);
+    const w='ws_'+'a'.repeat(32),mid='msg_'+'b'.repeat(32),account='123456789012',region='us-east-2',prefix='bane-'+'c'.repeat(20),bucket=`${prefix}-mail-${region}`;
+    const client=new S3Client({region}),commands:Json[]=[],raw=Buffer.from('Bcc: private@example.invalid\r\nSubject: Fixture\r\n\r\nStored body');
+    t.mock.method(client,'send',async(cmd:any)=>{switch(cmd.constructor.name){case 'HeadObjectCommand':return {ETag:'"pin"',ContentLength:raw.length};case 'GetObjectCommand':return {Body:{transformToByteArray:async()=>raw}};case 'PutObjectCommand':commands.push(cmd.input);return {};default:throw Error(cmd.constructor.name);}});
+    const store=receivedMailStore({config:{multiTenant:true}} as import('./src/core.js').Runtime,w,{bucket,binding:{kind:'byo',id:'fixture',role_arn:'fixture',external_id:'fixture',aws_account_id:account},delivery:{lifecycle:'kept',prefixInbox:null,drop:false,owners:[]}},client,{messageId:mid,sesMessageId:'receipt'});
+    const copied=await copyWorkspaceRaw(client,region,bucket,'staging/receipt',store.rawKey,[],'kept');await store.objects.put(store.rawKey,copied.bytes,'message/rfc822');client.destroy();
+    assert.equal(commands.length,2);assert.equal(store.rawKey,`workspaces/${w}/raw/kept/${mid}.eml`);
+    const hosted=Object.values(render('--fresh',{account,origin:'https://dev.bane.mx'}) as Record<string,{Statement:IamStatement[]}>).flatMap(doc=>doc.Statement);
+    const cases:[IamStatement[],string][]=[[hosted,`bane-${account}-mail-${region}`]];
+    for(const file of ['byo-template.yaml','byo-template-v4.yaml']){
+      const src=await readFile(new URL(file,import.meta.url),'utf8'),params:Record<string,string>={ResourcePrefix:prefix,WorkspaceId:w,'AWS::Region':region,'!aws:RequestedRegion':region,'AWS::AccountId':account};
+      const cfn=load(src.replace(/\$\{([^}]+)\}/g,(m,k:string)=>params[k]??m).replaceAll("!Ref 'AWS::AccountId'",JSON.stringify(account)).replaceAll('!Ref ReceivingRegions','[us-east-2]').replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json;
+      const policy=cfn.Resources.KeptReceivingV1.Properties.PolicyDocument;
+      assert.ok(JSON.stringify(policy).length<=6144);assert.equal(cfn.Outputs.KeptReceivingPolicy.Value,`kept-v1:${w}`);
+      // Include the old receiving permissions as well, not just the new grant.
+      const legacy=file==='byo-template.yaml'?cfn.Resources.ReceivingPolicy.Properties.PolicyDocument:cfn.Resources.BaneRole.Properties.Policies.find((p:Json)=>Array.isArray(p)&&p[1]?.PolicyName==='Receiving')[1].PolicyDocument;
+      cases.push([[...legacy.Statement,...policy.Statement],bucket]);
+    }
+    for(const [policy,b] of cases){
+      const allow=(action:string,key:string,kind:string)=>iamAllows(policy,action,`arn:aws:s3:::${b}/${key}`,{'aws:RequestedRegion':region,'s3:ResourceAccount':account,'s3:RequestObjectTag/bane-kind':kind,'s3:RequestObjectTagKeys':['bane-kind']});
+      for(const {Key,Tagging} of commands){assert.equal(Tagging,'bane-kind=kept');assert.ok(allow('s3:PutObject',Key,'kept'));assert.ok(allow('s3:PutObjectTagging',Key,'kept'));assert.ok(allow('s3:PutObjectTagging',Key,'orphan'));}
+      const ordinary=`workspaces/${w}/raw/receipt.eml`;assert.ok(allow('s3:PutObject',ordinary,'raw'));assert.equal(allow('s3:PutObject',ordinary,'kept'),false);assert.equal(allow('s3:PutObjectTagging',ordinary,'orphan'),false);
+    }
   });
 
   test('attachment keys built by the code are authorized by the hosted, BYO and self-hosted IAM policies, and nothing wider (N1)',async()=>{
@@ -11786,6 +11922,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.mail_receive_limits (LIKE public.mail_receive_limits INCLUDING ALL);
           CREATE FUNCTION \${schema}.mail_route_input(text,jsonb,boolean,jsonb) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb';
           CREATE TABLE \${schema}.mailbox_regions (LIKE public.mailbox_regions INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_kept_policy_v1 (LIKE public.mail_kept_policy_v1 INCLUDING ALL);
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);

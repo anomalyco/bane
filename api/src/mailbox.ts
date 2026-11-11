@@ -195,8 +195,12 @@ const UpdateInboundThread = z.object({
 }).strict().refine(v => Object.entries(v).some(([key,value]) => key !== 'addressId' && value !== undefined), 'Change at least one state field.').openapi('UpdateInboundThread');
 type ThreadPatchInput = Omit<z.infer<typeof UpdateInboundThread>, 'addressId'>;
 async function patchThread(c: Ctx, mailboxId: string, threadId: string, patch: ThreadPatchInput) {
-  const { scope } = await mailboxFor(c, mailboxId, 'modify');
+  const { scope,mailbox } = await mailboxFor(c, mailboxId, 'modify');
   const runnable = await c.env.db.transaction(async tx => {
+    if(mailbox.kind==='inbox'){
+      if(!((await tx.execute<{ok:boolean}>(sql`SELECT inbox_patch_thread(${scope.workspaceId},${mailboxId},${threadId},${JSON.stringify(patch)}::jsonb) ok`)).rows[0]?.ok))throw new ApiError(404,'NOT_FOUND','Thread was not found in this inbox.');
+      return recordEvents(tx,scope.workspaceId,[{type:'thread.updated',mailboxId,threadId,data:{changes:patch}}]);
+    }
     const [row] = await tx.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, threadId))).for('update');
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Thread was not found in this mailbox.');
     if (patch.read === true) await tx.update(mailboxMessages).set({ read: true }).where(and(eq(mailboxMessages.mailboxId, mailboxId), eq(mailboxMessages.threadId, row.threadId), eq(mailboxMessages.read, false)));

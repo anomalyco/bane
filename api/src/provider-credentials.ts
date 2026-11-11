@@ -51,7 +51,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
   } finally { client.destroy(); }
 }
 type DeliverySession={purpose:'send';domainId:string}|{purpose:'template';name:string}|{purpose:'quota'};
-export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string; managed_tenant?:boolean; pool_tenant_name?:string|null; legacy?:boolean; legacy_names?:boolean; template_version?:string; pool_tier?:'trusted'|'probation'; identitySession?:{name:string;purpose:'verify'|'read'|'delete'|'mailFrom'}; deliverySession?:DeliverySession };
+export type ReadyConnection = { kept_policy_v1?:boolean; id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string; managed_tenant?:boolean; pool_tenant_name?:string|null; legacy?:boolean; legacy_names?:boolean; template_version?:string; pool_tier?:'trusted'|'probation'; identitySession?:{name:string;purpose:'verify'|'read'|'delete'|'mailFrom'}; deliverySession?:DeliverySession };
 export function forDelivery(connection:ReadyConnection|undefined,scope:DeliverySession) {
   return connection?.template_version==='v5'?{...connection,deliverySession:scope}:connection;
 }

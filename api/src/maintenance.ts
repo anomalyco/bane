@@ -32,6 +32,7 @@ export async function sweepInboxes(runtime:Runtime, budgetMs:number,clock=Date.n
   const until=clock()+budgetMs;
   const phases=[{name:'leases',batch:sql`SELECT inbox_retention_batch(25) n`,done:false,failed:false},
     {name:'content',batch:sql`SELECT mail_gc_batch(1000) n`,done:false,failed:false},
+    {name:'expunge history',batch:sql`SELECT inbox_prune_vanished() n`,done:false,failed:false},
     {name:'reservations',batch:sql`WITH pruned AS (DELETE FROM mail_retired_addresses WHERE (workspace_id,address) IN (SELECT workspace_id,address FROM mail_retired_addresses WHERE until<=now() ORDER BY until LIMIT 5000) RETURNING 1) SELECT count(*)::int n FROM pruned`,done:false,failed:false}];
   while(clock()<until && phases.some(p=>!p.done&&!p.failed))for(const p of phases){
     if(p.done||p.failed||clock()>=until)continue;
