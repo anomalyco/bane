@@ -8441,13 +8441,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
-        const first=await post('/v1/inbound/addresses',{address:'replay@receive.example'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example'},'addr-1');assert.equal(again.status,201);assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
+        const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
         const route=await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1');assert.equal(route.status,201);assert.equal((await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1')).body.id,route.body.id);
         error(await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'not a url'},'ep-1'),422);
         const made=await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'https://hooks.example.org/replay'},'ep-1');assert.equal(made.status,201,JSON.stringify(made.body));assert.match(made.body.secret,/^whsec_/);
         assert.match(error(await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'https://hooks.example.org/replay'},'ep-1'),409,'IDEMPOTENT_SECRET_WITHHELD').message,/shown once/);
         assert.equal((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='ep-1'")).rows[0].r.includes('whsec_'),false);
+        // A nested credential (createInbox's credential.secret) is withheld too.
+        const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/bane_mbx_/);
+        error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/bane_mbx_/);
         assert.deepEqual(await call('DELETE','/v1/endpoints/replay-hook'),{name:'replay-hook',deleted:true});await call('DELETE',`/v1/routing/routes/${route.body.id}`);
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {

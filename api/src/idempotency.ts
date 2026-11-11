@@ -20,15 +20,22 @@ const AUTHENTICATED_CREATES = [
   /^\/v1\/routing\/routes$/,
 ];
 const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|keys|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
-const SECRET_FIELDS = ['secret', 'token', 'key', 'verificationToken'];
+// Field names that hold credentials at any depth (createInbox nests its key under credential.secret).
+// "key" is not one: addresses and webhooks use it for their routing key.
+const SECRET_FIELDS = new Set(['secret', 'token', 'verificationToken', 'password']);
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
 }
-const carriesSecret = (body: unknown) =>
-  !!body && typeof body === 'object' && (SECRET_FIELDS.some(k => typeof (body as Record<string, unknown>)[k] === 'string') || /"Authorization":"Bearer /.test(JSON.stringify((body as Record<string, unknown>).config ?? null)));
+function carriesSecret(value: unknown, depth = 0): boolean {
+  if (depth > 16) return true;
+  if (typeof value === 'string') return /^(?:Bearer |bane_|whsec_)/.test(value);
+  if (Array.isArray(value)) return value.some(item => carriesSecret(item, depth + 1));
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([k, v]) => (SECRET_FIELDS.has(k) && typeof v === 'string' && v.length > 0) || carriesSecret(v, depth + 1));
+}
 class Discard extends Error {}
 
 function idempotentCreates(paths: RegExp[]) {
