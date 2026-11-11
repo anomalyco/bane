@@ -1,327 +1,196 @@
-import { useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
-import {
-  Alert,
-  Button,
-  CopyButton,
-  DataTable,
-  Dialog,
-  EmptyState,
-  ErrorState,
-  PageHeader,
-  SectionHeader,
-  StatusBadge,
-} from '../../components/ui';
-import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context';
-import { queries } from '../../data/queries';
-import { request } from '../../data/live';
-import type { Inbox, InboxMessage, InboxMessageDetail, InboundKey } from '../../../../sdk/src/types.gen';
-import { when } from './shared';
+import { useEffect, useState, type FormEvent } from 'react'
+import { Link, useNavigate, useParams } from 'react-router'
+import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
+import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
+import type { CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
+import { date, number } from '../../lib/format'
+import { useCursorPagination } from '../../lib/pagination'
+import { fieldError, MutationError } from '../settings/shared'
+import { nameOf, when } from './shared'
+import '../settings/settings.css'
+import './inbound.css'
 
-const base = '/v1/inboxes';
-const route = '/receiving/inboxes';
-function NewInbox({ close }: { close: () => void }) {
-  const domains = useApiDef(queries.inboundDomains()),
-    hosts = domains.data?.filter((d) => d.status === 'active').map((d) => d.dns[0]?.name ?? d.name) ?? [];
-  const [sandbox, setSandbox] = useState(false),
-    [domain, setDomain] = useState(''),
-    [ttl, setTtl] = useState(86400),
-    [key, setKey] = useState(true),
-    [name, setName] = useState('');
-  const make = useApiMutation(() =>
-    request<Inbox & { credential?: { secret: string } }>(base, {
-      method: 'POST',
-      body: {
-        type: sandbox ? 'sandbox' : 'ephemeral',
-        domain: sandbox ? undefined : domain || hosts[0],
-        name,
-        ttlSeconds: ttl,
-        ...(key ? { credential: { name: 'Agent', permissions: ['read', 'modify'] } } : {}),
-      },
-    }),
-  );
-  return (
-    <Dialog
-      open
-      title={make.data ? 'Inbox created' : 'New inbox'}
-      onOpenChange={(open) => {
-        if (!open) close();
-      }}
-      footer={
-        make.data ? (
-          <Button onClick={close}>Done</Button>
-        ) : (
-          <Button disabled={make.isPending || (!sandbox && !hosts.length)} onClick={() => make.mutate(undefined)}>
-            Create inbox
-          </Button>
-        )
-      }
-    >
-      {make.data ? (
-        <div className="stack">
-          <p>{make.data.address}</p>
-          {make.data.credential && (
-            <>
-              <p>Copy this key now. It won’t be shown again.</p>
-              <code className="settings-copy-cell">
-                {make.data.credential.secret}
-                <CopyButton value={make.data.credential.secret} label="Copy inbox key" />
-              </code>
-            </>
-          )}
-        </div>
-      ) : (
-        <div className="stack">
-          <label>
-            Name <input maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
-          </label>
-          <label>
-            <input type="checkbox" checked={sandbox} onChange={(e) => setSandbox(e.target.checked)} /> Sandbox
-            (simulated mail only)
-          </label>
-          <label>
-            Receiving host{' '}
-            <select disabled={sandbox} value={domain || hosts[0] || ''} onChange={(e) => setDomain(e.target.value)}>
-              {hosts.map((h) => (
-                <option key={h}>{h}</option>
-              ))}
-            </select>
-          </label>
-          {!sandbox && !domains.isPending && !hosts.length && (
-            <Alert tone="warning">
-              Add a domain and publish its receiving MX record.{' '}
-              {domains.data
-                ?.flatMap((d) => d.dns)
-                .map((r) => (
-                  <code key={r.name}>
-                    {r.name} MX {r.priority} {r.value}{' '}
-                  </code>
-                ))}
-              <Link to="/domains">Open Domains</Link>
-            </Alert>
-          )}
-          <label>
-            Expires in{' '}
-            <select value={ttl} onChange={(e) => setTtl(Number(e.target.value))}>
-              {[
-                [3600, '1 hour'],
-                [86400, '24 hours'],
-                [604800, '7 days'],
-                [2592000, '30 days'],
-              ].map(([t, label]) => (
-                <option value={t} key={t}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <input type="checkbox" checked={key} onChange={(e) => setKey(e.target.checked)} /> Create an inbox key
-          </label>
-          {make.error && <Alert tone="danger">{make.error.message}</Alert>}
-        </div>
-      )}
-    </Dialog>
-  );
+const route = '/receiving/inboxes'
+const lifetimes = [{ value: '3600', label: '1 hour' }, { value: '86400', label: '24 hours' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
+const statusTone: Record<InboxStatus, Tone> = { active: 'success', expired: 'warning', deleting: 'neutral' }
+const statusLabel: Record<InboxStatus, string> = { active: 'Active', expired: 'Expired', deleting: 'Deleting' }
+const size = (bytes: number) => bytes < 1024 ? `${number(bytes)} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1048576).toFixed(1)} MiB`
+// The MX record's host is the receiving host: reply.example.com on hosted Bane, the domain itself otherwise.
+const receivingHosts = (domains: MailboxDomain[] = []) => domains.filter(domain => domain.status === 'active').map(domain => domain.dns[0]?.name ?? domain.name)
+
+function messageState(message: InboxMessage): { label: string; tone: Tone } {
+  if (message.held) return { label: message.held === 'quota' ? 'Held: over limit' : 'Held: expired', tone: 'warning' }
+  if (message.junk) return { label: 'Junk', tone: 'danger' }
+  if (message.simulated) return { label: 'Simulated', tone: 'info' }
+  return message.read ? { label: 'Read', tone: 'neutral' } : { label: 'Unread', tone: 'info' }
 }
-export function AgentInboxesPage() {
-  const nav = useNavigate(),
-    { canAdminister } = useWorkspaceAccess(),
-    [open, setOpen] = useState(false),
-    [cursor, setCursor] = useState('');
-  const boxes = useApiQuery(['agent-inboxes', cursor], (_, signal) =>
-    request<{ data: Inbox[]; nextCursor: string | null }>(
-      base + '?limit=50' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''),
-      { signal },
-    ),
-  );
-  return (
-    <div className="stack inbound-stack">
-      <PageHeader
-        title="Agent inboxes"
-        actions={canAdminister && <Button onClick={() => setOpen(true)}>New inbox</Button>}
-      />
-      {boxes.error ? (
-        <ErrorState error={boxes.error} onRetry={() => void boxes.refetch()} />
-      ) : (
-        <DataTable
-          loading={boxes.isPending}
-          rows={boxes.data?.data ?? []}
-          rowKey={(b) => b.id}
-          onRowClick={(b) => nav(`${route}/${b.id}`)}
-          empty={
-            <EmptyState
-              title="No agent inboxes"
-              description="Create a temporary address on an active receiving host. If you don’t have one, add a domain and publish its MX record first."
-              action={<Link to="/domains">Open Domains</Link>}
-            />
-          }
-          columns={[
-            {
-              key: 'address',
-              label: 'Address',
-              render: (b) => (
-                <div className="settings-cell-stack">
-                  {b.address}
-                  <span className="muted">{b.name}</span>
-                </div>
-              ),
-            },
-            { key: 'status', label: 'Status', render: (b) => <StatusBadge status={b.status} /> },
-            { key: 'expires', label: 'Expires', render: (b) => when(b.expiresAt) },
-            ...(['messages', 'held', 'unread'] as const).map((k) => ({
-              key: k,
-              label: k[0].toUpperCase() + k.slice(1),
-              render: (b: Inbox) => b.usage[k],
-            })),
-          ]}
-        />
-      )}
-      {cursor && <Button onClick={() => setCursor('')}>First page</Button>}
-      {boxes.data?.nextCursor && <Button onClick={() => setCursor(boxes.data!.nextCursor!)}>Next page</Button>}
-      {open && <NewInbox close={() => setOpen(false)} />}
+
+function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const navigate = useNavigate()
+  const domains = useApiDef(queries.inboundDomains(), { enabled: open })
+  const hosts = receivingHosts(domains.data)
+  const [type, setType] = useState<InboxInput['type']>('ephemeral')
+  const [host, setHost] = useState('')
+  const [name, setName] = useState('')
+  const [lifetime, setLifetime] = useState('86400')
+  const [withKey, setWithKey] = useState(true)
+  const create = useApiMutation((api, input: InboxInput) => api.inboxes.create(input), 'Inbox created')
+  const created: CreatedInbox | undefined = create.data
+  const noHost = !domains.isPending && !hosts.length
+  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Without an active receiving host the only inbox that works is a sandbox.
+  useEffect(() => { if (open) setType(noHost ? 'sandbox' : 'ephemeral') }, [open, noHost])
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    try { await create.mutateAsync({ type, ...(type === 'ephemeral' ? { domain: host || hosts[0] } : {}), ...(name.trim() ? { name: name.trim() } : {}), ttlSeconds: Number(lifetime), ...(withKey ? { credential: { name: 'Agent', permissions: ['read', 'modify'] } } : {}) }) } catch { /* Shown in the form. */ }
+  }
+  const close = () => onOpenChange(false)
+  if (created) return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Inbox created" footer={<><Button onClick={close}>Done</Button><Button variant="primary" onClick={() => { close(); navigate(`${route}/${created.id}`) }}>Open inbox</Button></>}>
+    <div className="stack">
+      <Field label="Address"><div className="settings-copy-cell"><code>{created.address}</code><CopyButton value={created.address} label="Copy address" /></div></Field>
+      {created.credential && <Field label="Inbox key" hint="Copy it now; it won’t be shown again. It can read and manage only this inbox, over the API or hosted MCP, and stops working when the inbox is deleted.">
+        <div className="settings-copy-cell"><code>{created.credential.secret}</code><CopyButton value={created.credential.secret} label="Copy inbox key" /></div>
+      </Field>}
+      <p className="muted">Expires {date(created.expiresAt)}. {created.type === 'sandbox' ? 'Send it test mail with POST /v1/inboxes/{id}/simulate.' : 'Mail sent to this address shows up here and through the API.'}</p>
     </div>
-  );
+  </Dialog>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New inbox" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
+    <form id="agent-inbox-create" className="stack" onSubmit={submit} noValidate>
+      <MutationError error={create.error} />
+      {noHost && <Alert tone="info">No domain receives mail yet, so this will be a sandbox inbox: it only gets test mail you send with the API. For a real address, add a domain in <Link to="/domains">Domains</Link> and publish its receiving MX record.</Alert>}
+      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')} hint={type === 'sandbox' ? 'A random address on a .invalid host that never receives real mail.' : 'A random address that nobody can guess.'}>
+        <Select id="agent-inbox-type" value={type === 'sandbox' ? 'sandbox' : host || hosts[0] || ''} disabled={create.isPending} onValueChange={value => { if (value === 'sandbox') setType('sandbox'); else { setType('ephemeral'); setHost(value) } }}
+          options={[...hosts.map(value => ({ value, label: `…@${value}` })), { value: 'sandbox', label: 'Sandbox (test mail only)' }]} />
+      </Field>
+      <Field label="Name" htmlFor="agent-inbox-name" hint="Optional. Shown in lists and as the sender name on replies.">
+        <Input id="agent-inbox-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="Sign-up test" autoComplete="off" />
+      </Field>
+      <Field label="Expires after" htmlFor="agent-inbox-lifetime" hint="New mail is held for 24 hours after that, then the inbox and its mail are erased.">
+        <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes} />
+      </Field>
+      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create a key for this inbox, for an agent or test" />
+    </form>
+  </Dialog>
 }
+
+export function AgentInboxesPage() {
+  const navigate = useNavigate()
+  const { canAdminister } = useWorkspaceAccess()
+  const [search, setSearch] = useState('')
+  const [creating, setCreating] = useState(false)
+  const pagination = useCursorPagination()
+  const q = search.trim(), cursor = pagination.cursor
+  const inboxes = useApiQuery(['agent-inboxes', q, cursor ?? null], (api, signal) => api.inboxes.list({ search: q || undefined, cursor }, signal), { interval: 30_000, keepPrevious: true })
+  return <div className="stack inbound-stack">
+    <PageHeader title="Agent inboxes" backTo="/receiving" actions={<>
+      <Input className="receiving-search" type="search" aria-label="Search inboxes" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />
+      {canAdminister && <Button variant="primary" onClick={() => setCreating(true)}>New inbox</Button>}
+    </>} />
+    {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
+      <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`${route}/${row.id}`)}
+        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an inbox key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
+        columns={[
+          { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link className="receiving-clip" to={`${route}/${row.id}`} title={row.address}>{row.address}</Link>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div> },
+          { key: 'status', label: 'Status', width: '14%', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
+          { key: 'expires', label: 'Expires', width: '16%', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : date(row.expiresAt) },
+          { key: 'messages', label: 'Messages', align: 'right', render: row => number(row.usage.messages) },
+          { key: 'unread', label: 'Unread', align: 'right', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span> },
+          { key: 'held', label: 'Held', align: 'right', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
+        ]} />
+      {inboxes.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={inboxes.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, inboxes.data?.nextCursor)} />}
+    </>}
+    <NewInboxDialog open={creating} onOpenChange={setCreating} />
+  </div>
+}
+
+function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messageId: string; onClose: () => void }) {
+  const message = useApiQuery(['agent-inbox-message', inboxId, messageId], (api, signal) => api.inboxes.message(inboxId, messageId, signal))
+  const m = message.data
+  const verdict = (name: string, value?: string) => <StatusBadge status={`${name} ${value ?? 'none'}`} tone={value === 'PASS' ? 'success' : value === 'FAIL' ? 'danger' : 'neutral'} />
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
+    {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
+      <div className="settings-cell-stack">
+        <div className="mailbox-message__from"><span>{nameOf(m.from)}</span><span className="muted" title={m.from.address}>{m.from.address}</span></div>
+        <span className="muted">{date(m.receivedAt, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+      </div>
+      <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>
+      {m.held && <Alert tone="warning">{m.held === 'quota' ? 'Held: the inbox was over its message or size limit when this arrived.' : 'Held: this arrived after the inbox expired.'} It is stored but did not notify waiting agents or webhooks.</Alert>}
+      {m.hiddenContent && <Alert tone="info">Hidden text was removed from this message. Only what a reader would see is shown.</Alert>}
+      {(m.extract.codes.length > 0 || m.extract.links.length > 0) && <dl className="settings-facts">
+        {m.extract.codes.length > 0 && <div><dt>Codes</dt><dd className="stack">{m.extract.codes.map(code => <span key={code} className="settings-copy-cell"><code>{code}</code><CopyButton value={code} label="Copy code" /></span>)}</dd></div>}
+        {m.extract.links.length > 0 && <div><dt>Links</dt><dd className="stack">{m.extract.links.slice(0, 5).map(link => <span key={link.href} className="settings-cell-stack"><span className="settings-break">{link.text || link.href}</span><span className="muted settings-break">{new URL(link.href).host}{link.mismatch && ' · text names another site'}</span></span>)}</dd></div>}
+      </dl>}
+      <div className="mailbox-message__body">{m.text || <span className="muted">No text.</span>}</div>
+      {m.attachments.length > 0 && <ul className="mailbox-attachments">{m.attachments.map(file => <li key={file.id}>{file.url ? <a className="ui-button ui-button--secondary ui-button--sm" href={file.url} rel="noreferrer">{file.filename} <span className="muted">{size(file.size)}</span></a> : <span className="muted">{file.filename} · not scanned</span>}</li>)}</ul>}
+    </div>}
+  </Dialog>
+}
+
 export function AgentInboxPage() {
-  const { id = '' } = useParams();
-  return <InboxDetail key={id} id={id} />;
+  const { id = '' } = useParams()
+  return <InboxDetail key={id} id={id} />
 }
 function InboxDetail({ id }: { id: string }) {
-  const { canAdminister } = useWorkspaceAccess(),
-    path = `${base}/${encodeURIComponent(id)}`,
-    [confirm, setConfirm] = useState(false),
-    [selected, select] = useState(''),
-    [after, setAfter] = useState('0');
-  const box = useApiQuery(['agent-inbox', id], (_, signal) => request<Inbox>(path, { signal })),
-    list = useApiQuery(['agent-messages', id, after], (_, signal) =>
-      request<{ data: InboxMessage[]; cursor: string; hasMore: boolean }>(
-        `${path}/messages?include=held&after=${after}`,
-        { signal },
-      ),
-    ),
-    msg = useApiQuery(
-      ['agent-message', id, selected],
-      (_, signal) => request<InboxMessageDetail>(`${path}/messages/${selected}`, { signal }),
-      { enabled: !!selected },
-    );
-  const keys = useApiQuery(
-    ['agent-keys', id],
-    (_, signal) => request<{ data: InboundKey[] }>('/v1/inbound/keys?limit=100', { signal }),
-    { enabled: canAdminister },
-  );
-  const remove = useApiMutation(() => request(path, { method: 'DELETE' }), 'Inbox scheduled for deletion');
-  const b = box.data;
-  return (
-    <div className="stack inbound-stack">
-      <Link to={route}>Agent inboxes</Link>
-      <PageHeader
-        title={b?.name || b?.address || 'Inbox'}
-        actions={
-          canAdminister &&
-          b?.status !== 'deleting' && (
-            <Button onClick={() => (confirm ? remove.mutate(undefined) : setConfirm(true))} disabled={remove.isPending}>
-              {confirm ? 'Confirm deletion' : 'Delete inbox'}
-            </Button>
-          )
-        }
-      />
-      {confirm && !remove.isSuccess && (
-        <Alert tone="warning">
-          Deletion retires the address and removes its mail at the next sweep.{' '}
-          <Button onClick={() => setConfirm(false)}>Cancel</Button>
-        </Alert>
-      )}
-      {remove.error && <Alert tone="danger">{remove.error.message}</Alert>}
-      {box.error && <ErrorState error={box.error} onRetry={() => void box.refetch()} />}
-      {b && (
-        <>
-          <p>
-            {b.address} · {b.status} · Expires {new Date(b.expiresAt).toLocaleString()}
-          </p>
-          <p>
-            {b.usage.messages} / {b.limits.messages} messages · {b.usage.bytes.toLocaleString()} bytes
-          </p>
-          {!!b.usage.held && (
-            <Alert tone="warning">{b.usage.held} held. Held mail stays readable until the inbox is deleted.</Alert>
-          )}
-        </>
-      )}
-      <SectionHeader title="Messages" />
-      {list.error ? (
-        <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-      ) : (
-        <DataTable
-          rows={list.data?.data ?? []}
-          loading={list.isPending}
-          rowKey={(m) => m.id}
-          onRowClick={(m) => select(m.id)}
-          empty={<EmptyState title="No messages yet" />}
+  const navigate = useNavigate()
+  const { canAdminister } = useWorkspaceAccess()
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [selected, setSelected] = useState<string | null>(null)
+  const pagination = useCursorPagination()
+  const inbox = useApiQuery(['agent-inbox', id], (api, signal) => api.inboxes.get(id, signal), { interval: 15_000 })
+  const messages = useApiQuery(['agent-inbox-messages', id, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor }, signal), { interval: 15_000, keepPrevious: true })
+  const keys = useApiQuery(['agent-inbox-keys', id], async (api, signal) => (await api.mailboxes.keys(false, signal)).filter(key => key.addressIds?.length === 1 && key.addressIds[0] === id), { enabled: canAdminister })
+  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted')
+  const b: Inbox | undefined = inbox.data
+  if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
+  const next = messages.data?.hasMore ? messages.data.cursor : null
+  return <div className="stack inbound-stack">
+    <PageHeader title={b ? b.address : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
+      {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
+      {canAdminister && b.status !== 'deleting' && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
+    </>} />
+    {b && <>
+      <dl className="settings-facts">
+        <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} /></dd></div>
+        <div><dt>{b.status === 'active' ? 'Expires' : 'Expired'}</dt><dd>{date(b.expiresAt)}</dd></div>
+        <div><dt>Erased after</dt><dd>{date(b.deleteAfter)}</dd></div>
+        <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
+        <div><dt>Stored</dt><dd>{size(b.usage.bytes)} of {size(b.limits.bytes)}</dd></div>
+        <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never' : b.send.enabled ? `To senders only, ${number(b.send.perDay)} a day` : 'Off'}</dd></div>
+        {b.name && <div><dt>Name</dt><dd className="settings-break">{b.name}</dd></div>}
+        {b.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}
+      </dl>
+      {b.status === 'deleting' && <Alert tone="info">This inbox was deleted. Its address no longer receives mail, and its messages are erased within the hour.</Alert>}
+      {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
+      {b.usage.held > 0 && b.status !== 'deleting' && <Alert tone="warning">{number(b.usage.held)} {b.usage.held === 1 ? 'message is' : 'messages are'} held: stored and listed below, but not delivered to waiting agents or webhooks.</Alert>}
+    </>}
+    <section className="section stack" aria-labelledby="agent-inbox-messages">
+      <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} />
+      {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
+        <DataTable loading={messages.isPending} skeletonRows={3} minRows={1} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
+          empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? `Mail sent to ${b.address} shows up here within seconds.` : undefined} />}
           columns={[
-            { key: 'from', label: 'From', render: (m) => m.from.address },
-            { key: 'subject', label: 'Subject', render: (m) => m.subject || '(no subject)' },
-            {
-              key: 'status',
-              label: 'Status',
-              render: (m) => m.held || (m.simulated ? 'Simulated' : m.junk ? 'Junk' : m.read ? 'Read' : 'Unread'),
-            },
-            { key: 'date', label: 'Received', render: (m) => when(m.receivedAt) },
-          ]}
-        />
-      )}
-      {after !== '0' && <Button onClick={() => setAfter('0')}>First page</Button>}
-      {list.data?.hasMore && <Button onClick={() => setAfter(list.data!.cursor)}>Next page</Button>}
-      {selected && (
-        <Dialog
-          open
-          title={msg.data?.subject || 'Message'}
-          onOpenChange={(open) => {
-            if (!open) select('');
-          }}
-        >
-          {msg.error ? (
-            <ErrorState error={msg.error} onRetry={() => void msg.refetch()} />
-          ) : (
-            msg.data && (
-              <div className="stack">
-                <p>{msg.data.from.address}</p>
-                <p>
-                  SPF {msg.data.auth.spf ?? '—'} · DKIM {msg.data.auth.dkim ?? '—'} · DMARC {msg.data.auth.dmarc ?? '—'}
-                </p>
-                <pre style={{ whiteSpace: 'pre-wrap' }}>{msg.data.text}</pre>
-                {msg.data.attachments.map((f) =>
-                  f.url ? (
-                    <a key={f.id} href={f.url} rel="noreferrer">
-                      Download {f.filename}
-                    </a>
-                  ) : (
-                    <span key={f.id}>{f.filename} · unavailable</span>
-                  ),
-                )}
-              </div>
-            )
-          )}
-        </Dialog>
-      )}
-      {canAdminister && (
-        <>
-          <SectionHeader title="Inbox keys" />
-          {keys.error ? (
-            <ErrorState error={keys.error} onRetry={() => void keys.refetch()} />
-          ) : (
-            <DataTable
-              rows={(keys.data?.data ?? []).filter((k) => k.addressIds?.includes(id))}
-              rowKey={(k) => k.id}
-              columns={[
-                { key: 'name', label: 'Name', render: (k) => k.name },
-                { key: 'prefix', label: 'Prefix', render: (k) => k.prefix },
-                { key: 'permissions', label: 'Permissions', render: (k) => k.permissions.join(', ') },
-              ]}
-              empty={<EmptyState title="No inbox keys" />}
-            />
-          )}
-        </>
-      )}
-    </div>
-  );
+            { key: 'from', label: 'From', width: '24%', render: row => <span className="receiving-clip" title={row.from.address}>{nameOf(row.from)}</span> },
+            { key: 'subject', label: 'Subject', width: '40%', render: row => <div className="settings-cell-stack"><span className="receiving-clip">{row.subject || '(no subject)'}</span>{row.snippet && <span className="muted receiving-clip">{row.snippet}</span>}</div> },
+            { key: 'code', label: 'Code', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span> },
+            { key: 'state', label: 'Status', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
+            { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
+          ]} />
+        {messages.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
+      </>}
+    </section>
+    {canAdminister && <section className="section stack" aria-labelledby="agent-inbox-keys">
+      <SectionHeader title={<span id="agent-inbox-keys">Keys for this inbox</span>} />
+      {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={1} rows={keys.data ?? []} rowKey={key => key.id}
+        empty={<EmptyState title="No keys" description="Keys created with the inbox show here. They stop working when it is deleted." />}
+        columns={[
+          { key: 'name', label: 'Name', width: '30%', render: key => key.name },
+          { key: 'prefix', label: 'Key', width: '30%', render: key => <code>{key.prefix}…</code> },
+          { key: 'permissions', label: 'Permissions', render: key => key.permissions.join(', ') },
+          { key: 'used', label: 'Last used', align: 'right', render: key => key.lastUsedAt ? date(key.lastUsedAt) : <span className="muted">Never</span> },
+        ]} />}
+    </section>}
+    {selected && <MessageDialog inboxId={id} messageId={selected} onClose={() => setSelected(null)} />}
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${b?.address ?? 'this inbox'}?`} description="The address stops receiving now and stays reserved for 30 days. Keys created with the inbox stop working, and its messages are erased within the hour." confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(route) }} />
+  </div>
 }

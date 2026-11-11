@@ -62,7 +62,7 @@ const Inbox = z.object({
   limits,
   send: z.object({ enabled: z.boolean(), perDay: z.number(), replyOnly: z.literal(true) }),
   usage: z.object({
-    messages: z.number(), bytes: z.number(),
+    messages: z.number().describe('Messages stored, including held ones.'), bytes: z.number().describe('Bytes stored, including held mail.'),
     held: z.number().describe('Messages stored but not delivered (over a limit or after expiry). List them with include=held.'),
     unread: z.number(), lastMessageAt: z.string().nullable(),
   }),

@@ -1636,7 +1636,13 @@ export type Inbox = {
         replyOnly: true;
     };
     usage: {
+        /**
+         * Messages stored, including held ones.
+         */
         messages: number;
+        /**
+         * Bytes stored, including held mail.
+         */
         bytes: number;
         /**
          * Messages stored but not delivered (over a limit or after expiry). List them with include=held.
@@ -11712,6 +11718,10 @@ export type ListInboundAddressesData = {
     query?: {
         domain?: string;
         origin?: 'api' | 'auto';
+        /**
+         * address: receiving addresses only; inbox: agent inboxes only. Default: both.
+         */
+        kind?: 'address' | 'inbox';
         q?: string;
         cursor?: string;
         limit?: number;

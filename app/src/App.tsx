@@ -46,11 +46,11 @@ const SettingsPage = settings.page(m => m.SettingsPage)
 const WebhookDetailPage = settings.page(m => m.WebhookDetailPage)
 const DocsPage = docs.page(m => m.DocsPage)
 const InboundPage = inbound.page(m => m.InboundPage)
-const AgentInboxesPage = inbound.page(m => m.AgentInboxesPage)
-const AgentInboxPage = inbound.page(m => m.AgentInboxPage)
 const ReceivingPage = inbound.page(m => m.ReceivingPage)
 const InboundAddressDetailPage = inbound.page(m => m.InboundAddressDetailPage)
 const InboundWebhooksPage = inbound.page(m => m.InboundWebhooksPage)
+const AgentInboxesPage = inbound.page(m => m.AgentInboxesPage)
+const AgentInboxPage = inbound.page(m => m.AgentInboxPage)
 const InboundWebhookDetailPage = inbound.page(m => m.InboundWebhookDetailPage)
 const LegacyMailboxesRedirect = inbound.page(m => m.LegacyMailboxesRedirect)
 const LegacyMailboxRedirect = inbound.page(m => m.LegacyMailboxRedirect)
@@ -104,8 +104,9 @@ export function App() {
   return <AppErrorBoundary><Routes><Route path="docs" element={<Suspense fallback={<BootLoader />}><DocsPage /></Suspense>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<ReceivedEmailDetailPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
-    <Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inboxes" element={<AgentInboxesPage/>}/><Route path="receiving/inboxes/:id" element={<AgentInboxPage/>}/><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
+    <Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
     <Route path="receiving/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound" element={<Moved to={() => '/receiving/inbox'} />} /><Route path="inbound/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound/addresses/:id" element={<Moved to={params => `/receiving/addresses/${id(params)}`} />} /><Route path="inbound/webhooks" element={<Moved to={() => '/receiving/webhooks'} />} /><Route path="inbound/webhooks/:id" element={<Moved to={params => `/receiving/webhooks/${id(params)}`} />} />
+    <Route path="receiving/inboxes" element={<AgentInboxesPage />} /><Route path="receiving/inboxes/:id" element={<AgentInboxPage />} />
     <Route path="mailboxes" element={<LegacyMailboxesRedirect />} /><Route path="mailboxes/webhooks" element={<LegacyMailboxWebhooksRedirect />} /><Route path="mailboxes/webhooks/:id" element={<LegacyMailboxWebhookRedirect />} /><Route path="mailboxes/:id" element={<LegacyMailboxRedirect />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
     <Route path="campaigns/templates" element={<TemplatesPage />} /><Route path="campaigns/templates/:id" element={<TemplateEditorPage />} />

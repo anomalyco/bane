@@ -6426,10 +6426,12 @@
             "type": "object",
             "properties": {
               "messages": {
-                "type": "number"
+                "type": "number",
+                "description": "Messages stored, including held ones."
               },
               "bytes": {
-                "type": "number"
+                "type": "number",
+                "description": "Bytes stored, including held mail."
               },
               "held": {
                 "type": "number",
@@ -33871,6 +33873,20 @@
             },
             "required": false,
             "name": "origin",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "address",
+                "inbox"
+              ],
+              "description": "address: receiving addresses only; inbox: agent inboxes only. Default: both."
+            },
+            "required": false,
+            "description": "address: receiving addresses only; inbox: agent inboxes only. Default: both.",
+            "name": "kind",
             "in": "query"
           },
           {
