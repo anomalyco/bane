@@ -16,7 +16,7 @@
   },
   "vars": {
     "BANE_MAIL_BUCKET": "bane-prod-mail",
-    "BANE_MAIL_STORE": "s3",
+    "BANE_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://bane.mx",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",
