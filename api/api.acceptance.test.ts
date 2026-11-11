@@ -7018,9 +7018,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,
         text:'plain signal',raw:'rendered MIME signal',html:`<div hidden>${'x'.repeat(16000)} hidden signal</div><p>HTML signal</p><a href="https://link.example.invalid/path">read</a><img src="https://image.example.invalid/tracker">`};
       await screenSnapshot(runtime,s);await screenSnapshot(runtime,s);
-      assert.equal(bodies.length,1);assert.ok(bodies[0]!.length<=8000);
-      for(const part of ['plain signal','rendered MIME signal','hidden signal','HTML signal','link.example.invalid','image.example.invalid'])assert.ok(bodies[0]!.includes(part),part);
-      await screenSnapshot(runtime,{...s,html:s.html.replace('x'.repeat(16000),'x'.repeat(8000)+'y'+'x'.repeat(7999))});assert.equal(bodies.length,2);
+      assert.equal(bodies.length,3);assert.ok(bodies.every(b=>Buffer.byteLength(b)<=8000));
+      for(const part of ['plain signal','rendered MIME signal','hidden signal','HTML signal','link.example.invalid','image.example.invalid'])assert.ok(bodies.some(b=>b.includes(part)),part);
+      await screenSnapshot(runtime,{...s,html:s.html.replace('x'.repeat(16000),'x'.repeat(8000)+'y'+'x'.repeat(7999))});assert.equal(bodies.length,6);
+      const hostLinks=Array.from({length:7},(_,i)=>`<a href="https://reference${i}.invalid/document">Reference</a>`).join('');
+      for(let i=0;i<(BENCH?65:3);i++) {
+        const n=i*300, start:number=bodies.length;
+        assert.equal((await screenSnapshot(runtime,{...s,html:hostLinks+'a'.repeat(n)+'SampleMarker'+'b'.repeat(19200-n)}))?.spam,.99);
+        assert.ok(bodies.slice(start).every(b=>b.includes('reference6.invalid')));
+      }
       const links=Array.from({length:300},(_,i)=>`<a href="https://docs.example.invalid/${i}">Guide.</a>`);
       links.splice(150,0,'<a href="https://samplemarker.invalid">docs.example.invalid</a>');
       for(const html of ['<p>SampleMarker</p>',`<div hidden>${'x'.repeat(8000)}</div>SampleMarker`,'<img src="https://samplemarker.invalid">',

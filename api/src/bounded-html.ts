@@ -1,4 +1,4 @@
-import { defaultTreeAdapter, Parser, parseFragment, Tokenizer } from 'parse5';
+import { defaultTreeAdapter, Parser, Tokenizer } from 'parse5';
 
 class TreeBudgetExceeded extends Error {}
 // createElement is too late: parse5 searches all preceding attribute names before
@@ -54,22 +54,4 @@ export function boundedHtmlFragment(html: string, mode: 'fragment' | 'document' 
     return mode === 'document' ? parser.document : parser.getFragment();
   }
   catch (e) { if (e instanceof TreeBudgetExceeded) return null; throw e; }
-}
-
-/** Flat, conservative classifier input. Keep attribute values (including link targets)
- * and ambiguous content rather than hiding text based on an incomplete DOM. */
-export function flatScreenText(html: string) {
-  const parts: string[] = [];
-  for (const [token] of html.matchAll(/<[^<>]*>?|[^<]+/g)) {
-    const tag = /^<\/?[a-z][\w:-]*/i.exec(token);
-    if (!tag) parts.push(token);
-    else {
-      const attrs = token.slice(tag[0].length, token.endsWith('/>') ? -2 : token.endsWith('>') ? -1 : undefined).trim();
-      if (attrs) parts.push('\n', attrs);
-      if (parts.length && parts.at(-1) !== '\n') parts.push('\n');
-    }
-  }
-  // Decode HTML character references, but only as text: no input can open an element.
-  const [text] = parseFragment(parts.join('').replaceAll('<', '&lt;')).childNodes;
-  return text && 'value' in text ? text.value : '';
 }
