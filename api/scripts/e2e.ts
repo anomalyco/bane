@@ -95,6 +95,7 @@ Object.assign(SKIP, {
   createInbox: receivingMvp,
   listInboxes: receivingMvp,
   getInbox: receivingMvp,
+  listInboxFolders:receivingMvp, getInboxChanges:receivingMvp, copyInboxMessage:receivingMvp, moveInboxMessage:receivingMvp, deleteInboxMessage:receivingMvp, expungeInboxFolder:receivingMvp,
   updateInbox: receivingMvp,
   deleteInbox: receivingMvp,
   simulateInboxMessage: receivingMvp,

@@ -11,6 +11,7 @@ import { storageBinding } from './mailbox-ingest-input.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { signedUrl } from './inbound-threads.js';
 import { displayText, visibleMail } from './inbox-content.js';
+import {registerInboxFolders,Role,Location,flagNames,flagsOf,inboxVisible as visible,locations} from './inbox-folders.js';
 import { replyText } from './mailbox-store.js';
 
 // Agent inboxes: `mailboxes` rows with kind='inbox'. One SQL function creates them; ingest and the
@@ -25,8 +26,8 @@ const limits = z.object({
   messages: z.number().int().min(1).max(MAX_MESSAGES).default(MAX_MESSAGES).describe('Messages delivered before new mail is held. At most 200.'),
   bytes: z.number().int().min(1).max(MAX_BYTES).default(MAX_BYTES).describe('Stored bytes before new mail is held. At most 25 MiB.'),
 }).strict();
-const type = z.enum(['ephemeral', 'sandbox'])
-  .describe('ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.');
+const type = z.enum(['ephemeral', 'sandbox', 'persistent'])
+  .describe('persistent: a real address kept until explicitly deleted. ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.');
 const create = z.object({
   type: type.default('ephemeral'),
   ttlSeconds: z.number().int().min(60).max(2592000).default(86400).describe('Lifetime before the inbox expires: 60 seconds to 30 days. Default 24 hours.'),
@@ -36,7 +37,7 @@ const create = z.object({
   name: z.string().max(200).optional().describe('A label for the dashboard and lists. Replies use it as the From display name.'),
   metadata: metadata.default({}),
   clientId: z.string().min(1).max(200).optional().describe('Idempotency key. Repeating a create with the same clientId and body returns the same inbox (200, without the key secret); a different body is a 409.'),
-  limits: limits.default({ messages: MAX_MESSAGES, bytes: MAX_BYTES }).describe('Caps that hold new mail once reached; they can only be lowered. Held mail is stored and readable, never dropped.'),
+  limits: limits.optional().describe('Optional delivery caps. Temporary inboxes default to 200 messages and 25 MiB; persistent inboxes have no default delivery cap. Held mail is stored and readable, never dropped.'),
   send: z.object({
     enabled: z.boolean().default(false).describe('Allow replies through POST /v1/inbound/threads/{threadId}/reply.'),
     perDay: z.number().int().min(1).max(20).default(20).describe('Replies per day, at most 20.'),
@@ -57,9 +58,10 @@ const Inbox = z.object({
   clientId: z.string().nullable(),
   status,
   createdAt: z.string(),
-  expiresAt: z.string().describe('When the inbox stops delivering mail.'),
-  deleteAfter: z.string().describe('When the inbox, its mail and its keys are erased.'),
-  limits,
+  expiresAt: z.string().nullable().describe('When the inbox stops delivering mail.'),
+  deleteAfter: z.string().nullable().describe('When the inbox, its mail and its keys are erased.'),
+  retention: z.object({mode:z.enum(['forever','ephemeral'])}),
+  limits: z.object({messages:z.number().nullable(),bytes:z.number().nullable()}),
   send: z.object({ enabled: z.boolean(), perDay: z.number(), replyOnly: z.literal(true) }),
   usage: z.object({
     messages: z.number().describe('Messages stored, including held ones.'), bytes: z.number().describe('Bytes stored, including held mail.'),
@@ -74,6 +76,8 @@ const Message = z.object({
   cursor: z.string().describe('Pass as after to continue after this message.'),
   from: address.describe('The claimed sender. Check auth before trusting it.'), to: z.array(address),
   subject: z.string(), snippet: z.string(), receivedAt: z.string(), read: z.boolean(),
+  flags:z.array(z.enum(flagNames)), labels:z.array(z.string()), folders:z.array(Location), modseq:z.string(),
+  uid:z.number().nullable(), uidValidity:z.number().nullable(),
   junk: z.boolean().describe('SES judged this message spam.'),
   held: z.enum(['quota', 'expired']).nullable().describe('null when delivered; quota or expired when stored but held.'),
   attachmentCount: z.number(),
@@ -102,7 +106,6 @@ const meta = { tags: ['Agent inboxes'], security };
 const take = z.coerce.number().int().min(1).max(100).default(25);
 const extract = z.enum(['codes', 'links', 'codes,links', 'links,codes']).optional().describe('Extract one-time codes, links or both into each message’s extract field.');
 const absent = () => new ApiError(404, 'NOT_FOUND', 'No such inbox or message for this credential.');
-const visible = (v: MailboxAccess) => sql`b.workspace_id=${v.workspaceId} AND b.kind='inbox' AND b.delete_after>statement_timestamp() ${v.mailboxIds ? sql`AND b.id=ANY(${sql.param(v.mailboxIds)}::text[])` : sql``}`;
 const randomLocal = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
 
 type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: string; replay: boolean; inbox: Box };
@@ -138,7 +141,7 @@ type Box = z.infer<typeof Inbox>;
 type FileRow = { id: string; filename: string; content_type: string; size_bytes: number; bucket: string; storage_key: string };
 type Row = {
   id: string; thread_id: string; inbox_seq: string; from_name: string | null; from_address: string; to: MailAddress[]; subject: string; received_at: string;
-  read: boolean; spam: boolean; held_reason: 'expired' | 'quota' | null; attachment_count: number; verdicts: Verdicts; html: string | null; text: string | null;
+  direction:'inbound'|'outbound'; flags:number; labels:string[]; folders:z.infer<typeof Location>[]; modseq:string; uid:number|null; uid_validity:number|null; read: boolean; spam: boolean; held_reason: 'expired' | 'quota' | null; attachment_count: number; verdicts: Verdicts; html: string | null; text: string | null;
   region: string; binding: ReadyConnection | null; files: FileRow[];
 };
 function project(row: Row, extract?: string) {
@@ -148,6 +151,7 @@ function project(row: Row, extract?: string) {
   return {
     message: {
       id: row.id, threadId: row.thread_id, cursor: String(row.inbox_seq ?? 0), from: { name, address: row.from_address }, to,
+      uid:row.uid??null, uidValidity:row.uid_validity??null, folders:row.folders, modseq:row.modseq, flags:flagsOf(row.flags), labels:row.labels,
       subject, snippet: p.text.slice(0, 240), receivedAt: new Date(row.received_at).toISOString(), read: row.read, junk: row.spam, held: row.held_reason,
       attachmentCount: row.attachment_count, auth: { spf: row.verdicts.spf, dkim: row.verdicts.dkim, dmarc: row.verdicts.dmarc }, simulated: row.verdicts.simulated === true,
       hiddenContent: p.hiddenContent, extract: p.extract,
@@ -156,17 +160,20 @@ function project(row: Row, extract?: string) {
   };
 }
 export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission) => MailboxAccess) {
+  registerInboxFolders(app,access);
   const created = Inbox.extend({
-    credential: z.object({ id: z.string(), secret: z.string().describe('Shown once. A bearer token for this API and hosted MCP.'), permissions, expiresAt: z.string() }).optional(),
+    credential: z.object({ id: z.string(), secret: z.string().describe('Shown once. A bearer token for this API and hosted MCP.'), permissions, expiresAt: z.string().nullable() }).optional(),
   }).openapi('CreatedInbox');
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createInbox', summary: 'Create an agent inbox',
-    description: 'Creates an expiring inbox with a fresh address on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
+    description: 'Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
     request: { body: json(create) }, responses: { 200: response(Inbox), 201: response(created), ...errors },
   }), async c => {
     const v = access(c, 'create'), input = c.req.valid('json');
     const grantId = c.get('actor')?.grantId ?? v.grantId;
     const manageAddress = v.admin && !grantId;
+    if(input.type==='persistent'&&!v.admin) throw new ApiError(403,'ADMIN_REQUIRED','Creating a persistent inbox requires workspace management permission.');
+    if(input.type==='persistent'&&(input.ttlSeconds!==86400||input.graceHours!==24))throw new ApiError(422,'VALIDATION_FAILED','A persistent inbox has no lease or grace period.');
     if(input.credential&&grantId)throw new ApiError(422,'USE_INBOX_CONNECTION','Use an approval with receiving consent and create an inbox connection for a grant-bound key.');
     if (input.localPart && !manageAddress) throw new ApiError(403,'PERMISSION_DENIED','This credential must omit localPart and use a generated address.','localPart');
     if (!inboxStoreReady(c.env)) throw new ApiError(503, 'INBOXES_UNAVAILABLE', 'Agent inboxes are not enabled on this deployment yet.');
@@ -176,11 +183,11 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     if (input.type === 'sandbox' && (input.domain || input.localPart || input.send.enabled)) throw new ApiError(422, 'SANDBOX_ONLY', 'Sandbox inboxes get a generated .invalid address and cannot send: omit domain, localPart and send.');
     const secret = input.credential ? randomSecret('bane_mbx_') : null, credential = secret ? { id: id('mbk'), hash: await digest(secret), prefix: secret.slice(0, 14) } : undefined;
     const p = {
-      wid: v.workspaceId, actor: v.keyId, admin: v.admin, manageAddress, hosted: c.env.config.multiTenant, id: id('mbx'), input, key: credential,
+      wid: v.workspaceId, actor: v.keyId, admin: v.admin, manageAddress, hosted: c.env.config.multiTenant, id: id('mbx'), input:{...input,limits:input.limits??(input.type==='persistent'?undefined:{messages:MAX_MESSAGES,bytes:MAX_BYTES})}, key: credential,
       sandboxHost: input.type === 'sandbox' ? `${(await digest(v.workspaceId)).slice(0, 24)}.sandbox.invalid` : undefined,
       locals: input.localPart ? [input.localPart] : [randomLocal(), randomLocal(), randomLocal()],
     };
-    const { r } = (await c.env.db.execute<{ r: CreateResult }>(sql`SELECT create_ephemeral_inbox(${JSON.stringify(p)}::jsonb) AS r`)).rows[0]!;
+    const { r } = (await c.env.db.execute<{ r: CreateResult }>(sql`SELECT create_managed_inbox(${JSON.stringify(p)}::jsonb) AS r`)).rows[0]!;
     if (r.error) {
       if (r.error === 'INBOX_CREATE_RATE') c.header('Retry-After', String(60 - new Date().getUTCSeconds()));
       throw createError(r, input);
@@ -217,7 +224,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }), async c => {
     const v = access(c, 'modify'), { id } = c.req.valid('param'), q = c.req.valid('json');
     const row = (await c.env.db.execute<{ box: Box }>(
-      sql`WITH changed AS (UPDATE mailboxes b SET display_name=coalesce(${q.name ?? null},display_name),metadata=coalesce(${q.metadata ? JSON.stringify(q.metadata) : null}::jsonb,metadata),delete_after=delete_after-expires_at+coalesce(${q.expiresAt ?? null}::timestamptz,expires_at),expires_at=coalesce(${q.expiresAt ?? null}::timestamptz,expires_at) WHERE ${visible(v)} AND b.id=${id} AND b.delete_after>now() AND (${q.expiresAt ?? null}::timestamptz IS NULL OR ${q.expiresAt ?? null}::timestamptz BETWEEN now() AND b.created_at+interval '30 days') RETURNING b.*), keys AS (UPDATE mailbox_keys k SET expires_at=b.delete_after FROM changed b WHERE k.workspace_id=b.workspace_id AND k.mailbox_ids=jsonb_build_array(b.id) AND k.expires_at IS NOT NULL) SELECT inbox_view(b::mailboxes) box FROM changed b`,
+      sql`WITH changed AS (UPDATE mailboxes b SET display_name=coalesce(${q.name ?? null},display_name),metadata=coalesce(${q.metadata ? JSON.stringify(q.metadata) : null}::jsonb,metadata),delete_after=delete_after-expires_at+coalesce(${q.expiresAt ?? null}::timestamptz,expires_at),expires_at=coalesce(${q.expiresAt ?? null}::timestamptz,expires_at) WHERE ${visible(v)} AND b.id=${id} AND (${q.expiresAt ?? null}::timestamptz IS NULL OR b.retention_mode='ephemeral') AND (${q.expiresAt ?? null}::timestamptz IS NULL OR ${q.expiresAt ?? null}::timestamptz BETWEEN now() AND b.created_at+interval '30 days') RETURNING b.*), keys AS (UPDATE mailbox_keys k SET expires_at=b.delete_after FROM changed b WHERE k.workspace_id=b.workspace_id AND k.mailbox_ids=jsonb_build_array(b.id) AND k.expires_at IS NOT NULL) SELECT inbox_view(b::mailboxes) box FROM changed b`,
     )).rows[0];
     if (!row) throw absent();
     return c.json(row.box, 200);
@@ -246,6 +253,8 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     after: z.string().regex(/^\d{1,18}$/).default('0').describe('cursor from a previous response. Omit to start at the first message.'),
     wait: z.coerce.number().int().min(0).max(30).default(0).describe('Seconds to wait for a message when none is available yet (0–30). The call returns as soon as one arrives.'),
     limit: take,
+    folder:Role.optional().describe('Select one folder. In a folder, after and cursor are UIDs, not delivery cursors.'),
+    flagged:z.enum(['true','false']).optional(),
     from: z.string().email().optional().describe('Only messages from this sender address.'),
     subjectContains: z.string().max(200).optional().describe('Only messages whose subject contains this text, ignoring case.'),
     unread: z.enum(['true', 'false']).optional(),
@@ -269,7 +278,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     const deadline = Date.now() + 1000 * q.wait;
     for (let left = q.wait; ; left--) {
       const { rows } = await c.env.db.execute<Row>(
-        sql`SELECT page.* FROM mailboxes b LEFT JOIN LATERAL(SELECT m.id,m.thread_id,m.from_name,m.from_address,m."to",m.subject,m.received_at,((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam,m.attachment_count,m.verdicts,left(m.text,32768) AS text,left(m.html,32768) AS html,l.inbox_seq::text,l.read,l.held_reason FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id WHERE l.mailbox_id=b.id AND l.inbox_seq>${q.after}::bigint ${q.include && !q.wait ? sql`` : sql`AND l.held_reason IS NULL AND NOT ('spam'=ANY(l.labels)) AND (NOT m.spam OR 'guard-allowed'=ANY(l.labels)) AND NOT ('unverified'=ANY(l.labels))`} ${q.from ? sql`AND m.from_address=${q.from.toLowerCase()}` : sql``} ${q.unread ? sql`AND l.read=${q.unread === 'false'}` : sql``} ${q.subjectContains ? sql`AND strpos(lower(m.subject),lower(${q.subjectContains}))>0` : sql``} ORDER BY l.inbox_seq LIMIT ${q.limit + 1}) page ON true WHERE ${visible(v)} AND b.id=${id} ORDER BY page.inbox_seq::bigint`,
+        sql`SELECT page.* FROM mailboxes b LEFT JOIN LATERAL(SELECT m.id,m.thread_id,m.from_name,m.from_address,m."to",m.subject,m.received_at,((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam,m.attachment_count,m.verdicts,left(m.text,32768) AS text,left(m.html,32768) AS html,${q.folder ? sql`e.uid` : sql`l.inbox_seq`}::text AS inbox_seq,l.read,l.held_reason,l.modseq::text,l.flags,l.labels,${locations} folders,${q.folder ? sql`e.uid::float8 uid,f.uid_validity::float8 uid_validity` : sql`NULL uid,NULL uid_validity`} FROM mailbox_messages l ${q.folder ? sql`JOIN inbox_entries e ON e.inbox_id=l.mailbox_id AND e.message_id=l.message_id AND e.role=${q.folder} JOIN inbox_folders f USING(inbox_id,role)` : sql``} JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id WHERE l.mailbox_id=b.id AND ${q.folder ? sql`e.uid` : sql`l.inbox_seq`}>${q.after}::bigint ${q.flagged ? sql`AND ((l.flags&1)<>0)=${q.flagged==='true'}`:sql``} ${!q.folder ? sql`AND l.direction='inbound'`:sql``} ${!q.wait && (q.include || q.folder) ? sql`` : sql`AND l.held_reason IS NULL AND NOT ('spam'=ANY(l.labels)) AND (NOT m.spam OR 'guard-allowed'=ANY(l.labels)) AND NOT ('unverified'=ANY(l.labels))`} ${q.from ? sql`AND m.from_address=${q.from.toLowerCase()}` : sql``} ${q.unread ? sql`AND l.read=${q.unread === 'false'}` : sql``} ${q.subjectContains ? sql`AND strpos(lower(m.subject),lower(${q.subjectContains}))>0` : sql``} ORDER BY ${q.folder ? sql`e.uid` : sql`l.inbox_seq`} LIMIT ${q.limit + 1}) page ON true WHERE ${visible(v)} AND b.id=${id} ORDER BY page.inbox_seq::bigint`,
       );
       if (!rows.length) throw absent();
       const data = rows.filter(r => r.id).slice(0, q.limit).map(r => project(r, q.extract).message);
@@ -284,10 +293,10 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query'), { id, messageId } = c.req.valid('param');
     const r = (await c.env.db.execute<Row>(
-      sql`SELECT m.*,((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam,l.read,l.inbox_seq::text,l.held_reason,${c.env.config.multiTenant ? storageBinding(v.workspaceId, sql`m.region`, sql`m.raw_bucket`) : sql`NULL`} binding,coalesce((SELECT jsonb_agg(a ORDER BY id) FROM mail_attachments a WHERE a.workspace_id=b.workspace_id AND a.message_id=m.id),'[]') files FROM mailboxes b JOIN mailbox_messages l ON l.mailbox_id=b.id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id WHERE ${visible(v)} AND b.id=${id} AND m.id=${messageId}`,
+      sql`SELECT m.*,((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam,l.read,l.inbox_seq::text,l.held_reason,l.modseq::text,l.flags,l.labels,${locations} folders,${c.env.config.multiTenant ? storageBinding(v.workspaceId, sql`m.region`, sql`m.raw_bucket`) : sql`NULL`} binding,coalesce((SELECT jsonb_agg(a ORDER BY id) FROM mail_attachments a WHERE a.workspace_id=b.workspace_id AND a.message_id=m.id),'[]') files FROM mailboxes b JOIN mailbox_messages l ON l.mailbox_id=b.id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id WHERE ${visible(v)} AND b.id=${id} AND m.id=${messageId}`,
     )).rows[0];
     if (!r) throw absent();
-    const { message, text } = project(r, q.extract), first = r.files[0], scanned = r.verdicts.virus === 'PASS';
+    const { message, text } = project(r, q.extract), first = r.files[0], scanned = (r.verdicts.virus??(r.direction==='outbound'?'PASS':null)) === 'PASS';
     if(r.files.some(f=>displayText(f.filename)!==f.filename))message.hiddenContent=true;
     if (r.files.some(f => f.bucket !== first!.bucket)) throw absent();
     // One S3 client for every link; R2 links are Bane-signed and need no client or query.
@@ -308,7 +317,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }), async c => {
     const v = access(c, 'read'), { id, messageId, attachmentId } = c.req.valid('param');
     const f = (await c.env.db.execute<FileRow & { region: string; binding: ReadyConnection | null }>(
-      sql`SELECT a.*,m.region,${c.env.config.multiTenant ? storageBinding(v.workspaceId, sql`m.region`, sql`a.bucket`) : sql`NULL`} binding FROM mailboxes b JOIN mailbox_messages l ON l.mailbox_id=b.id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id JOIN mail_attachments a ON a.message_id=m.id AND a.workspace_id=b.workspace_id WHERE ${visible(v)} AND b.id=${id} AND m.id=${messageId} AND a.id=${attachmentId} AND m.verdicts->>'virus'='PASS'`,
+      sql`SELECT a.*,m.region,${c.env.config.multiTenant ? storageBinding(v.workspaceId, sql`m.region`, sql`a.bucket`) : sql`NULL`} binding FROM mailboxes b JOIN mailbox_messages l ON l.mailbox_id=b.id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id JOIN mail_attachments a ON a.message_id=m.id AND a.workspace_id=b.workspace_id WHERE ${visible(v)} AND b.id=${id} AND m.id=${messageId} AND a.id=${attachmentId} AND coalesce(m.verdicts->>'virus',CASE WHEN m.direction='outbound' THEN 'PASS' END)='PASS'`,
     )).rows[0];
     if (!f) throw absent();
     return c.json(await withMailObjects(c.env, v.workspaceId, f.region, f.bucket, async (objects, s3) => {
@@ -320,16 +329,5 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
       const bytes = await readMailBytes(stream, f.size_bytes, image ? 5242880 : 1048576);
       return { ...out, ...(text ? { text: new TextDecoder().decode(bytes) } : { image: Buffer.from(bytes).toString('base64') }) };
     }, { binding: f.binding }), 200);
-  });
-  app.openapi(createRoute({
-    ...meta, method: 'patch', path: detail, operationId: 'updateInboxMessage', summary: 'Mark an inbox message read or unread',
-    request: { params: mp, body: json(z.object({ read: z.boolean() }).strict()) }, responses: { 200: response(z.object({ id: key, read: z.boolean() })), ...errors },
-  }), async c => {
-    const v = access(c, 'modify'), { id, messageId } = c.req.valid('param'), { read } = c.req.valid('json');
-    const r = await c.env.db.execute(
-      sql`WITH old AS MATERIALIZED(SELECT l.* FROM mailbox_messages l JOIN mailboxes b ON b.id=l.mailbox_id WHERE ${visible(v)} AND b.id=${id} AND l.message_id=${messageId} FOR UPDATE OF l), changed AS (UPDATE mailbox_messages l SET read=${read} FROM old WHERE l.mailbox_id=old.mailbox_id AND l.message_id=old.message_id AND l.read<>${read} RETURNING old.*), refreshed AS (UPDATE mailbox_threads t SET unread_count=greatest(0,t.unread_count+CASE WHEN ${read} THEN -1 ELSE 1 END) FROM changed ch WHERE t.mailbox_id=ch.mailbox_id AND t.thread_id=ch.thread_id AND ch.held_reason IS NULL) SELECT 1 FROM old`,
-    );
-    if (!r.rowCount) throw absent();
-    return c.json({ id: messageId, read }, 200);
   });
 }

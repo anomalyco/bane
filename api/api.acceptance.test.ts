@@ -5323,6 +5323,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     }
     if(source.startsWith('-- bane:batched\n')){
       let cursor='';do{cursor=(await db.query(source,[cursor])).rows[0].cursor;}while(cursor);
+      if(file!=='120_routing_backfill.sql')continue;
       await t.test('routing M1/M2: upgrading overlapping legacy rules preserves the legacy store and skips oversize domains',async()=>{
         assert.equal((await db.query(`SELECT mail_route_input('default','["sales-eu-x@upgrade.example"]') p`)).rows[0].p,null);
         assert.equal((await db.query("SELECT FROM mail_routing_state")).rowCount,0);assert.equal((await db.query("SELECT FROM mail_route_plan_issues WHERE domain_id='r-big' AND bytes>262144")).rowCount,1);
@@ -8300,7 +8301,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('review M4: sweep reports an exhausted slice and isolates a failed phase',async t=>{
     await simulatedSesFixture(t,async({runtime})=>{const {sweepInboxes}=await import('./src/maintenance.js');let calls=0;
       const mock=t.mock.method(runtime.db,'execute',async()=>{if(++calls===1)throw Error('synthetic failure');return {rows:[{n:0}]};});
-      try {assert.equal(await sweepInboxes(runtime,1000),false);assert.equal(calls,3);let tick=0;assert.equal(await sweepInboxes(runtime,1,()=>tick++),false);assert.equal(calls,3);}finally{mock.mock.restore();}
+      try {assert.equal(await sweepInboxes(runtime,1000),false);assert.equal(calls,4);let tick=0;assert.equal(await sweepInboxes(runtime,1,()=>tick++),false);assert.equal(calls,4);}finally{mock.mock.restore();}
     });
   });
   test('ephemeral inbox: hourly sweep drains 10,000 due inboxes in bounded batches',{skip:!BENCH},async t=>{
@@ -8320,6 +8321,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const ids=[unique('msg'),unique('msg')];for(const mid of ids)await a.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','fixture',jsonb_build_array($4::text),'{}')",[wid,mid,REGION,addr]);
     const insert=(db:pg.Client,mid:string)=>db.query("SELECT * FROM mail_store_incoming_v2($1,'[]','[]',$2,false,false)",[JSON.stringify({id:mid,workspace_id:wid,ses_message_id:mid,lifecycle:'ephemeral',envelope_to:[addr],direction:'inbound',subject:mid,from_address:'author@example.net',to:[],cc:[],bcc:[],reply_to:[],references:[],received_at:new Date().toISOString(),body_truncated:false,snippet:mid,headers:[],size_bytes:42,attachment_count:0,verdicts:{},spam:false,automated:false,status:'received'}),JSON.stringify([{addr,n:0,valid:true}])]);
     await a.query('BEGIN');try{await insert(a,ids[0]);const later=insert(b,ids[1]);const path=`/v1/inboxes/${bid}/messages`;const waiting=http('GET',path+'?wait=2&limit=1',token);await a.query('COMMIT');await later;const first=ok(await waiting);assert.deepEqual(first.data.map((m:Json)=>m.id),[ids[0]]);const page=ok(await http('GET',path+'?after='+first.cursor,token));assert.deepEqual(page.data.map((m:Json)=>m.id),[ids[1]]);assert.ok(BigInt(page.cursor)>BigInt(first.cursor));}finally{await a.query('ROLLBACK');}
+  });
+  test('folder UID and MODSEQ follow commit order, rollbacks never publish a wake',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),wid=unique('folder-w'),bid=unique('mbx'),mid=unique('msg'),tid=unique('thr');
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'folder.invalid',$3,'active','store')",[bid,wid,REGION]);
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'folder@example.invalid','inbox','forever')",[bid,wid]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,wid]);await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'outbound','kept')",[mid,wid,tid]);
+    await a.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read) VALUES($1,$2,$3,$4,'outbound',now(),true)",[wid,bid,mid,tid]);
+    const wakes:string[]=[];b.on('notification',event=>wakes.push(event.payload!));await b.query('LISTEN bane_inbox_changed');
+    const copy=(cx:pg.Client)=>cx.query("SELECT inbox_mutate($1,$2,$3,'copy','{\"source\":\"sent\",\"uid\":1,\"folder\":\"archive\"}') r",[wid,bid,mid]);
+    await a.query('BEGIN');try{await copy(a);await a.query('ROLLBACK');await b.query('SELECT 1');assert.equal(wakes.length,0);
+      await a.query('BEGIN');const first=(await copy(a)).rows[0].r,later=copy(b);await a.query('COMMIT');const second=(await later).rows[0].r;
+      assert.equal(first.uid,1);assert.equal(second.uid,2);assert.ok(BigInt(second.modseq)>BigInt(first.modseq));assert.ok(wakes.includes(bid));
+    }finally{await a.query('ROLLBACK');await b.query('UNLISTEN bane_inbox_changed');}
   });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
@@ -8415,11 +8430,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
         const rpc=(method:string,params:Json,path='/mcp?codemode=true&toolsets=inboxes')=>request('POST',path,key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
         const read=ok(await charged(2,()=>rpc('tools/call',{name:'getInboxMessage',arguments:{inboxId:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
         const plain = ok(await rpc('tools/list',{},'/mcp')).result.tools;
         assert.deepEqual(plain.map((tool:Json)=>tool.name).sort(),['attachments','describe_tool','inboxes','messages']);
-        assert.deepEqual(plain.find((tool:Json)=>tool.name==='messages').inputSchema.properties.action.enum.sort(),['get','list','update','wait']);
+        assert.deepEqual(plain.find((tool:Json)=>tool.name==='messages').inputSchema.properties.action.enum.sort(),['copy','delete','expunge','get','list','move','update','wait']);
         const merged = ok(await charged(2,()=>rpc('tools/call',{name:'messages',arguments:{action:'get',inboxId:box.id,messageId:first.id}},'/mcp'))).result;
         assert.equal(merged.isError,false); assert.equal(merged.content[0].text,read.content[0].text);
         for (const [path,name,args] of [['/mcp','messages',{action:'getInbound'}],['/mcp?codemode=true','getInboundMessage',{}]] as const) {
@@ -8445,6 +8460,38 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         error(await reply(sender.id,unverified.thread_id,'fixture@example.net',unverified.id),403,'RECIPIENT_NOT_ALLOWED');
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net'),202);
         await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction) SELECT 'out_'||i,$1,$2,$3,'outbound' FROM generate_series(1,19)i",[wid,mail.thread_id,sender.id]);error(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),429,'MAILBOX_SEND_LIMIT');
+      });
+      await t.test('folder entries keep independent UIDs and shared flags, not shared state across inboxes',async()=>{
+        const p=ok(await local('POST',root,{type:'persistent',localPart:'persistent',send:{enabled:true},credential:{name:'owner',permissions:['read','modify']}}),201);
+        assert.equal(p.expiresAt,null);assert.equal(p.deleteAfter,null);assert.equal(p.retention.mode,'forever');
+        const token=p.credential.secret,base=`${root}/${p.id}`,folders=()=>request('GET',base+'/folders',token),initial=ok(await folders());
+        assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','inbox','junk','sent','trash']);
+        const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
+        assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
+        const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
+        const url=`${base}/messages/${m.id}`,v=(await page('inbox'))[0];assert.equal(v.uid,1);assert.equal(v.uidValidity,initial.data.find((f:Json)=>f.role==='inbox').uidValidity);
+        const post=(action:string,body:Json)=>request('POST',`${url}/${action}`,token,body);
+        const c1=ok(await charged(2,()=>post('copy',{folder:'archive',source:'inbox',uid:1})));assert.equal(c1.uid,1);
+        const c2=ok(await post('copy',{folder:'archive',source:'inbox',uid:1}));assert.equal(c2.uid,2);assert.deepEqual((await page('archive')).map((x:Json)=>x.uid),[1,2]);
+        error(await request('PATCH',url,token,{read:true,ifModseq:v.modseq}),409,'MODIFIED');
+        const updated=ok(await request('PATCH',url,token,{read:true,flagged:true,answered:true,addLabels:['followup']}));assert.ok(BigInt(updated.modseq)>BigInt(c2.modseq));
+        assert.ok((await page('archive')).every((x:Json)=>x.read&&x.flags.includes('flagged')&&x.labels.includes('followup')));
+        assert.equal(ok(await local('GET',`${root}/${other.id}/messages/${m.id}`)).read,false);
+        const moved=ok(await post('move',{source:'inbox',uid:1,folder:'trash'}));assert.equal(moved.uid,1);assert.deepEqual(await page('inbox'),[]);
+        ok(await local('PATCH',`/v1/inbound/threads/${m.thread_id}`,{addressId:p.id,starred:false}));assert.ok(!(await page('trash'))[0].flags.includes('flagged'));
+        error(await post('move',{source:'inbox',uid:1,folder:'sent'}),404,'MESSAGE_GONE');
+        ok(await request('PATCH',url,token,{source:'archive',uid:2,deleted:true}));
+        const exp=ok(await request('POST',base+'/folders/archive/expunge',token,{}));assert.equal(exp.expunged,1);
+        assert.equal((await page('archive')).length,1);assert.equal((await page('trash'))[0].folders.length,2);
+        const reply=ok(await local('POST',`/v1/inbound/threads/${m.thread_id}/reply`,{addressId:p.id,replyToMessageId:m.id,to:['fixture@example.net'],text:'Sent copy'},'live',{'idempotency-key':unique('idem')}),202);
+        assert.deepEqual((await page('sent')).map((x:Json)=>x.id),[reply.id]);const sent=(await db.query('SELECT raw_key,size_bytes FROM mail_messages WHERE id=$1',[reply.id])).rows[0];assert.ok(sent.raw_key);assert.equal(s3mail.get(sent.raw_key)!.length,sent.size_bytes);assert.match(s3mail.get(sent.raw_key)!.toString(),/Sent copy/);
+        const since=ok(await folders()).state;
+        for(const role of ['archive','trash'])ok(await request('DELETE',`${url}?permanent=true&source=${role}&uid=1`,token));
+        assert.deepEqual(ok(await request('GET',base+'/changes?since='+since,token)).removed,[m.id]);
+        assert.equal(ok(await local('GET',`${root}/${other.id}/messages/${m.id}`)).id,m.id);
+        const later=await deliver('kept-later',[p.address]);assert.equal((await page('inbox'))[0].uid,2);assert.notEqual(later.id,m.id);
+        error(await request('GET',`${root}/${other.id}/folders`,token),404);
+        ok(await request('DELETE',base,token),202);await db.query('SELECT inbox_retention_batch(25)');
       });
       const sharedMail=await deliver('two-inboxes',[box.address,other.address]);
       await t.test('review H1: generated addresses cannot shadow existing routing; retirement is admin-releasable',async()=>{
