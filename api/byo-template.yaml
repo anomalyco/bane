@@ -277,6 +277,31 @@ Resources:
                     StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}
                     StringEqualsIfExists: {'s3:RequestObjectTag/bane-kind': raw}
                     'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
+  # Revision kept-v1. Keep ordinary raw's expiry/tag policy unchanged. Separate
+  # managed policy so the existing receiving policy stays below its IAM size cap.
+  KeptReceivingV1:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: Receiving
+    Properties:
+      Roles: [!Ref BaneRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['s3:PutObject', 's3:PutObjectTagging']
+            Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/kept/msg_????????????????????????????????.eml'
+            Condition:
+              StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': kept}
+              'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
+          - Effect: Allow
+            Action: s3:PutObjectTagging
+            Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/kept/msg_????????????????????????????????.eml'
+            Condition:
+              StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': orphan}
+              'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
 Outputs:
+  KeptReceivingPolicy:
+    Condition: Receiving
+    Value: !Sub 'kept-v1:${WorkspaceId}'
   AccountId: {Value: !Ref 'AWS::AccountId'}
   RoleArn: {Value: !GetAtt BaneRole.Arn}

@@ -150,7 +150,7 @@ export async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', r
   } finally { if(!client)s3.destroy(); }
 }
 async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect, files: (typeof mailAttachments.$inferSelect)[]) {
-  const rawExpiresAt=row.rawKey?new Date(Math.min(Date.parse(row.createdAt),Date.parse(row.receivedAt))+90*86400000).toISOString():null;
+  const rawExpiresAt=row.rawKey&&row.lifecycle!=='kept'?new Date(Math.min(Date.parse(row.createdAt),Date.parse(row.receivedAt))+90*86400000).toISOString():null;
   const bucket = row.rawBucket ?? files[0]?.bucket, region = row.region;
   if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
   // Only outbound copies have no SES receiving scan by design.
@@ -159,7 +159,7 @@ async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect
   try {
     if (files.some(f => f.sourceId)) await archiveMailboxFiles(runtime, row.workspaceId, row.id, client);
     const link = async (kind:'att'|'raw', key:string, filename:string) => (await signedUrl(runtime, row.workspaceId, kind, region, bucket, key, filename, undefined, client)).url;
-    return {rawExpiresAt, rawUrl: row.rawKey && rawExpiresAt && Date.parse(rawExpiresAt)>Date.now() ? await link('raw', row.rawKey, `${row.id}.eml`) : null, urls: await Promise.all(files.map(f => link('att', f.storageKey, f.filename))) };
+    return {rawExpiresAt, rawUrl: row.rawKey && (!rawExpiresAt || Date.parse(rawExpiresAt)>Date.now()) ? await link('raw', row.rawKey, `${row.id}.eml`) : null, urls: await Promise.all(files.map(f => link('att', f.storageKey, f.filename))) };
   } finally { client?.destroy(); }
 }
 
@@ -230,7 +230,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     if(!f?.region)throw new ApiError(404,'NOT_FOUND','Attachment not found.');return c.redirect((await signedUrl(c.env,v.workspaceId,'att',f.region,f.bucket,f.key,f.filename)).url,307);
   });
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{
-    const v=messageScope(c,'true'),mid=c.req.param('messageId');const [m]=await c.env.db.select({region:messages.region,bucket:messages.rawBucket,key:messages.rawKey}).from(messages).where(and(accessible(v,{}),eq(messages.id,mid),sql`${messages.verdicts}->>'virus'='PASS' AND least(${messages.createdAt},${messages.receivedAt})>now()-interval '90 days'`));
+    const v=messageScope(c,'true'),mid=c.req.param('messageId');const [m]=await c.env.db.select({region:messages.region,bucket:messages.rawBucket,key:messages.rawKey}).from(messages).where(and(accessible(v,{}),eq(messages.id,mid),sql`${messages.verdicts}->>'virus'='PASS' AND (${messages.lifecycle}='kept' OR least(${messages.createdAt},${messages.receivedAt})>now()-interval '90 days')`));
     if(!m?.region||!m.bucket||!m.key)throw new ApiError(404,'NOT_FOUND','Raw message not found.');return c.redirect((await signedUrl(c.env,v.workspaceId,'raw',m.region,m.bucket,m.key,mid+'.eml')).url,307);
   });
   app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
@@ -276,16 +276,17 @@ export async function wakeMailboxSend(c: Ctx, actor: Actor, runnable: number) {
   if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
 }
 export async function queueInboundThreadMessage(c: Ctx, actor: Actor, prepare: (db: DbExecutor) => Promise<Omit<OutgoingMessage, 'actor'>>) {
-  let runnable = 0,prepared:Omit<OutgoingMessage,'actor'>|undefined;
+  let runnable = 0,fileSent=false,prepared:Omit<OutgoingMessage,'actor'>|undefined;
   const body=await c.req.json<{attachments?:unknown[]}>();
   // Never resolve the parent, recipients, or attachments on replay. The path already binds the thread.
   const result = await idempotent(c, actor, body, async db => {
     const outgoing = prepared ?? await prepare(db);
+    fileSent=outgoing.mailbox.kind==='inbox';
     const queued = await sendFromMailbox(c.env, db, { ...outgoing, actor });
     runnable = queued.runnable;
     return messageView(queued.message, [outgoing.mailbox.id]);
   },undefined,body.attachments?.length ? async()=>{prepared=await prepare(c.env.db);} : undefined);
-  if(result.attachmentCount) await finishMailboxArchive(c.env,actor.workspaceId,result.id);
+  if(fileSent||result.attachmentCount) await finishMailboxArchive(c.env,actor.workspaceId,result.id);
   await wakeMailboxSend(c, actor, runnable);
   return result;
 }

@@ -1,6 +1,16 @@
 # Agent inboxes
 
-An agent inbox is an expiring email address an agent or a test can create, wait on and read through the API, the SDK or hosted MCP. It lives on one of your workspace’s receiving domains (or on a DNS-free sandbox host), keeps its mail for its lease, and erases itself afterwards.
+An agent can create, wait on and read an inbox through the API, SDK or hosted MCP. By default it gets an expiring address on a workspace receiving domain. A workspace manager can instead create a persistent inbox: `POST /v1/inboxes` with `{"type":"persistent"}`. Its retention mode is `forever`, its two expiry dates are `null`, and it has no default per-inbox delivery cap. Existing plain addresses and temporary leases are not converted.
+
+### Folders and sync
+
+Every managed inbox, including temporary and sandbox inboxes, has five location labels: `inbox`, `sent`, `junk`, `archive` and `trash`. Existing routes can deliver mail from multiple addresses into one inbox, or into several overlapping inboxes. They share the message content, not the flags or folder entries. Receiving an API reply files a read copy in the **sender’s** Sent folder; retrying its archival does not send another email.
+
+`GET /v1/inboxes/{id}/folders` returns counts, `uidValidity`, `uidNext`, `highestModseq` and an inbox-wide sync `state`. With `GET …/messages?folder=archive`, the cursor is a UID in that folder. Without `folder`, it is still the original delivery cursor. Do not interchange them. `GET …/changes?since=<state>` lists changed and removed message IDs; keep paging while `hasMore` is true. If a checkpoint predates retained expunge history (30 days), `410 CHANGES_EXPIRED` means to list again from scratch.
+
+Use `PATCH …/messages/{messageId}` for read state, flags and keywords, or `POST …/messages/{messageId}/move` or `/copy` with `{"source":"inbox","uid":1,"folder":"archive"}`. Copies have distinct UIDs and share flags within an inbox; `deleted` belongs only to the specified entry. `ifModseq` refuses a stale write with `409 MODIFIED`. `DELETE …/messages/{messageId}` moves an entry to Trash; `permanent=true` removes it. `POST …/folders/{folder}/expunge` with `{}` removes only entries marked deleted, up to 500 per call. Other inboxes retain their copies.
+
+The same operations are available through the plain `inboxes` and `messages` MCP tools and as individual Code Mode operations. Having folders does **not** enable IMAP, create an app password or incur a protocol fee.
 
 ![Agent inboxes in the dashboard: addresses, status, expiry, delivered, unread and held counts](images/inboxes/inbox-list.png)
 

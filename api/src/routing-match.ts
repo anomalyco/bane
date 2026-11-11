@@ -10,7 +10,7 @@ export type RoutingInput = {
   hosts: Record<string, { default: string; patterns: Route[] }> | null;
   exact: Record<string, Route> | null;
   owners: Record<string, { id: string; public: boolean }> | null;
-  boxes: Record<string, { dmarc: boolean; created: string; expires: string | null; deleteAfter?: string | null }> | null;
+  boxes: Record<string, { dmarc: boolean; kept?:boolean; created: string; expires: string | null; deleteAfter?: string | null }> | null;
   hooks: Record<string, string> | null;
 };
 /** Why a recipient went where it did, most specific first. `address` is an inbox's own address or alias, which needs no route. */

@@ -2128,9 +2128,9 @@ export type Inbox = {
     id: string;
     kind: 'inbox';
     /**
-     * ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.
+     * persistent: a real address kept until explicitly deleted. ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.
      */
-    type: 'ephemeral' | 'sandbox';
+    type: 'ephemeral' | 'sandbox' | 'persistent';
     /**
      * The address to give the sender or sign-up form.
      */
@@ -2149,20 +2149,17 @@ export type Inbox = {
     /**
      * When the inbox stops delivering mail.
      */
-    expiresAt: string;
+    expiresAt: string | null;
     /**
      * When the inbox, its mail and its keys are erased.
      */
-    deleteAfter: string;
+    deleteAfter: string | null;
+    retention: {
+        mode: 'forever' | 'ephemeral';
+    };
     limits: {
-        /**
-         * Messages delivered before new mail is held. At most 200.
-         */
-        messages?: number;
-        /**
-         * Stored bytes before new mail is held. At most 25 MiB.
-         */
-        bytes?: number;
+        messages: number | null;
+        bytes: number | null;
     };
     send: {
         enabled: boolean;
@@ -2198,7 +2195,7 @@ export type CreatedInbox = Inbox & {
          * read: list and read mail. modify: mark read, simulate, delete the inbox. send: reply (needs send.enabled).
          */
         permissions: Array<'read' | 'modify' | 'send'>;
-        expiresAt: string;
+        expiresAt: string | null;
     };
 };
 
@@ -2238,6 +2235,18 @@ export type InboxMessage = {
     snippet: string;
     receivedAt: string;
     read: boolean;
+    flags: Array<'flagged' | 'answered' | 'draft' | 'forwarded' | 'junk' | 'notJunk' | 'mdnSent'>;
+    labels: Array<string>;
+    folders: Array<{
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        uid: number;
+        uidValidity: number;
+        modseq: string;
+        deleted: boolean;
+    }>;
+    modseq: string;
+    uid: number | null;
+    uidValidity: number | null;
     /**
      * SES judged this message spam.
      */
@@ -13396,14 +13405,607 @@ export type TestRitualsResponses = {
 
 export type TestRitualsResponse = TestRitualsResponses[keyof TestRitualsResponses];
 
+export type ListInboxFoldersData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/folders';
+};
+
+export type ListInboxFoldersErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboxFoldersError = ListInboxFoldersErrors[keyof ListInboxFoldersErrors];
+
+export type ListInboxFoldersResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            role: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+            path: string;
+            uidValidity: number;
+            uidNext: number;
+            highestModseq: string;
+            total: number;
+            unseen: number;
+        }>;
+        state: string;
+    };
+};
+
+export type ListInboxFoldersResponse = ListInboxFoldersResponses[keyof ListInboxFoldersResponses];
+
+export type DeleteInboxMessageData = {
+    body?: never;
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: {
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        uid?: number;
+        permanent?: 'true' | 'false';
+        ifModseq?: string;
+    };
+    url: '/v1/inboxes/{id}/messages/{messageId}';
+};
+
+export type DeleteInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteInboxMessageError = DeleteInboxMessageErrors[keyof DeleteInboxMessageErrors];
+
+export type DeleteInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        read: boolean;
+        modseq: string;
+        uid: number | null;
+        removed: boolean;
+    };
+};
+
+export type DeleteInboxMessageResponse = DeleteInboxMessageResponses[keyof DeleteInboxMessageResponses];
+
+export type GetInboxMessageData = {
+    body?: never;
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: {
+        includeHtml?: 'true' | 'false';
+        /**
+         * Extract one-time codes, links or both into each message’s extract field.
+         */
+        extract?: 'codes' | 'links' | 'codes,links' | 'links,codes';
+    };
+    url: '/v1/inboxes/{id}/messages/{messageId}';
+};
+
+export type GetInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboxMessageError = GetInboxMessageErrors[keyof GetInboxMessageErrors];
+
+export type GetInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: InboxMessageDetail;
+};
+
+export type GetInboxMessageResponse = GetInboxMessageResponses[keyof GetInboxMessageResponses];
+
+export type UpdateInboxMessageData = {
+    body: {
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        uid?: number;
+        ifModseq?: string;
+        read?: boolean;
+        deleted?: boolean;
+        addLabels?: Array<string>;
+        removeLabels?: Array<string>;
+        flagged?: boolean;
+        answered?: boolean;
+        draft?: boolean;
+        forwarded?: boolean;
+        junk?: boolean;
+        notJunk?: boolean;
+        mdnSent?: boolean;
+    };
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/messages/{messageId}';
+};
+
+export type UpdateInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboxMessageError = UpdateInboxMessageErrors[keyof UpdateInboxMessageErrors];
+
+export type UpdateInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        read: boolean;
+        modseq: string;
+        uid: number | null;
+        removed: boolean;
+    };
+};
+
+export type UpdateInboxMessageResponse = UpdateInboxMessageResponses[keyof UpdateInboxMessageResponses];
+
+export type MoveInboxMessageData = {
+    body: {
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        uid?: number;
+        ifModseq?: string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+    };
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/messages/{messageId}/move';
+};
+
+export type MoveInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MoveInboxMessageError = MoveInboxMessageErrors[keyof MoveInboxMessageErrors];
+
+export type MoveInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        read: boolean;
+        modseq: string;
+        uid: number | null;
+        removed: boolean;
+    };
+};
+
+export type MoveInboxMessageResponse = MoveInboxMessageResponses[keyof MoveInboxMessageResponses];
+
+export type CopyInboxMessageData = {
+    body: {
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        uid?: number;
+        ifModseq?: string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+    };
+    path: {
+        id: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/messages/{messageId}/copy';
+};
+
+export type CopyInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CopyInboxMessageError = CopyInboxMessageErrors[keyof CopyInboxMessageErrors];
+
+export type CopyInboxMessageResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        read: boolean;
+        modseq: string;
+        uid: number | null;
+        removed: boolean;
+    };
+};
+
+export type CopyInboxMessageResponse = CopyInboxMessageResponses[keyof CopyInboxMessageResponses];
+
+export type ExpungeInboxFolderData = {
+    body: {
+        uids?: Array<number>;
+    };
+    path: {
+        id: string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/folders/{folder}/expunge';
+};
+
+export type ExpungeInboxFolderErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ExpungeInboxFolderError = ExpungeInboxFolderErrors[keyof ExpungeInboxFolderErrors];
+
+export type ExpungeInboxFolderResponses = {
+    /**
+     * Success
+     */
+    200: {
+        expunged: number;
+        hasMore: boolean;
+    };
+};
+
+export type ExpungeInboxFolderResponse = ExpungeInboxFolderResponses[keyof ExpungeInboxFolderResponses];
+
+export type GetInboxChangesData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query: {
+        since: string;
+    };
+    url: '/v1/inboxes/{id}/changes';
+};
+
+export type GetInboxChangesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboxChangesError = GetInboxChangesErrors[keyof GetInboxChangesErrors];
+
+export type GetInboxChangesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        changed: Array<string>;
+        removed: Array<string>;
+        state: string;
+        hasMore: boolean;
+    };
+};
+
+export type GetInboxChangesResponse = GetInboxChangesResponses[keyof GetInboxChangesResponses];
+
 export type ListInboxesData = {
     body?: never;
     path?: never;
     query?: {
         /**
-         * ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.
+         * persistent: a real address kept until explicitly deleted. ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.
          */
-        type?: 'ephemeral' | 'sandbox';
+        type?: 'ephemeral' | 'sandbox' | 'persistent';
         /**
          * active: receiving. expired: in its grace period; new mail is held. deleting: erased at the next hourly sweep.
          */
@@ -13475,9 +14077,9 @@ export type ListInboxesResponse = ListInboxesResponses[keyof ListInboxesResponse
 export type CreateInboxData = {
     body: {
         /**
-         * ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.
+         * persistent: a real address kept until explicitly deleted. ephemeral: a real address on one of your active receiving domains. sandbox: an address on a .invalid host that receives nothing from the internet; fill it with POST /v1/inboxes/{id}/simulate.
          */
-        type?: 'ephemeral' | 'sandbox';
+        type?: 'ephemeral' | 'sandbox' | 'persistent';
         /**
          * Lifetime before the inbox expires: 60 seconds to 30 days. Default 24 hours.
          */
@@ -13509,7 +14111,7 @@ export type CreateInboxData = {
          */
         clientId?: string;
         /**
-         * Caps that hold new mail once reached; they can only be lowered. Held mail is stored and readable, never dropped.
+         * Optional delivery caps. Temporary inboxes default to 200 messages and 25 MiB; persistent inboxes have no default delivery cap. Held mail is stored and readable, never dropped.
          */
         limits?: {
             /**
@@ -13897,6 +14499,11 @@ export type ListInboxMessagesData = {
         wait?: number | null;
         limit?: number;
         /**
+         * Select one folder. In a folder, after and cursor are UIDs, not delivery cursors.
+         */
+        folder?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        flagged?: 'true' | 'false';
+        /**
          * Only messages from this sender address.
          */
         from?: string;
@@ -13970,145 +14577,6 @@ export type ListInboxMessagesResponses = {
 };
 
 export type ListInboxMessagesResponse = ListInboxMessagesResponses[keyof ListInboxMessagesResponses];
-
-export type GetInboxMessageData = {
-    body?: never;
-    path: {
-        id: string;
-        messageId: string;
-    };
-    query?: {
-        includeHtml?: 'true' | 'false';
-        /**
-         * Extract one-time codes, links or both into each message’s extract field.
-         */
-        extract?: 'codes' | 'links' | 'codes,links' | 'links,codes';
-    };
-    url: '/v1/inboxes/{id}/messages/{messageId}';
-};
-
-export type GetInboxMessageErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type GetInboxMessageError = GetInboxMessageErrors[keyof GetInboxMessageErrors];
-
-export type GetInboxMessageResponses = {
-    /**
-     * Success
-     */
-    200: InboxMessageDetail;
-};
-
-export type GetInboxMessageResponse = GetInboxMessageResponses[keyof GetInboxMessageResponses];
-
-export type UpdateInboxMessageData = {
-    body: {
-        read: boolean;
-    };
-    path: {
-        id: string;
-        messageId: string;
-    };
-    query?: never;
-    url: '/v1/inboxes/{id}/messages/{messageId}';
-};
-
-export type UpdateInboxMessageErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type UpdateInboxMessageError = UpdateInboxMessageErrors[keyof UpdateInboxMessageErrors];
-
-export type UpdateInboxMessageResponses = {
-    /**
-     * Success
-     */
-    200: {
-        id: string;
-        read: boolean;
-    };
-};
-
-export type UpdateInboxMessageResponse = UpdateInboxMessageResponses[keyof UpdateInboxMessageResponses];
 
 export type GetInboxAttachmentData = {
     body?: never;

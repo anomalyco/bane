@@ -158,6 +158,14 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getRituals` | `rituals` · `config` · rituals |
 | `applyRituals` | `rituals` · `apply` · rituals |
 | `testRituals` | `rituals` · `test` · rituals |
+| `listInboxFolders` | `inboxes` · `folders` · inboxes |
+| `updateInboxMessage` | `messages` · `update` · inboxes |
+| `deleteInboxMessage` | `messages` · `delete` · inboxes |
+| `getInboxMessage` | `messages` · `get` · inboxes |
+| `moveInboxMessage` | `messages` · `move` · inboxes |
+| `copyInboxMessage` | `messages` · `copy` · inboxes |
+| `expungeInboxFolder` | `messages` · `expunge` · inboxes |
+| `getInboxChanges` | `inboxes` · `changes` · inboxes |
 | `createInbox` | `inboxes` · `create` · inboxes |
 | `listInboxes` | `inboxes` · `list` · inboxes |
 | `getInbox` | `inboxes` · `get` · inboxes |
@@ -165,8 +173,6 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `deleteInbox` | `inboxes` · `delete` · inboxes |
 | `simulateInboxMessage` | `inboxes` · `simulate` · inboxes |
 | `listInboxMessages` | `messages` · `list` · inboxes |
-| `getInboxMessage` | `messages` · `get` · inboxes |
-| `updateInboxMessage` | `messages` · `update` · inboxes |
 | `getInboxAttachment` | `attachments` · `getInbox` · inboxes |
 | `releaseRetiredAddress` | `addresses` · `release` · inboxes |
 | `getInboundScanPolicy` | `settings` · `inboundPolicy` · admin |

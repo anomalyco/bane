@@ -11,6 +11,11 @@ Parameters:
   ConnectionId:
     Type: String
     AllowedPattern: 'conn_[0-9a-f]{32}'
+  WorkspaceId:
+    Description: Exact workspace for kept mail. Set when upgrading receiving to kept-v1.
+    Type: String
+    Default: disabled
+    AllowedPattern: '(disabled|ws_[0-9a-f]{32})'
   ResourcePrefix:
     Description: Bane resources dedicated to this connection.
     Type: String
@@ -196,11 +201,41 @@ Resources:
                 - Effect: Allow
                   Action: ['s3:PutObject','s3:PutObjectTagging']
                   Condition: { StringEquals: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
-                  Resource:
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/raw/*'
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/att/*'
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/att/*'
+                - Effect: Allow
+                  Action: ['s3:PutObject','s3:PutObjectTagging','s3:AbortMultipartUpload']
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/raw/*'
+                  Condition:
+                    StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}
+                    StringEqualsIfExists: {'s3:RequestObjectTag/bane-kind': raw}
+                    'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
           - !Ref AWS::NoValue
+  # Revision kept-v1. Keep ordinary raw's expiry/tag policy unchanged. Separate
+  # managed policy so the existing receiving policy stays below its IAM size cap.
+  KeptReceivingV1:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: Receiving
+    Properties:
+      Roles: [!Ref BaneRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['s3:PutObject', 's3:PutObjectTagging']
+            Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/${WorkspaceId}/raw/kept/msg_????????????????????????????????.eml'
+            Condition:
+              StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': kept}
+              'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
+          - Effect: Allow
+            Action: s3:PutObjectTagging
+            Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/${WorkspaceId}/raw/kept/msg_????????????????????????????????.eml'
+            Condition:
+              StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': orphan}
+              'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
 Outputs:
+  KeptReceivingPolicy:
+    Condition: Receiving
+    Value: !Sub 'kept-v1:${WorkspaceId}'
   AccountId:
     Description: Bane detects this account automatically. Use this ID only for manual verification.
     Value: !Ref AWS::AccountId

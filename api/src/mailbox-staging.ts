@@ -92,7 +92,7 @@ export const cleanCandidates:JobHandler=async(runtime)=>{
   if(!rows.length)return;
   const u=rows[0]!,owner=sql`workspace_id=${u.workspace_id} AND ses_message_id=${u.ses_message_id}`;
   const terminal=sql`NOT EXISTS(SELECT FROM mail_receipts WHERE ${owner} AND status='pending')`;
-  const {rows:[snapshot]}=await runtime.db.execute<{missing:string[]}>(sql`SELECT ARRAY(SELECT key FROM unnest(${sql.param(u.keys)}::text[]) key WHERE NOT EXISTS(SELECT FROM mail_attachments WHERE workspace_id=${u.workspace_id} AND message_id=${u.message_id} AND bucket=${u.bucket} AND storage_key=key)) AS missing WHERE ${terminal}`);
+  const {rows:[snapshot]}=await runtime.db.execute<{missing:string[]}>(sql`SELECT ARRAY(SELECT key FROM unnest(${sql.param(u.keys)}::text[]) key WHERE NOT EXISTS(SELECT FROM mail_attachments WHERE workspace_id=${u.workspace_id} AND message_id=${u.message_id} AND bucket=${u.bucket} AND storage_key=key) AND NOT EXISTS(SELECT FROM mail_messages WHERE workspace_id=${u.workspace_id} AND id=${u.message_id} AND raw_bucket=${u.bucket} AND raw_key=key)) AS missing WHERE ${terminal}`);
   if(!snapshot)throw new JobDeferred(new Date().toISOString());
   const missing=snapshot.missing;
   // R2 has no object tags; deletes are free, so orphans there go now instead of by a tag rule.
@@ -102,7 +102,7 @@ export const cleanCandidates:JobHandler=async(runtime)=>{
   } else if(missing.length){
     const s3=await mailboxS3(runtime,u.workspace_id,u.region,u.bucket);
     try {const {PutObjectTaggingCommand}=await loadS3Staging();const signal=AbortSignal.timeout(10000);
-      for(const key of missing.slice(0,8)){assertMailboxKey(u.workspace_id,key,'att');await s3.send(new PutObjectTaggingCommand({Bucket:u.bucket,Key:key,Tagging:{TagSet:[{Key:'bane-kind',Value:'orphan'}]}}),{abortSignal:signal}).catch(e=>{if(e?.name!=='NoSuchKey')throw e;});}
+      for(const key of missing.slice(0,8)){assertMailboxKey(u.workspace_id,key,key.startsWith(`workspaces/${u.workspace_id}/raw/kept/`)?'raw':'att');await s3.send(new PutObjectTaggingCommand({Bucket:u.bucket,Key:key,Tagging:{TagSet:[{Key:'bane-kind',Value:'orphan'}]}}),{abortSignal:signal}).catch(e=>{if(e?.name!=='NoSuchKey')throw e;});}
     } finally {s3.destroy();}
   }
   const fence=sql`batch=${u.batch} AND keys=${sql.param(u.keys)}::text[] AND ${terminal}`;
