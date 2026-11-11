@@ -11,9 +11,8 @@ inputs:
     required: false
     default: https://kjivkui2evldapbok5fhrrl6oy0fctkp.lambda-url.us-east-1.on.aws/
   account-id:
-    description: Cloudflare account id the token is minted in
-    required: false
-    default: "15d29c8639fd3733b1b5486a2acfd968"
+    description: Cloudflare account id the token is minted in; must match the stage's account
+    required: true
 
 outputs:
   token:

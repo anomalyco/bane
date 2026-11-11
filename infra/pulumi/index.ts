@@ -9,10 +9,12 @@ import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleR
 const stages = {
   dev: {
     account: "905840579680", origin: "https://dev.bane.mx", prefix: "bane-dev", worker: "bane-dev",
-    queues: { work: "9c0d42c6410842c38d9304094dccccc4", feedback: "e655c22094e14e198abb3a254e235c7d" },
+    cloudflareAccountId: "d8e944f537ceef3f06a5bd3aec1d7a53",
+    queues: { work: "b2a85efa75214d8291a61eb0bf4c608a", feedback: "002ff3b09e2040d6a1fe09fa13e36387" },
   },
   production: {
     account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
+    cloudflareAccountId: "15d29c8639fd3733b1b5486a2acfd968",
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
   },
 };
@@ -36,7 +38,7 @@ function adopt(id: string, provider: pulumi.ProviderResource): pulumi.CustomReso
   return { import: id, protect: true, provider }; // Dropping one would take its stage down.
 }
 
-const cloudflareAccountId = "15d29c8639fd3733b1b5486a2acfd968";
+const cloudflareAccountId = stage.cloudflareAccountId;
 const cloudflare = new cf.Provider("cloudflare", {}); // CLOUDFLARE_API_TOKEN
 for (const [purpose, queueId] of Object.entries(stage.queues)) {
   new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, {
@@ -49,8 +51,9 @@ for (const purpose of ['webhooks','feedback-dlq']) {
   new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, { provider: cloudflare, protect: true });
 }
 const bucket = `${stage.prefix}-attachments`;
+// Dev's bucket is created in anomaly-dev; only production's existing bucket is adopted.
 new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {
-  ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"], // ENAM; creation-only.
+  ...(production ? adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare) : { provider: cloudflare, protect: true }), ignoreChanges: ["location"], // ENAM; creation-only.
 });
 
 // Hosted received mail (raw MIME and files) once BANE_MAIL_STORE=r2; agent inbox mail always.
