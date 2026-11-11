@@ -31,6 +31,10 @@ on:
         description: Preview the Pulumi stack only; do not apply it or deploy the Worker
         type: boolean
         default: false
+      skip_dev_e2e:
+        description: 'Production only, emergency: deploy without a passing live dev E2E for this commit (still needs the production approval). Use only while dev is down.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -146,6 +150,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.pin.outputs.sha }}
+          EVENT: ${{ github.event_name }}
+          SKIP_DEV_E2E: ${{ inputs.skip_dev_e2e }}
+          ACTOR: ${{ github.actor }}
         run: |
           [[ $SHA =~ ^[0-9a-f]{40}$ ]]
           # Rollbacks deploy an older production commit, so the ref must be an
@@ -161,6 +168,14 @@ jobs:
           fi
           repo="repos/$GITHUB_REPOSITORY"
           gh api "$repo/compare/$SHA...dev?per_page=1" | jq -e --arg sha "$SHA" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$SHA is not reachable from dev"; exit 1; }
+          # Emergency override: a manual production dispatch may skip the live dev
+          # E2E proof while dev itself is down. The ancestry checks above and the
+          # production environment approval still apply; the skip is logged.
+          if [[ $EVENT == workflow_dispatch && $SKIP_DEV_E2E == true ]]; then
+            echo "::warning::Deploying $SHA to production WITHOUT a passing live dev E2E (skip_dev_e2e, by $ACTOR)."
+            echo "**Dev E2E proof skipped** for \`$SHA\` by $ACTOR (skip_dev_e2e)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           # The name of the dev deploy job is derived from the same immutable
           # output as its checkout, so the E2E step proves this exact commit.
           for ((page=1; ; page++)); do
