@@ -53,7 +53,8 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
     properties[p.name] = p.schema;
     if (p.required || p.in === 'path') required.push(p.name);
   }
-  if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.name.toLowerCase() !== 'idempotency-key'))) invalid('Unsupported API parameter location.');
+  // Optional headers such as If-Match are not tool arguments; a required one would make the tool unusable.
+  if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.required && p.name.toLowerCase() !== 'idempotency-key'))) invalid('Unsupported API parameter location.');
   if (operation.operationId === 'replyToInboundThread' && !operation.requestBody) return undefined;
   if (operation.requestBody) {
     const body = reference(spec, operation.requestBody);

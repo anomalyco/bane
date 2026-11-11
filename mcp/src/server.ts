@@ -123,7 +123,8 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
     properties[location] = { type: 'object', properties: fields, additionalProperties: false, ...(needed.length ? { required: needed } : {}) };
     if (needed.length) required.push(location);
   }
-  if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.name.toLowerCase() !== 'idempotency-key'))) fail('INVALID_SPEC', 'Unsupported API parameter location.');
+  // Optional headers such as If-Match are not tool arguments; a required one would make the tool unusable.
+  if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.required && p.name.toLowerCase() !== 'idempotency-key'))) fail('INVALID_SPEC', 'Unsupported API parameter location.');
   if (operation.operationId === 'replyToInboundThread' && !operation.requestBody) return undefined;
   // Domain setup has a fixed non-forcing request body, not an agent-controlled routing policy.
   if (operation.requestBody && operation.operationId !== 'enableInboundDomain') {
