@@ -6952,6 +6952,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('direct-send HTML exceeding the tree budget is refused before admission SQL', async t=>{
+    await simulatedSesFixture(t,async({runtime,local,request,db})=>{
+      const key=ok(await local('POST','/v1/api-keys',{name:'HTML budget',permissions:['read','send']}),201).secret;
+      ok(await request('GET','/v1/me',key)); runtime.config.multiTenant=true;
+      const query=t.mock.method(db,'query');
+      const nested='<div>'.repeat(257);
+      for(const size of BENCH?[50000,100000,200000,400000]:[5000]) {
+        const html=nested.padEnd(size,' '),start=performance.now();
+        error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html}),422,'CONTENT_TOO_LARGE_TO_SCREEN');
+        const ms=performance.now()-start;
+        t.diagnostic(`Bounded HTML: ${size} bytes refused in ${ms.toFixed(1)} ms`);
+        if (BENCH) assert.ok(ms<50,`HTML validation took ${ms} ms`);
+      }
+      assert.equal(query.mock.callCount(),0); query.mock.restore();
+    });
+  });
+
   test('hosted screen covers independent parts, hidden copy and link targets with a bounded request and a full-content cache key',async t=>{
     await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
       const {screenSnapshot}=await import('./src/screen.js');

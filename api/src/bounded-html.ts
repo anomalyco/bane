@@ -14,7 +14,7 @@ class BoundedTokenizer extends Tokenizer {
 }
 
 /** Bound tree construction, not a traversal of an already expensive parse. */
-export function boundedHtmlFragment(html: string) {
+export function boundedHtmlFragment(html: string, mode: 'fragment' | 'document' = 'fragment') {
   const started = performance.now(), depth = new WeakMap<object, number>();
   let nodes = 0, open = 0, attributeBytes = 0;
   const tick = () => {
@@ -43,13 +43,15 @@ export function boundedHtmlFragment(html: string) {
     onItemPop: () => { open--; },
   };
   try {
-    const parser = Parser.getFragmentParser(null, { treeAdapter });
+    // Direct sends may be full documents. Fragment mode alone would discard
+    // attributes on html/body and silently skip their URL validation.
+    const parser = mode === 'document' ? new Parser({ treeAdapter }) : Parser.getFragmentParser(null, { treeAdapter });
     const tokenizer = new BoundedTokenizer(parser.options, parser);
     tokenizer.state = parser.tokenizer.state;
     tokenizer.inForeignNode = parser.tokenizer.inForeignNode;
     parser.tokenizer = tokenizer;
     tokenizer.write(html, true);
-    return parser.getFragment();
+    return mode === 'document' ? parser.document : parser.getFragment();
   }
   catch (e) { if (e instanceof TreeBudgetExceeded) return null; throw e; }
 }
