@@ -56,18 +56,19 @@ for (const purpose of ['webhooks','feedback-dlq']) {
   });
 }
 const bucket = `${stage.prefix}-attachments`;
-// Dev's bucket is created in anomaly-dev; only production's existing bucket is adopted.
+// Both buckets already hold attachments; adopt each in its stage's account.
 new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {
-  ...(production ? adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare) : { provider: cloudflare, protect: true }), ignoreChanges: ["location"], // ENAM; creation-only.
+  ...adopt(`${cloudflareAccountId}/${bucket}/default`, cloudflare), ignoreChanges: ["location"],
 });
 
 // Hosted received mail (raw MIME and files) once BANE_MAIL_STORE=r2; agent inbox mail always.
-// Created here, not adopted. Keys start with their class: d/ default (raw kept 90 days, as in
+// Keys start with their class: d/ default (raw kept 90 days, as in
 // S3), a/ attachments (no expiry, as today), e/ agent inboxes (the app erases them; 45 days is
 // the backstop past the 30-day lease plus 7 days of grace), k/ kept mail (phase 2, app-managed).
 const mailBucket = `${stage.prefix}-mail`;
 const mailR2 = new cf.R2Bucket("mail", { accountId: cloudflareAccountId, name: mailBucket, jurisdiction: "default", location: "enam", storageClass: "Standard" }, {
-  provider: cloudflare, protect: true, ignoreChanges: ["location"], // Creation-only, like attachments.
+  ...(production ? { provider: cloudflare, protect: true } : adopt(`${cloudflareAccountId}/${mailBucket}/default`, cloudflare)),
+  ignoreChanges: ["location"], // Creation-only, like attachments.
 });
 const day = 86400;
 new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, bucketName: mailR2.name, jurisdiction: "default", rules: [
