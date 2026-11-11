@@ -6331,7 +6331,8 @@
           "type": {
             "type": "string",
             "enum": [
-              "ephemeral"
+              "ephemeral",
+              "sandbox"
             ]
           },
           "address": {
@@ -6556,6 +6557,9 @@
               }
             }
           },
+          "simulated": {
+            "type": "boolean"
+          },
           "hiddenContent": {
             "type": "boolean"
           },
@@ -6611,6 +6615,7 @@
           "held",
           "attachmentCount",
           "auth",
+          "simulated",
           "hiddenContent",
           "extract"
         ]
@@ -7582,6 +7587,9 @@
       "InboundMessage": {
         "type": "object",
         "properties": {
+          "simulated": {
+            "type": "boolean"
+          },
           "id": {
             "type": "string"
           },
@@ -8051,7 +8059,14 @@
               "verdicts": {
                 "type": "object",
                 "additionalProperties": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
                 }
               },
               "html": {
@@ -29552,7 +29567,8 @@
                   "type": {
                     "type": "string",
                     "enum": [
-                      "ephemeral"
+                      "ephemeral",
+                      "sandbox"
                     ],
                     "default": "ephemeral"
                   },
@@ -29868,7 +29884,8 @@
             "schema": {
               "type": "string",
               "enum": [
-                "ephemeral"
+                "ephemeral",
+                "sandbox"
               ]
             },
             "required": false,
@@ -30566,6 +30583,213 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request DELETE \\\n  --url 'https://bane.mx/v1/inboxes/resource_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inboxes/{id}/simulate": {
+      "post": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "simulateInboxMessage",
+        "summary": "Deliver synthetic mail to a sandbox inbox",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "maxLength": 254,
+                    "format": "email"
+                  },
+                  "subject": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "pattern": "^[^\\r\\n]*$"
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 65536
+                  },
+                  "html": {
+                    "type": "string",
+                    "maxLength": 65536
+                  }
+                },
+                "required": [
+                  "from",
+                  "subject",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messageId": {
+                      "type": "string"
+                    },
+                    "simulated": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    }
+                  },
+                  "required": [
+                    "messageId",
+                    "simulated"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { simulateInboxMessage } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await simulateInboxMessage({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"from\": \"sender@example.com\",\n    \"subject\": \"Hello from Bane\",\n    \"text\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/simulate' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"subject\": \"Hello from Bane\",\n  \"text\": \"Your message is ready.\"\n}'"
           }
         ]
       }

@@ -22,7 +22,7 @@ const catchAll = customType<{data:'create_address'|'store';driverData:'create_ma
 });
 export type MailboxPermission = 'read' | 'send' | 'modify' | 'create';
 export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
-export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
+export type Verdicts = { simulated?:boolean; spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
 
 const scope = () => ({ workspaceId: text('workspace_id').notNull() });
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });

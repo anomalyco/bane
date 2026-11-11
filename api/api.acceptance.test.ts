@@ -7610,6 +7610,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       drift='';await reconcileSharedConnections(runtime);assert.equal((await health(runtime)).receiving,'ready');assert.ok(redriven);assert.deepEqual((await db.query('SELECT sending_state,receiving_state FROM provider_pool_regions')).rows,[{sending_state:'pending',receiving_state:'ready'}]);
     });
   });
+  test('sandbox inbox: simulated mail goes through the real store, is marked simulated, and cannot send or receive externally',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const objects=new Map<string,Buffer>();runtime.mailR2={write:true,name:'fake',bucket:{put:async(k:string,b:Uint8Array)=>{objects.set(k,Buffer.from(b));}} as unknown as R2Bucket};
+      const root='/v1/inboxes',box=ok(await local('POST',root,{type:'sandbox'}),201),path=`${root}/${box.id}`;assert.match(box.address,/^[a-z2-7]{10}@[0-9a-f]{24}\.sandbox\.invalid$/);
+      error(await local('POST',root,{type:'sandbox',send:{enabled:true}}),422,'SANDBOX_ONLY');
+      const input={from:'qa@fixture.invalid',subject:'Sign-up check',text:'Verify code 543210'};const {messageId}=ok(await local('POST',path+'/simulate',input),202);
+      const m=ok(await local('GET',`${path}/messages/${messageId}?extract=codes`));assert.equal(m.simulated,true);assert.deepEqual(m.auth,{dkim:'NONE',dmarc:'NONE',spf:'NONE'});assert.deepEqual(m.extract.codes,['543210']);assert.equal(ok(await local('GET',path+'/messages?wait=1')).data[0].simulated,true);
+      assert.match(objects.get(`e/${runtime.config.workspaceId}/${box.id}/${messageId}.eml`)!.toString(),/^From: qa@fixture.invalid/);assert.equal(ok(await local('GET',`/v1/inbound/messages/${messageId}?includeDelivery=true`)).simulated,true);
+      await db.query("UPDATE inbox_state SET simulated_count=50 WHERE inbox_id=$1",[box.id]);error(await local('POST',path+'/simulate',input),429,'SIMULATION_LIMIT');await db.query('UPDATE inbox_state SET simulated_count=1 WHERE inbox_id=$1',[box.id]);await db.query("UPDATE api_request_budgets SET used=1000 WHERE key_id='inbox-simulate:'||$1",[runtime.config.workspaceId]);error(await local('POST',path+'/simulate',input),429,'SIMULATION_LIMIT');
+      const r=(await db.query('SELECT status,receiving_host FROM mailbox_domains WHERE workspace_id=$1 AND name=$2',[runtime.config.workspaceId,box.domain])).rows[0];assert.deepEqual(r,{status:'disabled',receiving_host:null});assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0].n,0);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mailObjectsFor } from './mail-objects.js';
+import { assertMailKey, mailObjectsFor } from './mail-objects.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 import { ingestInput,type IngestInput } from './mailbox-ingest-input.js';
@@ -521,6 +521,7 @@ const inProgress=new Set<string>();
 export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.deleteObjects':async(runtime,payload,job)=>{
   const bucket=String(payload.bucket), keys=payload.keys;
   if(!Array.isArray(keys)||keys.length>1000||!keys.every(k=>typeof k==='string'))throw new ApiError(422,'JOB_PAYLOAD_INVALID','Invalid mail object list.');
+  if(bucket==='sandbox:local'){for(const k of keys){assertMailKey(job.workspaceId,k);if(!k.startsWith('e/'))throw new ApiError(422,'JOB_PAYLOAD_INVALID','Invalid sandbox key.');}try{for(const k of keys)await runtime.storage.delete(k);}catch{throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);}return;}
   const s3=bucket.startsWith('r2:')?undefined:await mailboxS3(runtime,job.workspaceId,String(payload.region),bucket,runtime.db,job.deleteBinding);
   try{await mailObjectsFor(runtime,job.workspaceId,bucket,s3).delete(keys);}catch(e){if(e instanceof ApiError)throw e;throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);}finally{s3?.destroy();}
 },[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {

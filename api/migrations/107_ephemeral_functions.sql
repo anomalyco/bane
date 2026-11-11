@@ -19,10 +19,16 @@ BEGIN
  INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(wid,'inbox-create:'||wid,date_trunc('minute',now()),1) ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN least(61,b.used+1) ELSE 1 END,window_start=excluded.window_start RETURNING used INTO used_count;
  IF used_count>60 THEN RETURN jsonb_build_object('error','INBOX_CREATE_RATE'); END IF;
  IF (SELECT count(*) FROM (SELECT 1 FROM mailboxes WHERE workspace_id=wid AND retention_mode='ephemeral' AND expires_at>now() LIMIT 1000)s)>=1000 THEN RETURN jsonb_build_object('error','EPHEMERAL_INBOX_LIMIT'); END IF;
+ IF req->>'type'='sandbox' THEN
+  host:=p->>'sandboxHost';
+  INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES('virtual_'||host,wid,'virtual_'||host,host,'sandbox','disabled','store') ON CONFLICT(workspace_id,name) DO NOTHING;
+  SELECT * INTO STRICT d FROM mailbox_domains WHERE workspace_id=wid AND name=host AND status='disabled';
+ ELSE
  SELECT m.* INTO d FROM mailbox_domains m WHERE m.workspace_id=wid AND m.status IN ('active','waiting_for_mx','provisioning') AND (req->>'domain' IS NULL OR coalesce(m.receiving_host,m.name)=req->>'domain') AND (NOT (p->>'hosted')::boolean OR (m.receiving_host IS NOT NULL AND EXISTS(SELECT FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.state='ready' JOIN operation_domains o ON o.workspace_id=dc.workspace_id AND o.name=dc.name WHERE o.id=m.domain_id AND dc.workspace_id=wid AND (dc.sending_state IN ('verified','lost') OR dc.receiving_state<>'off') AND (o.region=pc.region OR (pc.kind='shared' AND m.region='us-east-2' AND m.status='active' AND dc.receiving_state IN ('active','lost')))))) ORDER BY (m.status='active') DESC,m.created_at,m.id LIMIT 1 FOR SHARE OF m;
  IF NOT FOUND THEN RETURN jsonb_build_object('error','RECEIVING_DOMAIN_REQUIRED'); END IF;
  host:=coalesce(d.receiving_host,d.name);
  IF d.status<>'active' THEN RETURN jsonb_build_object('error','RECEIVING_NOT_ACTIVE','mx',host||' MX 10 inbound-smtp.'||d.region||'.amazonaws.com'); END IF;
+ END IF;
  FOR local IN SELECT jsonb_array_elements_text(p->'locals') LOOP
   addr:=local||'@'||host;
   IF EXISTS(SELECT FROM mail_retired_addresses WHERE workspace_id=wid AND address=addr AND until>now()) THEN IF req->>'localPart' IS NOT NULL THEN RETURN jsonb_build_object('error','ADDRESS_RETIRED');END IF;
@@ -63,6 +69,10 @@ BEGIN
  can_create:=can_create AND NOT is_spam AND EXISTS(SELECT FROM jsonb_to_recordset(envelopes) AS v(addr text) JOIN mailbox_domains d ON d.workspace_id=wid AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND d.catch_all='create_mailbox' WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=wid AND a.address IN (addr,regexp_replace(addr,'[+][^@]*@','@'))));
  IF can_create OR msg->>'lifecycle'='ephemeral' THEN INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(wid,'address') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false; END IF;
  IF msg->>'lifecycle'='ephemeral' AND inbox_delivery(wid,msg->'envelope_to')->>'lifecycle' IS DISTINCT FROM 'ephemeral' THEN RAISE EXCEPTION 'Inbox ownership changed; reclaim receipt' USING ERRCODE='40001'; END IF;
+ IF msg#>>'{verdicts,simulated}'='true' THEN
+  IF NOT EXISTS(SELECT FROM mailboxes WHERE workspace_id=wid AND address=msg#>>'{envelope_to,0}' AND create_request->>'type'='sandbox' AND delete_after>now()) THEN RAISE EXCEPTION 'Sandbox no longer exists'; END IF;
+  INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES(wid,msg->>'ses_message_id','sandbox',msg->>'raw_bucket',msg->>'raw_key',msg->'envelope_to','{"simulated":true}');
+ END IF;
  locked:=clock_timestamp();
  WITH delivery AS MATERIALIZED (
     SELECT x.* FROM jsonb_populate_record(NULL::mail_messages,msg::jsonb) x
@@ -100,7 +110,7 @@ BEGIN
   ), target AS MATERIALIZED (SELECT * FROM stored UNION ALL SELECT * FROM known UNION ALL SELECT * FROM extended), routes AS MATERIALIZED (
     SELECT addr,base,n,d.id AS domain,d.catch_all,r.valid,o.owner,o.receives,rule.id AS ruled,EXISTS(SELECT FROM mail_retired_addresses t WHERE t.workspace_id=wid AND t.address IN(addr,base) AND t.until>now()) AS retired
     FROM target x CROSS JOIN jsonb_to_recordset(envelopes::jsonb) r(addr text,n int,valid boolean)
-    JOIN mailbox_domains d ON d.workspace_id=x.workspace_id AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND (d.status='active' OR (d.receiving_host IS NULL AND d.status IN ('waiting_for_mx','provisioning')))
+    JOIN mailbox_domains d ON d.workspace_id=x.workspace_id AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND (d.status='active' OR (d.receiving_host IS NULL AND d.status IN ('waiting_for_mx','provisioning')) OR (d.status='disabled' AND d.name LIKE '%.sandbox.invalid' AND msg#>>'{verdicts,simulated}'='true'))
     CROSS JOIN LATERAL (SELECT regexp_replace(addr,'[+][^@]*@','@') AS base) plus
     LEFT JOIN LATERAL (SELECT b.id AS owner,a.kind<>'public' AND (b.kind='inbox' OR b.expires_at IS NULL OR (b.created_at<=least(x.received_at,received::timestamptz) AND b.expires_at>greatest(statement_timestamp(),least(x.received_at,received::timestamptz)))) AS receives
       FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND a.address IN(addr,base) ORDER BY (a.address=addr) DESC LIMIT 1) o ON true
@@ -135,7 +145,7 @@ BEGIN
     INSERT INTO mailbox_write_lanes(workspace_id,lane) SELECT DISTINCT workspace_id,'events' FROM items ORDER BY workspace_id
     ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane RETURNING workspace_id
   ), events AS (INSERT INTO mailbox_events(workspace_id,type,mailbox_id,thread_id,message_id,data)
-    SELECT workspace_id,type,mailbox_id,thread_id,message_id,data FROM items JOIN lanes USING(workspace_id) ORDER BY workspace_id,ord RETURNING *
+    SELECT workspace_id,type,mailbox_id,thread_id,message_id,CASE WHEN msg#>>'{verdicts,simulated}'='true' THEN data||'{"simulated":true}' ELSE data END FROM items JOIN lanes USING(workspace_id) ORDER BY workspace_id,ord RETURNING *
   ), subscriptions AS (SELECT e.workspace_id,e.seq,array_agg(h.id) AS hooks FROM events e
     CROSS JOIN LATERAL (SELECT id,event_types,mailbox_ids FROM mailbox_webhooks WHERE workspace_id=e.workspace_id AND NOT paused ORDER BY id LIMIT 32) h
     WHERE h.event_types ? e.type AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id)) GROUP BY e.workspace_id,e.seq),

@@ -1590,7 +1590,7 @@ export type ConfigureSesAutoValidation = {
 export type Inbox = {
     id: string;
     kind: 'inbox';
-    type: 'ephemeral';
+    type: 'ephemeral' | 'sandbox';
     address: string;
     domain: string;
     name: string | null;
@@ -1644,6 +1644,7 @@ export type InboxMessage = {
         dkim?: string;
         dmarc?: string;
     };
+    simulated: boolean;
     hiddenContent: boolean;
     extract: {
         codes: Array<string>;
@@ -1951,6 +1952,7 @@ export type InboundThreadDetail = InboundThread & {
 };
 
 export type InboundMessage = {
+    simulated?: boolean;
     id: string;
     threadId: string;
     addressIds: Array<string>;
@@ -2055,7 +2057,7 @@ export type InboundMessageDetail = InboundMessage & {
         value: string;
     }>;
     verdicts?: {
-        [key: string]: string;
+        [key: string]: string | boolean;
     };
     html: string | null;
     attachments: Array<{
@@ -9999,7 +10001,7 @@ export type ListInboxesData = {
     body?: never;
     path?: never;
     query?: {
-        type?: 'ephemeral';
+        type?: 'ephemeral' | 'sandbox';
         status?: 'active' | 'expired' | 'deleting';
         q?: string;
         cursor?: string;
@@ -10067,7 +10069,7 @@ export type ListInboxesResponse = ListInboxesResponses[keyof ListInboxesResponse
 
 export type CreateInboxData = {
     body: {
-        type?: 'ephemeral';
+        type?: 'ephemeral' | 'sandbox';
         ttlSeconds?: number;
         graceHours?: number;
         domain?: string;
@@ -10358,6 +10360,77 @@ export type UpdateInboxResponses = {
 };
 
 export type UpdateInboxResponse = UpdateInboxResponses[keyof UpdateInboxResponses];
+
+export type SimulateInboxMessageData = {
+    body: {
+        from: string;
+        subject: string;
+        text: string;
+        html?: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inboxes/{id}/simulate';
+};
+
+export type SimulateInboxMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SimulateInboxMessageError = SimulateInboxMessageErrors[keyof SimulateInboxMessageErrors];
+
+export type SimulateInboxMessageResponses = {
+    /**
+     * Success
+     */
+    202: {
+        messageId: string;
+        simulated: true;
+    };
+};
+
+export type SimulateInboxMessageResponse = SimulateInboxMessageResponses[keyof SimulateInboxMessageResponses];
 
 export type ListInboxMessagesData = {
     body?: never;

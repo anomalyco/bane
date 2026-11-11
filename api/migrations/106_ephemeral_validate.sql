@@ -1,3 +1,4 @@
 ALTER TABLE mailboxes VALIDATE CONSTRAINT mailboxes_kind, VALIDATE CONSTRAINT mailboxes_retention_mode, VALIDATE CONSTRAINT mailboxes_ephemeral_shape;
 ALTER TABLE mail_messages VALIDATE CONSTRAINT mail_messages_lifecycle;
 ALTER TABLE mailbox_messages VALIDATE CONSTRAINT mailbox_messages_held;
+ALTER TABLE mailbox_domains VALIDATE CONSTRAINT sandbox_never_routable;
