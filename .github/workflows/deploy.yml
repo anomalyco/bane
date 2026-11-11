@@ -443,6 +443,10 @@ jobs:
         with:
           secret-ids: |
             DATABASE_URL,bane/${{ env.STAGE }}/DATABASE_URL
+            BETTER_AUTH_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
+            GOOGLE_CLIENT_ID,bane/${{ env.STAGE }}/GOOGLE_CLIENT_ID
+            GOOGLE_CLIENT_SECRET,bane/${{ env.STAGE }}/GOOGLE_CLIENT_SECRET
+            TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
           parse-json-secrets: false
 
       # Only dev runs a live E2E, so only dev has an E2E key to read.

@@ -29,7 +29,7 @@ async function openMailObject(runtime: Runtime, token: string, workspace?: strin
   const { w, k, t, f, e,inbox } = JSON.parse(Buffer.from(data, 'base64url').toString());
   if (!Number.isSafeInteger(e) || e <= Date.now() / 1000 || !runtime.mailR2 || (workspace !== undefined && w !== workspace)) throw missing();
   const bound=inbox??(k.startsWith('e/')?k.split('/')[2]:null);
-  if(bound&&!(await runtime.db.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${w} AND id=${bound} AND kind='inbox' AND delete_after>statement_timestamp()`)).rowCount)throw missing();
+  if(bound&&!(await runtime.db.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${w} AND id=${bound} AND kind='inbox' AND (delete_after IS NULL OR delete_after>statement_timestamp())`)).rowCount)throw missing();
   const body = await r2MailObjects(w, runtime.mailR2.bucket).get(k);
   if (!body) throw missing();
   return new Response(body, {

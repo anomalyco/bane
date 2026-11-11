@@ -1,3 +1,4 @@
+import {mimeIndex} from './mailbox-mime-index.js';
 import { sql } from 'drizzle-orm';
 import { ApiError, id, type Runtime } from './core.js';
 import { mailKey, sandboxMailStore } from './mail-objects.js';
@@ -64,7 +65,7 @@ export async function simulateInbox(
       html: input.html ?? null,
       snippet: input.text.slice(0, 240),
       bodyTruncated: false,
-      headers: [],
+      mime:mimeIndex(wire), headers: [],
       attachmentCount: 0,
       sizeBytes: wire.length,
       rawBucket: bucket,

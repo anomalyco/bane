@@ -2,7 +2,7 @@ import { bigint, bigserial, boolean, customType, index, integer, smallint,jsonb,
 import { sql } from 'drizzle-orm';
 
 /** Workspace-wide readers may see durable mail, but not an ended inbox's mail while GC drains. */
-export const retainedMail = () => sql`(${mailMessages.lifecycle}<>'ephemeral' OR EXISTS(
+export const retainedMail = () => sql`(${mailMessages.lifecycle}='default' OR EXISTS(
   SELECT FROM mailbox_messages l JOIN mailboxes b ON b.id=l.mailbox_id WHERE l.message_id=${mailMessages.id}
     AND (b.delete_after IS NULL OR b.delete_after>statement_timestamp())))`;
 
@@ -73,6 +73,7 @@ export const mailThreads = pgTable('mail_threads', {
 });
 
 export const mailMessages = pgTable('mail_messages', {
+  mime:jsonb('mime').$type<import('../mailbox-mime-index.js').MimePart>(),
   lifecycle:text('lifecycle').notNull().default('default'),
   id: text('id').primaryKey(), ...scope(), direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), threadId: text('thread_id').notNull(),
   region: text('region'), domainId: text('domain_id'), sesMessageId: text('ses_message_id'), sendingEmailId: text('sending_email_id'),

@@ -37,6 +37,7 @@ try {
       const binding=`${sample.workspace_id}:${sample.env}:${table==='mailbox_webhooks'?'mailbox:':''}${sample.id}`;
       try { await decrypt({config:{encryptionKey:deriveEncryptionKey(process.env.BETTER_AUTH_SECRET)}},sample.encrypted_secret,binding); }
       catch { throw new Error('KEY_ROTATION_REQUIRED: BETTER_AUTH_SECRET differs from the secret that encrypted the stored webhooks. Restore it or configure explicit rotation. No data was modified.'); }
+      log('info', {code:'STORED_WEBHOOK_SECRET_DECRYPT_VERIFIED'});
       break;
     }
   }

@@ -458,7 +458,7 @@ export function formattedSender(from: string, fromName?: string, foldMime = fals
 }
 // SES Simple puts CID images beside the body in multipart/mixed. Build only
 // the inline-image case ourselves so each image is related to its HTML part.
-export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uint8Array {
+export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[], archive?:{id:string;date:string}): Uint8Array {
   const crlf = '\r\n';
   const base64 = (value: string | Uint8Array) => Buffer.from(value).toString('base64').match(/.{1,76}/g)?.join(crlf) ?? '';
   const encodedWords = (value: string) => {
@@ -484,7 +484,7 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uin
   };
   const textPart = (type: 'plain' | 'html', body: string) => `Content-Type: text/${type}; charset=UTF-8${crlf}Content-Transfer-Encoding: quoted-printable${crlf}${crlf}${quotedPrintable(body)}`;
   const multipart = (type: 'related' | 'alternative' | 'mixed', children: string[]) => {
-    const boundary = `bane_${crypto.randomUUID()}`;
+    const boundary = `bane_${archive ? `${archive.id}_${type}` : crypto.randomUUID()}`;
     return `Content-Type: multipart/${type}; boundary="${boundary}"${type === 'related' ? '; type="text/html"' : ''}${crlf}${crlf}` +
       children.map(child => `--${boundary}${crlf}${child}${crlf}`).join('') + `--${boundary}--${crlf}`;
   };
@@ -499,8 +499,9 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uin
   };
   const inline = parts.filter(part => part.ContentDisposition === 'INLINE');
   const files = parts.filter(part => part.ContentDisposition !== 'INLINE');
-  let body = multipart('related', [textPart('html', snapshot.html!), ...inline.map(filePart)]);
-  if (snapshot.text !== undefined) body = multipart('alternative', [textPart('plain', snapshot.text), body]);
+  let body = snapshot.html === undefined ? textPart('plain',snapshot.text??'') : textPart('html',snapshot.html);
+  if(inline.length)body=multipart('related',[body,...inline.map(filePart)]);
+  if (snapshot.html!==undefined && snapshot.text !== undefined) body = multipart('alternative', [textPart('plain', snapshot.text), body]);
   if (files.length) body = multipart('mixed', [body, ...files.map(filePart)]);
   // Bcc stays only in the SES envelope, never the MIME headers.
   const headers = [
@@ -509,7 +510,8 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uin
     ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(`,${crlf} `)}`] : []),
     ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(`,${crlf} `)}`] : []),
     `Subject: ${/^[\x20-\x7e]{1,900}$/.test(snapshot.subject) && !snapshot.subject.includes('=?') ? snapshot.subject : encodedWords(snapshot.subject)}`,
-    `Date: ${new Date().toUTCString()}`,
+    `Date: ${new Date(archive?.date??Date.now()).toUTCString()}`,
+    ...(archive?[`Message-ID: <${archive.id}@bane.invalid>`]:[]),
     'MIME-Version: 1.0',
     ...snapshot.headers.map(header => {
       if (!/^[A-Za-z0-9-]+$/.test(header.Name) || /[\r\n]/.test(header.Value)) throw new ApiError(422, 'INVALID_MIME_HEADER', 'Message headers cannot contain line breaks.');

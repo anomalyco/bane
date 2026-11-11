@@ -95,6 +95,7 @@ Object.assign(SKIP, {
   createInbox: receivingMvp,
   listInboxes: receivingMvp,
   getInbox: receivingMvp,
+  listInboxFolders:receivingMvp, getInboxChanges:receivingMvp, copyInboxMessage:receivingMvp, moveInboxMessage:receivingMvp, deleteInboxMessage:receivingMvp, expungeInboxFolder:receivingMvp,
   updateInbox: receivingMvp,
   deleteInbox: receivingMvp,
   simulateInboxMessage: receivingMvp,
@@ -879,6 +880,8 @@ async function run() {
       })(),
     ]);
     await step('Regional metrics for this run window', async () => {
+      const sender = await api('getSenderScore', {});
+      check(sender.state === 'warmup' ? sender.score === null : sender.score !== null && sender.score >= 0 && sender.score <= 100, 'sender score outside its grading range');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
       check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
     });
