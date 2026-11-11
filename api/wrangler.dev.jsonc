@@ -51,7 +51,9 @@
   // Run HTTP requests next to the bane-dev database (PlanetScale aws-us-east-2).
   "placement": { "region": "aws:us-east-2" },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
-  // Hyperdrive config `bane-dev` in anomaly-dev (caching disabled, 15 origin connections: the database allows 25).
+  // Hyperdrive config `bane-dev` in anomaly-dev (caching disabled, 10 origin connections). The database allows 25 (22
+  // for non-superusers), and Hyperdrive can open a second pool with its own allocation, so two pools must fit: at 15,
+  // a second pool exhausted the database and Postgres refused connections mid-E2E (2026-11-11).
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "8c45a6d9fd9c48af94fd30baf40410fd" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "bane-dev-attachments" }, { "binding": "MAIL", "bucket_name": "bane-dev-mail" }],

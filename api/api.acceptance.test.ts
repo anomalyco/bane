@@ -4409,6 +4409,48 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual([as('dashboard', 'owner'), as('dashboard', 'member'), as('apiKey'), as('mcp', 'owner'), as('agentToken')], [true, false, true, false, false]);
     });
   });
+
+  // Dev E2E, 2026-11-11: Postgres refused Hyperdrive's connections during a burst. Requests failed with 500
+  // INTERNAL_ERROR at authentication and a campaign.run job failed for good, stranding its campaign in preparing.
+  test('database connection refusals: a retryable 503 for requests and a retried job, with the SQLSTATE logged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      // Drizzle wraps driver errors; Hyperdrive reports its own as SQLSTATE 58000 and passes Postgres errors through.
+      const wrapped = (code: string | undefined, message: string) => Object.assign(new Error('Failed query: select 1\nparams: '), { cause: Object.assign(new Error(message), code ? { code } : {}) });
+      const logs: Json[] = [];
+      for (const level of ['error', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Refusal reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
+      const execute = runtime.db.execute.bind(runtime.db);
+      let fault: unknown = null;
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault; fault = null; throw thrown; } return execute(...args); }) as typeof execute);
+      const refused = async (failure: unknown) => { fault = failure; logs.length = 0; return request('GET', '/v1/emails', reader.secret); };
+      for (const failure of [wrapped('58000', 'Failed to acquire a connection from the pool.'), wrapped('58000', 'Server connection attempt failed: connection_refused'), wrapped('53300', 'sorry, too many clients already'), wrapped('08006', 'connection failure'), new Error('Connection terminated unexpectedly')]) {
+        const reply = await refused(failure);
+        const body = error(reply, 503, 'DATABASE_UNAVAILABLE');
+        assert.deepEqual([body.retryable, reply.headers.get('retry-after')], [true, '1']);
+        const entry = logs.find(line => line.code === 'DATABASE_UNAVAILABLE');
+        assert.ok(entry && entry.status === 503 && entry.stack, 'the refusal is logged with its stack');
+        assert.equal(entry.databaseCode, (failure as { cause?: { code?: string } }).cause?.code);
+      }
+      // Anything else stays an internal error, now with the wrapped SQLSTATE in the log.
+      const broken = await refused(wrapped('42703', 'column "missing" does not exist'));
+      error(broken, 500, 'INTERNAL_ERROR');
+      assert.equal(logs.find(line => line.code === 'INTERNAL_ERROR')?.databaseCode, '42703');
+      assert.equal(ok(await request('GET', '/v1/emails', reader.secret)).data.length >= 0, true, 'the next request succeeds');
+      t.mock.restoreAll();
+      for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      // Jobs: a refusal is retried with backoff (attempt charged); a real bug still fails the job.
+      const { processJobs } = await import('./src/jobs.js');
+      const job = async (id: string, failure: unknown) => {
+        await db.query("INSERT INTO jobs(id, workspace_id, type, payload, available_at) VALUES ($1, $2, 'campaign.run', '{}'::jsonb, now() - interval '1 second')", [id, wid]);
+        assert.equal(await processJobs(runtime, { 'campaign.run': async () => { throw failure; } }, 1, 1), 1);
+        return (await db.query('SELECT status, attempts, last_error, available_at > now() AS later FROM jobs WHERE id = $1', [id])).rows[0];
+      };
+      assert.deepEqual(await job(unique('refused-job-'), wrapped('58000', 'Failed to acquire a connection from the pool.')), { status: 'pending', attempts: 1, last_error: 'DATABASE_UNAVAILABLE', later: true });
+      assert.equal(logs.find(line => line.code === 'DATABASE_UNAVAILABLE' && line.operation === 'campaign.run')?.databaseCode, '58000');
+      assert.deepEqual(await job(unique('broken-job-'), wrapped('42703', 'column "missing" does not exist')), { status: 'failed', attempts: 1, last_error: 'JOB_INTERNAL_ERROR', later: true });
+    });
+  });
 });
 
 describe('Personalization context boundaries', () => {

@@ -218,6 +218,25 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
   const { getSesSync } = await preloadSesTransport(runtime.config.multiTenant);
   return getSesSync(runtime, selectedRegion, connection, runClients);
 }
+// Database connection failures are transient: the statement never reached the database or the connection dropped.
+// Hyperdrive reports its own failures (pool exhausted, origin refused the connection) as SQLSTATE 58000; Postgres
+// passes 53300 (too many connections), class 08 (connection exceptions) and 57P01-57P03 (shutdown, starting up);
+// node-postgres throws plain errors when a socket drops. Drizzle wraps all of them, so read the cause chain.
+const TRANSIENT_SQLSTATES = new Set(['58000', '53300', '57P01', '57P02', '57P03']);
+const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE']);
+const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|Server connection attempt failed: .+)$/;
+const errorChain = (error: unknown) => { const chain: Error[] = []; for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); return chain; };
+/** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs. */
+export const databaseCodeOf = (error: unknown) => errorChain(error).map(e => (e as { code?: unknown }).code).find((code): code is string => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code));
+export function transientDatabaseError(error: unknown) {
+  if (error instanceof ApiError) return false;
+  return errorChain(error).some(e => {
+    const code = (e as { code?: unknown }).code;
+    return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || TRANSIENT_DRIVER_MESSAGE.test(e.message);
+  });
+}
+/** What callers see when the database is briefly unreachable: retry, nothing was committed by this request. */
+export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
   // Sample routine successes at the source, NOT whole invocations. A sampled-out
   // request can still emit every error and the minute and batch metrics stay exact.
