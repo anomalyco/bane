@@ -1,7 +1,9 @@
+import { useLocation } from 'react-router'
 import { useApiDef, useApiQuery, useRegion } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Domain, Overview } from '../../data/types'
-import { scoreReport, type ScoreInputs, type ScoreReport } from '../../lib/sender-score'
+import { readScoreOverride } from '../../lib/design'
+import { scoreReport, withScore, type ScoreInputs, type ScoreReport } from '../../lib/sender-score'
 
 // Pitch only: no score API yet. Bounces, complaints and volume consistency come from the real 30-day metrics,
 // authentication from the workspace's domains; the content screen and list hygiene inputs are synthetic until the
@@ -29,6 +31,7 @@ export function spikeRatio(points: Overview['points']) {
 
 export function useSenderScore(): { report: ScoreReport | null; domains: Domain[]; loading: boolean } {
   const { regionId } = useRegion()
+  const override = readScoreOverride(useLocation().search)
   const metrics = useApiDef(queries.overview(regionId, '30d', 'all'), { interval: 60_000 })
   const domains = useApiQuery(['domains', 'score'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal))
   if (!metrics.data || !domains.data) return { report: null, domains: domains.data?.items ?? [], loading: metrics.isPending || domains.isPending }
@@ -42,5 +45,6 @@ export function useSenderScore(): { report: ScoreReport | null; domains: Domain[
     hygiene: SYNTHETIC.hygiene,
     consistency: spikeRatio(data.points),
   }
-  return { report: scoreReport(inputs), domains: domains.data.items, loading: false }
+  const report = scoreReport(inputs)
+  return { report: override !== null && report.state === 'graded' ? withScore(report, override) : report, domains: domains.data.items, loading: false }
 }

@@ -26,7 +26,7 @@ export const factorSpecs: readonly FactorSpec[] = [
   { key: 'bounces', label: 'Bounces', short: 'Bounce', weight: 20, good: 0.01, bad: 0.08, format: pct(1), source: 'Hard bounces ÷ sent, 30 days' },
   { key: 'content', label: 'Content', short: 'Content', weight: 20, good: 0.001, bad: 0.03, format: pct(1), source: 'Share of mail the screen scores ≥ 0.7 spam (sent and forwarded)' },
   { key: 'auth', label: 'Authentication', short: 'Auth', weight: 15, good: 1, bad: 0, format: value => `${Math.round(value * 100)}%`, source: 'DKIM 40 + aligned SPF 30 + DMARC 30 (p=none counts half), by volume' },
-  { key: 'hygiene', label: 'List hygiene', short: 'Lists', weight: 10, good: 0.005, bad: 0.05, format: pct(1), source: 'Sends to suppressed, unknown or disposable addresses; replies received count in your favour' },
+  { key: 'hygiene', label: 'List hygiene', short: 'Lists', weight: 10, good: 0.005, bad: 0.05, format: pct(1), source: 'Sends to suppressed, unknown or disposable addresses; replies received count in your favor' },
   { key: 'consistency', label: 'Consistency', short: 'Volume', weight: 10, good: 3, bad: 20, format: value => `${value.toFixed(1)}×`, source: 'Busiest day ÷ the 7-day median before it' },
 ]
 
@@ -48,14 +48,27 @@ export function scoreReport(inputs: ScoreInputs, days = 14): ScoreReport {
   })
   const raw = factors.reduce((sum, factor) => sum + factor.points, 0)
   const target = (inputs.emails * raw + CONFIDENCE * PRIOR) / (inputs.emails + CONFIDENCE)
-  // The displayed score walks towards the target a day at a time; the pitch replays the last `days` days from the
-  // first graded day (prior) so the history shows how the grade moved.
+  const history = walk(target, days), score = history[history.length - 1]
+  return { state: 'graded', emails: inputs.emails, raw, target, score, ...placing(score), factors, history }
+}
+// The displayed score walks towards the target a day at a time; the pitch replays the last `days` days from the
+// first graded day (the prior) so the history shows how the grade moved.
+function walk(target: number, days: number) {
   const history: number[] = []
   let score = PRIOR
   for (let day = 0; day < days; day++) { score += Math.max(-MAX_FALL, Math.min(MAX_RISE, target - score)); history.push(score) }
+  return history
+}
+function placing(score: number) {
   const index = gradeBands.findIndex(band => score >= band.min), band = gradeBands[index]
   const above = index > 0 ? gradeBands[index - 1] : null
-  return { state: 'graded', emails: inputs.emails, raw, target, score, grade: band.grade, band: { min: band.min, max: above?.min ?? 100 }, next: above ? { grade: above.grade, at: above.min, gap: above.min - score } : null, factors, history }
+  return { grade: band.grade, band: { min: band.min, max: above?.min ?? 100 }, next: above ? { grade: above.grade, at: above.min, gap: above.min - score } : null }
+}
+// Pitch only: the same report pinned to another score, to show every grade band.
+export function withScore(report: Extract<ScoreReport, { state: 'graded' }>, score: number): Extract<ScoreReport, { state: 'graded' }> {
+  const history = walk(score, report.history.length)
+  history[history.length - 1] = score
+  return { ...report, target: score, score, ...placing(score), history }
 }
 
 // The step that would gain the most points, in plain words.
