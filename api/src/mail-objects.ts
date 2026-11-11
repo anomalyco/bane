@@ -19,8 +19,8 @@ export interface MailObjects {
   head(key: string): Promise<number | null>;
   delete(keys: string[]): Promise<void>;
 }
-/** `default`: today's retention (raw 90 days by lifecycle rule). `ephemeral`: erased with its inbox. Phase 2 adds `kept`. */
-export type MailClass = 'default' | 'ephemeral';
+/** Kept raw has no lifecycle deadline; membership GC owns its deletion. */
+export type MailClass = 'default' | 'ephemeral' | 'kept';
 
 const R2 = 'r2:', LOCAL = 'local:';
 export const isS3Bucket = (bucket: string) => !bucket.includes(':');
@@ -33,7 +33,7 @@ const missing = () => new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'The mail ob
  */
 export function mailKey(wid: string, cls: MailClass, inboxId: string | null | undefined, messageId: string, file?: { batch: string; id: string }) {
   if (cls === 'ephemeral' && !inboxId) throw new Error('Ephemeral mail keys need the owning inbox');
-  const owner = cls === 'ephemeral' ? `e/${wid}/${inboxId}` : null;
+  const owner = cls === 'ephemeral' ? `e/${wid}/${inboxId}` : cls==='kept'&&!file ? `k/${wid}` : null;
   const key = file ? `${owner ?? `a/${wid}`}/${messageId}/${file.batch}/${file.id}` : `${owner ?? `d/${wid}`}/${messageId}.eml`;
   assertMailKey(wid, key);
   return key;
@@ -49,7 +49,7 @@ export function assertMailKey(wid: string, key: string) {
  * bound, so erasing it never needs an S3 delete grant, including after a rollback of the switch.
  */
 export function hostedMailBucket(runtime: Runtime, cls: MailClass) {
-  return runtime.mailR2?.write || cls === 'ephemeral' ? boundMailBucket(runtime) : null;
+  return runtime.mailR2?.write || cls !== 'default' ? boundMailBucket(runtime) : null;
 }
 /** The bucket column value of the bound R2 mail bucket, which Bane-signed download links stream from. */
 export const boundMailBucket = (runtime: Runtime) => runtime.mailR2 ? `${R2}${runtime.mailR2.name}` : null;
@@ -139,11 +139,11 @@ export async function withMailObjects<T>(runtime: Runtime, wid: string, region: 
 }
 
 /** Where ingest writes one received message: R2 under its class prefix on hosted, else the receipt's S3 bucket. */
-export function receivedMailStore(runtime: Runtime, wid: string, receipt: Pick<IngestInput, 'bucket' | 'binding' | 'delivery'>, s3: S3Client, ids: { messageId: string; sesMessageId: string }) {
-  const lifecycle: MailClass = receipt.delivery?.lifecycle === 'ephemeral' ? 'ephemeral' : 'default', inbox = receipt.delivery?.prefixInbox;
-  const r2 = runtime.config.multiTenant && receipt.binding?.kind === 'shared' ? hostedMailBucket(runtime, lifecycle) : null;
+export function receivedMailStore(runtime: Runtime, wid: string, receipt: Pick<IngestInput, 'bucket' | 'binding' | 'delivery'>, s3: S3Client, ids: { messageId: string; sesMessageId: string }, forceInboxStore=false) {
+  const lifecycle: MailClass = receipt.delivery?.lifecycle==='kept'?'kept':receipt.delivery?.lifecycle === 'ephemeral' ? 'ephemeral' : 'default', inbox = receipt.delivery?.prefixInbox;
+  const r2 = runtime.config.multiTenant && receipt.binding?.kind === 'shared' ? hostedMailBucket(runtime, forceInboxStore?'kept':lifecycle) : null;
   if (r2) return { lifecycle, bucket: r2, r2: true, objects: mailObjectsFor(runtime, wid, r2), rawKey: mailKey(wid, lifecycle, inbox, ids.messageId), fileKey: (batch: string, id: string) => mailKey(wid, lifecycle, inbox, ids.messageId, { batch, id }) };
-  return { lifecycle, bucket: receipt.bucket, r2: false, objects: s3MailObjects(wid, s3, receipt.bucket), rawKey: `${workspacePrefix(wid, 'raw')}${ids.sesMessageId}.eml`, fileKey: (batch: string, id: string) => receivedAttachmentKey(wid, ids.messageId, batch, id) };
+  return { lifecycle, bucket: receipt.bucket, r2: false, objects: s3MailObjects(wid, s3, receipt.bucket), rawKey: `${workspacePrefix(wid, 'raw')}${lifecycle==='kept'?'kept/':''}${ids.sesMessageId}.eml`, fileKey: (batch: string, id: string) => receivedAttachmentKey(wid, ids.messageId, batch, id) };
 }
 /** Archive key for a file sent from an address or inbox; the bucket comes from the sending domain's store. */
 export const sentMailKey = (wid: string, bucket: string, inboxId: string | null, messageId: string, attachmentId: string) =>

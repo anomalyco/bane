@@ -37,7 +37,7 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
 }
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
-export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw',etag?:string,reserve?:(bytes:number)=>Promise<void>,objects?:MailObjects) {
+export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw'|'kept',etag?:string,reserve?:(bytes:number)=>Promise<void>,objects?:MailObjects) {
   const { HeadObjectCommand, GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
   const location={Bucket:bucket,Key:source};
   const head=await client.send(new HeadObjectCommand(location));

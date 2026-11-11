@@ -3,6 +3,7 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { serialize, type DefaultTreeAdapterMap } from 'parse5';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
+import {mimeIndex} from './mailbox-mime-index.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
 import { domains } from './db/operations.js';
@@ -10,7 +11,7 @@ import { regionalSender, regionalSending, unverifiedSender, verifiedClaim } from
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
-import { hostedMailBucket, readMailBytes, sentMailKey, withMailObjects } from './mail-objects.js';
+import { hostedMailBucket, isS3Bucket, mailKey, readMailBytes, sentMailKey, withMailObjects } from './mail-objects.js';
 import { readableMailboxKey } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
@@ -86,7 +87,30 @@ export async function archiveMailboxFiles(runtime:Runtime,wid:string,messageId:s
     DELETE FROM sending_attachment_links l USING copied c WHERE l.workspace_id=${wid} AND l.owner_type='mailbox' AND l.owner_id=c.id`);
 }
 export async function finishMailboxArchive(runtime:Runtime,wid:string,messageId:string){
-  try{await archiveMailboxFiles(runtime,wid,messageId);}catch{log('warn',{code:'MAILBOX_ARCHIVE_DEFERRED',messageId});}
+  try{await archiveSentMessage(runtime,wid,messageId);}catch{log('warn',{code:'MAILBOX_ARCHIVE_DEFERRED',messageId});}
+}
+
+/** Render the accepted reply, never resubmit it. The send transaction enqueues a retry
+ * before commit. Both the object name and its bytes are stable on replay. */
+export async function archiveSentMessage(runtime:Runtime,wid:string,mid:string){
+  await archiveMailboxFiles(runtime,wid,mid);
+  const [m]=await runtime.db.select().from(mailMessages).where(and(eq(mailMessages.id,mid),eq(mailMessages.workspaceId,wid),eq(mailMessages.direction,'outbound')));
+  if(!m?.rawBucket||!m.senderMailboxId||!m.region||m.rawKey||m.lifecycle==='default')return;
+  const key=isS3Bucket(m.rawBucket)?`workspaces/${wid}/raw/sent/${mid}.eml`:mailKey(wid,m.lifecycle==='kept'?'kept':'ephemeral',m.senderMailboxId,mid);
+  const files=await runtime.db.select().from(mailAttachments).where(and(eq(mailAttachments.workspaceId,wid),eq(mailAttachments.messageId,mid))).orderBy(mailAttachments.id);
+  const {inlineMessage}=await import('./sending.js');
+  await withMailObjects(runtime,wid,m.region,m.rawBucket,async objects=>{
+    const parts=[];let total=0;
+    for(const f of files){
+      if(f.bucket!==m.rawBucket||(total+=f.sizeBytes)>MAX_TOTAL_ATTACHMENT_BYTES)throw new Error('Invalid Sent attachment binding');
+      const object=await objects.get(f.storageKey);if(!object)throw new Error('Missing Sent attachment');
+      parts.push({FileName:f.filename,ContentType:f.contentType,ContentId:f.contentId??undefined,ContentDisposition:f.disposition==='inline'?'INLINE' as const:'ATTACHMENT' as const,RawContent:await readMailBytes(object,f.sizeBytes,MAX_TOTAL_ATTACHMENT_BYTES)});
+    }
+    const wire=inlineMessage({kind:'transactional',from:m.fromAddress,fromName:m.fromName??undefined,to:m.to.map(a=>a.address),cc:m.cc.map(a=>a.address),bcc:[],replyTo:m.replyTo.map(a=>a.address),subject:m.subject,html:m.html??undefined,text:m.text??undefined,region:m.region!,tracking:false,attachments:[],headers:m.headers.map(h=>({Name:h.name,Value:h.value}))},parts,{id:mid,date:m.receivedAt});
+    await objects.put(key,wire,'message/rfc822');
+    const done=await runtime.db.execute(sql`WITH updated AS (UPDATE mail_messages SET raw_key=${key},size_bytes=${wire.length},mime=${JSON.stringify(mimeIndex(wire))}::jsonb WHERE workspace_id=${wid} AND id=${mid} AND raw_key IS NULL RETURNING sender_mailbox_id), usage AS (UPDATE inbox_state s SET bytes=bytes+${wire.length} FROM updated WHERE s.inbox_id=sender_mailbox_id AND EXISTS(SELECT FROM mailbox_messages WHERE mailbox_id=s.inbox_id AND message_id=${mid})) SELECT FROM mail_messages WHERE workspace_id=${wid} AND id=${mid}`);
+    if(!done.rowCount)await objects.delete([key]);
+  });
 }
 
 const wireId = (v: string, header: string) => /^[\x21-\x3b\x3d\x3f-\x7e]+$/.test(v) && v.length + 2 + header.length <= 996;
@@ -169,7 +193,8 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   }
   await enforceLimits(tx, message);
   // Shared-pool archives follow the hosted mail store; inbox archives use R2 whenever it is bound.
-  const hostedSentBucket=hostedMailBucket(runtime,current.kind==='inbox'?'ephemeral':'default');
+  const lifecycle=current.kind!=='inbox'?'default':current.expiresAt?'ephemeral':'kept';
+  const hostedSentBucket=hostedMailBucket(runtime,lifecycle);
   const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN ${hostedSentBucket ? sql`${hostedSentBucket}::text` : sql`p.inbound_bucket`} ELSE r.bucket END FROM provider_connections c
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
@@ -183,7 +208,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
-    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentMailKey(message.scope.workspaceId,domain.bucket!,current.kind==='inbox'?current.id:null,messageRowId,attachmentId)};
+    return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentMailKey(message.scope.workspaceId,domain.bucket!,lifecycle==='ephemeral'?current.id:null,messageRowId,attachmentId)};
   }));
   const references = referencesHeader(message.references);
   const headers = [
@@ -201,7 +226,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${now}::timestamptz)` }).where(eq(mailThreads.id, threadId));
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
-    lifecycle:current.kind==='inbox'?'ephemeral':'default',
+    lifecycle,rawBucket:current.kind==='inbox'?domain.bucket:null,
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
     inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,
@@ -213,6 +238,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     await tx.insert(attachmentLinks).values(files.map(f=>({...message.scope,attachmentId:f.sourceId,ownerType:'mailbox' as const,ownerId:f.id})));
   }
   await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
+  if(current.kind==='inbox')await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
   const queued = await recordEvents(tx, message.scope.workspaceId, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
   return { message: row!, runnable: queued };
 }
