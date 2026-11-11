@@ -114,9 +114,9 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { key?:
 export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: typeof mailMessages.$inferSelect, mailboxIds: string[]) {
   if (!mailboxIds.length) return [];
   const inbound = message.direction === 'inbound';
-  const result=await tx.execute<{mailbox_id:string}>(sql`WITH added AS (
+  const result=await tx.execute<{mailbox_id:string}>(sql`WITH states AS MATERIALIZED (SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY inbox_id FOR UPDATE), added AS (
     INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at)
-    SELECT box,${message.id},${scope.workspaceId},${message.threadId},${message.direction},${!inbound},${message.receivedAt}::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(mailboxIds)}::jsonb) b(box) ON CONFLICT DO NOTHING RETURNING *
+    SELECT box,${message.id},${scope.workspaceId},${message.threadId},${message.direction},${!inbound},${message.receivedAt}::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(mailboxIds)}::jsonb) b(box) WHERE (SELECT count(*) FROM states)>=0 ORDER BY box ON CONFLICT DO NOTHING RETURNING *
   ) INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
     SELECT mailbox_id,thread_id,workspace_id,1,${inbound?1:0},received_at,CASE WHEN ${inbound} THEN received_at END,${message.spam},CASE WHEN ${message.spam} THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM added ORDER BY mailbox_id
     ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+excluded.unread_count,last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=CASE WHEN excluded.last_inbound_at IS NOT NULL THEN false ELSE t.archived END RETURNING mailbox_id`);
