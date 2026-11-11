@@ -133,7 +133,14 @@ Direct tools are named below. Where there is no direct tool, the reason or remai
 | `listRitualVersions` | `rituals_versions` |
 | `restoreRitualVersion` | `rituals_restore` |
 | `setRitualEvaluation` | `rituals_set_omens` |
-| `setEndpointPolicy` | `endpoints_set_policy` |
+| `updateEndpoint` | `endpoints_update` |
+| `getEndpoint` | `endpoints_get` |
+| `deleteEndpoint` | `endpoints_delete` |
+| `sendEndpointVerification` | `endpoints_send_verification` |
+| `testEndpoint` | `endpoints_test` |
+| `checkRitual` | `rituals_check` |
+| `getRitualTypings` | `rituals_typings` |
+| `listRitualTemplates` | `rituals_templates` |
 | `listEndpoints` | `endpoints_list` |
 | `createEndpoint` | `endpoints_create` |
 | `createInboxConnection` | `inboxes_connect` |

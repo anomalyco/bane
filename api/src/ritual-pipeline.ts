@@ -3,7 +3,8 @@ import { digest, type Runtime } from './core.js';
 import { jevQuestions } from './screen.js';
 import { visibleMail } from './inbox-content.js';
 import { safeForwardHtml } from './mailbox-send.js';
-import { compileRitual, runRitual, MESSAGE_STEPS, MESSAGE_BYTES, type RitualIR, type Intent } from './ritual-engine.js';
+import { compileRitual, runRitual, RitualError, MESSAGE_STEPS, MESSAGE_BYTES, type Diagnostic, type RitualIR, type Intent } from './ritual-engine.js';
+import { closest, type EndpointType } from './ritual-schema.js';
 import { matchRouting, plusBase, type RoutingInput } from './routing-match.js';
 import type { mailMessages, mailAttachments } from './db/mailbox.js';
 import { JobDeferred } from './jobs.js';
@@ -15,14 +16,14 @@ export const Binding = z
   .object({
     ritual: key,
     target: bounded.describe('A mailbox ID (mbx_…) or an existing recipient address.'),
-    continue: z.boolean().default(false),
+    continue: z.boolean().default(false).describe('Run the next attached ritual even after this one took an action.'),
   })
   .strict();
 export const RitualConfig = z
   .object({
     rituals: z.array(Ritual).max(50).default([]),
     attachments: z.array(Binding).max(256).default([]),
-    senderLists: z.record(key, z.array(bounded.toLowerCase()).max(500)).default({}),
+    senderLists: z.record(key, z.array(bounded.toLowerCase()).max(500)).default({}).describe('Named address lists for lists.has(name, address). Entries are addresses or @domain.'),
     evaluateDomains: z.array(bounded.toLowerCase()).max(100).default([]),
     evaluateRoutes: z
       .array(bounded)
@@ -33,36 +34,66 @@ export const RitualConfig = z
   .strict();
 export type Config = z.infer<typeof RitualConfig>;
 export type Programs = {
-  grants?:string[];
+  grants?: string[];
   rituals: Record<string, RitualIR>;
   attachments: Config['attachments'];
   senderLists: Config['senderLists'];
   evaluateDomains: string[];
   evaluateRoutes: string[];
+  /** ref (endpoint:<name>, inbox:<key>) → destination ID, resolved when saved. */
   refs: Record<string, string>;
+  /** ref → endpoint type, for payload checks while running. */
+  types?: Record<string, EndpointType | 'inbox'>;
 };
-export function compileConfig(c: Config): Programs {
-  const rituals = Object.fromEntries(c.rituals.map((h) => [h.key, compileRitual(h.source)]));
-  if (Object.keys(rituals).length !== c.rituals.length)
-    throw Error('Duplicate ritual key.');
-  for (const a of c.attachments) {
-    if (!Object.hasOwn(rituals, a.ritual)) throw Error(`Unknown ritual: ${a.ritual}`);
-    if (
-      c.attachments.filter((x) => x.target === a.target && x.ritual === a.ritual).length > 1 ||
-      c.attachments.filter((x) => x.target === a.target).length > 3
-    )
-      throw Error('Attach up to three distinct rituals per target.');
+/** Every compile problem in a config, each tied to its ritual and source position. */
+export class RitualConfigError extends Error {
+  constructor(readonly diagnostics: Diagnostic[]) {
+    super(diagnostics.map(formatDiagnostic).join('\n'));
   }
+}
+export const formatDiagnostic = (d: Diagnostic) => `${d.ritual ? `Ritual ${d.ritual}, l` : 'L'}ine ${d.line}, column ${d.column}: ${d.message}${d.hint ? ` ${d.hint}` : ''}`;
+const at = (ritual: string, message: string, hint?: string, line = 1, column = 1): Diagnostic => ({ ritual, line, column, endLine: line, endColumn: column, message, ...(hint ? { hint } : {}) });
+export function compileConfig(c: Config): Programs {
+  const diagnostics: Diagnostic[] = [], rituals: Record<string, RitualIR> = Object.create(null);
+  for (const h of c.rituals) {
+    if (Object.hasOwn(rituals, h.key)) { diagnostics.push(at(h.key, `Two rituals use the key ${h.key}.`, 'Keys must be unique.')); continue; }
+    try { rituals[h.key] = compileRitual(h.source); }
+    catch (e) { if (e instanceof RitualError) diagnostics.push({ ...e.diagnostic, ritual: h.key }); else throw e; }
+  }
+  const listNames = Object.keys(c.senderLists);
+  for (const [name, ir] of Object.entries(rituals))
+    for (const list of ir.lists ?? [])
+      if (!Object.hasOwn(c.senderLists, list.name)) {
+        const guess = closest(list.name, listNames);
+        diagnostics.push(at(name, `No sender list named ${list.name}.`, guess ? `Did you mean "${guess}"?` : 'Add it to senderLists, for example { "vip": ["ceo@example.com", "@partner.com"] }.', list.line, list.column));
+      }
+  const known = Object.keys(rituals).concat(c.rituals.map(r => r.key));
+  for (const a of c.attachments) {
+    if (!known.includes(a.ritual)) { const guess = closest(a.ritual, known); diagnostics.push(at(a.ritual, `Attachment to ${a.target} names ritual ${a.ritual}, which does not exist.`, guess ? `Did you mean ${guess}?` : undefined)); continue; }
+    if (c.attachments.filter(x => x.target === a.target && x.ritual === a.ritual).length > 1) diagnostics.push(at(a.ritual, `${a.ritual} is attached to ${a.target} twice.`));
+    if (c.attachments.filter(x => x.target === a.target).length > 3) diagnostics.push(at(a.ritual, `${a.target} has more than three rituals attached.`, 'Combine them, or attach at most three per inbox or address.'));
+  }
+  if (diagnostics.length) throw new RitualConfigError([...new Map(diagnostics.map(d => [formatDiagnostic(d), d])).values()].slice(0, 50));
   const p = {
     rituals,
     attachments: c.attachments,
     evaluateDomains: c.evaluateDomains,
     evaluateRoutes: c.evaluateRoutes,
-    senderLists: Object.fromEntries(Object.entries(c.senderLists).map(([k, v]) => ['list:' + k, v])),
+    senderLists: c.senderLists,
     refs: {},
   };
-  if (Buffer.byteLength(JSON.stringify(p)) > 256 * 1024) throw Error('Workspace ritual plan exceeds 256 KiB.');
+  if (Buffer.byteLength(JSON.stringify(p)) > 256 * 1024) throw new RitualConfigError([at('', 'The workspace ritual plan exceeds 256 KiB.', 'Shorten rituals or sender lists.')]);
   return p;
+}
+/** What a ritual may hand an endpoint while running; a literal payload was already checked when saved. */
+export function payloadProblem(type: EndpointType | 'inbox' | undefined, body: unknown): string | null {
+  if (type === 'slack' || type === 'discord') {
+    const k = type === 'slack' ? 'text' : 'content';
+    return body && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === 1 && typeof (body as Record<string, unknown>)[k] === 'string' && (body as Record<string, string>)[k]!.length
+      ? null : `expects { ${k}: "…" } with non-empty text`;
+  }
+  if (type === 'forward' && body !== undefined) return 'takes no payload';
+  return null;
 }
 
 export function projectEmail(
@@ -269,6 +300,8 @@ export async function ritualPipeline(
             d.warnings.push(`Unavailable: ${a.ref}`);
             continue;
           }
+          const problem = payloadProblem(p.types?.[a.ref], a.body);
+          if (problem) { d.warnings.push(`Skipped ${a.ref.replace(/^endpoint:/, 'endpoints.')}: ${problem}.`); continue; }
           if(!a.ref.startsWith('inbox:')){const list=d.actions[id]??=[];if(list.length>=3){d.warnings.push(`Skipped ${a.ref}: at most three calls per endpoint.`);continue}list.push({ritualAction:[email.id,input.version,kind,key,index,r.address].join(':'),...(a.body===undefined?{}:{body:a.body})});}
           if (!d.refs.includes(id)) d.refs.push(id);
           if (a.body !== undefined) d.bodies[id] = a.body;

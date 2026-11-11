@@ -26,7 +26,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
-  if (/^\/v1\/(?:rituals|endpoints|inbox-connections|inboxes|objects)(?:\/|$)/.test(pathname)) return 'mailbox';
+  if (/^\/v1\/(?:rituals|endpoints|forwarding|inbox-connections|inboxes|objects)(?:\/|$)/.test(pathname)) return 'mailbox';
   if (pathname === '/v1/regions' || pathname.startsWith('/v1/regions/')) return 'ses-regions';
   if (pathname === '/v1/routing' || pathname.startsWith('/v1/routing/') || pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
@@ -115,7 +115,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
     if (c.req.path === '/v1/public/stats') return next();
-    if (['GET','POST'].includes(c.req.method) && /^\/v1\/routing\/forward-confirm\/verify_[A-Za-z0-9_-]+$/.test(c.req.path)) return next();
+    // Forward recipients answer with the emailed link alone; the routes check the token themselves.
+    if (['GET','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
@@ -180,7 +181,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       errorType: unexpected ? error.name : undefined, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined,
       stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
-    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
+    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));

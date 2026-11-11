@@ -9,23 +9,12 @@ import { request } from '../../data/live';
 import { useApiDef, useWorkspaceAccess } from '../../data/context';
 import { queries } from '../../data/queries';
 import type { GetRitualsResponse, TestRitualsResponse } from '../../../../sdk/src/types.gen';
-import { ritualSymbols } from '../../../../api/src/ritual-schema';
+import { ritualTemplates } from '../../../../api/src/ritual-schema';
 
-const templates: Record<string, string> = {
-  'Block a domain':'if (email.from.domain === "blocked.example") block("blocked domain")',
-  'Allow VIP senders':'if (lists.has("list:vip", email.from.address)) allow()',
-  'Junk failed DMARC':'if (email.auth.dmarc === "fail") junk("DMARC failed")',
-  'Newsletter omen':'const r = omens(email, { newsletter: "Is this a newsletter?" }); if (r.newsletter >= 0.8) junk("newsletter")',
-  'Junk newsletters': 'if (email.headers.has("List-Unsubscribe")) junk("newsletter")',
-  Slack: 'slack.support({text: `${email.from.address}: ${email.subject}`})',
-  Discord: 'discord.team({content: email.subject})',
-  'JSON webhook': 'webhook.crm({sender: email.from.address, subject: email.subject})',
-  'Forward to team': 'if (email.auth.fromVerified) forward.team()',
-  'Refund omen':
-    'const result = omens(email, {refund: "Is the sender asking for a refund?"})\n  if (result.refund >= 0.7) label("refund")',
-};
-const sourceFor = (name: string) => `export default function route(email, ctx) {\n  ${templates[name]}\n}\n`;
-function Editor({ value, change, symbols }: { value: string; change: (s: string) => void; symbols:string[] }) {
+const templates = Object.fromEntries(ritualTemplates.map(t => [t.name, t]));
+const sourceFor = (name: string) => templates[name]?.source() ?? ritualTemplates[0]!.source();
+type Completion = { label: string; detail: string; info: string; apply?: string; type: string };
+function Editor({ value, change, symbols }: { value: string; change: (s: string) => void; symbols: Completion[] }) {
   const parent = useRef<HTMLDivElement>(null),
     view = useRef<EditorView | null>(null),
     callback = useRef(change),names=useRef(symbols);names.current=symbols;
@@ -44,7 +33,7 @@ function Editor({ value, change, symbols }: { value: string; change: (s: string)
             (ctx) => {
               const word = ctx.matchBefore(/[\w.]+/);
               return word
-                ? { from: word.from, options: names.current.map((label) => ({ label, type: 'variable' })) }
+                ? { from: word.from, options: names.current.map((c) => ({ label: c.label, type: c.type, detail: c.detail, info: c.info, apply: c.apply })) }
                 : null;
             },
           ],
@@ -80,13 +69,13 @@ export function RitualsPage() {
     [result, setResult] = useState<TestRitualsResponse | null>(null),
     [pending, setPending] = useState(false),
     [notice, setNotice] = useState(''),
-    [domains, setDomains] = useState(''),[symbols,setSymbols]=useState(ritualSymbols);
+    [domains, setDomains] = useState(''),[symbols,setSymbols]=useState<Completion[]>([]);
   const [bindings, setBindings] = useState<NonNullable<GetRitualsResponse['config']['attachments']>>([]);
   const path = '/v1/rituals';
   useEffect(() => {
     if (!canAdminister) return;
     const ac = new AbortController();
-    request<{data:{ref:string;verified:boolean}[]}>('/v1/endpoints',{signal:ac.signal}).then(({data})=>setSymbols([...ritualSymbols,...data.filter(x=>x.verified).map(({ref})=>{const [kind,key]=ref.split(':');return kind==='inbox'?`inbox.deliver(${JSON.stringify(key)})`:/^[a-z][a-z0-9_]*$/.test(key)?`${kind}.${key}`:`${kind}[${JSON.stringify(key)}]`})])).catch(()=>{});
+    request<{ completions: Completion[] }>('/v1/rituals/typings', { signal: ac.signal }).then(({ completions }) => setSymbols(completions)).catch(() => {});
     request<GetRitualsResponse>(path, { signal: ac.signal })
       .then((s) => {
         setSaved(s);
@@ -161,7 +150,7 @@ export function RitualsPage() {
               <Field label="Start from a template">
                 <Select
                   value={template}
-                  options={Object.keys(templates).map((label) => ({ label, value: label }))}
+                  options={ritualTemplates.map((t) => ({ label: t.name, value: t.name }))}
                   onValueChange={(v) => {
                     setTemplate(v);
                     setSource(sourceFor(v));

@@ -725,6 +725,8 @@ function registerInboundWebhooks(app: App) {
       if (!input.paused) await hookCapacity(tx, value.workspaceId, !input.eventTypes.length);
       // Junk delivery needs the routed store, which emits message.junk.
       if (junk === 'include') await enableRouting(tx, value.workspaceId);
+      // A keyed webhook is also an endpoint; its key must not collide with a Slack, Discord or forward endpoint name.
+      if (input.key) { await lockMailboxLane(tx, value.workspaceId, 'address'); await (await import('./ritual-endpoints.js')).assertEndpointName(tx, value.workspaceId, input.key, '', false); }
       const r=await tx.insert(mailboxWebhooks).values(values).returning();await ownReceiving(tx,c,'endpoint',webhookId);return r;
     });
     c.header('Cache-Control', 'no-store');
@@ -740,7 +742,10 @@ function registerInboundWebhooks(app: App) {
     const input = c.req.valid('json'), webhookId = c.req.valid('param').id;
     const updated = await c.env.db.transaction(async tx => {
       // Serialize partial updates: two independently valid changes must not combine into a scoped message.stored subscription.
-      const { row } = await getWebhook(c, webhookId, manageHook(c), tx);
+      const access = manageHook(c);
+      // Same lock order as endpoint writes: the address lane before the webhook row.
+      if (input.key) await lockMailboxLane(tx, access.workspaceId, 'address');
+      const { row } = await getWebhook(c, webhookId, access, tx);
       const eventTypes = input.eventTypes && [...new Set(input.eventTypes)], types = eventTypes ?? row.eventTypes;
       const format = input.format ?? row.format, junk = input.junk ?? (format !== row.format ? defaultJunk(format) : row.junk);
       checkScope(input.addressIds === undefined ? row.mailboxIds : input.addressIds, types, format);
@@ -751,6 +756,7 @@ function registerInboundWebhooks(app: App) {
         c.get('actor').wakeJobs=1;
       }
       const url = input.url ? webhookUrl(c.env, input.url) : undefined;
+      if (input.key && input.key !== row.key) await (await import('./ritual-endpoints.js')).assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
       await ownReceiving(tx,c,'endpoint',webhookId);const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
         encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;

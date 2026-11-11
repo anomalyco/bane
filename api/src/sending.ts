@@ -394,6 +394,8 @@ async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.
   // App-owned capabilities only, not a general sanitizer for transactional bearer links.
   // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
   const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
+  // Sealed Bane notices (forward confirmations) carry a capability meant only for the recipient: withheld from every reader.
+  if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
   return EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
 }
 function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
@@ -944,7 +946,7 @@ export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'work
   const upload=attachmentUpload(runtime,a,validateAttachment(parsed.data,bytes),bytes,await bytesDigest(bytes));
   try {await upload.put();return await runtime.db.transaction(upload.finish);}finally{await upload.refund();}
 }
-export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; headers: { Name: string; Value: string }[] };
+export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   sesHeaders(request.headers.length);
@@ -955,6 +957,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   const snapshot = await prepare(runtime, db, a, parsed.data,false,undefined,false,false,undefined,undefined,bulk);
   snapshot.headers = [...snapshot.headers, ...request.headers];
   if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;
+  if (request.sealed) snapshot.sealed = true;
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }

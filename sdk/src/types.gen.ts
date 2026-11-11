@@ -25,6 +25,12 @@ export type ApiError = {
          * Next capacity change for a Hosted rolling send limit.
          */
         resetAt?: string;
+        /**
+         * Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint.
+         */
+        details?: Array<{
+            [key: string]: unknown;
+        }>;
     };
 };
 
@@ -1821,6 +1827,201 @@ export type RoutingTest = {
      * Test the routes of an earlier version instead of the saved ones.
      */
     version?: number;
+};
+
+export type EndpointPage = {
+    data: Array<Endpoint>;
+    nextCursor: string | null;
+};
+
+export type Endpoint = {
+    /**
+     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     */
+    name: string;
+    type: 'slack' | 'discord' | 'webhook' | 'forward';
+    /**
+     * ready: callable. pending: a forward waiting for its recipient to confirm. expired: the confirmation link lapsed. declined: the recipient declined or stopped forwards. paused: deliveries are held.
+     */
+    status: 'ready' | 'pending' | 'expired' | 'declined' | 'paused';
+    /**
+     * How a ritual calls it.
+     */
+    call: string;
+    /**
+     * Where it delivers. Chat credentials are masked; they are write-only.
+     */
+    target: string;
+    policy: EndpointPolicy;
+    /**
+     * When a pending forward confirmation link expires.
+     */
+    expiresAt: string | null;
+    /**
+     * What to do next, for people and agents.
+     */
+    nextStep: string;
+    createdAt: string;
+};
+
+export type EndpointPolicy = {
+    /**
+     * Calls per minute; extra calls wait for the next minute.
+     */
+    perMinute: number;
+    /**
+     * Replay an attempt whose outcome is unknown (timeout, dropped connection). Off by default for chat and webhooks; always on for forwards.
+     */
+    retryOnTimeout: boolean;
+    /**
+     * The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only.
+     */
+    idempotent: boolean;
+};
+
+export type CreatedEndpoint = Endpoint & {
+    /**
+     * Webhook signing secret, shown once.
+     */
+    secret?: string;
+};
+
+export type CreateEndpoint = {
+    type: 'slack';
+    /**
+     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     */
+    name: string;
+    /**
+     * Slack incoming webhook URL (https://hooks.slack.com/services/…). Stored encrypted and never returned.
+     */
+    url: string;
+} | {
+    type: 'discord';
+    /**
+     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     */
+    name: string;
+    /**
+     * Discord webhook URL (https://discord.com/api/webhooks/…). Stored encrypted and never returned.
+     */
+    url: string;
+} | {
+    type: 'webhook';
+    /**
+     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     */
+    name: string;
+    /**
+     * Public HTTPS URL that receives signed JSON events.
+     */
+    url: string;
+    /**
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    timeoutSeconds?: number;
+    retryAttempts?: number;
+} | {
+    type: 'forward';
+    /**
+     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     */
+    name: string;
+    /**
+     * Recipient. They confirm with an emailed link unless preverify applies.
+     */
+    address: string;
+    /**
+     * Receiving address ID (mbx_…) or address that sends the confirmation request. Defaults to the oldest permanent receiving address.
+     */
+    from?: string;
+    /**
+     * Skip the emailed confirmation. Only for addresses on a domain this workspace has verified.
+     */
+    preverify?: boolean;
+};
+
+export type UpdateEndpoint = {
+    /**
+     * Calls per minute; extra calls wait for the next minute.
+     */
+    perMinute?: number;
+    /**
+     * Replay an attempt whose outcome is unknown (timeout, dropped connection). Off by default for chat and webhooks; always on for forwards.
+     */
+    retryOnTimeout?: boolean;
+    /**
+     * The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only.
+     */
+    idempotent?: boolean;
+    /**
+     * Hold deliveries. Queued calls resume when unpaused.
+     */
+    paused?: boolean;
+    /**
+     * Replace a Slack, Discord or webhook URL.
+     */
+    url?: string;
+};
+
+export type EndpointTest = {
+    ok: boolean;
+    status: number | null;
+    error: string | null;
+};
+
+export type RitualCheck = {
+    ok: boolean;
+    diagnostics: Array<RitualDiagnostic>;
+    /**
+     * Endpoints and inboxes the ritual calls.
+     */
+    calls: Array<string>;
+    omens: Array<string>;
+    lists: Array<string>;
+};
+
+export type RitualDiagnostic = {
+    ritual?: string;
+    line: number;
+    column: number;
+    endLine: number;
+    endColumn: number;
+    message: string;
+    hint?: string;
+};
+
+export type RitualTypings = {
+    typescript: string;
+    completions: Array<{
+        label: string;
+        type: 'function' | 'property' | 'variable' | 'keyword';
+        detail: string;
+        info: string;
+        apply?: string;
+    }>;
+    endpoints: Array<{
+        name: string;
+        type: 'slack' | 'discord' | 'webhook' | 'forward';
+        status: string;
+    }>;
+    inboxes: Array<string>;
+    lists: Array<string>;
+};
+
+export type RitualTemplates = {
+    data: Array<{
+        id: string;
+        name: string;
+        description: string;
+        needs: 'slack' | 'discord' | 'webhook' | 'forward' | null;
+        endpoint: string | null;
+        source: string;
+    }>;
 };
 
 export type Inbox = {
@@ -11440,8 +11641,14 @@ export type RestoreRitualVersionResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -11534,8 +11741,14 @@ export type SetRitualEvaluationResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -11550,81 +11763,14 @@ export type SetRitualEvaluationResponses = {
 
 export type SetRitualEvaluationResponse = SetRitualEvaluationResponses[keyof SetRitualEvaluationResponses];
 
-export type SetEndpointPolicyData = {
-    body: {
-        ref: string;
-        perMinute: number;
-        retryOnTimeout: boolean;
-        idempotent?: boolean;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/endpoints/policy';
-};
-
-export type SetEndpointPolicyErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type SetEndpointPolicyError = SetEndpointPolicyErrors[keyof SetEndpointPolicyErrors];
-
-export type SetEndpointPolicyResponses = {
-    /**
-     * Success
-     */
-    200: {
-        ref: string;
-        perMinute: number;
-        retryOnTimeout: boolean;
-        idempotent?: boolean;
-    };
-};
-
-export type SetEndpointPolicyResponse = SetEndpointPolicyResponses[keyof SetEndpointPolicyResponses];
-
 export type ListEndpointsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        type?: 'slack' | 'discord' | 'webhook' | 'forward';
+        cursor?: string;
+        limit?: number;
+    };
     url: '/v1/endpoints';
 };
 
@@ -11677,31 +11823,13 @@ export type ListEndpointsResponses = {
     /**
      * Success
      */
-    200: {
-        data: Array<{
-            ref: string;
-            verified: boolean;
-        }>;
-    };
+    200: EndpointPage;
 };
 
 export type ListEndpointsResponse = ListEndpointsResponses[keyof ListEndpointsResponses];
 
 export type CreateEndpointData = {
-    body: {
-        type: 'slack';
-        key: string;
-        url: string;
-    } | {
-        type: 'discord';
-        key: string;
-        url: string;
-    } | {
-        type: 'forward';
-        key: string;
-        address: string;
-        senderInbox: string;
-    };
+    body: CreateEndpoint;
     path?: never;
     query?: never;
     url: '/v1/endpoints';
@@ -11756,13 +11884,342 @@ export type CreateEndpointResponses = {
     /**
      * Success
      */
-    201: {
-        ref: string;
-        verified: boolean;
-    };
+    201: CreatedEndpoint;
 };
 
 export type CreateEndpointResponse = CreateEndpointResponses[keyof CreateEndpointResponses];
+
+export type DeleteEndpointData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/endpoints/{name}';
+};
+
+export type DeleteEndpointErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteEndpointError = DeleteEndpointErrors[keyof DeleteEndpointErrors];
+
+export type DeleteEndpointResponses = {
+    /**
+     * Deleted.
+     */
+    204: void;
+};
+
+export type DeleteEndpointResponse = DeleteEndpointResponses[keyof DeleteEndpointResponses];
+
+export type GetEndpointData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/endpoints/{name}';
+};
+
+export type GetEndpointErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetEndpointError = GetEndpointErrors[keyof GetEndpointErrors];
+
+export type GetEndpointResponses = {
+    /**
+     * Success
+     */
+    200: Endpoint;
+};
+
+export type GetEndpointResponse = GetEndpointResponses[keyof GetEndpointResponses];
+
+export type UpdateEndpointData = {
+    body: UpdateEndpoint;
+    path: {
+        /**
+         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/endpoints/{name}';
+};
+
+export type UpdateEndpointErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateEndpointError = UpdateEndpointErrors[keyof UpdateEndpointErrors];
+
+export type UpdateEndpointResponses = {
+    /**
+     * Success
+     */
+    200: Endpoint;
+};
+
+export type UpdateEndpointResponse = UpdateEndpointResponses[keyof UpdateEndpointResponses];
+
+export type SendEndpointVerificationData = {
+    body: {
+        from?: string;
+    };
+    path: {
+        /**
+         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/endpoints/{name}/verification';
+};
+
+export type SendEndpointVerificationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SendEndpointVerificationError = SendEndpointVerificationErrors[keyof SendEndpointVerificationErrors];
+
+export type SendEndpointVerificationResponses = {
+    /**
+     * Success
+     */
+    202: Endpoint;
+};
+
+export type SendEndpointVerificationResponse = SendEndpointVerificationResponses[keyof SendEndpointVerificationResponses];
+
+export type TestEndpointData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/endpoints/{name}/test';
+};
+
+export type TestEndpointErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type TestEndpointError = TestEndpointErrors[keyof TestEndpointErrors];
+
+export type TestEndpointResponses = {
+    /**
+     * Success
+     */
+    200: EndpointTest;
+};
+
+export type TestEndpointResponse = TestEndpointResponses[keyof TestEndpointResponses];
 
 export type CreateInboxConnectionData = {
     body: {
@@ -11836,6 +12293,198 @@ export type CreateInboxConnectionResponses = {
 };
 
 export type CreateInboxConnectionResponse = CreateInboxConnectionResponses[keyof CreateInboxConnectionResponses];
+
+export type CheckRitualData = {
+    body: {
+        source: string;
+        key?: string;
+        /**
+         * Lists to check against. Defaults to the saved sender lists.
+         */
+        senderLists?: {
+            [key: string]: Array<string>;
+        };
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/check';
+};
+
+export type CheckRitualErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CheckRitualError = CheckRitualErrors[keyof CheckRitualErrors];
+
+export type CheckRitualResponses = {
+    /**
+     * Success
+     */
+    200: RitualCheck;
+};
+
+export type CheckRitualResponse = CheckRitualResponses[keyof CheckRitualResponses];
+
+export type GetRitualTypingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/typings';
+};
+
+export type GetRitualTypingsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRitualTypingsError = GetRitualTypingsErrors[keyof GetRitualTypingsErrors];
+
+export type GetRitualTypingsResponses = {
+    /**
+     * Success
+     */
+    200: RitualTypings;
+};
+
+export type GetRitualTypingsResponse = GetRitualTypingsResponses[keyof GetRitualTypingsResponses];
+
+export type ListRitualTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/rituals/templates';
+};
+
+export type ListRitualTemplatesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRitualTemplatesError = ListRitualTemplatesErrors[keyof ListRitualTemplatesErrors];
+
+export type ListRitualTemplatesResponses = {
+    /**
+     * Success
+     */
+    200: RitualTemplates;
+};
+
+export type ListRitualTemplatesResponse = ListRitualTemplatesResponses[keyof ListRitualTemplatesResponses];
 
 export type DeleteRitualEntryData = {
     body?: never;
@@ -11911,8 +12560,14 @@ export type DeleteRitualEntryResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -12070,8 +12725,14 @@ export type PutRitualEntryResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -12094,6 +12755,9 @@ export type SetRitualAttachmentsData = {
              * A mailbox ID (mbx_…) or an existing recipient address.
              */
             target: string;
+            /**
+             * Run the next attached ritual even after this one took an action.
+             */
             continue?: boolean;
         }>;
     };
@@ -12167,8 +12831,14 @@ export type SetRitualAttachmentsResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -12254,8 +12924,14 @@ export type GetRitualsResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -12282,8 +12958,14 @@ export type PutRitualsData = {
              * A mailbox ID (mbx_…) or an existing recipient address.
              */
             target: string;
+            /**
+             * Run the next attached ritual even after this one took an action.
+             */
             continue?: boolean;
         }>;
+        /**
+         * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+         */
         senderLists?: {
             [key: string]: Array<string>;
         };
@@ -12363,8 +13045,14 @@ export type PutRitualsResponses = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };
@@ -12392,8 +13080,14 @@ export type TestRitualsData = {
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
+                /**
+                 * Run the next attached ritual even after this one took an action.
+                 */
                 continue?: boolean;
             }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
             senderLists?: {
                 [key: string]: Array<string>;
             };

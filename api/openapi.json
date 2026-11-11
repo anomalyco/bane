@@ -115,6 +115,14 @@
                 "type": "string",
                 "format": "date-time",
                 "description": "Next capacity change for a Hosted rolling send limit."
+              },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "description": "Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint."
               }
             },
             "required": [
@@ -7013,6 +7021,564 @@
           }
         },
         "additionalProperties": false
+      },
+      "EndpointPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Endpoint"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ]
+      },
+      "Endpoint": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "slack",
+              "discord",
+              "webhook",
+              "forward"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "pending",
+              "expired",
+              "declined",
+              "paused"
+            ],
+            "description": "ready: callable. pending: a forward waiting for its recipient to confirm. expired: the confirmation link lapsed. declined: the recipient declined or stopped forwards. paused: deliveries are held."
+          },
+          "call": {
+            "type": "string",
+            "description": "How a ritual calls it."
+          },
+          "target": {
+            "type": "string",
+            "description": "Where it delivers. Chat credentials are masked; they are write-only."
+          },
+          "policy": {
+            "$ref": "#/components/schemas/EndpointPolicy"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When a pending forward confirmation link expires."
+          },
+          "nextStep": {
+            "type": "string",
+            "description": "What to do next, for people and agents."
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "status",
+          "call",
+          "target",
+          "policy",
+          "expiresAt",
+          "nextStep",
+          "createdAt"
+        ]
+      },
+      "EndpointPolicy": {
+        "type": "object",
+        "properties": {
+          "perMinute": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6000,
+            "description": "Calls per minute; extra calls wait for the next minute."
+          },
+          "retryOnTimeout": {
+            "type": "boolean",
+            "description": "Replay an attempt whose outcome is unknown (timeout, dropped connection). Off by default for chat and webhooks; always on for forwards."
+          },
+          "idempotent": {
+            "type": "boolean",
+            "description": "The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only."
+          }
+        },
+        "required": [
+          "perMinute",
+          "retryOnTimeout",
+          "idempotent"
+        ]
+      },
+      "CreatedEndpoint": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Endpoint"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "secret": {
+                "type": "string",
+                "description": "Webhook signing secret, shown once."
+              }
+            }
+          }
+        ]
+      },
+      "CreateEndpoint": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "slack"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Slack incoming webhook URL (https://hooks.slack.com/services/…). Stored encrypted and never returned."
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "discord"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Discord webhook URL (https://discord.com/api/webhooks/…). Stored encrypted and never returned."
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "webhook"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Public HTTPS URL that receives signed JSON events."
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+                    },
+                    "value": {
+                      "type": "string",
+                      "maxLength": 2048,
+                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 10,
+                "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved."
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30
+              },
+              "retryAttempts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "forward"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+              },
+              "address": {
+                "type": "string",
+                "maxLength": 254,
+                "format": "email",
+                "description": "Recipient. They confirm with an emailed link unless preverify applies."
+              },
+              "from": {
+                "type": "string",
+                "maxLength": 254,
+                "description": "Receiving address ID (mbx_…) or address that sends the confirmation request. Defaults to the oldest permanent receiving address."
+              },
+              "preverify": {
+                "type": "boolean",
+                "default": false,
+                "description": "Skip the emailed confirmation. Only for addresses on a domain this workspace has verified."
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "address"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "UpdateEndpoint": {
+        "type": "object",
+        "properties": {
+          "perMinute": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6000,
+            "description": "Calls per minute; extra calls wait for the next minute."
+          },
+          "retryOnTimeout": {
+            "type": "boolean",
+            "description": "Replay an attempt whose outcome is unknown (timeout, dropped connection). Off by default for chat and webhooks; always on for forwards."
+          },
+          "idempotent": {
+            "type": "boolean",
+            "description": "The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Hold deliveries. Queued calls resume when unpaused."
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Replace a Slack, Discord or webhook URL."
+          }
+        },
+        "additionalProperties": false
+      },
+      "EndpointTest": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "status",
+          "error"
+        ]
+      },
+      "RitualCheck": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RitualDiagnostic"
+            }
+          },
+          "calls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Endpoints and inboxes the ritual calls."
+          },
+          "omens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "ok",
+          "diagnostics",
+          "calls",
+          "omens",
+          "lists"
+        ]
+      },
+      "RitualDiagnostic": {
+        "type": "object",
+        "properties": {
+          "ritual": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "column": {
+            "type": "integer"
+          },
+          "endLine": {
+            "type": "integer"
+          },
+          "endColumn": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "column",
+          "endLine",
+          "endColumn",
+          "message"
+        ]
+      },
+      "RitualTypings": {
+        "type": "object",
+        "properties": {
+          "typescript": {
+            "type": "string"
+          },
+          "completions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "function",
+                    "property",
+                    "variable",
+                    "keyword"
+                  ]
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "info": {
+                  "type": "string"
+                },
+                "apply": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "type",
+                "detail",
+                "info"
+              ]
+            }
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "slack",
+                    "discord",
+                    "webhook",
+                    "forward"
+                  ]
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "type",
+                "status"
+              ]
+            }
+          },
+          "inboxes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "typescript",
+          "completions",
+          "endpoints",
+          "inboxes",
+          "lists"
+        ]
+      },
+      "RitualTemplates": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "needs": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "slack",
+                    "discord",
+                    "webhook",
+                    "forward",
+                    null
+                  ]
+                },
+                "endpoint": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "description",
+                "needs",
+                "endpoint",
+                "source"
+              ]
+            }
+          }
+        },
+        "required": [
+          "data"
+        ]
       },
       "Inbox": {
         "type": "object",
@@ -33011,7 +33577,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -33034,7 +33601,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -33301,7 +33869,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -33324,7 +33893,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -33474,208 +34044,6 @@
         ]
       }
     },
-    "/v1/endpoints/policy": {
-      "put": {
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "dashboardSession": []
-          },
-          {
-            "secureDashboardSession": []
-          }
-        ],
-        "tags": [
-          "Rituals"
-        ],
-        "operationId": "setEndpointPolicy",
-        "summary": "Set endpoint calls per minute and unknown-outcome retry policy; only declare idempotency for a webhook that implements Idempotency-Key",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "ref": {
-                    "type": "string",
-                    "maxLength": 128
-                  },
-                  "perMinute": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 6000
-                  },
-                  "retryOnTimeout": {
-                    "type": "boolean"
-                  },
-                  "idempotent": {
-                    "type": "boolean",
-                    "default": false
-                  }
-                },
-                "required": [
-                  "ref",
-                  "perMinute",
-                  "retryOnTimeout"
-                ],
-                "additionalProperties": false
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ref": {
-                      "type": "string",
-                      "maxLength": 128
-                    },
-                    "perMinute": {
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 6000
-                    },
-                    "retryOnTimeout": {
-                      "type": "boolean"
-                    },
-                    "idempotent": {
-                      "type": "boolean",
-                      "default": false
-                    }
-                  },
-                  "required": [
-                    "ref",
-                    "perMinute",
-                    "retryOnTimeout"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        },
-        "x-codeSamples": [
-          {
-            "lang": "TypeScript",
-            "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { setEndpointPolicy } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await setEndpointPolicy({\n  client,\n  body: {\n    \"ref\": \"example\",\n    \"perMinute\": 1,\n    \"retryOnTimeout\": false,\n    \"idempotent\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
-          },
-          {
-            "lang": "Shell",
-            "label": "cURL",
-            "source": "curl --request PUT \\\n  --url 'https://bane.mx/v1/endpoints/policy' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"ref\": \"example\",\n  \"perMinute\": 1,\n  \"retryOnTimeout\": false,\n  \"idempotent\": false\n}'"
-          }
-        ]
-      }
-    },
     "/v1/endpoints": {
       "get": {
         "security": [
@@ -33690,39 +34058,53 @@
           }
         ],
         "tags": [
-          "Rituals"
+          "Endpoints"
         ],
         "operationId": "listEndpoints",
+        "summary": "List endpoints rituals can call",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "slack",
+                "discord",
+                "webhook",
+                "forward"
+              ]
+            },
+            "required": false,
+            "name": "type",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "ref": {
-                            "type": "string"
-                          },
-                          "verified": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "ref",
-                          "verified"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/EndpointPage"
                 }
               }
             }
@@ -33854,95 +34236,17 @@
           }
         ],
         "tags": [
-          "Rituals"
+          "Endpoints"
         ],
         "operationId": "createEndpoint",
-        "summary": "Add a write-only chat credential or send a forward verification request to its recipient",
+        "summary": "Create a named Slack, Discord, webhook or forward endpoint",
+        "description": "Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "enum": [
-                          "slack"
-                        ]
-                      },
-                      "key": {
-                        "type": "string",
-                        "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
-                      },
-                      "url": {
-                        "type": "string",
-                        "maxLength": 2048
-                      }
-                    },
-                    "required": [
-                      "type",
-                      "key",
-                      "url"
-                    ]
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "enum": [
-                          "discord"
-                        ]
-                      },
-                      "key": {
-                        "type": "string",
-                        "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
-                      },
-                      "url": {
-                        "type": "string",
-                        "maxLength": 2048
-                      }
-                    },
-                    "required": [
-                      "type",
-                      "key",
-                      "url"
-                    ]
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "enum": [
-                          "forward"
-                        ]
-                      },
-                      "key": {
-                        "type": "string",
-                        "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
-                      },
-                      "address": {
-                        "type": "string",
-                        "maxLength": 254,
-                        "format": "email"
-                      },
-                      "senderInbox": {
-                        "type": "string",
-                        "maxLength": 120
-                      }
-                    },
-                    "required": [
-                      "type",
-                      "key",
-                      "address",
-                      "senderInbox"
-                    ]
-                  }
-                ]
+                "$ref": "#/components/schemas/CreateEndpoint"
               }
             }
           }
@@ -33953,19 +34257,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ref": {
-                      "type": "string"
-                    },
-                    "verified": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "ref",
-                    "verified"
-                  ]
+                  "$ref": "#/components/schemas/CreatedEndpoint"
                 }
               }
             }
@@ -34075,12 +34367,815 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createEndpoint } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createEndpoint({\n  client,\n  body: {\n    \"type\": \"slack\",\n    \"key\": \"example\",\n    \"url\": \"https://example.com/webhook\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createEndpoint } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createEndpoint({\n  client,\n  body: {\n    \"type\": \"slack\",\n    \"name\": \"Example\",\n    \"url\": \"https://example.com/webhook\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/endpoints' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"type\": \"slack\",\n  \"key\": \"example\",\n  \"url\": \"https://example.com/webhook\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/endpoints' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"type\": \"slack\",\n  \"name\": \"Example\",\n  \"url\": \"https://example.com/webhook\"\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/endpoints/{name}": {
+      "get": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Endpoints"
+        ],
+        "operationId": "getEndpoint",
+        "summary": "Read one endpoint, its status and the next step",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+              "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+            },
+            "required": true,
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).",
+            "name": "name",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Endpoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getEndpoint } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getEndpoint({\n  client,\n  path: {\n    \"name\": \"Example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/endpoints/Example' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      },
+      "patch": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Endpoints"
+        ],
+        "operationId": "updateEndpoint",
+        "summary": "Change an endpoint’s rate, retry policy, pause state or URL",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+              "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+            },
+            "required": true,
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).",
+            "name": "name",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEndpoint"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Endpoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { updateEndpoint } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await updateEndpoint({\n  client,\n  path: {\n    \"name\": \"Example\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request PATCH \\\n  --url 'https://bane.mx/v1/endpoints/Example' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+          }
+        ]
+      },
+      "delete": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Endpoints"
+        ],
+        "operationId": "deleteEndpoint",
+        "summary": "Delete an endpoint no ritual or route uses",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+              "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+            },
+            "required": true,
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).",
+            "name": "name",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { deleteEndpoint } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await deleteEndpoint({\n  client,\n  path: {\n    \"name\": \"Example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request DELETE \\\n  --url 'https://bane.mx/v1/endpoints/Example' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/endpoints/{name}/verification": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Endpoints"
+        ],
+        "operationId": "sendEndpointVerification",
+        "summary": "Email a forward recipient a new confirmation link",
+        "description": "For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+              "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+            },
+            "required": true,
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).",
+            "name": "name",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "maxLength": 254
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Endpoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { sendEndpointVerification } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await sendEndpointVerification({\n  client,\n  path: {\n    \"name\": \"Example\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/endpoints/Example/verification' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+          }
+        ]
+      }
+    },
+    "/v1/endpoints/{name}/test": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Endpoints"
+        ],
+        "operationId": "testEndpoint",
+        "summary": "Post a fixed test message to a Slack, Discord or webhook endpoint now",
+        "description": "Bypasses rituals and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRituals for a dry run.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+              "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…)."
+            },
+            "required": true,
+            "description": "Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).",
+            "name": "name",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { testEndpoint } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await testEndpoint({\n  client,\n  path: {\n    \"name\": \"Example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/endpoints/Example/test' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
@@ -34089,7 +35184,7 @@
       "post": {
         "operationId": "createInboxConnection",
         "tags": [
-          "Rituals"
+          "Agent inboxes"
         ],
         "security": [
           {
@@ -34299,6 +35394,480 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inbox-connections' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"inboxes\": [\n    \"example\"\n  ],\n  \"client\": \"opencode\",\n  \"auth\": \"key\",\n  \"reply\": false\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/rituals/check": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Rituals"
+        ],
+        "operationId": "checkRitual",
+        "summary": "Compile one ritual source against this workspace without saving",
+        "description": "Returns every problem with its line, column and a hint, and what the ritual calls. Use it while editing; nothing is saved, delivered or sent to Jev.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "maxLength": 65536
+                  },
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                    "default": "draft"
+                  },
+                  "senderLists": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 254
+                      },
+                      "maxItems": 500
+                    },
+                    "default": {},
+                    "description": "Lists to check against. Defaults to the saved sender lists."
+                  }
+                },
+                "required": [
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RitualCheck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { checkRitual } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await checkRitual({\n  client,\n  body: {\n    \"source\": \"example\",\n    \"key\": \"draft\",\n    \"senderLists\": {}\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/rituals/check' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"source\": \"example\",\n  \"key\": \"draft\",\n  \"senderLists\": {}\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/rituals/typings": {
+      "get": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Rituals"
+        ],
+        "operationId": "getRitualTypings",
+        "summary": "TypeScript declarations and editor completions for this workspace",
+        "description": "Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a ritual can call.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RitualTypings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getRitualTypings } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getRitualTypings({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/rituals/typings' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/rituals/templates": {
+      "get": {
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Rituals"
+        ],
+        "operationId": "listRitualTemplates",
+        "summary": "Starting points for common rituals, filled in with this workspace’s endpoints",
+        "description": "Each template compiles. An endpoint template uses the first endpoint of the type it needs; endpoint is null when there is none yet, and source then uses a placeholder name to replace.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RitualTemplates"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listRitualTemplates } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listRitualTemplates({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/rituals/templates' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
@@ -34588,7 +36157,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -34611,7 +36181,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -34851,7 +36422,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -34874,7 +36446,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -35077,7 +36650,8 @@
                         },
                         "continue": {
                           "type": "boolean",
-                          "default": false
+                          "default": false,
+                          "description": "Run the next attached ritual even after this one took an action."
                         }
                       },
                       "required": [
@@ -35150,7 +36724,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -35173,7 +36748,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -35406,7 +36982,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -35429,7 +37006,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -35653,7 +37231,8 @@
                         },
                         "continue": {
                           "type": "boolean",
-                          "default": false
+                          "default": false,
+                          "description": "Run the next attached ritual even after this one took an action."
                         }
                       },
                       "required": [
@@ -35676,7 +37255,8 @@
                       },
                       "maxItems": 500
                     },
-                    "default": {}
+                    "default": {},
+                    "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                   },
                   "evaluateDomains": {
                     "type": "array",
@@ -35759,7 +37339,8 @@
                               },
                               "continue": {
                                 "type": "boolean",
-                                "default": false
+                                "default": false,
+                                "description": "Run the next attached ritual even after this one took an action."
                               }
                             },
                             "required": [
@@ -35782,7 +37363,8 @@
                             },
                             "maxItems": 500
                           },
-                          "default": {}
+                          "default": {},
+                          "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                         },
                         "evaluateDomains": {
                           "type": "array",
@@ -36000,7 +37582,8 @@
                             },
                             "continue": {
                               "type": "boolean",
-                              "default": false
+                              "default": false,
+                              "description": "Run the next attached ritual even after this one took an action."
                             }
                           },
                           "required": [
@@ -36023,7 +37606,8 @@
                           },
                           "maxItems": 500
                         },
-                        "default": {}
+                        "default": {},
+                        "description": "Named address lists for lists.has(name, address). Entries are addresses or @domain."
                       },
                       "evaluateDomains": {
                         "type": "array",
@@ -48795,6 +50379,9 @@
     },
     {
       "name": "Rituals"
+    },
+    {
+      "name": "Endpoints"
     },
     {
       "name": "Agent inboxes"

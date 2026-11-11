@@ -19,6 +19,8 @@ export type EmailSnapshot = {
   screen?: boolean;
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
   unsubscribeUrl?: string;
+  /** Bane-authored notice with a recipient-only capability; reads withhold it. */
+  sealed?: boolean;
 };
 export type CampaignDraft = {
   regionPinned?: boolean;

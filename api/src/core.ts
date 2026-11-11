@@ -112,6 +112,8 @@ export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, jo
   deleteBinding?:ReadyConnection|null; webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
 
 export class ApiError extends Error {
+  /** Structured detail for errors that have several parts, such as ritual compile diagnostics. */
+  details?: Record<string, unknown>[];
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 export class ModuleLoadError extends ApiError {
@@ -132,7 +134,7 @@ export function lazyModule<T>(load: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
   return () => pending ??= wrapModuleLoad(load).catch(error => { pending = undefined; throw error; });
 }
-export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.') }) }).openapi('ApiError');
+export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.'), details: z.array(z.record(z.string(), z.unknown())).optional().describe('Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint.') }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
@@ -246,7 +248,7 @@ export function hasSessionCookie(headers: Headers): boolean {
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.
   if (status < 400 || status >= 500 || path === '/v1/events/ses') return null;
-  if (/^\/unsubscribe(?:\/|$)/.test(path)) return 'unsubscribe';
+  if (/^\/unsubscribe(?:\/|$)/.test(path) || /^\/v1\/forwarding\//.test(path)) return 'unsubscribe';
   if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
   return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';
 }

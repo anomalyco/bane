@@ -116,7 +116,11 @@ export type OutgoingMessage = {
   subject: string; text?: string; html?: string; attachments: ResolvedAttachment[];
   fromName?: string; region?: string; tracking?: boolean; screen?: boolean;
   threadId?: string; inReplyTo: string | null; references: string[]; autoSubmitted?: 'auto-generated' | 'auto-replied'; headers: { name: string; value: string }[];
+  /** Bane-authored mail carrying a single-use capability (fwd_…). Every workspace-visible copy withholds it; only the sent message has it. */
+  sealed?: boolean;
 };
+/** Withholds single-use capabilities from stored, workspace-visible copies of sealed mail. */
+export const sealCapabilities = (value: string) => value.replace(/fwd_[0-9a-f]{64}/g, '[link withheld: only the recipient can use it]');
 
 /** Enforces per-mailbox limits and loop guards. Caller holds the mailbox row lock. */
 async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
@@ -190,7 +194,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
   const { queueMailboxEmail } = await wrapModuleLoad(() => import('./sending.js'));
-  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen }, locked.replyAuthors);
+  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
   const now = new Date().toISOString();
   let threadId = message.threadId;
   if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
@@ -201,7 +205,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
     inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,
-    sentAt: now, receivedAt: now, text: message.text ?? (message.html ? htmlToPlain(message.html) : null), html: message.html ?? null, snippet: snippetOf(message.text, message.html),
+    sentAt: now, receivedAt: now, ...(() => { const seal = (v: string) => message.sealed ? sealCapabilities(v) : v; const text = message.text ?? (message.html ? htmlToPlain(message.html) : null); return { text: text === null ? null : seal(text), html: message.html ? seal(message.html) : null, snippet: seal(snippetOf(message.text, message.html)) }; })(),
     headers: headers.map(header => ({ name: header.Name, value: header.Value })), attachmentCount: files.length, status: 'queued', automated: !!message.autoSubmitted,
   }).returning();
   if(files.length){
