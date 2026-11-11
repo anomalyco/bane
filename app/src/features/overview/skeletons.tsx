@@ -3,6 +3,7 @@ import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import type { RegionCatalogEntry } from '../../data/types'
 import { label } from '../../lib/format'
 import { LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
+import { logColumnDefs } from '../logs/rows'
 import './overview.css'
 
 // Hosted mail manages its region, so it shows no status; a bring-your-own connection shows its own state,
@@ -16,7 +17,6 @@ export function RegionStatus({ current }: { current?: RegionCatalogEntry }) {
 
 export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as const
 export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '60%' }, { key: 'sent', label: 'Recipients', width: '20%', align: 'right' as const }, { key: 'delivered', label: 'Delivered', width: '20%', align: 'right' as const }]
-export const latestColumns = [{ key: 'status', label: 'Status', width: 116 }, { key: 'subject', label: 'Subject' }, { key: 'stream', label: 'Stream', width: 116 }, { key: 'time', label: 'UTC', width: 88, align: 'right' as const }]
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.
 export function FactsSkeleton() {
@@ -35,7 +35,7 @@ export function OverviewRouteSkeleton() {
   return <>
     <PageHeader title="Overview" actions={<div className="cluster ov-controls">{!multiTenant && <>{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></>}<Tabs value="24h" onValueChange={() => {}} disabled items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" /><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div>} />
     <LoadingRegion label="Loading overview"><div className="ov-split">
-      <div className="ov-split__main"><FactsSkeleton /><ChartSkeleton /><section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <ArrowUpRight size={16} /></span>} /><TableSkeleton className="ov-table" columns={latestColumns} rows={7} /></section></div>
+      <div className="ov-split__main"><FactsSkeleton /><ChartSkeleton /><section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <ArrowUpRight size={16} /></span>} /><TableSkeleton className="logs-table ov-table" columns={logColumnDefs} rows={7} /></section></div>
       <aside className="ov-split__aside"><AsideSkeleton /></aside>
     </div></LoadingRegion>
   </>
