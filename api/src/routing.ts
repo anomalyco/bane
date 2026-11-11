@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
+import { retainedMail } from './db/mailbox.js';
 import { actor, ApiError, errors, id, json, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
 import { ADDRESS, lockMailboxLane } from './mailbox-store.js';
@@ -659,7 +660,7 @@ export function registerRouting(app: App) {
       if (input.messageId) {
         const row = (
           await c.env.db.execute<{ to: string[]; spam: string | null; dmarc: string | null; at: string; from: string | null; subject: string }>(
-            sql`SELECT envelope_to AS "to",verdicts->>'spam' AS spam,verdicts->>'dmarc' AS dmarc,received_at::text AS at,from_address AS "from",subject FROM mail_messages WHERE workspace_id=${w} AND id=${input.messageId} AND direction='inbound'`,
+            sql`SELECT envelope_to AS "to",verdicts->>'spam' AS spam,verdicts->>'dmarc' AS dmarc,received_at::text AS at,from_address AS "from",subject FROM mail_messages WHERE workspace_id=${w} AND id=${input.messageId} AND direction='inbound' AND ${retainedMail()}`,
           )
         ).rows[0];
         if (!row) throw fail(404, 'NOT_FOUND', `Inbound message ${input.messageId} was not found.`, 'messageId');

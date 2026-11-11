@@ -7937,6 +7937,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         for(const p of [url,`${url}/${first.id}`,`/v1/inbound/messages/${first.id}`,`/v1/inbound/threads/${first.thread_id}`]){error(await request('GET',p,scoped),404);error(await local('GET',p),404);}
+        const file=(await db.query('SELECT id FROM mail_attachments WHERE message_id=$1',[first.id])).rows[0];
+        for(const suffix of ['raw',`parts/${file.id}`])error(await local('GET',`/v1/inbound/messages/${first.id}/${suffix}`),404);
+        error(await local('POST','/v1/routing/test',{messageId:first.id}),404);
         const late=await deliver('late',[box.address]);assert.equal(late.lifecycle,'default');assert.equal((await db.query('SELECT FROM mailbox_messages WHERE message_id=$1',[late.id])).rowCount,0);assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[late.id])).rowCount,1);await db.query('SELECT inbox_retention_batch(25)');
       });
       await t.test('ephemeral inbox: expired keys stop authenticating at deleteAfter',async()=>{error(await charged(1,()=>request('GET',root,key)),401,'AUTH_INVALID');});
@@ -7944,6 +7947,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('ephemeral inbox: retention removes unreferenced rows, threads and R2 objects, not default mail',async()=>{
         await charged(1,()=>db.query('SELECT mail_gc_batch(1000)'));for(const j of await jobs('mail.deleteObjects'))await charged(0,()=>mailboxIngestJobs[j.type](runtime,j.payload,{id:j.id,workspaceId:wid,attempts:1}));assert.equal(stored.has(first.raw_key),false);assert.ok(stored.has(sharedMail.raw_key));assert.equal((await db.query('SELECT FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[sharedMail.id,other.id])).rowCount,1);for(const [table,id] of [['mail_messages',first.id],['mail_threads',first.thread_id],['mailboxes',box.id]])assert.equal((await db.query(`SELECT FROM ${table} WHERE id=$1`,[id])).rowCount,0);
         await db.query('INSERT INTO mail_gc_candidates(workspace_id,message_id) VALUES($1,$2)',[wid,defaultMsg.id]);await db.query('SELECT mail_gc_batch(1000)');assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[defaultMsg.id])).rowCount,1);assert.ok(stored.has(defaultMsg.raw_key));
+      });
+      await t.test('combined ingest: routed R2 delivery, recipient-specific holds and release at the 2/3 statement budget',async()=>{
+        const lease=ok(await local('POST',root,{localPart:'routed',limits:{messages:1}}),201);
+        const desk=ok(await local('POST','/v1/inbound/addresses',{address:'durable@'+host}),201);
+        const hook=ok(await local('POST','/v1/inbound/webhooks',{url:'https://example.org/receive',format:'inbound',eventTypes:[]}),201);
+        const route=(match:string,to:string[])=>local('POST','/v1/routing/routes',{match,to});
+        const path='/v1/routing/routes/',direct=ok(await route(lease.address,[lease.id,hook.id]),201);
+        ok(await route('rout*@'+host,[desk.id]),201);
+        const pick=(localPart:string)=>db.query('SELECT create_ephemeral_inbox($1) AS r',[{wid,admin:false,manageAddress:false,actor:'synthetic',id:unique('mbx'),hosted:false,input:{domain:host,type:'ephemeral',ttlSeconds:60,graceHours:1},locals:[localPart]}]);
+        assert.equal((await pick('routable')).rows[0].r.error,'ADDRESS_TAKEN');
+        const first=await deliver('combined-file',[lease.address],true);assert.equal(first.lifecycle,'ephemeral');
+        await expandFixtureOutbox(runtime,wid);
+        const delivery=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hook.id,first.id])).rows[0];assert.ok(delivery);
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');let posted:Json|undefined;
+        runtime.webhookFetch=async(_url,init)=>{posted=JSON.parse(String(init.body));return {status:204};};
+        const before=gets;await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:delivery.id},{id:'r2-hook',workspaceId:wid,attempts:1});
+        assert.equal(gets-before,1);assert.equal(posted!.email.parsedData.raw,stored.get(first.raw_key)!.toString());
+        // A simultaneous normal recipient emits message.received but cannot release the held recipient's hook.
+        const mixed=await deliver('combined-quota',[lease.address,desk.address]);assert.equal(mixed.lifecycle,'default');
+        await expandFixtureOutbox(runtime,wid);
+        assert.deepEqual((await db.query('SELECT held_reason FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[lease.id,mixed.id])).rows,[{held_reason:'quota'}]);
+        assert.equal((await db.query("SELECT FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hook.id,mixed.id])).rowCount,0);
+        const trace=(await db.query('SELECT routing FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,'combined-quota'])).rows[0].routing;
+        assert.deepEqual(trace.recipients.find((r:Json)=>r.address===lease.address).webhooks,[]);
+        ok(await local('PATCH',path+direct.id,{to:[lease.id,desk.id,hook.id]}));
+        await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[lease.id]);
+        const grace=await deliver('combined-grace',[lease.address],true);assert.equal(grace.raw_key,`d/${wid}/${grace.id}.eml`);
+        assert.deepEqual((await db.query('SELECT mailbox_id,held_reason FROM mailbox_messages WHERE message_id=$1 ORDER BY held_reason NULLS FIRST',[grace.id])).rows,[{mailbox_id:desk.id,held_reason:null},{mailbox_id:lease.id,held_reason:'expired'}]);
+        ok(await local('DELETE',path+direct.id));ok(await local('DELETE',root+'/'+lease.id),202);
+        const released=await deliver('combined-released',[lease.address]);assert.deepEqual((await db.query('SELECT mailbox_id FROM mailbox_messages WHERE message_id=$1',[released.id])).rows,[{mailbox_id:desk.id}]);
+        ok(await route('*@'+host,[desk.id]),201);error(await create({}),409,'ADDRESS_TAKEN');
       });
     });
   });

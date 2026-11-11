@@ -432,7 +432,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const owners=receipt.routing?.owners;
   const needsDefault=plan?.recipients.some(r=>{
     const owner=owners?.[r.address]??owners?.[plusBase(r.address)];
-    return !r.dropped && (r.limited || r.webhooks.length>0 || r.inboxes.length!==1 || r.inboxes[0]!==owner?.id);
+    return !r.dropped && (r.limited || r.inboxes.length!==1 || r.inboxes[0]!==owner?.id);
   });
   const store=receivedMailStore(runtime,scope.workspaceId,needsDefault?{...receipt,delivery:undefined}:receipt,s3,{messageId:messageRowId,sesMessageId});
   const readStarted=performance.now();

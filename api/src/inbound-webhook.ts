@@ -1,9 +1,10 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, id, lazyModule, type ClaimedWebhook, type Runtime } from './core.js';
-import { mailMessages, type mailboxWebhooks, type MailAddress } from './db/mailbox.js';
+import { mailMessages, retainedMail, type mailboxWebhooks, type MailAddress } from './db/mailbox.js';
 import { webhookSecretBinding } from './mailbox-events.js';
 import { safeForwardHtml } from './mailbox-send.js';
-import { mailboxS3, readableMailboxKey } from './mailbox-setup.js';
+import { readableMailboxKey } from './mailbox-setup.js';
+import { withMailObjects } from './mail-objects.js';
 import { decrypt, hmac, postWebhook, webhookSecret, webhookUrl } from './operations.js';
 
 const s3commands = lazyModule(() => import('@aws-sdk/client-s3'));
@@ -166,20 +167,21 @@ async function loadMessage(runtime: Runtime, w: string, messageId: string, withR
       parts: sql<Part[]>`coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id,'filename',filename,'contentType',content_type,'contentId',content_id,'size',size_bytes,'contentDisposition',disposition) ORDER BY id) FROM mail_attachments a WHERE a.workspace_id=${w} AND a.message_id=${mailMessages.id}),'[]')`,
     })
     .from(mailMessages)
-    .where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, messageId)));
+    .where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, messageId), retainedMail()));
   if (!row) throw new ApiError(410, 'MESSAGE_GONE', 'The message was deleted before this delivery.');
   const { region, rawBucket, rawKey, verdicts, sizeBytes } = row.message;
   let raw: string | null = null;
   if (withRaw && region && rawBucket && rawKey && verdicts.virus === 'PASS' && (sizeBytes ?? Infinity) <= RAW_INLINE_LIMIT) {
-    const client = await mailboxS3(runtime, w, region, rawBucket);
-    try {
+    raw=await withMailObjects(runtime,w,region,rawBucket,async(objects,client)=>{
+      if(!client){
+        const body=await objects.get(rawKey,{offset:0,length:RAW_INLINE_LIMIT});
+        return body ? new Response(body).text() : null;
+      }
       const key = await readableMailboxKey(runtime, w, region, rawBucket, rawKey, 'raw', runtime.db, client);
       const { GetObjectCommand } = await s3commands();
       const object = await client.send(new GetObjectCommand({ Bucket: rawBucket, Key: key, Range: `bytes=0-${RAW_INLINE_LIMIT - 1}` }));
-      raw = (await object.Body?.transformToString()) ?? null;
-    } finally {
-      client.destroy();
-    }
+      return (await object.Body?.transformToString()) ?? null;
+    });
   }
   return { message: row.message as RenderMessage, parts: row.parts, raw };
 }

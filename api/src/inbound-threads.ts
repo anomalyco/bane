@@ -8,7 +8,7 @@ import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
 import { ApiError, errors, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
-import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages } from './db/mailbox.js';
+import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages, retainedMail } from './db/mailbox.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
 import { IdempotencyHeaders, idempotent } from './sending.js';
@@ -173,7 +173,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
   const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
-    v.admin && !f.addressId ? sql`(${messages.lifecycle}<>'ephemeral' OR EXISTS(SELECT FROM mailbox_messages l WHERE l.message_id=${messages.id} AND ${liveBox(sql`l.mailbox_id`)}))` : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
+    v.admin && !f.addressId ? retainedMail() : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
   // Never grant this projection to an address key, even a key that can read every address.
   const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (dashboard or unrestricted live manage access only).');

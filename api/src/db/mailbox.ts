@@ -1,6 +1,11 @@
 import { bigint, bigserial, boolean, customType, index, integer, smallint,jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
+/** Workspace-wide readers may see durable mail, but not an ended inbox's mail while GC drains. */
+export const retainedMail = () => sql`(${mailMessages.lifecycle}<>'ephemeral' OR EXISTS(
+  SELECT FROM mailbox_messages l JOIN mailboxes b ON b.id=l.mailbox_id WHERE l.message_id=${mailMessages.id}
+    AND (b.delete_after IS NULL OR b.delete_after>statement_timestamp())))`;
+
 export type MailAddress = { name: string | null; address: string };
 export type MailHeader = { name: string; value: string };
 export type MxReport = {
