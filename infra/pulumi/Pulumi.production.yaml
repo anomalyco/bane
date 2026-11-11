@@ -11,10 +11,11 @@ config:
     - "arn:aws:sns:us-east-2:009882681002:bane-feedback"
     - "arn:aws:sns:us-east-2:009882681002:bane-feedback:60f95a6f-24ae-438f-8157-e59b994137e5"
     - "arn:aws:sns:us-east-1:009882681002:bane-trusted-feedback"
+    - "arn:aws:sns:us-east-1:009882681002:bane-trusted-feedback:14ef46fd-c087-4ea2-a7ae-e66eee9354ae"
     - "bane-transactional|bane-events"
     - "bane-marketing|bane-events"
   bane:receivingAlarmTopicArn: arn:aws:sns:us-east-2:009882681002:bane-alerts
-  bane:trustedFeedbackPublish: "false"
+  bane:trustedFeedbackPublish: "true"
   bane:virginiaAlarmTopicArn: arn:aws:sns:us-east-1:009882681002:bane-alerts
 secretsprovider: awskms://alias/pulumi/bane-production?region=us-east-1
 encryptedkey: AQICAHi4jVSzrmLwXsODflz6qiRbZ0JAEMb2xDbTZTLHj7dcOgHF7glAsx6bKexc6+o9sQKLAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMUp1e9x2SL7jBf+MGAgEQgDv45CvP8nVAA+zbRV5x7ZsfNoMnUM506ujzmrcPKe+UmUyB/pmsZnAn59G+kpWv9bTjvA+x3CXUnB2NxA==
