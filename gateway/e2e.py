@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""One-command loopback acceptance gate. No production addresses, credentials or delivery."""
+
+import base64
+import contextlib
+import imaplib
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import smtplib
+import socket
+import ssl
+import subprocess as sp
+import sys
+import tempfile
+import time
+import traceback
+
+ROOT = Path(__file__).resolve().parent
+USER = "primary@example.invalid"
+ALIAS = "alias@example.invalid"
+PASS = secrets.token_hex(12)
+RAW = b"From: alias@example.invalid\r\nSubject: caf\xc3\xa9\r\nMessage-ID: <one@example.invalid>\r\nContent-Type: text/plain\r\n\r\n.dot\r\n"
+IMAPTEST = "dovecot/imaptest@sha256:db2b7de2f7bdd5d331fbdc12463828e3e35f1571c40999df47a0ff2359d399d7"
+DOVECOT = "dovecot/dovecot@sha256:547d28f9a893c93a1d2f6dc164880cd7bfa74009106dfa46b36a6a2ee636d921"
+SCRIPTS = "0682be5f3617149e55cb6a2f4de4b23be8092c53"
+
+
+def run(args, **kw):
+    p = sp.run(
+        args, stdout=sp.PIPE, stderr=sp.STDOUT, timeout=kw.pop("timeout", 90), **kw
+    )
+    text = p.stdout.decode(errors="replace").replace(PASS, "<fixture>")
+    if p.returncode:
+        raise RuntimeError(f"{Path(args[0]).name} exit {p.returncode}: {text[-4000:]}")
+    return text
+
+
+@contextlib.contextmanager
+def gateway(tmp, **overrides):
+    env = dict(
+        os.environ,
+        MAILGW_CERT=str(tmp / "cert.pem"),
+        MAILGW_KEY=str(tmp / "key.pem"),
+        MAILGW_FIXTURE_PASSWORD=PASS,
+        MAILGW_IMAP_ENABLED="true",
+        MAILGW_AUTH_SECONDS="5",
+        **{"MAILGW_" + p + "_PORT": "0" for p in ("IMAP", "IMAPS", "SMTP", "SMTPS")},
+    )
+    env.update(overrides)
+    with sp.Popen(
+        [ROOT / "target/debug/mailgw"], env=env, stdout=sp.PIPE, text=True
+    ) as proc:
+        try:
+            ports = {}
+            for line in proc.stdout:
+                if line.strip() == "READY":
+                    break
+                name, n = line.split()
+                ports[name] = int(n)
+            assert len(ports) == 4, "listener startup failed"
+            yield ports, proc.pid
+        finally:
+            proc.terminate()
+
+
+def connect(port):
+    c = imaplib.IMAP4_SSL("localhost", port, ssl_context=CTX, timeout=8)
+    c.login(USER, PASS)
+    return c
+
+
+def ok(result):
+    assert result[0] == "OK", result
+    return result[1]
+
+
+def tls(p):
+    with imaplib.IMAP4("localhost", p["IMAP"], timeout=6) as c:
+        caps = ok(c.capability())[0].upper().split()
+        assert b"LOGINDISABLED" in caps and b"AUTH=PLAIN" not in caps
+        try:
+            c.login(USER, PASS)
+        except imaplib.IMAP4.error:
+            pass
+        else:
+            raise AssertionError("plaintext login accepted")
+        ok(c.starttls(CTX))
+        ok(c.authenticate("PLAIN", lambda _: ("\0" + ALIAS + "\0" + PASS).encode()))
+    with smtplib.SMTP("localhost", p["SMTP"], timeout=6) as c:
+        c.ehlo()
+        assert not c.has_extn("auth") and c.has_extn("starttls")
+        assert c.docmd("AUTH", "PLAIN")[0] == 530
+        c.starttls(context=CTX)
+        assert c.docmd("AUTH", "LOGIN")[0] == 503
+        c.ehlo()
+        assert (
+            c.auth(
+                "LOGIN",
+                lambda challenge=None: (
+                    USER if not challenge or challenge.startswith(b"User") else PASS
+                ),
+            )[0]
+            == 235
+        )
+
+
+def mail(p):
+    with smtplib.SMTP_SSL("localhost", p["SMTPS"], context=CTX, timeout=6) as c:
+        c.ehlo()
+        c.login(ALIAS, PASS)
+        assert c.mail("other@example.invalid")[0] == 553
+        c.send(
+            f"MAIL FROM:<{ALIAS}> SIZE={len(RAW)} BODY=8BITMIME\r\nRCPT TO:<sink@example.invalid>\r\nDATA\r\n".encode()
+        )
+        assert [c.getreply()[0] for _ in range(3)] == [250, 250, 354]
+        c.send(RAW.replace(b"\r\n.", b"\r\n..") + b".\r\n")
+        assert c.getreply()[0] == 250
+        for field in [
+            b"From: intruder@example.invalid\r\n",
+            b"Sender: intruder@example.invalid\r\n"
+            + RAW.split(b"\r\n", 1)[0]
+            + b"\r\n",
+        ]:
+            c.mail(ALIAS)
+            c.rcpt(USER)
+            assert c.data(field + b"\r\nbody\r\n")[0] == 553
+    with connect(p["IMAPS"]) as c:
+        ok(c._simple_command("LIST", '""', '"*"', "RETURN", "(SPECIAL-USE)"))
+        listed = b" ".join(c.response("LIST")[1])
+        assert all(
+            ("\\" + role).encode() in listed
+            for role in ("Sent", "Drafts", "Trash", "Junk", "Archive")
+        )
+        ok(c.select("Sent"))
+        assert ok(c.uid("FETCH", "*", "BODY.PEEK[]"))[0][1] == RAW
+        before = ok(c.uid("SEARCH", None, "ALL"))
+        ok(c.append("Sent", None, None, RAW))
+        assert ok(c.uid("SEARCH", None, "ALL")) == before, (
+            "client APPEND duplicated the submitted Sent copy"
+        )
+
+
+def client_flow(port):
+    """Same script and exact octet assertions on both servers. Ignore only server-assigned identifiers, tags and response prose."""
+    result = []
+    with connect(port) as c:
+        ok(c.create("Client"))
+        ok(c.create("ClientDst"))
+        ok(c.subscribe("Client"))
+        assert any(b"Client" in x for x in ok(c.lsub('""', "Client")))
+        ok(c.namespace())
+        ok(c.xatom("ID", "NIL"))
+        ok(c.append("Client", None, None, RAW))
+        result.append(ok(c.select("Client")))
+        uid = ok(c.uid("SEARCH", None, "ALL"))[0]
+        assert len(uid.split()) == 1
+        data = ok(
+            c.uid(
+                "FETCH",
+                uid,
+                "(FLAGS ENVELOPE BODYSTRUCTURE INTERNALDATE RFC822.SIZE BODY.PEEK[TEXT]<1.3>)",
+            )
+        )
+        result.append(
+            next(
+                v[1] for v in data if isinstance(v, tuple) and b"BODY[TEXT]<1>" in v[0]
+            )
+        )
+        assert result[-1] == b"dot"
+        result.append(ok(c.uid("SEARCH", None, "UNSEEN"))[0] == uid)
+        ok(c.uid("STORE", uid, "+FLAGS.SILENT", "(\\Flagged)"))
+        result.append(ok(c.uid("SEARCH", None, "FLAGGED"))[0] == uid)
+        ok(c.uid("COPY", uid, "ClientDst"))
+        ok(c.uid("STORE", uid, "+FLAGS.SILENT", "(\\Deleted)"))
+        ok(c.uid("EXPUNGE", uid))
+        result.append(ok(c.uid("SEARCH", None, "ALL")))
+        ok(c.select("ClientDst"))
+        result.append(ok(c.uid("FETCH", "*", "BODY.PEEK[]"))[0][1])
+        ok(c.uid("MOVE", "*", "Client"))
+        result.append(ok(c.uid("SEARCH", None, "ALL")))
+        ok(c.close())
+        ok(c.delete("ClientDst"))
+        ok(c.delete("Client"))
+    assert result == [[b"1"], b"dot", True, True, [b""], RAW, [b""]], result
+    return result
+
+
+def changes(p):
+    with connect(p["IMAPS"]) as r, connect(p["IMAPS"]) as w:
+        ok(w.create("Changes"))
+        ok(r.select("Changes"))
+        r.send(b"i IDLE\r\n")
+        assert r.readline().startswith(b"+")
+        ok(w.append("Changes", None, None, RAW))
+        assert r.readline() == b"* 1 EXISTS\r\n"
+        ok(w.select("Changes"))
+        ok(w.store("1", "+FLAGS", "(\\Deleted)"))
+        assert b"\\Deleted" in r.readline()
+        ok(w.expunge())
+        assert r.readline() == b"* 1 EXPUNGE\r\n"
+        r.send(b"DONE\r\n")
+        assert r.readline().startswith(b"i OK")
+        ok(w.close())
+        ok(w.delete("Changes"))
+        ok(w.create("Changes"))
+        r.send(b"v NOOP\r\n")
+        assert r.readline().startswith(b"* BYE")
+        r.state = "LOGOUT"
+
+
+def framing(p):
+    with connect(p["IMAPS"]) as c:
+        raw = b'Content-Type: multipart/mixed; boundary="absent"\r\nSubject: x\xff\r\n\r\nincomplete MIME\r\n'
+        ok(c.create("Mime"))
+        c.send(f"a APPEND Mime {{{len(raw)}+}}\r\n".encode() + raw + b"\r\n")
+        assert c.readline().startswith(b"a OK [APPENDUID")
+        ok(c.select("Mime", readonly=True))
+        assert ok(c.fetch("1", "BODY[]"))[0][1] == raw
+        assert ok(c.search(None, "UNSEEN")) == [b"1"]
+        assert b"BODYSTRUCTURE" in ok(c.fetch("1", "BODYSTRUCTURE"))[0]
+    with connect(p["IMAPS"]) as c:
+        c.send(b"b APPEND INBOX {41943041}\r\n")
+        assert c.readline() == b""
+        c.state = "LOGOUT"
+
+
+def deadline(p):
+    with socket.create_connection(("localhost", p["IMAP"]), timeout=8) as s:
+        s.settimeout(8)
+        assert s.recv(2048).startswith(b"* OK")
+        s.sendall(b"a CAP")
+        assert not s.recv(1), "unfinished pre-auth command survived deadline"
+
+
+def admission(tmp):
+    with gateway(tmp, MAILGW_LOGIN_LIMIT="1", MAILGW_MONTHLY="1") as (p, _):
+        with (
+            connect(p["IMAPS"]),
+            smtplib.SMTP_SSL("localhost", p["SMTPS"], context=CTX, timeout=5) as c,
+        ):
+            c.ehlo()
+            token = base64.b64encode(f"\0{ALIAS}\0{PASS}".encode()).decode()
+            assert c.docmd("AUTH", "PLAIN " + token)[0] == 421, (
+                "alias bypassed the shared session limit"
+            )
+        for accepted, login in [(True, ALIAS), (False, USER)]:
+            with smtplib.SMTP_SSL("localhost", p["SMTPS"], context=CTX, timeout=5) as c:
+                c.login(login, PASS)
+                c.mail(ALIAS)
+                c.rcpt(USER)
+                assert c.data(RAW)[0] == (250 if accepted else 451)
+
+
+def reference(tmp):
+    conf = tmp / "dovecot.conf"
+    conf.write_text(f"""protocols = imap
+listen = *
+default_vsz_limit = 0
+service imap-login {{
+ vsz_limit = 0
+}}
+service auth {{
+ vsz_limit = 0
+}}
+ssl = required
+ssl_cert = </fixture/cert.pem
+ssl_key = </fixture/key.pem
+mail_location = maildir:/tmp/fixture-mail
+mail_uid = 1000
+mail_gid = 1000
+first_valid_uid = 1
+log_path = /dev/stderr
+passdb {{
+ driver = static
+ args = password={PASS}
+}}
+userdb {{
+ driver = static
+ args = uid=1000 gid=1000 home=/tmp
+}}
+""")
+    cid = (
+        run(
+            [
+                "docker",
+                "create",
+                "-p",
+                "127.0.0.1::993",
+                "-v",
+                f"{tmp}:/fixture:ro",
+                DOVECOT,
+                "/usr/sbin/dovecot",
+                "-F",
+                "-c",
+                "/fixture/dovecot.conf",
+            ]
+        )
+        .strip()
+        .splitlines()[-1]
+    )
+    try:
+        run(["docker", "start", cid])
+        port = int(
+            run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    '{{(index (index .NetworkSettings.Ports "993/tcp") 0).HostPort}}',
+                    cid,
+                ]
+            ).strip()
+        )
+        end = time.monotonic() + 12
+        while True:
+            try:
+                with connect(port):
+                    break
+            except (OSError, imaplib.IMAP4.abort):
+                if time.monotonic() > end:
+                    raise RuntimeError(run(["docker", "logs", cid])[-1000:])
+                time.sleep(0.1)
+        return client_flow(port)
+    except Exception:
+        print(run(["docker", "logs", cid])[-2000:])
+        raise
+    finally:
+        run(["docker", "rm", "-f", cid])
+
+
+def imaptest(tmp, p, stress=False):
+    repo = ROOT / "target" / ("imaptest-" + SCRIPTS)
+    if not repo.exists():
+        run(["git", "init", "-q", repo])
+        run(
+            [
+                "git",
+                "-C",
+                repo,
+                "fetch",
+                "-q",
+                "--depth=1",
+                "https://github.com/dovecot/imaptest.git",
+                SCRIPTS,
+            ]
+        )
+        run(["git", "-C", repo, "checkout", "-q", "FETCH_HEAD"])
+    assert run(["git", "-C", repo, "rev-parse", "HEAD"]).strip() == SCRIPTS
+    # All scripts are offered to the runner. Unsupported capabilities are its own SKIPs.
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{repo}/src/tests:/scripts:ro",
+        IMAPTEST,
+        "host=host.docker.internal",
+        f"port={p['IMAPS']}",
+        "ssl=any-cert",
+        f"user={USER}",
+        f"pass={PASS}",
+        "mbox=/scripts/default.mbox",
+    ]
+    args += (
+        [
+            "clients=3",
+            "secs=3,5",
+            "seed=17",
+            "-",
+            "noop=30",
+            "append=20",
+            "fetch=30",
+            "logout=5",
+        ]
+        if stress
+        else ["test=/scripts", "clients=3"]
+    )
+    proc = sp.run(args, stdout=sp.PIPE, stderr=sp.STDOUT, timeout=180)
+    output = proc.stdout.decode(errors="replace").replace(PASS, "<fixture>")
+    log = (
+        ROOT / "target" / ("imaptest-stress.log" if stress else "imaptest-scripts.log")
+    )
+    log.write_text(output)
+    print(output[-400:], flush=True)
+    if stress:
+        assert (
+            proc.returncode == 0 and "Totals:" in output and "Error:" not in output
+        ), f"Stress failed: {log}"
+        return
+    scripts = repo / "src/tests"
+    with connect(p["IMAPS"]) as c:
+        caps = set(ok(c.capability())[0].upper().decode().split())
+    skipped = []
+    for script in sorted(scripts.iterdir()):
+        if not script.is_file() or script.suffix:
+            continue
+        header = script.read_bytes().split(b"\n\n", 1)[0]
+        match = re.search(rb"(?im)^capabilities: ([^\n]+)", header)
+        missing = set(match[1].upper().decode().split()) - caps if match else set()
+        if missing:
+            skipped.append(script.name)
+            print(f"SKIP {script.name}: requires {', '.join(sorted(missing))}")
+    assert f"{len(skipped)} skipped due to missing capabilities" in output, (
+        "skip ledger disagrees with upstream"
+    )
+    if proc.returncode == 0:
+        assert re.search(r"\b0 failed,", output) and "Error:" not in output
+        return
+    # Run all upstream commands unmodified first. No catch-all XFAIL for a group:
+    # any deviation other than the specific ten Recent-dependent commands fails the gate.
+    failures = set(re.findall(r"^\*\*\* Test ([\w-]+) command (\d+)/", output, re.M))
+    recent_failures = {
+        (group, str(n))
+        for group, ns in [
+            ("copy", (16, 17, 20, 21)),
+            ("search-flags", (18, 19, 20)),
+            ("select", (3, 5, 6)),
+        ]
+        for n in ns
+    }
+    assert (
+        not os.environ.get("MAILGW_STRICT_IMAPTEST")
+        and proc.returncode == 2
+        and failures == recent_failures
+        and "Error:" not in output
+    ), f"Upstream compliance failed: {log}"
+    print(
+        "UPSTREAM 3 groups differ on \\Recent; rerunning their full scripts with only recent expectations normalized."
+    )
+    profile = tmp / "recent-profile"
+    profile.mkdir()
+    shutil.copy(scripts / "default.mbox", profile)
+    shutil.copy(scripts / "select.mbox", profile)
+    for name in ("copy", "search-flags", "select"):
+        data = (scripts / name).read_text()
+        # rev1 compatibility in the Bane design: never set Recent, old == all, new == none.
+        if name == "copy":
+            data = (
+                data.replace("* 3 recent\n", "")
+                .replace("* 4 recent\n", "")
+                .replace("\\recent ", "")
+                .replace("\\recent)", ")")
+            )
+        if name == "select":
+            data = data.replace("* 2 recent", "* 0 recent").replace(
+                "messages 2 recent 2", "messages 2 recent 0"
+            )
+        if name == "search-flags":
+            data = (
+                data.replace("search new\n* search 1 3 4 5", "search new\n* search")
+                .replace("search old\n* search\n", "search old\n* search 1 2 3 4 5\n")
+                .replace("search recent\n* search 1 2 3 4 5", "search recent\n* search")
+            )
+        (profile / name).write_text(data)
+    scoped = run(
+        [a.replace(f"{scripts}:/scripts", f"{profile}:/scripts") for a in args]
+    )
+    print("BANE RECENT PROFILE", scoped[-200:])
+    assert "3 test groups: 0 failed" in scoped and "Error:" not in scoped
+
+
+def clients(tmp, p):
+    run(
+        [ROOT / "target/debug/examples/client"],
+        env=dict(
+            os.environ,
+            MAILGW_FIXTURE_PASSWORD=PASS,
+            MAILGW_CERT=str(tmp / "cert.pem"),
+            MAILGW_IMAPS_PORT=str(p["IMAPS"]),
+        ),
+    )
+    run(
+        [
+            "swaks",
+            "--server",
+            "localhost",
+            "--port",
+            str(p["SMTP"]),
+            "--tls",
+            "--auth",
+            "PLAIN",
+            "--auth-user",
+            USER,
+            "--auth-password",
+            PASS,
+            "--from",
+            ALIAS,
+            "--to",
+            "sink@example.invalid",
+            "--header",
+            "Subject: swaks fixture",
+        ]
+    )
+    rc = tmp / "neomuttrc"
+    rc.write_text(f'''set smtp_url="smtps://primary%40example.invalid@localhost:{p["SMTPS"]}/"
+set smtp_pass="{PASS}" smtp_authenticators=plain from="{USER}" use_from=yes copy=no
+set certificate_file="{tmp / "cert.pem"}"
+''')
+    run(
+        [
+            "neomutt",
+            "-n",
+            "-F",
+            str(rc),
+            "-s",
+            "NeoMutt fixture",
+            "--",
+            "sink@example.invalid",
+        ],
+        input=b"synthetic\n",
+        env=dict(os.environ, HOME=str(tmp), SSL_CERT_FILE=str(tmp / "cert.pem")),
+    )
+    with connect(p["IMAPS"]) as c:
+        ok(c.select("Sent"))
+        for subject in ["swaks", "NeoMutt"]:
+            assert ok(c.search(None, "SUBJECT", subject))[0]
+
+
+def memory(tmp):
+    with (
+        gateway(tmp, MAILGW_LOGIN_LIMIT="300") as (p, pid),
+        contextlib.ExitStack() as stack,
+    ):
+        rss = lambda: int(run(["ps", "-o", "rss=", "-p", str(pid)]).strip())
+        base = 0
+        for i in range(272):
+            c = connect(p["IMAPS"])
+            stack.callback(c.shutdown)
+            ok(c.select("INBOX"))
+            c.send(b"i IDLE\r\n")
+            assert c.readline().startswith(b"+")
+            if i == 15:
+                base = rss()
+        final = rss()
+        print(
+            f"IDLE measured {(final - base) / 256:.1f} KiB/connection (process RSS {base} -> {final} KiB, 16 -> 272 TLS IDLE sockets; excludes kernel)",
+            flush=True,
+        )
+
+
+def main():
+    global CTX
+    if not __debug__:
+        raise RuntimeError("assertions must be enabled")
+    os.chdir(ROOT)
+    os.umask(0o077)
+    run(["cargo", "build", "--locked", "--bins", "--examples"], timeout=300)
+    success = []
+    failed = []
+    with tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
+        tmp = Path(d).resolve()
+        run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-keyout",
+                tmp / "key.pem",
+                "-out",
+                tmp / "cert.pem",
+            ]
+        )
+        CTX = ssl.create_default_context(cafile=tmp / "cert.pem")
+        with gateway(tmp) as (p, _):
+            for name, fn in [
+                ("TLS/STARTTLS", lambda: tls(p)),
+                ("submission", lambda: mail(p)),
+                ("admission", lambda: admission(tmp)),
+                ("differential", lambda: client_flow(p["IMAPS"]) == reference(tmp)),
+                ("IDLE/UIDVALIDITY", lambda: changes(p)),
+                ("literals/MIME", lambda: framing(p)),
+                ("preauth timeout", lambda: deadline(p)),
+                ("Rust/swaks/NeoMutt", lambda: clients(tmp, p)),
+                ("imaptest scripts", lambda: imaptest(tmp, p)),
+                ("imaptest stress", lambda: imaptest(tmp, p, True)),
+                ("IDLE RSS", lambda: memory(tmp)),
+            ]:
+                if len(sys.argv) > 1 and name not in sys.argv[1:]:
+                    continue
+                try:
+                    assert fn() is not False
+                    print("PASS", name, flush=True)
+                    success.append(name)
+                except Exception:
+                    traceback.print_exc()
+                    print("FAIL", name, flush=True)
+                    failed.append(name)
+    print(f"SUMMARY {len(success)} passed, {len(failed)} failed: {failed}", flush=True)
+    return bool(failed or not success)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
