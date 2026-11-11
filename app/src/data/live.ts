@@ -1,4 +1,4 @@
-import { ApiError, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -268,7 +268,8 @@ export function createLiveApi(): BaneApi {
       address: (id, signal) => inboundCall<InboundAddress>(`/addresses/${idPath(id)}`, 'GET', undefined, signal),
       createAddress: (input, signal) => inboundCall<InboundAddress>('/addresses', 'POST', input, signal),
       updateAddress: (id, patch, signal) => inboundCall<InboundAddress>(`/addresses/${idPath(id)}`, 'PATCH', patch, signal),
-      deleteAddress: async (id, signal) => { await inboundCall(`/addresses/${idPath(id)}`, 'DELETE', undefined, signal) },
+      // The dashboard confirms deletion, so routes that deliver to it lose it in the same change.
+      deleteAddress: async (id, signal) => { await inboundCall(`/addresses/${idPath(id)}?detach=true`, 'DELETE', undefined, signal) },
       threads: async (input, signal) => { const query = new URLSearchParams({ view: input.view, limit: '50', ...(input.addressId ? { addressId: input.addressId } : {}), ...(input.q ? { q: input.q } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await inboundCall<{ data: InboundThread[]; nextCursor: string | null }>(`/threads?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       thread: (id, input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.addressId ? { addressId: input.addressId } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); return inboundCall<InboundThreadDetail>(`/threads/${idPath(id)}?${query}`, 'GET', undefined, signal) },
       updateThread: (threadId, patch, signal) => inboundCall<InboundAddressState>(`/threads/${idPath(threadId)}`, 'PATCH', patch, signal),
@@ -280,9 +281,16 @@ export function createLiveApi(): BaneApi {
       webhook: (id, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'GET', undefined, signal),
       createWebhook: async (input, signal) => { const { secret, ...webhook } = await inboundCall<InboundWebhook & { secret: string }>('/webhooks', 'POST', input, signal); return { webhook, secret } },
       updateWebhook: (id, patch, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'PATCH', patch, signal),
-      deleteWebhook: async (id, signal) => { await inboundCall(`/webhooks/${idPath(id)}`, 'DELETE', undefined, signal) },
+      deleteWebhook: async (id, signal) => { await inboundCall(`/webhooks/${idPath(id)}?detach=true`, 'DELETE', undefined, signal) },
       rotateWebhookSecret: (id, signal) => inboundCall<{ secret: string }>(`/webhooks/${idPath(id)}/rotate-secret`, 'POST', undefined, signal),
       webhookDeliveries: async (id, cursor, signal) => { const result = await inboundCall<{ data: MailboxWebhookDelivery[]; nextCursor: string | null }>(`/webhooks/${idPath(id)}/deliveries?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+    },
+    routing: {
+      routes: signal => call<{ version: number; routes: MailRoute[] }>('/routing', 'GET', undefined, signal),
+      createRoute: (input, signal) => call<MailRoute>('/routing/routes', 'POST', input, signal),
+      updateRoute: (id, patch, signal) => call<MailRoute>(`/routing/routes/${idPath(id)}`, 'PATCH', patch, signal),
+      deleteRoute: async (id, signal) => { await call(`/routing/routes/${idPath(id)}`, 'DELETE', undefined, signal) },
+      test: (input, signal) => call<RoutingTestResult>('/routing/test', 'POST', { ...(input.to ? { envelope: { to: input.to } } : {}), ...(input.raw ? { raw: input.raw } : {}), verdicts: { spam: input.junk ? 'FAIL' : 'PASS', dmarc: 'PASS' } }, signal),
     },
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},

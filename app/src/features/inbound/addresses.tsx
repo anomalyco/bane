@@ -150,7 +150,7 @@ export function InboundAddressDetailPage() {
         </form>}
       </section>
     </>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${current?.address ?? 'this address'}?`} description="The address and its aliases are released, and its read, star and archive state is removed. Stored messages are kept; future mail to these addresses follows the domain’s routing." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${current?.address ?? 'this address'}?`} description="The address and its aliases are released, and its read, star and archive state is removed. Stored messages are kept; future mail to these addresses follows the domain’s routing, and routes that deliver to this inbox stop doing so." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }
 
