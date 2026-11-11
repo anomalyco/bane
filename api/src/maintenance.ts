@@ -25,12 +25,31 @@ export async function checkHostedHealth(runtime: Runtime) {
   for (const row of result.rows) log('warn', { code: 'HOSTED_SENDING_AUTO_PAUSED', workspaceId: row.workspace_id, reason: row.pause_reason, sends: Number(row.sends), bounces: Number(row.bounces), complaints: Number(row.complaints) });
 }
 
+/** Independent bounded slice, before other hourly drains. A poison batch must not
+ * abort ordinary retention, MX checks or receipt recovery. Alternate deletion
+ * and GC so a backlog or failure in either phase doesn't starve the other. */
+export async function sweepInboxes(runtime:Runtime, budgetMs:number,clock=Date.now){
+  const until=clock()+budgetMs;
+  const phases=[{name:'leases',batch:sql`SELECT inbox_retention_batch(25) n`,done:false,failed:false},
+    {name:'content',batch:sql`SELECT mail_gc_batch(1000) n`,done:false,failed:false},
+    {name:'reservations',batch:sql`WITH pruned AS (DELETE FROM mail_retired_addresses WHERE (workspace_id,address) IN (SELECT workspace_id,address FROM mail_retired_addresses WHERE until<=now() ORDER BY until LIMIT 5000) RETURNING 1) SELECT count(*)::int n FROM pruned`,done:false,failed:false}];
+  while(clock()<until && phases.some(p=>!p.done&&!p.failed))for(const p of phases){
+    if(p.done||p.failed||clock()>=until)continue;
+    try{const {rows}=await runtime.db.execute<{n:number}>(p.batch);p.done=Number(rows[0]?.n)===0;if(p.name==='leases'&&!p.done)phases[1].done=false;}
+    catch{p.failed=true;log('error',{code:'INBOX_RETENTION_FAILED',phase:p.name});}
+  }
+  const pending=phases.filter(p=>!p.done).map(p=>p.name);
+  log(pending.length?'warn':'info',{code:pending.length?'INBOX_RETENTION_PARTIAL':'INBOX_RETENTION_COMPLETED',pending});
+  return pending.length===0;
+}
+
 /**
  * Retention runs one table at a time in bounded batches, each its own transaction. It used to be one transaction
  * of unbounded deletes: a single statement over the 60 s limit (e.g. the 2M consent events of a bulk import all
  * crossing 30 days in the same hour) rolled back the whole run every hour, so nothing was ever retired again.
  */
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
+  const inboxComplete=await sweepInboxes(runtime,Math.min(60_000,Math.floor(budgetMs/4)));
   try { await checkHostedHealth(runtime); } catch { log('error', { code: 'HOSTED_HEALTH_CHECK_FAILED', message: 'Continuing retention; the next hourly check will retry.' }); }
   const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
   // A durable daily election prevents two reconcilers from applying the same
@@ -120,7 +139,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('operation_events', batch(sql`operation_events`, sql`created_at < ${cutoff}`));
   await drain('operation_sns_receipts', batch(sql`operation_sns_receipts`, sql`created_at < ${cutoff}`));
   await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff}`));
-  await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type <> 'maintenance.deleteAttachment' AND created_at < ${cutoff}`));
+  await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
   await runtime.db.transaction(async tx => {
     const unused = await tx.execute<{ id: string; storage_key: string; workspace_id: string; source_template_asset_id: string | null }>(sql`WITH old AS (
@@ -137,10 +156,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     ) DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id`);
     for (const object of unusedTemplateAssets.rows) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
   });
-  await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type = 'maintenance.deleteAttachment' AND created_at < ${cutoff}`));
-  const complete = Date.now() < deadline;
-  while(Date.now()<deadline && (await runtime.db.execute<{n:number}>(sql`SELECT inbox_retention_batch(25) AS n`)).rows[0].n>0){}
-  while(Date.now()<deadline && (await runtime.db.execute<{n:number}>(sql`SELECT mail_gc_batch(1000) AS n`)).rows[0].n===1000){}
-  await runtime.db.execute(sql`DELETE FROM mail_retired_addresses WHERE (workspace_id,address) IN (SELECT workspace_id,address FROM mail_retired_addresses WHERE until<=now() ORDER BY until LIMIT 5000)`);
+  await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
+  const complete=inboxComplete && Date.now()<deadline;
   log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
 }

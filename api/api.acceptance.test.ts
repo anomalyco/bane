@@ -7639,6 +7639,31 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for(let i=0;i<4;i++)for(const fn of ['mail_store_incoming','mail_store_incoming_v2']){await db.query('SAVEPOINT store_bench');const {rows:[r]}=await db.query(`SELECT * FROM ${fn}($1,'[]','[]',$2,false,false)`,[JSON.stringify(msg),JSON.stringify([{addr,n:0,valid:true}])]);await db.query('ROLLBACK TO store_bench');if(i)t.diagnostic(`${fn}: 1 wire statement; wait + hold ${(r.wait_ms+r.hold_ms).toFixed(2)} ms`);}
     });
   });
+  test('review H2: populated GC indexes keep a thousand erasures bounded beside unrelated mail',{skip:!BENCH},async t=>{
+    await simulatedSesFixture(t,async({db,runtime})=>{
+      const wid=runtime.config.workspaceId,other=wid+'-unrelated';await db.query("SET LOCAL statement_timeout='60s'");
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES('bench-domain',$1,'fixture','bench.invalid','fixture','active')",[other]);
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES('bench-owner',$1,'bench-domain','qa@bench.invalid')",[other]);
+      for(const n of [50000,200000]){
+        const start=n===50000?1:50001;
+        await db.query("INSERT INTO mail_threads(id,workspace_id) SELECT 'bench-thread-'||g,$1 FROM generate_series($2::int,$3::int)g",[other,start,n]);
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction) SELECT 'bench-msg-'||g,$1,'bench-thread-'||g,'inbound' FROM generate_series($2::int,$3::int)g",[other,start,n]);
+        await db.query("INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT $1,g::text,'bench-msg-'||g,'bench-thread-'||g FROM generate_series($2::int,$3::int)g",[other,start,n]);
+        await db.query("INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,last_message_at) SELECT 'bench-owner','bench-thread-'||g,$1,now() FROM generate_series($2::int,$3::int)g",[other,start,n]);
+        await db.query("INSERT INTO mail_threads(id,workspace_id) SELECT 'due-thread-'||g,$1 FROM generate_series(1,1000)g",[wid]);
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) SELECT 'due-msg-'||g,$1,'due-thread-'||g,'inbound','ephemeral' FROM generate_series(1,1000)g",[wid]);
+        await db.query("INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT $1,g::text,'due-msg-'||g,'due-thread-'||g FROM generate_series(1,1000)g",[wid]);
+        await db.query("INSERT INTO mail_gc_candidates(workspace_id,message_id) SELECT $1,'due-msg-'||g FROM generate_series(1,1000)g",[wid]);
+        await db.query('ANALYZE mail_message_ids;ANALYZE mailbox_threads');const at=performance.now();assert.equal((await db.query('SELECT mail_gc_batch(1000) n')).rows[0].n,1000);const ms=performance.now()-at;t.diagnostic(`GC: 1000 erasures beside ${n} unrelated messages and thread summaries: ${ms.toFixed(1)} ms`);assert.ok(ms<2000);assert.equal((await db.query("SELECT FROM mail_threads WHERE id='due-thread-1'")).rowCount,0);
+      }
+    });
+  });
+  test('review M4: sweep reports an exhausted slice and isolates a failed phase',async t=>{
+    await simulatedSesFixture(t,async({runtime})=>{const {sweepInboxes}=await import('./src/maintenance.js');let calls=0;
+      const mock=t.mock.method(runtime.db,'execute',async()=>{if(++calls===1)throw Error('synthetic failure');return {rows:[{n:0}]};});
+      try {assert.equal(await sweepInboxes(runtime,1000),false);assert.equal(calls,3);let tick=0;assert.equal(await sweepInboxes(runtime,1,()=>tick++),false);assert.equal(calls,3);}finally{mock.mock.restore();}
+    });
+  });
   test('ephemeral inbox: hourly sweep drains 10,000 due inboxes in bounded batches',{skip:!BENCH},async t=>{
     await simulatedSesFixture(t,async({db,runtime})=>{const wid=runtime.config.workspaceId,domain=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'bench.invalid',$3,'active')",[domain,wid,REGION]);
       await db.query("INSERT INTO mailboxes(id,address,workspace_id,domain_id,kind,retention_mode,expires_at,delete_after) SELECT 'sweep_'||i,'sweep'||i||'@bench.invalid',$1,$2,'inbox','ephemeral',now()-interval '1 minute',now() FROM generate_series(1,10000)i",[wid,domain]);

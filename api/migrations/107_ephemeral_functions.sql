@@ -225,9 +225,14 @@ BEGIN
 END $$;
 
 CREATE FUNCTION mail_gc_batch(batch_size int) RETURNS int LANGUAGE plpgsql AS $$
-DECLARE n int; threads text[];
+DECLARE n int; threads text[]; mids text[];
 BEGIN
- WITH candidates AS MATERIALIZED (SELECT * FROM mail_gc_candidates ORDER BY workspace_id,message_id LIMIT least(batch_size,1000) FOR UPDATE SKIP LOCKED),
+ -- Capture one bounded set, serialize with incoming deliveries, then check references
+ -- on a fresh READ COMMITTED snapshot. If another drainer wins these ids, do not
+ -- substitute other candidates whose ingest lanes we do not hold.
+ SELECT ARRAY(SELECT message_id FROM mail_gc_candidates ORDER BY workspace_id,message_id LIMIT least(batch_size,1000)) INTO mids;
+ INSERT INTO mailbox_write_lanes(workspace_id,lane) SELECT DISTINCT workspace_id,'ingest' FROM mail_gc_candidates WHERE message_id=ANY(mids) ORDER BY workspace_id ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false;
+ WITH candidates AS MATERIALIZED (SELECT * FROM mail_gc_candidates WHERE message_id=ANY(mids) ORDER BY workspace_id,message_id FOR UPDATE SKIP LOCKED),
  dead AS MATERIALIZED (SELECT m.* FROM candidates c JOIN mail_messages m ON m.workspace_id=c.workspace_id AND m.id=c.message_id WHERE m.lifecycle<>'default' AND NOT EXISTS(SELECT FROM mailbox_messages WHERE message_id=m.id) AND NOT EXISTS(SELECT FROM mail_unrouted WHERE message_id=m.id) FOR UPDATE OF m),
  keys AS (SELECT workspace_id,region,raw_bucket AS bucket,raw_key AS key FROM dead WHERE raw_key IS NOT NULL UNION ALL SELECT d.workspace_id,d.region,a.bucket,a.storage_key FROM dead d JOIN mail_attachments a ON a.message_id=d.id),
  chunks AS (SELECT *, (row_number() OVER(PARTITION BY workspace_id,bucket,region ORDER BY key)-1)/1000 AS chunk FROM keys),
