@@ -62,6 +62,8 @@ export interface DispatcherOptions {
   batchSize?: number;
   /** Provider requests in flight per loop; Workers allow six connections awaiting headers. */
   sendConcurrency?: number;
+  /** Clock for flushing a partially returned SES claim. A complete claim never waits on a timer. */
+  schedulePartialFlush?: (flush: () => void) => () => void;
   /** Independent claim→send→record pipelines sharing the gate; keeps the provider busy while a batch is being recorded. */
   lanes?: number;
   /** This shard's share of the regional quota: 1/count. */
@@ -735,7 +737,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { attachmentBytes:number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcome: Outcome) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { attachmentBytes:number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -913,7 +915,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     const snapshot = single.mail.snapshot;
     lane.held.recipients++;
     const result = await phase('send', () => lane.send({ ...single, snapshot, content: simpleContent(snapshot, []) }, Date.now() + MAX_PRE_SEND_MS));
-    await lane.record(result);
+    await lane.record([result]);
     return { processed: 1, blocked: false };
   }
   const loadAttachments = batchAttachments(base, ready);
@@ -957,7 +959,17 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       while(lane.attachmentBytes+bytes>limit) await (lane.bytesReleased??=new Promise(resolve=>{lane.notifyBytes=resolve;}));
       lane.attachmentBytes+=bytes;
       try {
-        await streamPage(page,true);
+        // A single immutable review shares all object reads. With no external
+        // classifier, prepare one full claim at a time; CPU speed is not a
+        // reason to split it. Unrelated objects/probes still stream below.
+        const review=page[0]!.mail.reviewId;
+        if (review && page.every(({mail,owner}) => mail.reviewId===review && (isSimulatedSes(owner.runtime) || !owner.tenantName || !owner.runtime.config.hostedScreen))) {
+          const prepared:Prepared[]=[];
+          for (const group of chunk(page,options.sendConcurrency)) {
+            for(const p of await Promise.all(group.map(prepare))) if(p) prepared.push(p);
+          }
+          await dispatchPrepared(base,lane,prepared);
+        } else await streamPage(page,true);
       }finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
       page=[];bytes=0;
     };
@@ -992,29 +1004,26 @@ async function recordBatch(base: Runtime,lane: Lane,outcomes: Outcome[]) {
     if (outcome.mail.campaignId && !requeued(outcome)) lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
   }
 }
-// One writer per run, shared by all lanes. The first response starts SQL immediately;
-// responses received during that write go into the next set-based statement. Never wait
-// on a different SES call to commit a provider ID, and don't fan out DB connections.
+// One writer per run. Concurrent lanes can share the next statement without
+// fanning out DB connections. The caller decides when a claim is ready to write.
 function outcomeRecorder(write: (ready: Outcome[]) => Promise<void>) {
   const ready: Outcome[] = [];
-  let writing: Promise<void> | undefined, lastStart = -Infinity;
+  let writing: Promise<void> | undefined;
   async function flush() {
     let failure: { reason: unknown } | undefined;
     try {
       while (ready.length) {
-        // On sub-LAN-latency databases, back-to-back writes would degenerate to one
-        // statement per recipient. Coalesce for at most 16 ms from the *previous start*;
-        // idle sends and real Hyperdrive RTTs already exceed this window and never sleep.
-        const delay = 16 - (performance.now() - lastStart);
-        if (delay > 0) await sleep(delay);
-        lastStart = performance.now();
         try { await write(ready.splice(0)); } catch (reason) { failure ??= { reason }; }
       }
       if (failure) throw failure.reason;
     }
     finally { writing = undefined; }
   }
-  return (outcome: Outcome) => { ready.push(outcome); return writing ??= flush(); };
+  return (outcomes: Outcome[]) => { ready.push(...outcomes); return writing ??= flush(); };
+}
+function schedulePartialFlush(flush: () => void) {
+  const timer = setTimeout(flush, 16);
+  return () => clearTimeout(timer);
 }
 async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
   if (!prepared.length) return;
@@ -1073,11 +1082,25 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
     if (!attempting.length) continue;
     // Each message takes its own evenly spaced slot, so the provider sees a steady stream at the target
     // rate rather than one burst per group; a throttled response brakes every lane on this shard.
-    await phase('send', () => Promise.all(attempting.map(async item => {
-      const write = lane.record(await lane.send(item, claimDeadline));
+    // Record the complete claim together, even on a fast database. Start a
+    // bounded flush at the first result so a stuck provider cannot hold its
+    // siblings' IDs. Singleton claims and the last response flush immediately.
+    const ready: Outcome[] = [];
+    let received = 0;
+    let cancel: (() => void) | undefined;
+    const flush = () => {
+      cancel?.(); cancel = undefined;
+      if (!ready.length) return;
+      const write = lane.record(ready.splice(0));
       void write.catch(() => {}); // Observe immediately; propagate the write error when the batch joins.
       pendingRecords.push(write);
+    };
+    const sends = await phase('send', () => Promise.allSettled(attempting.map(async item => {
+      ready.push(await lane.send(item, claimDeadline));
+      if (++received < attempting.length) cancel ??= (options.schedulePartialFlush ?? schedulePartialFlush)(flush);
     })));
+    flush();
+    for (const send of sends) if (send.status === 'rejected') { await Promise.all(pendingRecords); throw send.reason; }
   }
   // Local marketing allowance is not a regional hold: a sibling may still have capacity. Do not
   // hide the tail of its queue for a minute. Oversize transactional envelopes still get backoff.
