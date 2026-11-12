@@ -139,7 +139,7 @@ export function manageKeys(c: Parameters<typeof actor>[0]) {
 }
 const keyView = (key: typeof apiKeys.$inferSelect) => { const { hash: _hash, workspaceId: _workspace, ...view } = key; return view; };
 export function registerAuth(app: App) {
-  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.', request: { body: json(z.object({
+  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.', request: { body: json(z.object({
     permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).refine(value => value[0] === 'read' && new Set(value).size === value.length, 'Start with read and do not repeat permissions.'),
     expiresInSeconds: z.number().int().min(30).max(86400), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]),
     purpose: z.string().trim().min(1).max(200),

@@ -125,10 +125,10 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 export function registerWorkspaces(app: App) {
   // Deprecated alias: GET /v1/me returns the same list as `workspaces`, so the dashboard needs one request, not two.
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security, deprecated: true,
-    description: 'Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a OIDC session.',
+    description: 'Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.',
     responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => c.json({ data: await memberships(c.env.db, dashboardSession(c).userId) }, 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
-    description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-Bane-Workspace.`,
+    description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Bane-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
     const a = dashboardSession(c), { name } = c.req.valid('json'), policy = await accountSessionPolicy(c.env, c.req.raw.headers);
     const created = await c.env.db.transaction(async db => {
@@ -181,7 +181,7 @@ export function registerWorkspaces(app: App) {
     return c.json({ id, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces/invitations/{id}', operationId: 'getWorkspaceInvitation', tags, security,
-    description: 'Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.',
+    description: 'Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.',
     request: { params: IdParams }, responses: { 200: response(InvitationPreview), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = await verifiedDashboardUser(c.env, c.req.raw.headers,true), invitationId = c.req.valid('param').id;
