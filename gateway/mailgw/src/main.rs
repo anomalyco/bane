@@ -170,7 +170,7 @@ impl Gateway {
                 biased;
                 _=tokio::time::sleep_until(read_deadline)=>break,
                 _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
-                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{let generation=event?;if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;if idling&&let Some(store)=backend.as_mut()&&let Core::Imap(i)=&mut core{tokio::task::block_in_place(||store.reload(true))?;stale=false;let r=i.update(store);write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
+                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{let generation=event?;if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;if idling&&let Some(store)=backend.as_mut()&&let Core::Imap(i)=&mut core{let r=tokio::task::block_in_place(||store.wake(i,&mut stale))?;write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
                 n=stream.read(&mut buf)=>n?,
                 _=tokio::time::sleep_until(heartbeat),if idling=>{
                     write(&mut stream,b"* OK Still here\r\n").await?;
@@ -313,28 +313,18 @@ impl Gateway {
                         let now = chrono::Utc::now().fixed_offset();
                         if let Some(store) = backend.as_mut() {
                             store.deadline = std::time::Instant::now() + Duration::from_secs(5);
-                            let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
-                                w.eq_ignore_ascii_case(b"SELECT")
-                                    || w.eq_ignore_ascii_case(b"EXAMINE")
-                            });
-                            if matches!(core, Core::Imap(_))
-                                && !selects
-                                && (stale || store.stamp.elapsed() > Duration::from_secs(240))
-                            {
-                                store.refresh()?;
-                                stale = false
-                            }
-                            if selects {
-                                stale = false;
-                            }
-                            let reply = match &mut core {
-                                Core::Imap(i) => i.step(&bytes, identity, store, now),
-                                Core::Smtp(s) => s.step(&bytes, identity, store, now),
-                            };
-                            // A parse, folder or access refusal can bypass Store::change.
-                            // No uploaded literal ever belongs to the next command.
-                            store.finish_command();
-                            Ok(reply)
+                            Ok(match &mut core {
+                                // Store::imap refreshes a stale snapshot, steps the core and
+                                // finishes the command (drops an unclaimed APPEND spool).
+                                Core::Imap(i) => {
+                                    store.imap(i, &bytes, identity, &mut stale, now)?
+                                }
+                                Core::Smtp(s) => {
+                                    let reply = s.step(&bytes, identity, store, now);
+                                    store.finish_command();
+                                    reply
+                                }
+                            })
                         } else {
                             Ok(match &mut core {
                                 Core::Imap(i) => {

@@ -4,7 +4,8 @@ use anyhow::{Result, anyhow, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use mailgw_core::{
-    session::{Identity, Protocol},
+    imap::Imap,
+    session::{Identity, Protocol, Reply},
     smtp::{Submission, SubmitError, Submitter},
     store::{self, Applied, Change, Entry, Flags, Folder, FolderOp, MailStore, Mode},
 };
@@ -218,6 +219,18 @@ impl Api {
                 .lock()
                 .is_ok_and(|v| v.current(&p.inbox, s, Instant::now()))
         })
+    }
+    /// One database notification: every change drops the wake cache; an auth change also
+    /// drops cached logins for that inbox. Then the inbox's sessions are woken.
+    pub fn notified(&self, events: &crate::hints::Hints, channel: &str, inbox: &str) {
+        if let Ok(mut m) = self.wakes.lock() {
+            m.clear()
+        }
+        let auth = channel == "bane_protocol_auth";
+        if auth {
+            self.invalidate(Some(inbox))
+        }
+        events.publish(Some(inbox), auth);
     }
     pub fn invalidate(&self, inbox: Option<&str>) {
         if let Ok(mut c) = self.cache.lock() {
@@ -472,6 +485,38 @@ impl Store {
     }
     pub fn refresh(&mut self) -> Result<(), store::Error> {
         self.reload(false)
+    }
+    /// One IMAP command on a logged-in connection. A snapshot marked stale by a change
+    /// hint, or older than 240 s, is refreshed first; SELECT and EXAMINE load their own.
+    pub fn imap(
+        &mut self,
+        core: &mut Imap,
+        bytes: &[u8],
+        identity: &dyn Identity,
+        stale: &mut bool,
+        now: store::Date,
+    ) -> Result<Reply, store::Error> {
+        let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
+            w.eq_ignore_ascii_case(b"SELECT") || w.eq_ignore_ascii_case(b"EXAMINE")
+        });
+        if !selects && (*stale || self.stamp.elapsed() > Duration::from_secs(240)) {
+            self.refresh()?;
+            *stale = false
+        }
+        if selects {
+            *stale = false;
+        }
+        let reply = core.step(bytes, identity, self, now);
+        // A parse, folder or access refusal can bypass Store::change.
+        // No uploaded literal ever belongs to the next command.
+        self.finish_command();
+        Ok(reply)
+    }
+    /// A change hint while idling: reload (possibly from the wake cache) and push the update.
+    pub fn wake(&mut self, core: &mut Imap, stale: &mut bool) -> Result<Reply, store::Error> {
+        self.reload(true)?;
+        *stale = false;
+        Ok(core.update(self))
     }
     pub fn reload(&mut self, wake: bool) -> Result<(), store::Error> {
         let checkpoint = self.checkpoint;
@@ -981,14 +1026,7 @@ pub async fn listen(
         while let Some(msg) = futures_util::future::poll_fn(|cx| connection.poll_message(cx)).await
         {
             if let tokio_postgres::AsyncMessage::Notification(n) = msg? {
-                if let Ok(mut m) = api.wakes.lock() {
-                    m.clear()
-                }
-                let auth = n.channel() == "bane_protocol_auth";
-                if auth {
-                    api.invalidate(Some(n.payload()))
-                }
-                events.publish(Some(n.payload()), auth);
+                api.notified(events, n.channel(), n.payload())
             }
         }
         Err::<(), _>(anyhow!("listener ended"))
