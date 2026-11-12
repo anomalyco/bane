@@ -26,14 +26,17 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-page > .ui-alert { margin-bottom: var(--space-16); }
 /* The email paper stays light; the surrounding application retains its theme. */
 .campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F3F3F3; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E4E4E4; --color-accent: #315EFB; --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-canvas); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
+/* In dark mode only the email paper stays light: the desk around it follows the theme instead of a bright grey field. */
+:root[data-theme='dark'] .campaign-compose-workspace { background: #0D0D0D; }
+:root[data-theme='dark'] .campaign-compose-sheet { border-color: transparent; box-shadow: 0 0 0 1px rgb(255 255 255 / 8%); }
 .campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; padding-block: var(--space-24) var(--space-40); overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
 .campaign-compose-sheet { display: flex; flex-direction: column; width: calc(100% - 32px); max-width: 680px; min-height: calc(100% - 48px); margin-inline: auto; padding: var(--space-24); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-email-surface); box-shadow: 0 2px 8px rgb(24 24 24 / 6%); }
 .campaign-compose-metadata { flex-shrink: 0; }
-.campaign-compose-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; min-height: 44px; gap: var(--space-12); border-bottom: 1px solid var(--color-border); }
+.campaign-compose-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); align-items: center; min-height: 44px; gap: var(--space-12); border-bottom: 1px solid var(--color-border); }
 .campaign-compose-row > :is(label, span) { color: var(--color-muted); font-size: var(--text-xs); }
 .campaign-compose-row :is(.ui-input, .ui-control-skeleton) { height: 43px; padding: 0; border: 0; border-radius: 0; outline: 0; background: transparent; box-shadow: none; }
 .campaign-compose-page .campaign-compose-row .ui-input:hover:not(:disabled), .campaign-compose-page .campaign-compose-row .ui-input:focus { outline: 0; background: transparent; box-shadow: none; }
-.campaign-compose-subject { grid-template-columns: 64px minmax(0, 1fr) auto; }
+.campaign-compose-subject { grid-template-columns: 88px minmax(0, 1fr) auto; }
 .campaign-compose-subject input { font-size: var(--text-md); }
 /* Ghost buttons hang out by their own padding so labels align with the row's right edge and the text column. */
 .campaign-preview-toggle { color: var(--color-muted); margin-inline-end: calc(-1 * var(--space-8)); }
@@ -42,6 +45,13 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-preview[data-open] { grid-template-rows: 1fr; opacity: 1; }
 .campaign-compose-preview > div { min-height: 0; overflow: hidden; }
 .campaign-compose-feedback { padding-block: var(--space-8); }
+/* One reserved line, so loading counts or a changed list never moves the subject and body below it. */
+.campaign-audience-line { min-height: 36px; border-bottom: 0; }
+.campaign-audience-line__text { overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.campaign-audience-line__text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.campaign-personalize { margin-top: var(--space-24); padding-top: var(--space-16); border-top: 1px solid var(--color-border); }
+.campaign-personalize__lead { margin: 0 0 var(--space-4); font-size: var(--text-xs); line-height: 18px; }
+.campaign-personalize .campaign-compose-row > :first-child { font-family: 'OpenTUI Mono', monospace; letter-spacing: normal; }
 .campaign-compose-metadata > .ui-alert { margin-block: var(--space-8); }
 @media (prefers-reduced-motion: reduce) { .campaign-compose-preview { transition: none; } }
 .campaign-compose-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
@@ -60,6 +70,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .composer-skeleton-canvas .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }
 .campaign-audience-summary { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-summary-line { display: flex; justify-content: space-between; gap: var(--space-16); }
+.campaign-audience-source { min-height: 20px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-audience-note { margin: 0; font-size: var(--text-xs); line-height: 18px; }
 .campaign-message-details { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-16); row-gap: var(--space-8); margin: 0; }
 .campaign-message-details dt { color: var(--color-muted); }
 .campaign-message-details dd { margin: 0; overflow-wrap: anywhere; }
@@ -84,6 +96,15 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
   .campaign-compose-scroll { padding-block: var(--space-8) var(--space-24); }
   .campaign-compose-sheet { width: calc(100% - 16px); min-height: calc(100% - 16px); padding: var(--space-12); }
 }
+/* Phones: header actions wrap instead of running off screen, rows give inputs more room, and the audience line may use
+   its two reserved lines rather than cut off why someone can't be emailed. */
+@media (max-width: 640px) {
+  .campaign-compose-actions { flex-wrap: wrap; justify-content: flex-start; }
+  .campaign-compose-row { grid-template-columns: 72px minmax(0, 1fr); }
+  .campaign-compose-subject { grid-template-columns: 72px minmax(0, 1fr) auto; }
+  .campaign-audience-line { min-height: 44px; }
+  .campaign-audience-line__text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
+}
 .campaign-progress-bar { appearance: none; width: 100%; height: 6px; border: 0; border-radius: var(--radius-sm); overflow: hidden; background: var(--color-border); color: var(--color-accent); }
 .campaign-progress-bar::-webkit-progress-bar { background: var(--color-border); }
 .campaign-progress-bar::-webkit-progress-value { background: var(--color-accent); }
@@ -98,7 +119,14 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-pacing-limit .ui-input.campaign-pacing-share { width: 88px; }
 .campaign-pacing-options { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-pacing-options .ui-field .ui-input { max-width: 240px; }
-.template-save-error { margin-block: var(--space-8); }
+.template-compose-intro { margin: 0 0 var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
+.template-picker-dialog { width: min(560px, calc(100vw - 32px)); }
+.template-picker { display: flex; flex-direction: column; max-height: min(424px, 60vh); overflow: auto; border-top: 1px solid var(--color-border-muted); }
+.template-picker__row { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 53px; padding: var(--space-8) var(--space-4); border: 0; border-bottom: 1px solid var(--color-border-muted); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 120ms ease; }
+.template-picker__row:disabled { cursor: default; }
+.template-picker__row > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (hover: hover) and (pointer: fine) { .template-picker__row:hover:not(:disabled) { background: var(--color-active-bg); } }
+.template-picker .ui-empty-state { border: 0; }
 .template-preview-dialog { width: min(760px, calc(100vw - 32px)); }
 .template-preview-dialog .ui-email-preview { min-height: 520px; }
 /* Phone and tablet: the editor fills the space between the top bar and the tab bar and scrolls inside, as on a desktop. */

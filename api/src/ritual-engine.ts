@@ -42,19 +42,50 @@ const ACTIONS = new Set(Object.entries(builtins).filter(([, b]) => b.action).map
 const LEGACY_ENDPOINTS = new Set(['slack', 'discord', 'webhook', 'forward']);
 const own = (o: object, k: string) => Object.hasOwn(o, k);
 const reserved = (k: string) => ['__proto__', 'constructor', 'prototype'].includes(k);
-const patterns = new Map<string, RE2JS>();
+// A regex test costs what its matcher does, which the length of the text alone does not say.
+// re2js answers from a lazy DFA whose states it keeps (8 MiB a pattern by default) and, when a
+// pattern needs more, runs the whole text again on a simulation that advances one thread per
+// instruction. The step budget counted neither. Each test therefore runs on its own small DFA
+// and nothing else: the state it builds is charged as steps, and a pattern that needs more than
+// the allowance for this text is a ritual error, like any other budget. These are re2js
+// internals, so the version is pinned and a build without them compiles no regex at all.
+export const REGEX_STATE_BYTES = 512 * 1024;
+type Dfa = { stateBudget: number; memBudget: number; clearCache(): void; resetCache(state: unknown): unknown };
+type Engine = { prog: unknown; dfa: Dfa; lazyDFA: Dfa | null; doExecuteNFA(...args: unknown[]): unknown };
+type Matcher = { test(input: string): boolean; spent(): number };
+function matcher(re: RE2JS): Matcher {
+  const engine = (re as unknown as { re2Input?: Engine }).re2Input;
+  const Lazy = engine?.dfa?.constructor as (new (prog: unknown, bytes: number) => Dfa) | undefined;
+  const dfa = engine && Lazy ? new Lazy(engine.prog, REGEX_STATE_BYTES) : undefined;
+  if (!engine || !dfa || typeof engine.doExecuteNFA !== 'function' || typeof dfa.clearCache !== 'function' || typeof dfa.resetCache !== 'function' || dfa.stateBudget !== REGEX_STATE_BYTES || dfa.memBudget !== REGEX_STATE_BYTES)
+    throw Error('Regex limits are unavailable');
+  // A full cache ends the DFA, rather than emptying it and carrying on over the same text.
+  dfa.resetCache = () => null;
+  engine.lazyDFA = dfa;
+  engine.doExecuteNFA = () => { throw Error('Regex needs too many matcher states for this text'); };
+  let spent = 0;
+  return {
+    test(input) {
+      dfa.clearCache();
+      try { return re.test(input); } finally { spent = dfa.stateBudget - dfa.memBudget; dfa.clearCache(); }
+    },
+    spent: () => spent,
+  };
+}
+const patterns = new Map<string, Matcher>();
 function regex(pattern: string, flags: string, charge?: (n:number)=>void) {
   const key = flags + '\n' + pattern;
   let re = patterns.get(key);
   if (!re) {
     charge?.(200);
-    re = RE2JS.compile(
+    const compiled = RE2JS.compile(
       pattern,
       (flags.includes('i') ? RE2JS.CASE_INSENSITIVE : 0) |
         (flags.includes('m') ? RE2JS.MULTILINE : 0) |
         (flags.includes('s') ? RE2JS.DOTALL : 0),
     );
-    if (re.programSize() > 512) throw Error('Regex program exceeds 512 instructions');
+    if (compiled.programSize() > 512) throw Error('Regex program exceeds 512 instructions');
+    re = matcher(compiled);
     if (patterns.size >= 64) patterns.delete(patterns.keys().next().value!);
     patterns.set(key, re);
   }
@@ -481,7 +512,12 @@ export function runRitual(
         if (typeof s !== 'string') throw Error('Regex expected text');
         const input=s.slice(0,BODY_BYTES), re=regex(String(i.v), k,tick);
         tick(Math.ceil((input.length+1)/32));
-        return re.test(input);
+        // Building matcher state is work on top of reading the text: 64 bytes of it a step,
+        // charged to the message whether the test answers or gives up.
+        let found: boolean;
+        try { found=re.test(input); } catch (e) { steps += Math.ceil(re.spent()/64); throw e; }
+        tick(Math.ceil(re.spent()/64));
+        return found;
       }
       case 'builtin': {
         const [v, w] = a.map(node=>{const value=visit(node);return typeof value==='string'?value.slice(0,BODY_BYTES):value;});
