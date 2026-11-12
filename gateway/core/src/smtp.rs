@@ -55,10 +55,12 @@ impl Submitter for Sink<'_> {
         let day = now.timestamp().div_euclid(86400);
         let month = now.year() * 12 + now.month0() as i32;
         let c = &mut self.caps;
-        if c.day.0 != day {
+        // Windows only move forward: a clock that steps back (NTP, a skewed host) stays in
+        // the current window instead of reopening an earlier day's or month's cap.
+        if day > c.day.0 {
             c.day = (day, 0)
         }
-        if c.month.0 != month {
+        if month > c.month.0 {
             c.month = (month, 0)
         }
         let recipients = u32::try_from(s.recipients.len()).map_err(|_| SubmitError::Cap)?;
@@ -395,6 +397,43 @@ mod tests {
         ));
         assert!(submit("2025-02-01T00:00:00Z").is_ok());
         assert_eq!(m.folder("Sent").unwrap().entries.len(), 3);
+    }
+    /// Found by gateway/tear (13-step witness: ehlo, auth, cross midnight into a new month,
+    /// send to 3 recipients at a daily cap of 3, the clock steps back 1 s, send again): the
+    /// step back reset both windows and the second message was accepted.
+    #[test]
+    fn a_clock_stepping_back_does_not_reopen_a_cap() {
+        let a = Account::new("mbx_test".into(), vec![], "fixture".into(), false);
+        let mut m = Memory::default();
+        let mut c = Caps::new(3, 5);
+        let mut submit = |t: &str, n: usize| {
+            Sink {
+                store: &mut m,
+                caps: &mut c,
+            }
+            .submit(Submission {
+                principal: &a,
+                sender: "",
+                recipients: &vec!["reader@example.invalid".to_owned(); n],
+                raw: b"Subject: test\r\n\r\nfixture",
+                date: t.parse().unwrap(),
+            })
+        };
+        assert!(submit("2025-12-01T00:00:00Z", 3).is_ok());
+        assert!(matches!(
+            submit("2025-11-30T23:59:59Z", 1),
+            Err(SubmitError::Cap)
+        ));
+        assert!(matches!(
+            submit("2025-12-01T00:00:01Z", 1),
+            Err(SubmitError::Cap)
+        ));
+        assert!(submit("2025-12-02T00:00:00Z", 2).is_ok());
+        assert!(matches!(
+            submit("2025-12-01T23:59:59Z", 1),
+            Err(SubmitError::Cap)
+        ));
+        assert_eq!(m.folder("Sent").unwrap().entries.len(), 2);
     }
     #[test]
     fn scrub_only_bcc_headers_including_folded_lines() {
