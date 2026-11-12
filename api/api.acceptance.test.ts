@@ -5018,6 +5018,15 @@ describe('Campaign authorization and dispatch credentials', () => {
       const meter = await queryBudget(t, db);
       await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
+      // The statement applies the mailbox rule too: an upload that has gone out only in conversation mail is attached by
+      // a key that can read mailboxes, and any key attaches an upload that is not conversation content.
+      const [sender, managing] = [ok(await local('POST', '/v1/api-keys', { name: 'Sender', permissions: ['read', 'send'] }), 201), ok(await local('POST', '/v1/api-keys', { name: 'Managing', permissions: ['manage'] }), 201)];
+      for (const key of [sender, managing]) { secrets.add(key.secret); ok(await request('GET', '/v1/me', key.secret)); }
+      const conversationFile = ok(await local('POST', '/v1/attachments', file), 201);
+      await db.query("INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) VALUES($1,$2,'mailbox','matt_fixture')", [wid, conversationFile.id]);
+      await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('conversation-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', managing.secret, { ...direct, attachments: [conversationFile.id] }), 202), 1);
+      await meter('shared-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [privateFile.id] }), 202), 1);
     });
   });
   test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
@@ -11650,6 +11659,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
       await dispatchDue(runtime, REGION);
+      // Mail sent from an address is conversation mail (a reply can quote what it answers): the sending log lists and
+      // reads it only for credentials that can read the mailbox. Ordinary sends stay visible to every reader.
+      const quoted = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Quoted answer',quote:true },{ ...agent,'Idempotency-Key':'answer-quoted' }),202);
+      const direct = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Direct notice',text:'Direct notice' }),202);
+      const conversation = [reply.emailId,quoted.emailId,tracked.id];
+      const sendingKey = async (permissions:string[],domains:string[]=[]) => { const secret=ok(await post('/v1/api-keys',{ name:unique('log-reader'),permissions,domains }),201).secret; secrets.add(secret); return { authorization:`Bearer ${secret}` }; };
+      const logReader = await sendingKey(['read']), domainReader = await sendingKey(['read'],['example.com']), manageKey = await sendingKey(['manage']);
+      const listed = async (path:string,key?:Record<string,string>) => ok(await get(path,key)).data.map((row:Json)=>row.id);
+      for (const key of [undefined,manageKey]) {
+        for (const id of conversation) assert.ok((await listed('/v1/emails?limit=100',key)).includes(id));
+        assert.match(ok(await get(`/v1/emails/${quoted.emailId}/content`,key)).text,/Quoted answer[\s\S]*second zebra/);
+      }
+      for (const key of [logReader,domainReader]) {
+        for (const path of ['/v1/emails?limit=100','/v1/logs?direction=sent&limit=100']) {
+          const ids = await listed(path,key);
+          assert.ok(ids.includes(direct.id)); assert.deepEqual(conversation.filter(id=>ids.includes(id)),[]);
+        }
+        for (const id of conversation) for (const suffix of ['','/content','/detail','/events']) error(await get(`/v1/emails/${id}${suffix}`,key),404);
+        assert.equal(ok(await get(`/v1/emails/${direct.id}/content`,key)).text,'Direct notice');
+      }
+      // A reply queued before snapshots recorded their origin is still known by its mailbox message.
+      await db.query("UPDATE sending_emails SET snapshot=snapshot-'mailbox' WHERE id=$1",[quoted.emailId]);
+      error(await get(`/v1/emails/${quoted.emailId}/content`,logReader),404); ok(await get(`/v1/emails/${quoted.emailId}/content`,manageKey));
+      // An upload that has gone out only in conversation mail is conversation content as well. A reader without mailbox
+      // access keeps its own uploads, and gets any upload once it is also attached to mail that reader can read.
+      const uploads = new Map<string,{body:Uint8Array;contentType:string}>(), objectStore = runtime.storage;
+      runtime.storage = { async put(k,body,contentType) { uploads.set(k,{body,contentType}); }, async get(k) { return uploads.get(k) ?? null; }, async delete(k) { uploads.delete(k); } };
+      try {
+        const upload = async (filename:string,key?:Record<string,string>) => ok(await post('/v1/attachments',{ filename,content:Buffer.from(filename).toString('base64') },key),201).id as string;
+        const content = async (id:string,key?:Record<string,string>) => Buffer.from(ok(await get(`/v1/attachments/${id}/content`,key)).content,'base64').toString();
+        const sender = await sendingKey(['read','send']);
+        const shared = await upload('shared.txt'), own = await upload('own.txt',sender), legacy = await upload('legacy.txt');
+        const withFiles = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Your files',text:'Attached',replyMailboxId:box.id,attachments:[shared,own] }),202);
+        const older = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'An older file',text:'Attached',replyMailboxId:box.id,attachments:[legacy] }),202);
+        await db.query("UPDATE sending_emails SET snapshot=snapshot-'mailbox' WHERE id=$1",[older.id]);
+        assert.ok(withFiles.id && older.id);
+        for (const key of [undefined,manageKey]) for (const id of [shared,own,legacy]) { ok(await get(`/v1/attachments/${id}`,key)); assert.match(await content(id,key),/\.txt$/); }
+        for (const key of [logReader,domainReader,sender]) for (const id of [shared,legacy]) for (const suffix of ['','/content']) error(await get(`/v1/attachments/${id}${suffix}`,key),404,'ATTACHMENT_NOT_FOUND');
+        for (const key of [logReader,domainReader]) error(await get(`/v1/attachments/${own}/content`,key),404,'ATTACHMENT_NOT_FOUND');
+        assert.equal(await content(own,sender),'own.txt');
+        // Attaching an upload to new mail follows the same rule as reading it.
+        const notice = (attachments:string[]) => ({ from:publicAddress,to:'customer@example.net',subject:'Notice',text:'Notice',attachments });
+        error(await post('/v1/emails/send',notice([shared]),sender),404,'ATTACHMENT_NOT_FOUND');
+        ok(await post('/v1/emails/send',notice([own]),sender),202);
+        ok(await post('/v1/emails/send',notice([shared]),manageKey),202);
+        for (const key of [logReader,sender]) assert.equal(await content(shared,key),'shared.txt');
+        assert.equal(await content(own,logReader),'own.txt');
+        error(await get(`/v1/attachments/${legacy}/content`,logReader),404,'ATTACHMENT_NOT_FOUND');
+        // A mailbox sender attaches again what its mailbox already sent.
+        ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Again',text:'Attached again',replyMailboxId:box.id,attachments:[legacy] }),202);
+      } finally { runtime.storage = objectStore; }
       assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
       const wire = outgoing.get(reply.emailId); assert.equal(wire.FromEmailAddress,publicAddress); assert.equal(reply.threadId,detail.threadId);
       assert.deepEqual(wire.Destination,{ ToAddresses:['case-owner@example.net'],CcAddresses:['colleague@example.net'],BccAddresses:[] });
