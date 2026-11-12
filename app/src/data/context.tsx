@@ -138,7 +138,8 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // An invitation link selects its workspace first, so wait until it is accepted. Workspaces that may
   // still need onboarding wait for /v1/me, so onboarding never starts dashboard requests.
   useEffect(() => {
-    if (client.mode === 'demo' || publicRoute || invitation || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
+    // A remembered workspace means a hosted installation, which never reads it.
+    if (client.mode === 'demo' || publicRoute || invitation || selectedWorkspace() || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
   }, [cache, client, publicRoute, invitation])
   useEffect(() => {
@@ -221,6 +222,10 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
     </div></main>}
   </SessionContext.Provider></ApiContext.Provider>
+}
+// The installation's public origin, for examples and connection URLs.
+export function usePublicOrigin() {
+  return useContext(SessionContext)?.identity?.origin || window.location.origin
 }
 export function useApi() {
   const api = useContext(ApiContext)

@@ -1,10 +1,9 @@
-.campaign-search { max-width: 310px; }
 .campaign-row-name { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 40px; padding: 0; line-height: 18px; }
 .campaign-audience-review-skeleton { display: contents; }
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
 .page-surface:has(.campaign-compose-page) { padding: var(--space-16); }
 /* Anchored menus keep the application theme even when they open from the light email sheet. */
-.campaign-compose-page { --font-body: var(--font-email); --campaign-menu-surface: var(--color-surface); --campaign-menu-text: var(--color-text); --campaign-menu-border: var(--color-border); display: flex; flex-direction: column; height: 100%; min-height: 0; font-family: var(--font-body); font-size: var(--text-md); }
+.campaign-compose-page { --campaign-menu-surface: var(--color-surface); --campaign-menu-text: var(--color-text); --campaign-menu-border: var(--color-border); display: flex; flex-direction: column; height: 100%; min-height: 0; font-family: var(--font-body); font-size: var(--text-md); }
 .campaign-compose-page, .campaign-compose-page * { letter-spacing: var(--tracking-email); }
 body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) { --font-body: var(--font-email); --color-focus: var(--color-muted); --color-active-bg: color-mix(in srgb, var(--color-text) 8%, var(--color-surface)); font-family: var(--font-body); font-size: var(--text-md); }
 body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]),
@@ -99,7 +98,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-pacing-limit .ui-input.campaign-pacing-share { width: 88px; }
 .campaign-pacing-options { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-pacing-options .ui-field .ui-input { max-width: 240px; }
-.template-search { max-width: 310px; }
 .template-save-error { margin-block: var(--space-8); }
 .template-preview-dialog { width: min(760px, calc(100vw - 32px)); }
 .template-preview-dialog .ui-email-preview { min-height: 520px; }

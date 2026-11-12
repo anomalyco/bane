@@ -82,6 +82,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .search-box { display: flex; align-items: center; position: relative; width: 392px; max-width: 100%; min-width: 220px; flex-shrink: 1; }
 .search-box > svg { position: absolute; left: var(--space-12); color: var(--color-muted); pointer-events: none; }
 .search-box .ui-input { padding-left: var(--space-32); width: min(392px, 100%); }
+.search-box.search-box--list { width: 320px; flex-shrink: 0; }
 .logs-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .logs-page > .ui-page-header { margin-bottom: var(--space-12); }
 .logs-page > .data-toolbar { padding-bottom: var(--space-12); }

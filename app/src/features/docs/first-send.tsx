@@ -4,10 +4,9 @@ import { useMutation } from '@tanstack/react-query'
 import { Send } from 'lucide-react'
 import { Alert, Button, ErrorText, SectionHeader, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApi, useApiQuery, useSession } from '../../data/context'
+import { useApi, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { request } from '../../data/live'
 import type { Domain } from '../../data/types'
-import { usePublicOrigin } from './agent-setup'
 import './developer.css'
 
 const simulator = ['success', 'bounce', 'complaint'].map(local => `${local}@simulator.amazonses.com`)

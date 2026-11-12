@@ -29,7 +29,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
   async function upload(file?: File) {
     if (!file || busy || disabled) return
     if (metadata.isPending || metadata.isError) {
-      toast(metadata.isError ? 'Attachment sizes could not be loaded. Retrying…' : 'Wait for attachment sizes to load before uploading.', 'error')
+      toast(metadata.isError ? 'Couldn’t load attachment sizes. Retrying…' : 'Wait for attachment sizes to load before uploading.', 'error')
       if (metadata.isError) void metadata.refetch()
       return
     }
