@@ -755,10 +755,23 @@ function registerInboundWebhooks(app: App) {
     c.header('Cache-Control', 'no-store');
     return c.json({ ...await webhookView(c, row!), secret, ...await inboundToken(format, secret) }, 201);
   });
-  app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags, responses: { 200: response(z.object({ data: z.array(InboundWebhookSchema) }).openapi('InboundWebhookList')), ...errors } }), async c => {
-    const value = readAccess(c);
-    const rows = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId),sql`NOT starts_with(${mailboxWebhooks.id},'con_')`)).orderBy(desc(mailboxWebhooks.id)).limit(100);
-    return c.json({ data: await Promise.all(rows.map(row => webhookView(c, row))) }, 200);
+  app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags,
+    summary: 'List inbound webhooks a page at a time, in a stable ID order',
+    description: 'Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address\'s events (subscribed to it or to every address); getInboundOverview links a route\'s full list of subscribers this way.',
+    request: { query: z.object({
+      cursor: z.string().max(200).optional().describe('nextCursor from the previous page.'),
+      limit: z.coerce.number().int().min(1).max(100).default(100),
+      addressId: InboundAddressId.optional().describe('Only webhooks that get events for this address: subscribed to it, or to every address.'),
+      eventType: z.enum(inboundEventTypes).optional().describe('Only webhooks subscribed to this event type.'),
+    }) },
+    responses: { 200: response(pageOf(InboundWebhookSchema, 'InboundWebhookList')), ...errors } }), async c => {
+    const value = readAccess(c), q = c.req.valid('query');
+    const rows = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), sql`NOT starts_with(${mailboxWebhooks.id},'con_')`,
+      q.addressId ? sql`(${mailboxWebhooks.mailboxIds} IS NULL OR ${mailboxWebhooks.mailboxIds} ? ${q.addressId})` : undefined,
+      q.eventType ? sql`${mailboxWebhooks.eventTypes} ? ${q.eventType}` : undefined,
+      q.cursor ? lt(mailboxWebhooks.id, q.cursor) : undefined)).orderBy(desc(mailboxWebhooks.id)).limit(q.limit + 1);
+    const page = rows.slice(0, q.limit);
+    return c.json({ data: await Promise.all(page.map(row => webhookView(c, row))), nextCursor: rows.length > q.limit ? page.at(-1)!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(await webhookView(c, (await getWebhook(c, c.req.valid('param').id, readAccess(c))).row), 200));
   app.openapi(createRoute({ method: 'patch', path: `${path}/{id}`, operationId: 'updateInboundWebhook', security, tags, description: 'Only supplied fields change. Changing format resets junk to that format\'s default unless junk is supplied too.', request: { params: IdParam, body: json(patch.openapi('UpdateInboundWebhook')) }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => {

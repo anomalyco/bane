@@ -22,12 +22,13 @@ export function Match({ value, host = true }: { value: string; host?: boolean })
 }
 
 export const targetName = (t: Target, ownId?: string | null) => t.type === 'inbox' ? (t.id === ownId ? 'Inbox' : `${t.name} inbox`) : t.type in outcomes ? outcomes[t.type as keyof typeof outcomes] : t.name
-export function Targets({ to, ownId, max = 3 }: { to: Target[]; ownId?: string | null; max?: number }) {
+/** Where a route's mail goes, the first few by name; total is the complete list's size when to is only part of it. */
+export function Targets({ to, ownId, max = 3, total = to.length }: { to: Target[]; ownId?: string | null; max?: number; total?: number }) {
   if (!to.length) return <span className="muted">—</span>
   return <span className="rcv-targets">{to.slice(0, max).map(t => <span key={`${t.type}:${t.id}`} className="rcv-target" data-muted={t.type === 'store' || t.type === 'drop' || t.status === 'paused' || undefined}
     title={`${typeLabel[t.type]}${t.via ? ` · sent by the ${t.via} ritual, for the mail it chooses` : ''}`}>
     <TargetIcon type={t.type} size={13} /><span>{targetName(t, ownId)}</span>{t.via && <span className="rcv-via">via {t.via}</span>}
-  </span>)}{to.length > max && <span className="muted">+{to.length - max}</span>}</span>
+  </span>)}{total > Math.min(max, to.length) && <span className="muted">+{total - Math.min(max, to.length)}</span>}</span>
 }
 
 export function Chain({ keys, empty }: { keys: string[]; empty?: ReactNode }) {

@@ -89,7 +89,7 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
         { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip">{note(r)}</span></div></div> },
         { key: 'rituals', label: 'Rituals', width: '17%', render: r => <Chain keys={r.rituals} empty={overview.manage && r.address && r.kind !== 'pattern'
           ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}#rituals`} onClick={e => e.stopPropagation()}>No ritual · add</Link> : <span className="muted">—</span>} /> },
-        { key: 'to', label: 'Goes to', width: '32%', render: r => <Targets to={r.to} ownId={r.address?.id} /> },
+        { key: 'to', label: 'Goes to', width: '32%', render: r => <Targets to={r.to} total={r.toTotal} ownId={r.address?.id} /> },
         { key: 'unread', label: 'Unread', align: 'right', width: '8%', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
         { key: 'last', label: 'Last mail', align: 'right', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span> },
       ]} />

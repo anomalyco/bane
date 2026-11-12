@@ -115,8 +115,9 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="goes-to">
       <h2>{steps.goesTo.title}</h2><p>{steps.goesTo.line}</p>
-      {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span><span className="muted">{t.via ? `via ${t.via}` : typeLabel[t.type]}</span></li>)}</ul>}
+      {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span><span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span></li>)}</ul>}
       {entry && !elsewhere.length && <p className="addr-step__empty">{steps.goesTo.empty}. Add an endpoint to also send it to a webhook.</p>}
+      {entry?.toTruncated && <p className="addr-step__empty">{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook gets' : 'webhooks get'} this address’s mail. <Link to={`/receiving/webhooks?address=${encodeURIComponent(address.id)}`}>See every webhook</Link></p>}
       {entry?.route && <p className="addr-step__empty">A route sends this address’s mail{entry.route.to === 'drop' ? ' nowhere: it’s dropped' : entry.route.to.includes(address.id) ? '' : ' elsewhere instead of its inbox'}.</p>}
       <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>{entry?.route ? 'Edit route' : 'Add an endpoint'}</Button><span className="muted">Slack, Discord and forwards are sent by a ritual.</span></div>
     </section>

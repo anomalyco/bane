@@ -10443,7 +10443,7 @@
           },
           "endpointsTruncated": {
             "type": "boolean",
-            "description": "True when the workspace has more endpoints or inbound webhooks than listed; page the rest with listEndpoints and listInboundWebhooks."
+            "description": "True when the workspace has more endpoints or inbound webhooks than listed. Read them all with listEndpoints and listInboundWebhooks, following nextCursor until it is null."
           },
           "domains": {
             "type": "array",
@@ -10565,7 +10565,22 @@
             "items": {
               "$ref": "#/components/schemas/InboundOverviewTarget"
             },
-            "description": "Where its mail goes: routing first, then what attached rituals can send it to."
+            "description": "Where its mail goes: routing first, then active webhook subscribers, then what attached rituals can send it to, then paused subscribers. Routing and ritual targets are always complete; subscribers are listed up to 50, active ones first."
+          },
+          "toTotal": {
+            "type": "integer",
+            "description": "Targets in the complete list. Larger than to.length only when toTruncated."
+          },
+          "toTruncated": {
+            "type": "boolean",
+            "description": "True when the address has more than 50 webhook subscribers, so to is not the whole list."
+          },
+          "toMore": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When toTruncated: the API path that lists every webhook subscribed to this address (listInboundWebhooks with addressId and eventType=message.received; follow nextCursor)."
           }
         },
         "required": [
@@ -10577,7 +10592,10 @@
           "route",
           "catchAll",
           "rituals",
-          "to"
+          "to",
+          "toTotal",
+          "toTruncated",
+          "toMore"
         ]
       },
       "InboundOverviewTarget": {
@@ -11741,10 +11759,17 @@
             "items": {
               "$ref": "#/components/schemas/InboundWebhook"
             }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "data"
+          "data",
+          "nextCursor"
         ]
       },
       "UpdateInboundWebhook": {
@@ -48634,6 +48659,73 @@
         ],
         "tags": [
           "Inbound webhooks"
+        ],
+        "summary": "List inbound webhooks a page at a time, in a stable ID order",
+        "description": "Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Only webhooks that get events for this address: subscribed to it, or to every address."
+            },
+            "required": false,
+            "description": "Only webhooks that get events for this address: subscribed to it, or to every address.",
+            "name": "addressId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "message.received",
+                "message.junk",
+                "message.stored",
+                "message.queued",
+                "message.sent",
+                "message.delivered",
+                "message.delayed",
+                "message.bounced",
+                "message.complained",
+                "message.failed",
+                "thread.updated",
+                "address.created",
+                "address.deleted",
+                "inbox.created",
+                "inbox.deleted",
+                "message.held",
+                "inbox.quota_exceeded"
+              ],
+              "description": "Only webhooks subscribed to this event type."
+            },
+            "required": false,
+            "description": "Only webhooks subscribed to this event type.",
+            "name": "eventType",
+            "in": "query"
+          }
         ],
         "responses": {
           "200": {

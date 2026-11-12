@@ -2938,7 +2938,7 @@ export type InboundOverview = {
      */
     endpoints: Array<InboundOverviewEndpoint>;
     /**
-     * True when the workspace has more endpoints or inbound webhooks than listed; page the rest with listEndpoints and listInboundWebhooks.
+     * True when the workspace has more endpoints or inbound webhooks than listed. Read them all with listEndpoints and listInboundWebhooks, following nextCursor until it is null.
      */
     endpointsTruncated: boolean;
     /**
@@ -2982,9 +2982,21 @@ export type InboundOverviewRoute = {
      */
     rituals: Array<string>;
     /**
-     * Where its mail goes: routing first, then what attached rituals can send it to.
+     * Where its mail goes: routing first, then active webhook subscribers, then what attached rituals can send it to, then paused subscribers. Routing and ritual targets are always complete; subscribers are listed up to 50, active ones first.
      */
     to: Array<InboundOverviewTarget>;
+    /**
+     * Targets in the complete list. Larger than to.length only when toTruncated.
+     */
+    toTotal: number;
+    /**
+     * True when the address has more than 50 webhook subscribers, so to is not the whole list.
+     */
+    toTruncated: boolean;
+    /**
+     * When toTruncated: the API path that lists every webhook subscribed to this address (listInboundWebhooks with addressId and eventType=message.received; follow nextCursor).
+     */
+    toMore: string | null;
 };
 
 export type InboundOverviewTarget = {
@@ -3350,6 +3362,7 @@ export type CreateInboundWebhook = {
 
 export type InboundWebhookList = {
     data: Array<InboundWebhook>;
+    nextCursor: string | null;
 };
 
 export type UpdateInboundWebhook = {
@@ -17110,7 +17123,21 @@ export type RevokeInboundKeyResponse = RevokeInboundKeyResponses[keyof RevokeInb
 export type ListInboundWebhooksData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only webhooks that get events for this address: subscribed to it, or to every address.
+         */
+        addressId?: string;
+        /**
+         * Only webhooks subscribed to this event type.
+         */
+        eventType?: 'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded';
+    };
     url: '/v1/inbound/webhooks';
 };
 

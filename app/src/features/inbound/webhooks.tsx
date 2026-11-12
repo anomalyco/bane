@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType } from '../../data/types'
 import { date, time } from '../../lib/format'
+import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from '../settings/shared'
 import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
@@ -73,7 +74,11 @@ export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdmi
 
 function WebhooksList() {
   const navigate = useNavigate()
-  const webhooks = useApiQuery(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal))
+  // ?address= keeps the webhooks that get that address's received mail: the full list a route's "Goes to" links to.
+  const [params] = useSearchParams()
+  const addressId = params.get('address') ?? undefined
+  const pagination = useCursorPagination()
+  const webhooks = useApiQuery(['inbound-webhooks', 'page', addressId ?? '', pagination.cursor ?? ''], (api, signal) => api.inbound.webhookPage({ cursor: pagination.cursor, addressId }, signal), { keepPrevious: true })
   const addresses = useApiDef(queries.inboundAddressOptions())
   const create = useApiMutation((api, input: InboundWebhookInput) => api.inbound.createWebhook(input), 'Webhook created')
   const [open, setOpen] = useState(false)
@@ -91,8 +96,9 @@ function WebhooksList() {
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
     <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail on inbound addresses: received messages and the replies you send from them. Without a public URL, long-poll <code>GET /v1/inbound/events</code>. For email sent through the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/webhooks/${row.id}`)}
-      empty={<EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
+    {addressId && <p className="muted inbound-note">The active and paused webhooks that get this address’s mail. <Link to="/receiving/webhooks">Show all webhooks</Link></p>}
+    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/webhooks/${row.id}`)}
+      empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
         { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${row.id}`}>{row.description || row.url}</Link>{row.description && <span className="muted settings-break">{row.url}</span>}</div> },
         { key: 'addresses', label: 'Addresses', width: '20%', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
@@ -100,6 +106,7 @@ function WebhooksList() {
         { key: 'headers', label: 'Headers', width: '16%', render: row => <HeaderNames headers={row.headers} /> },
         { key: 'status', label: 'Status', render: row => <StatusBadge status={row.paused ? 'Paused' : 'Active'} tone={row.paused ? 'neutral' : 'success'} /> },
       ]} />}
+    {webhooks.data && <Pagination page={pagination.page} pageSize={50} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data?.nextCursor)} />}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add inbound webhook" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-mailbox-webhook">Add webhook</Button></>}>
       <form id="create-mailbox-webhook" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />

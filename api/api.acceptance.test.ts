@@ -5669,6 +5669,28 @@ test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
 });
 
+// PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
+test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and filter by address; stdio inbox keys are not offered it', async () => {
+  const [{ spawnSync }, { mkdtemp, writeFile }, { tmpdir }, { join }, { createOpenApiApp }, { buildMcpCatalog }] = await Promise.all([import('node:child_process'), import('node:fs/promises'), import('node:os'), import('node:path'), import('./src/app.js'), import('./src/mcp-catalog.js')]);
+  const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
+  const fields = (schema: unknown): string[] => !schema || typeof schema !== 'object' ? [] : Object.entries(schema as Json).flatMap(([k, v]) => k === 'properties' ? [...Object.keys(v as Json), ...Object.values(v as Json).flatMap(fields)] : fields(v));
+  const hosted = buildMcpCatalog(app).get('listInboundWebhooks')!;
+  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(hosted.tool.inputSchema).includes(name), `hosted input ${name}`);
+  assert.ok(fields(hosted.tool.outputSchema).includes('nextCursor'), 'hosted output nextCursor');
+  const file = join(await mkdtemp(join(tmpdir(), 'bane-stdio-')), 'openapi.json'); await writeFile(file, JSON.stringify(spec));
+  const fixture = `import {readFileSync} from 'node:fs';globalThis.fetch=async url=>{if(url.href==='http://127.0.0.1/health')return Response.json({status:'ok',service:'bane'});if(url.href==='http://127.0.0.1/openapi.json')return Response.json(JSON.parse(readFileSync(process.env.SPEC_FILE,'utf8')));throw Error('unexpected request')}`;
+  const tools = (key: string) => {
+    const input = [{ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } } }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }].map(m => JSON.stringify(m)).join('\n') + '\n';
+    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(fixture), '--import', 'tsx', '../mcp/src/server.ts'], { env: { PATH: process.env.PATH, BANE_API_URL: 'http://127.0.0.1', BANE_API_KEY: key, SPEC_FILE: file } as unknown as NodeJS.ProcessEnv, input, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    return new Map<string, Json>(result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(m => m.id === 2).result.tools.map((t: Json) => [t.name, t]));
+  };
+  const workspace = tools('bane_' + '1'.repeat(64)), inbox = tools('bane_mbx_' + '1'.repeat(64));
+  assert.ok(workspace.has('getInboundOverview') && workspace.has('getInboundWebhook'));
+  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(workspace.get('listInboundWebhooks')?.inputSchema).includes(name), `stdio input ${name}`);
+  assert.deepEqual([inbox.has('listInboundWebhooks'), inbox.has('getInboundWebhook'), inbox.has('getInboundOverview')], [false, false, true], 'REST refuses inbox keys webhook administration');
+});
+
 test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   // The operator script owns its transactions and inventories the entire installation. A separately
   // migrated schema exercises the real triggers/views without exposing any jobs to the harness runner.
@@ -9423,6 +9445,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const own = byMatch('overview@receive.example');
         assert.equal(own.kind, 'address'); assert.equal(own.address.id, box2.id); assert.deepEqual(own.address.aliases, ['ov-alias@receive.example']); assert.deepEqual(own.rituals, ['ovtriage']);
         assert.deepEqual(own.to.map((t: Json) => [t.type, t.id, t.via]), [['inbox', box2.id, null], ['webhook', hook.id, 'ovtriage']], 'its inbox by routing, then the endpoint the ritual can call');
+        assert.deepEqual([own.toTotal, own.toTruncated, own.toMore], [2, false, null], 'a short list is the whole list');
         assert.equal(byMatch('ov+*@receive.example').kind, 'pattern'); assert.equal(byMatch('ov+*@receive.example').address.id, box2.id);
         assert.deepEqual([byMatch('ov-route@receive.example').kind, byMatch('ov-route@receive.example').route.id, byMatch('ov-route@receive.example').to[0].id], ['route', only.id, hook.id]);
         assert.deepEqual(byMatch('ov-drop@receive.example').to.map((t: Json) => t.type), ['drop']);
@@ -9516,6 +9539,44 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.deepEqual(receivedTo(await row('mask-unrouted')), { address: 'someone@elsewhere.example', own: false });
           assert.equal(receivedTo({ to: [], addresses: [], envelopeTo: [] }), null);
         } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
+      });
+      // PR #55 recheck P2: listInboundWebhooks returned 100 webhooks with no cursor, and a route's subscribers were cut at
+      // 100 by ID, so 200 paused hooks could hide an active one. Webhooks now page completely; each route lists active
+      // subscribers before paused ones, and a longer list says so (toTotal, toTruncated, toMore).
+      await t.test('inbound webhooks: 201 hooks page completely by cursor; an active subscriber past 100 is on its route, and a long list says so', async () => {
+        const { OVERVIEW_SUBSCRIBERS } = await import('./src/inbound-overview.js');
+        const sub = await call('POST', '/v1/inbound/addresses', { address: 'subs@receive.example' }, 201);
+        const read = async (path: string, filter: Record<string, string> = {}) => {
+          const ids: string[] = []; let cursor: string | null = null, pages = 0;
+          do {
+            const page = await call('GET', `${path}?${new URLSearchParams({ ...filter, limit: '100', ...(cursor ? { cursor } : {}) })}`);
+            assert.ok(page.data.length <= 100); ids.push(...page.data.map((h: Json) => h.id)); cursor = page.nextCursor; pages++;
+          } while (cursor);
+          assert.equal(new Set(ids).size, ids.length, 'no webhook twice'); return { ids, pages };
+        };
+        const entry = async () => (await call('GET', '/v1/inbound/overview?q=subs%40receive.example&kind=address')).routes.data.find((r: Json) => r.address?.id === sub.id);
+        // 200 paused subscribers to every address whose IDs sort first, and one active subscriber of this address that sorts last.
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,paused,encrypted_secret) SELECT 'mwh_aasub'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/sub'||n,'[\"message.received\"]'::jsonb,true,'synthetic' FROM generate_series(1,200) n", [wid]);
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,mailbox_ids,paused,encrypted_secret,description) VALUES ('mwh_zzactive',$1,'https://hooks.example.org/active','[\"message.received\"]'::jsonb,jsonb_build_array($2::text),false,'synthetic','Active subscriber')", [wid, sub.id]);
+        try {
+          const all = await read('/v1/inbound/webhooks');
+          const every = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') ORDER BY id DESC", [wid])).rows.map(r => r.id);
+          assert.ok(every.length >= 201 && all.pages >= 3, `${every.length} webhooks in ${all.pages} pages`);
+          assert.deepEqual(all.ids, every, 'every webhook, once, by following nextCursor');
+          const subscribers = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') AND event_types ? 'message.received' AND (mailbox_ids IS NULL OR mailbox_ids ? $2) ORDER BY id DESC", [wid, sub.id])).rows.map(r => r.id);
+          const route = await entry(), ids = route.to.map((x: Json) => x.id), firstPaused = route.to.findIndex((x: Json) => x.status === 'paused');
+          assert.ok(ids.includes('mwh_zzactive'), 'the active subscriber is listed though 200 paused ones sort before it');
+          assert.ok(firstPaused > ids.indexOf('mwh_zzactive') && route.to.slice(firstPaused).every((x: Json) => x.status === 'paused'), 'active subscribers come before paused ones');
+          assert.deepEqual([route.toTruncated, route.toTotal, route.to.length], [true, 1 + subscribers.length, 1 + OVERVIEW_SUBSCRIBERS], 'its inbox and every subscriber, counted; the list says it is cut');
+          assert.equal(route.toMore, `/v1/inbound/webhooks?addressId=${sub.id}&eventType=message.received`);
+          const [path, query] = route.toMore.split('?');
+          assert.deepEqual((await read(path, Object.fromEntries(new URLSearchParams(query)))).ids, subscribers, 'toMore lists every subscriber');
+        } finally {
+          await db.query("DELETE FROM mailbox_webhooks WHERE workspace_id=$1 AND (id LIKE 'mwh_aasub%' OR id='mwh_zzactive')", [wid]);
+        }
+        const after = await entry();
+        assert.deepEqual([after.toTruncated, after.toTotal, after.toMore], [false, after.to.length, null]);
+        await call('DELETE', `/v1/inbound/addresses/${sub.id}?detach=true`);
       });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;

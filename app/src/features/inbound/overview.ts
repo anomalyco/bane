@@ -13,6 +13,8 @@ export type RouteEntry = {
   route: { id: string; enabled: boolean; to: string[] | 'drop' } | null
   catchAll: 'store' | 'create_address' | null
   rituals: string[]; to: Target[]
+  /** The complete list's size; more than to.length only when toTruncated (more webhook subscribers than listed). */
+  toTotal: number; toTruncated: boolean; toMore: string | null
 }
 export type OverviewRitual = { key: string; calls: string[]; delivers: string[]; omens: string[]; attachedTo: string[] }
 export type OverviewEndpoint = { id: string; source: 'endpoint' | 'inbound_webhook'; name: string; type: 'webhook' | 'slack' | 'discord' | 'forward'; status: EndpointStatus; target: string; call: string | null; eventTypes: string[]; routes: number; rituals: string[] }

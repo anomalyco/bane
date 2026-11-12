@@ -4,8 +4,8 @@
 //
 // Database budget: two statements, run one after the other (one connection at a time), whatever the route count.
 //   1. routes: counts per kind and one page of routes, with everything a page row refers to (its address, aliases and
-//      thread stats, its explicit route, the inboxes and webhooks that route delivers to, and the inbound webhooks
-//      subscribed to its addresses).
+//      thread stats, its explicit route, the inboxes and webhooks that route delivers to, and per address its webhook
+//      subscribers, active first, at most OVERVIEW_SUBSCRIBERS, with exact totals).
 //   2. workspace (managers only): the ritual config, the first 100 endpoints and 100 inbound webhooks (plus endpoints
 //      and inboxes a ritual names), their route counts from one probe of the destinations index, and the domains.
 // withRegionSettings adds one single-row read on hosted regional sending only.
@@ -27,8 +27,8 @@ type Deps = {
 };
 /** Endpoints and inbound webhooks listed per overview; endpointsTruncated says when a workspace has more. */
 export const OVERVIEW_ENDPOINTS = 100;
-/** Inbound webhooks subscribed to a page's addresses, considered per page. */
-const OVERVIEW_SUBSCRIPTIONS = 100;
+/** Webhook subscribers listed per route, active ones first. A route with more says so (toTruncated, toTotal, toMore). */
+export const OVERVIEW_SUBSCRIBERS = 50;
 const KINDS = ['address', 'inbox', 'route', 'pattern', 'catch_all'] as const;
 type Kind = (typeof KINDS)[number];
 const Kinds = z.string().max(64).regex(new RegExp(`^(${KINDS.join('|')})(,(${KINDS.join('|')}))*$`))
@@ -69,8 +69,9 @@ function decode(cursor: string | undefined) {
 type PageRow = { id: string; kind: Kind; match: string; host: string; rank: number; address_id: string | null; domain_id: string | null; catch_all: string | null; route: { id: string; to: string[] | 'drop'; enabled: boolean } | null };
 type Slim = { id: string; address: string; displayName: string | null };
 type Hook = { id: string; name: string | null; description: string; url: string; event_types: string[]; mailbox_ids: string[] | null; paused: boolean; routes?: number };
-type RoutesResult = { counts: Record<string, number>; page: PageRow[]; boxes: { row: MailboxRow; addresses: { address: string; kind: string }[]; stat: { threads: number; unread: number; last: string | null } | null }[]; dest_boxes: Slim[]; dest_endpoints: EndpointRow[]; hooks: Hook[] };
-type WorkspaceResult = { config: { rituals?: { key: string }[]; attachments?: { ritual: string; target: string }[] } | null; programs: Programs | null; endpoints: (EndpointRow & { routes: number; listed: boolean })[]; endpoints_more: boolean; hooks: Hook[]; hooks_more: boolean; keyed: (Slim & { key: string })[]; domains: { id: string; name: string; status: string; catchAll: string }[] };
+type Subscribers = { list: Hook[]; total: number; active: number };
+type RoutesResult = { counts: Record<string, number>; page: PageRow[]; boxes: { row: MailboxRow; addresses: { address: string; kind: string }[]; stat: { threads: number; unread: number; last: string | null } | null }[]; dest_boxes: Slim[]; dest_endpoints: EndpointRow[]; dest_hooks: Hook[]; subscribers: Record<string, Subscribers> };
+type WorkspaceResult = { config: { rituals?: { key: string }[]; attachments?: { ritual: string; target: string }[] } | null; programs: Programs | null; endpoints: (EndpointRow & { routes: number; listed: boolean })[]; endpoints_more: boolean; endpoint_hooks: Pick<Hook, 'id' | 'event_types' | 'mailbox_ids'>[]; hooks: Hook[]; hooks_more: boolean; keyed: (Slim & { key: string })[]; domains: { id: string; name: string; status: string; catchAll: string }[] };
 
 export function registerInboundOverview(app: App, deps: Deps) {
   const RouteEntry = z.object({
@@ -82,7 +83,10 @@ export function registerInboundOverview(app: App, deps: Deps) {
     route: z.object({ id: z.string(), enabled: z.boolean(), to: z.union([z.array(z.string()), z.literal('drop')]) }).nullable().describe('The explicit route for this match, when one exists.'),
     catchAll: z.enum(['store', 'create_address']).nullable().describe('The domain default for unknown recipients, on a domain-default row.'),
     rituals: z.array(z.string()).describe('Rituals attached to this address or alias, in the order they run.'),
-    to: z.array(Target).describe('Where its mail goes: routing first, then what attached rituals can send it to.'),
+    to: z.array(Target).describe(`Where its mail goes: routing first, then active webhook subscribers, then what attached rituals can send it to, then paused subscribers. Routing and ritual targets are always complete; subscribers are listed up to ${OVERVIEW_SUBSCRIBERS}, active ones first.`),
+    toTotal: z.number().int().describe('Targets in the complete list. Larger than to.length only when toTruncated.'),
+    toTruncated: z.boolean().describe(`True when the address has more than ${OVERVIEW_SUBSCRIBERS} webhook subscribers, so to is not the whole list.`),
+    toMore: z.string().nullable().describe('When toTruncated: the API path that lists every webhook subscribed to this address (listInboundWebhooks with addressId and eventType=message.received; follow nextCursor).'),
   }).openapi('InboundOverviewRoute');
   const OverviewDomain = z.object({
     id: z.string().describe('Bane domain ID.'), name: z.string().describe('Receiving host: the domain, or the subdomain it receives at.'),
@@ -94,7 +98,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     routes: z.object({ data: z.array(RouteEntry), nextCursor: z.string().nullable() }),
     rituals: z.array(z.object({ key: z.string(), calls: z.array(z.string()).describe('Endpoint names it can call.'), delivers: z.array(z.string()).describe('Inbox keys it can deliver to.'), omens: z.array(z.string()), attachedTo: z.array(z.string()).describe('Address IDs or addresses it runs on.') })),
     endpoints: z.array(OverviewEndpoint).describe(`At most ${OVERVIEW_ENDPOINTS} endpoints (by name) and ${OVERVIEW_ENDPOINTS} inbound webhooks.`),
-    endpointsTruncated: z.boolean().describe(`True when the workspace has more endpoints or inbound webhooks than listed; page the rest with listEndpoints and listInboundWebhooks.`),
+    endpointsTruncated: z.boolean().describe(`True when the workspace has more endpoints or inbound webhooks than listed. Read them all with listEndpoints and listInboundWebhooks, following nextCursor until it is null.`),
     domains: z.array(OverviewDomain).describe('Every domain with its receiving status, including domains that only send.'),
     manage: z.boolean().describe('False for members and scoped keys: they see their addresses, without routes, rituals, endpoints or domains.'),
   }).openapi('InboundOverview');
@@ -152,7 +156,14 @@ export function registerInboundOverview(app: App, deps: Deps) {
             AND (r.id=p.route_id OR (p.kind IN ('address','inbox') AND r.match=p.match)) LIMIT 1) r ON true
       ), dest AS (
         SELECT DISTINCT d FROM pr CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(pr.rto)='array' THEN pr.rto ELSE '[]'::jsonb END) d
-      ), ids AS (SELECT DISTINCT address_id AS id FROM p WHERE address_id IS NOT NULL)
+      ), ids AS (SELECT DISTINCT address_id AS id FROM p WHERE address_id IS NOT NULL
+      ), cand AS (
+        -- Every webhook (keyed or not) that gets message.received for some page address, exactly the set
+        -- listInboundWebhooks?addressId=&eventType=message.received lists: one scan of the workspace's webhooks.
+        SELECT h.id,h.name,h.description,h.url,h.event_types,h.mailbox_ids,h.paused FROM mailbox_webhooks h
+        WHERE ${manage}::boolean AND h.workspace_id=${w} AND NOT starts_with(h.id,'con_')
+          AND h.event_types ? 'message.received' AND (h.mailbox_ids IS NULL OR h.mailbox_ids ?| ARRAY(SELECT id FROM ids))
+      )
       SELECT
         (SELECT coalesce(jsonb_object_agg(k, n),'{}'::jsonb) FROM (SELECT CASE WHEN kind='address' AND origin='auto' THEN 'auto' ELSE kind END AS k, count(*)::int AS n FROM f GROUP BY 1) x) AS counts,
         (SELECT coalesce(jsonb_agg(jsonb_build_object('id',pr.id,'kind',pr.kind,'match',pr.match,'host',pr.host,'rank',pr.rank,'address_id',pr.address_id,'domain_id',pr.domain_id,'catch_all',pr.catch_all,
@@ -168,20 +179,18 @@ export function registerInboundOverview(app: App, deps: Deps) {
         (SELECT coalesce(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM (SELECT e.* FROM ${endpointSource(w)} e WHERE e.hook_id IN (SELECT d FROM dest)) x) AS dest_endpoints,
         (SELECT coalesce(jsonb_agg(to_jsonb(h)),'[]'::jsonb) FROM (
           SELECT h.id,h.name,h.description,h.url,h.event_types,h.mailbox_ids,h.paused FROM mailbox_webhooks h
-          WHERE ${manage}::boolean AND h.workspace_id=${w} AND h.key IS NULL AND NOT starts_with(h.id,'con_')
-            AND NOT EXISTS (SELECT FROM mail_endpoints d WHERE d.workspace_id=${w} AND d.hook_id=h.id) AND h.id IN (SELECT d FROM dest)
-          UNION
-          (SELECT h.id,h.name,h.description,h.url,h.event_types,h.mailbox_ids,h.paused FROM mailbox_webhooks h
-          WHERE ${manage}::boolean AND h.workspace_id=${w} AND h.key IS NULL AND NOT starts_with(h.id,'con_')
-            AND NOT EXISTS (SELECT FROM mail_endpoints d WHERE d.workspace_id=${w} AND d.hook_id=h.id)
-            AND h.event_types ? 'message.received' AND (h.mailbox_ids IS NULL OR h.mailbox_ids ?| ARRAY(SELECT id FROM ids))
-          ORDER BY h.id LIMIT ${OVERVIEW_SUBSCRIPTIONS})) h) AS hooks`)).rows[0]!;
+          WHERE ${manage}::boolean AND h.workspace_id=${w} AND NOT starts_with(h.id,'con_') AND h.id IN (SELECT d FROM dest)) h) AS dest_hooks,
+        -- Per page address: its webhook subscribers, active before paused, at most OVERVIEW_SUBSCRIBERS, and exact totals.
+        (SELECT coalesce(jsonb_object_agg(i.id, jsonb_build_object('list', x.list, 'total', n.total, 'active', n.active)),'{}'::jsonb) FROM ids i
+          CROSS JOIN LATERAL (SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.paused, c.id),'[]'::jsonb) AS list FROM (
+            SELECT * FROM cand c WHERE c.mailbox_ids IS NULL OR c.mailbox_ids ? i.id ORDER BY c.paused, c.id LIMIT ${OVERVIEW_SUBSCRIBERS}) c) x
+          CROSS JOIN LATERAL (SELECT count(*)::int AS total, (count(*) FILTER (WHERE NOT c.paused))::int AS active FROM cand c WHERE c.mailbox_ids IS NULL OR c.mailbox_ids ? i.id) n) AS subscribers`)).rows[0]!;
     const page = routes.page.slice(0, q.limit), last = routes.page.length > q.limit ? page.at(-1)! : null;
     const counts = { address: 0, auto: 0, route: 0, pattern: 0, catch_all: 0, inbox: 0, ...routes.counts };
 
     // Statement 2 (managers): the workspace side, bounded by OVERVIEW_ENDPOINTS and the API's own limits (50 rituals,
     // 256 attachments). Route counts come from one probe of the destinations GIN index for all listed endpoints.
-    let ws: WorkspaceResult = { config: null, programs: null, endpoints: [], endpoints_more: false, hooks: [], hooks_more: false, keyed: [], domains: [] };
+    let ws: WorkspaceResult = { config: null, programs: null, endpoints: [], endpoints_more: false, endpoint_hooks: [], hooks: [], hooks_more: false, keyed: [], domains: [] };
     if (manage) {
       c.env = await withRegionSettings(c.env, w);
       ws = (await c.env.db.execute<WorkspaceResult>(sql`/* inbound-overview: workspace */
@@ -193,7 +202,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
         eps AS (SELECT * FROM first UNION SELECT * FROM named),
         hk AS (SELECT h.id,h.name,h.description,h.url,h.event_types,h.mailbox_ids,h.paused FROM mailbox_webhooks h
           WHERE h.workspace_id=${w} AND h.key IS NULL AND NOT starts_with(h.id,'con_')
-            AND NOT EXISTS (SELECT FROM mail_endpoints d WHERE d.workspace_id=${w} AND d.hook_id=h.id) ORDER BY h.id LIMIT ${OVERVIEW_ENDPOINTS + 1}),
+            AND NOT EXISTS (SELECT FROM mail_endpoints d WHERE d.workspace_id=${w} AND d.hook_id=h.id) ORDER BY h.paused, h.id DESC LIMIT ${OVERVIEW_ENDPOINTS + 1}), -- active first, then listInboundWebhooks' order
         listed AS (SELECT hook_id AS id FROM eps UNION SELECT id FROM hk),
         -- One probe of the destinations index for every listed endpoint at once; only routes that name one are unnested.
         usage AS (SELECT d AS id, count(*)::int AS n FROM mail_routes r CROSS JOIN LATERAL jsonb_array_elements_text(r.destinations) d
@@ -203,7 +212,9 @@ export function registerInboundOverview(app: App, deps: Deps) {
           (SELECT coalesce(jsonb_agg(to_jsonb(eps) || jsonb_build_object('listed', eps.hook_id IN (SELECT hook_id FROM first),
             'routes', coalesce((SELECT n FROM usage WHERE usage.id=eps.hook_id),0))),'[]'::jsonb) FROM eps) AS endpoints,
           (SELECT count(*) > ${OVERVIEW_ENDPOINTS} FROM first) AS endpoints_more,
-          (SELECT coalesce(jsonb_agg(to_jsonb(hk) || jsonb_build_object('routes', coalesce((SELECT n FROM usage WHERE usage.id=hk.id),0)) ORDER BY hk.id),'[]'::jsonb) FROM hk) AS hooks,
+          (SELECT coalesce(jsonb_agg(jsonb_build_object('id',h.id,'event_types',h.event_types,'mailbox_ids',h.mailbox_ids)),'[]'::jsonb)
+            FROM mailbox_webhooks h WHERE h.workspace_id=${w} AND h.id IN (SELECT hook_id FROM eps)) AS endpoint_hooks,
+          (SELECT coalesce(jsonb_agg(to_jsonb(hk) || jsonb_build_object('routes', coalesce((SELECT n FROM usage WHERE usage.id=hk.id),0)) ORDER BY hk.paused, hk.id DESC),'[]'::jsonb) FROM hk) AS hooks,
           (SELECT count(*) > ${OVERVIEW_ENDPOINTS} FROM hk) AS hooks_more,
           (SELECT coalesce(jsonb_agg(jsonb_build_object('id',m.id,'key',m.key,'address',m.address,'displayName',m.display_name)),'[]'::jsonb)
             FROM mailboxes m WHERE m.workspace_id=${w} AND m.key IN (SELECT substr(ref,7) FROM refs WHERE starts_with(ref,'inbox:'))) AS keyed,
@@ -222,7 +233,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     const endpointViews = new Map<string, { view: z.infer<typeof Endpoint>; hook: string }>();
     for (const row of endpointRows) if (!endpointViews.has(row.hook_id)) endpointViews.set(row.hook_id, { view: await endpointView(c.env, w, row), hook: row.hook_id });
     const endpointByName = new Map([...endpointViews.values()].map(e => [e.view.name, e]));
-    const hookById = new Map([...routes.hooks, ...ws.hooks].map(h => [h.id, h]));
+    const hookById = new Map([...routes.dest_hooks, ...ws.hooks].map(h => [h.id, h]));
     const boxByKey = new Map(ws.keyed.map(b => [b.key, b]));
 
     type T = z.infer<typeof Target>;
@@ -240,7 +251,20 @@ export function registerInboundOverview(app: App, deps: Deps) {
       const v = boxByKey.get(ref.slice(6)); return v ? inboxTarget(v, k) : null;
     })).filter((t): t is T => !!t);
     const merge = (base: T[], extra: T[]) => [...base, ...extra].filter((t, i, all) => all.findIndex(x => x.type === t.type && x.id === t.id) === i);
-    const subscribed = (addressId: string) => routes.hooks.filter(h => h.event_types.includes('message.received') && (h.mailbox_ids === null || h.mailbox_ids.includes(addressId))).map(hookTarget);
+    // What each webhook a route or ritual names is subscribed to, so a subscriber that is also one of those counts once.
+    const hookInfo = new Map<string, Pick<Hook, 'event_types' | 'mailbox_ids'>>([...routes.dest_hooks, ...ws.endpoint_hooks].map(h => [h.id, h]));
+    const subscribes = (h: Pick<Hook, 'event_types' | 'mailbox_ids'> | undefined, addressId: string) => !!h && h.event_types.includes('message.received') && (h.mailbox_ids === null || h.mailbox_ids.includes(addressId));
+    const subscriberTarget = (h: Hook): T => { const e = endpointViews.get(h.id); return e ? endpointTarget(e) : hookTarget(h); };
+    /** An address's complete list: routing, active subscribers, ritual targets, paused subscribers; and whether it is all here. */
+    const destinations = (addressId: string, routing: T[], via: T[]) => {
+      const s = routes.subscribers[addressId] ?? { list: [], total: 0, active: 0 };
+      const to = merge(merge(merge(routing, s.list.filter(h => !h.paused).map(subscriberTarget)), via), s.list.filter(h => h.paused).map(subscriberTarget));
+      const named = merge(routing, via);
+      const overlap = named.filter(t => t.id && t.type !== 'inbox' && subscribes(hookInfo.get(t.id), addressId)).length;
+      const toTotal = named.length + s.total - overlap;
+      return { to, toTotal, toTruncated: toTotal > to.length, toMore: toTotal > to.length ? `/v1/inbound/webhooks?addressId=${encodeURIComponent(addressId)}&eventType=message.received` : null };
+    };
+    const complete = (to: T[]) => ({ to, toTotal: to.length, toTruncated: false, toMore: null });
     const routed = (r: { to: string[] | 'drop' }): T[] => r.to === 'drop' ? [{ type: 'drop', id: null, name: 'Dropped', detail: null, via: null, status: null }]
       : r.to.length ? r.to.map(resolve).filter((t): t is T => !!t) : [{ type: 'store', id: null, name: 'Stored, no inbox', detail: null, via: null, status: null }];
 
@@ -250,19 +274,19 @@ export function registerInboundOverview(app: App, deps: Deps) {
       if (r.kind === 'address' || r.kind === 'inbox') {
         const ritualKeys = ritualsFor([v!.id, v!.address, ...v!.aliases]);
         return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: v, route, catchAll: null, rituals: ritualKeys,
-          to: merge(route?.enabled ? routed(route) : [inboxTarget(v as Slim)], [...subscribed(v!.id), ...viaRituals(ritualKeys)]) };
+          ...destinations(v!.id, route?.enabled ? routed(route) : [inboxTarget(v as Slim)], viaRituals(ritualKeys)) };
       }
       if (r.kind === 'pattern' && v) {
         const ritualKeys = ritualsFor([v.id, v.address, ...v.aliases]);
-        return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: v, route: null, catchAll: null, rituals: ritualKeys, to: merge([inboxTarget(v as Slim)], [...subscribed(v.id), ...viaRituals(ritualKeys)]) };
+        return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: v, route: null, catchAll: null, rituals: ritualKeys, ...destinations(v.id, [inboxTarget(v as Slim)], viaRituals(ritualKeys)) };
       }
       if (r.domain_id) {
         const catchAll = r.catch_all === 'create_mailbox' || r.catch_all === 'create_address' ? 'create_address' as const : 'store' as const;
         return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route: null, catchAll, rituals: [],
-          to: [catchAll === 'create_address' ? { type: 'create_address' as const, id: null, name: 'New address per recipient', detail: null, via: null, status: null } : { type: 'store' as const, id: null, name: 'Stored, no inbox', detail: null, via: null, status: null }] };
+          ...complete([catchAll === 'create_address' ? { type: 'create_address' as const, id: null, name: 'New address per recipient', detail: null, via: null, status: null } : { type: 'store' as const, id: null, name: 'Stored, no inbox', detail: null, via: null, status: null }]) };
       }
       const ritualKeys = ritualsFor([r.match]);
-      return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route, catchAll: null, rituals: ritualKeys, to: merge(route ? routed(route) : [], viaRituals(ritualKeys)) };
+      return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route, catchAll: null, rituals: ritualKeys, ...complete(merge(route ? routed(route) : [], viaRituals(ritualKeys))) };
     });
     const rituals = Object.entries(programs).map(([key, ir]) => ({ key, calls: ir.refs.filter(r => r.startsWith('endpoint:')).map(r => r.slice(9)), delivers: ir.refs.filter(r => r.startsWith('inbox:')).map(r => r.slice(6)),
       omens: Object.keys(ir.omens ?? {}), attachedTo: attachments.filter(a => a.ritual === key).map(a => a.target) }));

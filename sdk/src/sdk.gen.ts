@@ -4254,6 +4254,11 @@ export const revokeInboundKey = <ThrowOnError extends boolean = false>(options: 
     ...options
 });
 
+/**
+ * List inbound webhooks a page at a time, in a stable ID order
+ *
+ * Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.
+ */
 export const listInboundWebhooks = <ThrowOnError extends boolean = false>(options?: Options<ListInboundWebhooksData, ThrowOnError>): RequestResult<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },

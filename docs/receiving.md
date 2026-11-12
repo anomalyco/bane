@@ -55,6 +55,8 @@ A route that has no ritual yet says so in its row (**No ritual · add**), so wha
 
 A route can deliver to inboxes and webhooks. Slack, Discord and forwards are sent by a ritual.
 
+The list is complete: routing targets and ritual targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (Event webhooks, filtered to that address).
+
 ## An address's page
 
 Opening a route shows the address as three steps, each with what you can do there:
@@ -110,7 +112,7 @@ Older links keep working: `/receiving/routing` opens Routes and `/receiving/endp
 
 ## API, SDK and MCP
 
-The Receiving screen is one read: `getInboundOverview` (`GET /v1/inbound/overview`) returns a page of routes merged across kinds, each with the rituals that run on it and where its mail goes, plus counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks (`endpointsTruncated` says when there are more; page them with `listEndpoints` and `listInboundWebhooks`) and the domains. Filter with `kind` (`address`, `inbox`, `route`, `pattern`, `catch_all`, comma-separated), `origin` (address rows only: `api` or `auto`), `domain` and `q`; page with `cursor`. It costs two database statements whatever the number of routes.
+The Receiving screen is one read: `getInboundOverview` (`GET /v1/inbound/overview`) returns a page of routes merged across kinds, each with the rituals that run on it and where its mail goes, plus counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks (`endpointsTruncated` says when there are more; read them all with `listEndpoints` and `listInboundWebhooks`, following `nextCursor`) and the domains. Each route's `to` is complete except for webhook subscribers beyond 50; then `toTruncated` is true, `toTotal` counts every target and `toMore` is the `listInboundWebhooks?addressId=…&eventType=message.received` path that lists them all. Filter with `kind` (`address`, `inbox`, `route`, `pattern`, `catch_all`, comma-separated), `origin` (address rows only: `api` or `auto`), `domain` and `q`; page with `cursor`. It costs two database statements whatever the number of routes.
 
 Access matches the other receiving reads: members and scoped keys see only their own addresses; the full view needs a manage credential, and credentials that come from an MCP approval also need its explicit receiving consent. Over MCP it is offered exactly to the approvals REST allows. Webhook, Slack and Discord URLs are write-only: only the last four characters are returned.
 
@@ -122,6 +124,7 @@ Access matches the other receiving reads: members and scoped keys see only their
 | Catch-all | `updateInboundDomain` (`catchAll`) |
 | Rituals and Try it | `saveRitual`, `attachRituals`, `testRituals` (trace rows carry a step-by-step `timeline`) |
 | Endpoints | `listEndpoints`, `createEndpoint`, `updateEndpoint`, `testEndpoint`, `deleteEndpoint` |
+| Inbound webhooks | `listInboundWebhooks` (`cursor`, `limit`, `addressId`, `eventType`), `getInboundWebhook`, `createInboundWebhook`, `updateInboundWebhook` |
 
 ```sh
 curl "$BANE/v1/inbound/overview?kind=address,route&origin=api&q=support" -H "Authorization: Bearer $KEY"
