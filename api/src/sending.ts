@@ -965,7 +965,8 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
         await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
       });
       reserved=true;
-      // Bounded far inside the reservation's hour (and the tombstone's day, 158): a put cannot land after both.
+      // S3 cancels the put after ten minutes; an R2 binding put cannot be cancelled. A put that lands after
+      // its reservation and tombstone (158) are gone is deleted by the hourly storage reconciliation.
       await runtime.storage.put(storageKey,bytes,input.contentType,AbortSignal.timeout(UPLOAD_PUT_MS));
     },
     async finish(db:DbExecutor){

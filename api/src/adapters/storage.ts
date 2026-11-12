@@ -5,7 +5,8 @@ const loadS3Sdk = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), im
 export function r2Storage(bucket: R2Bucket): Storage {
   return {
     cacheScope: bucket,
-    async put(key, body, contentType) { await bucket.put(key, body, { httpMetadata: { contentType } }); },
+    // The binding takes no signal and a started put cannot be cancelled: see Storage.put.
+    async put(key, body, contentType, signal) { signal?.throwIfAborted(); await bucket.put(key, body, { httpMetadata: { contentType } }); },
     async get(key) {
       const object = await bucket.get(key);
       if (!object) return null;
@@ -13,6 +14,10 @@ export function r2Storage(bucket: R2Bucket): Storage {
       return { body: new Uint8Array(await object.arrayBuffer()), contentType: object.httpMetadata?.contentType ?? 'application/octet-stream' };
     },
     async delete(key) { await bucket.delete(key); },
+    async list(prefix, after) {
+      const page = await bucket.list({ prefix, startAfter: after, limit: 1000 });
+      return { objects: page.objects.map(o => ({ key: o.key, uploaded: o.uploaded })), cursor: page.truncated ? page.objects.at(-1)?.key : undefined };
+    },
   };
 }
 export function s3Storage(env: Record<string, string | undefined>): Storage {
@@ -39,5 +44,11 @@ export function s3Storage(env: Record<string, string | undefined>): Storage {
       }
     },
     async delete(key) { const { client, s3 } = await getClient(); await client.send(new s3.DeleteObjectCommand({ Bucket: bucket, Key: key })); },
+    async list(prefix, after) {
+      const { client, s3 } = await getClient();
+      const page = await client.send(new s3.ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, StartAfter: after, MaxKeys: 1000 }));
+      const objects = (page.Contents ?? []).flatMap(o => o.Key && o.LastModified ? [{ key: o.Key, uploaded: o.LastModified }] : []);
+      return { objects, cursor: page.IsTruncated ? objects.at(-1)?.key : undefined };
+    },
   };
 }

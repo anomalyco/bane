@@ -7,6 +7,44 @@ import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
+const DAY_MS = 24 * 3600_000;
+
+/**
+ * Storage reconciliation, hourly after cleanup (the only retention step that calls storage). A put can
+ * land at any time (see Storage.put): after its reservation expired, after the sweeper's deletion ran
+ * and after the reservation's tombstone (158) was spent, or for a reservation that ended before 158
+ * existed. Listing the bucket finds every upload object that has had no reservation and no attachment
+ * for a day and queues its deletion; the same object found again later is queued again. Each run
+ * continues from a stored cursor and starts over at the end, so a large bucket is covered over several
+ * runs. Tombstones remain the fast path.
+ */
+const UPLOAD_KEY = /^[^/]+\/attachments\/[^/]+$/, RECONCILE_PAGES = 20;
+export async function reconcileUploads(runtime: Runtime, budgetMs = 60_000) {
+  if (!runtime.storage.list) return 0;
+  try { return await reconcilePages(runtime, Date.now() + budgetMs); }
+  catch { log('warn', { code: 'UPLOAD_RECONCILE_FAILED', message: 'The next hourly run resumes the storage listing.' }); return 0; }
+}
+async function reconcilePages(runtime: Runtime, deadline: number) {
+  let queued = 0, after = (await runtime.db.execute<{ after: string }>(sql`SELECT after FROM sending_upload_reconcile WHERE id='uploads'`)).rows[0]?.after ?? '';
+  for (let page = 0; page < RECONCILE_PAGES && Date.now() < deadline; page++) {
+    const listed = await runtime.storage.list!('', after || undefined), old = Date.now() - DAY_MS, next = listed.cursor ?? '';
+    const keys = listed.objects.filter(o => UPLOAD_KEY.test(o.key) && o.uploaded.getTime() <= old).map(o => o.key);
+    // The attachment id is the reservation id; any attachment row with it owns the object.
+    const { rows: [r] } = await runtime.db.execute<{ moved: boolean; n: number }>(sql`WITH moved AS (
+        INSERT INTO sending_upload_reconcile(id,after) VALUES('uploads',${next}) ON CONFLICT(id) DO UPDATE SET after=excluded.after WHERE sending_upload_reconcile.after=${after} RETURNING 1),
+      orphans AS (SELECT key,split_part(key,'/',1) AS wid FROM unnest(${sql.param(keys)}::text[]) key WHERE EXISTS(SELECT FROM moved)
+        AND NOT EXISTS(SELECT FROM sending_attachments a WHERE a.id=split_part(key,'/',3))
+        AND NOT EXISTS(SELECT FROM sending_upload_reservations u WHERE u.id=split_part(key,'/',3))),
+      queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-orphan:'||key,'maintenance.deleteAttachment',wid,jsonb_build_object('key',key) FROM orphans
+        ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status IN ('completed','failed') RETURNING 1)
+      SELECT EXISTS(SELECT FROM moved) AS moved,(SELECT count(*)::int FROM queued) AS n`);
+    // Another reconciler moved the cursor: it owns this page.
+    if (!r?.moved) break;
+    queued += r.n; after = next;
+    if (!next) break;
+  }
+  return queued;
+}
 // Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
 const RETENTION_BUDGET_MS = 4 * 60_000;
 

@@ -9532,6 +9532,38 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query('SELECT FROM sending_upload_tombstones WHERE workspace_id=$1',[wid])).rowCount,0);
     });
   });
+  // Recheck of #57, R5 (tear witness, 8 steps: U1 upload, expire, sweep, purge, day, purge, U1 crash, day -> a put
+  // that landed after its tombstone was spent left an object no record owned).
+  test('attachment upload: storage reconciliation deletes any upload object no record has owned for a day',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js'),{reconcileUploads}=await import('./src/maintenance.js'),{r2Storage}=await import('./src/adapters/storage.js');
+      const wid=runtime.config.workspaceId,day=86_400_000,objects=new Map<string,Date>();
+      t.mock.method(runtime.storage,'put',async(key:string)=>{objects.set(key,new Date());});
+      // The bucket as the hourly reconciliation lists it, two objects a page.
+      runtime.storage.list=async(prefix:string,after?:string)=>{
+        const keys=[...objects.keys()].filter(k=>k.startsWith(prefix)&&(!after||k>after)).sort();
+        return {objects:keys.slice(0,2).map(key=>({key,uploaded:objects.get(key)!})),cursor:keys.length>2?keys[1]:undefined};
+      };
+      const kept=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
+      const old=new Date(Date.now()-2*day),orphan=`${wid}/attachments/attachment_orphan`,young=`${wid}/attachments/attachment_young`,asset=`${wid}/templates/assets/tasset_x`;
+      // The orphan's put landed after every record of its upload was gone; the young one may still be published.
+      for(const key of [...objects.keys()])objects.set(key,old);
+      objects.set(orphan,old);objects.set(young,new Date());objects.set(asset,old);
+      const deletions=async()=>(await db.query("SELECT payload->>'key' k FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status='pending' ORDER BY 1",[wid])).rows.map(r=>r.k);
+      await reconcileUploads(runtime);
+      assert.deepEqual(await deletions(),[orphan],'only the unowned upload object a day old is queued');
+      assert.equal(kept.id.length>0,true);
+      // Found again (a put landing after its deletion), it is queued again.
+      await db.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='maintenance.deleteAttachment'",[wid]);
+      await reconcileUploads(runtime);
+      assert.deepEqual(await deletions(),[orphan]);
+      // An R2 binding put cannot be cancelled once started, but an already aborted one never starts.
+      let started=0;
+      const r2=r2Storage({put:async()=>{started++;}} as unknown as R2Bucket);
+      await assert.rejects(r2.put('k',new Uint8Array(1),'text/plain',AbortSignal.abort()));
+      assert.equal(started,0);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');

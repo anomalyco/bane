@@ -24,10 +24,16 @@ export interface Actor {
 export interface Storage {
   // Identity for reusable immutable bytes only, never pending request-bound I/O.
   readonly cacheScope?: object;
-  /** `signal` bounds the put where the backend supports it (S3); a Worker invocation bounds an R2 binding put. */
+  /**
+   * `signal` cancels an S3 put; an R2 binding put cannot be cancelled once it starts (an already
+   * aborted signal still stops it). No backend bounds when a put can land, so the hourly cleanup
+   * reconciles storage against its records instead (maintenance.ts).
+   */
   put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
   delete(key: string): Promise<void>;
+  /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
+  list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;
 }
 export interface Config {
   /** Requests per minute per credential. */

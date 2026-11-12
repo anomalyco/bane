@@ -230,10 +230,11 @@ export default {
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') {
-        const [{ cleanup }, { checkReputationAlerts }, { mailboxHourly }, { resolveRegionRuntime }] = await core.wrapModuleLoad(() => Promise.all([
+        const [{ cleanup, reconcileUploads }, { checkReputationAlerts }, { mailboxHourly }, { resolveRegionRuntime }] = await core.wrapModuleLoad(() => Promise.all([
           import('./maintenance.js'), import('./reputation-alerts.js'), import('./mailbox-ingest.js'), import('./ses-region-state.js'),
         ]));
         await cleanup(runtime);
+        await reconcileUploads(runtime);
         // Alerts are best-effort and must not stop the minute recovery work below.
         try { await checkReputationAlerts(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
         await mailboxHourly(await resolveRegionRuntime(runtime));

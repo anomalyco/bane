@@ -10,8 +10,13 @@ SET LOCAL lock_timeout='2s';
 -- so that every Worker version is covered. The reservation id is the attachment id, so publishing
 -- (taking the reservation and inserting the attachment in one transaction) removes the tombstone
 -- before it commits. A day later the hourly cleanup queues the object's deletion once more, unless
--- an attachment holds it. Puts are bounded to ten minutes, far inside the hour-long reservation
--- and the tombstone's day.
+-- an attachment holds it.
+--
+-- No storage backend bounds when a put lands (an R2 binding put cannot be cancelled), and a
+-- reservation that ended before this migration left no tombstone. So the hourly cleanup also
+-- reconciles storage itself: it lists the bucket, resuming from the cursor kept here, and queues the
+-- deletion of any upload object that has had no reservation and no attachment for a day.
+CREATE TABLE sending_upload_reconcile(id text PRIMARY KEY,after text NOT NULL);
 CREATE TABLE sending_upload_tombstones(id text PRIMARY KEY,workspace_id text NOT NULL,storage_key text NOT NULL,delete_after timestamptz NOT NULL);
 CREATE INDEX sending_upload_tombstones_due ON sending_upload_tombstones(delete_after);
 

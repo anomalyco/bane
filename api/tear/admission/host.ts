@@ -53,7 +53,7 @@ const DATABASE_URL = await (async () => {
   }
 })();
 
-const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, recoverHeldReceipts }, { setHostedLimits }, { setWorkspaceExemption }, { pauseHostedSending, resumeHostedSending }, { digest }, { cleanup }, { drainJobs }] = await Promise.all([
+const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, recoverHeldReceipts }, { setHostedLimits }, { setWorkspaceExemption }, { pauseHostedSending, resumeHostedSending }, { digest }, { cleanup, reconcileUploads }, { drainJobs }] = await Promise.all([
   import('../../src/app.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-receipts.js'),
   import('../../scripts/set-hosted-limits.js'), import('../../scripts/set-workspace-exemption.js'), import('../../src/states.js'), import('../../src/core.js'), import('../../src/maintenance.js'),
   import('../../src/dispatch.js'),
@@ -540,10 +540,11 @@ async function autoAct(words: string[]): Promise<unknown> {
       if ((await tables_()).has('sending_upload_tombstones')) await auto.client.query("UPDATE sending_upload_tombstones SET delete_after=delete_after-interval '24 hours' WHERE workspace_id=$1", [ws[0]]);
       today++;
       await cleanup({ ...runtime, storage: listing } as Json, 5_000);
+      await reconcileUploads({ ...runtime, storage: listing } as Json);
       return 'ok';
     }
     case 'expire': await auto.client.query("UPDATE sending_upload_reservations SET expires_at=expires_at-interval '1 hour' WHERE workspace_id=$1 AND storage_key<>'tear-seed'", [ws[0]]); return 'ok';
-    case 'sweep': await cleanup({ ...runtime, storage: listing } as Json, 5_000); return 'ok';
+    case 'sweep': await cleanup({ ...runtime, storage: listing } as Json, 5_000); await reconcileUploads({ ...runtime, storage: listing } as Json); return 'ok';
     case 'purge': {
       // Run the queued object deletions through the real job handler.
       await drainJobs({ ...runtime, storage: listing } as Json, 50, 1, 10_000);
