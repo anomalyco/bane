@@ -33,4 +33,4 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
 }
 
 /** A marketing hold (bounces only): marketing is refused while transactional mail keeps flowing. */
-export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', `${reason ?? 'Marketing from this workspace is held after a high hard-bounce rate.'} Transactional mail still sends. Remove the addresses that bounced; Bane reviews the hold.`);
+export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', `${reason ?? 'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending.'} Remove the addresses that bounced; Bane reviews the hold.`);

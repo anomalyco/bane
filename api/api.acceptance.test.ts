@@ -8135,7 +8135,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const marketingHold = async () => (await db.query('SELECT marketing_held_at,marketing_hold_reason FROM provider_connections WHERE workspace_id=$1',[wid])).rows[0];
       await checkHostedHealth(runtime); assert.equal(await pause(),null);
       assert.match((await marketingHold()).marketing_hold_reason,/hard-bounce/);
-      assert.match(error(await send({kind:'marketing'}),409,'MARKETING_HELD').message,/Transactional mail still sends/);
+      assert.equal(error(await send({kind:'marketing'}),409,'MARKETING_HELD').message,'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending. Remove the addresses that bounced; Bane reviews the hold.');
       ok(await send(),202); ok(await thread(),202);
       assert.equal((await db.query(`SELECT FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rowCount,0,'A marketing hold never disables the SES tenants.');
       // Complaints pause everything, the stronger signal, even while marketing is held.
