@@ -5592,7 +5592,8 @@ describe('Operational configuration and public event boundaries', () => {
         await drainJobs(runtime,1,1);
         assert.equal((await db.query('SELECT status FROM operation_deliveries WHERE id=$1',[queued.id])).rows[0].status,'paused');
         ok(await local('PATCH', path, { paused:false, headers: [{ name: 'Authorization', value: replaced }] }));
-        assert.equal((await db.query("SELECT 1 FROM jobs WHERE payload->>'deliveryId'=$1 AND payload->>'generation'='1' AND status='pending'",[queued.id])).rowCount,1);
+        // The resumed job continues the delivery's attempt count; a pause never refills the retry ceiling.
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE payload->>'deliveryId'=$1 AND payload->>'generation'='1' AND status='pending'",[queued.id])).rows,[{attempts:1}]);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
         await drainJobs(runtime,1,1);
         checkCallback(1, replaced, false);
@@ -5604,6 +5605,27 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(detail.attempts.length, 3); assert.equal(detail.status, 'delivered');
         const serialized = JSON.stringify([ok(await local('GET', `${path}/deliveries`)), detail, logs.flatMap(log => log.mock.calls.map(call => call.arguments))]);
         assert.ok(!serialized.includes(auth) && !serialized.includes(replaced));
+        // Endpoint tests and manual retries draw on the same hourly manual-post budget as inbound
+        // redeliveries; a refused charge leaves no delivery or job behind.
+        const budget = await db.query('SELECT used FROM mailbox_manual_delivery_budget WHERE workspace_id=$1', [runtime.config.workspaceId]);
+        assert.equal(budget.rows[0].used, 2, 'One endpoint test and one manual retry were charged.');
+        await db.query('UPDATE mailbox_manual_delivery_budget SET used=60 WHERE workspace_id=$1', [runtime.config.workspaceId]);
+        error(await local('POST', `${path}/test`), 429, 'WEBHOOK_REDELIVERY_LIMIT');
+        error(await local('POST', `${path}/deliveries/${queued.id}/retry`), 429, 'WEBHOOK_REDELIVERY_LIMIT');
+        assert.equal((await db.query("SELECT count(*)::int AS n FROM operation_deliveries WHERE workspace_id=$1", [runtime.config.workspaceId])).rows[0].n, 1);
+        assert.equal((await db.query("SELECT status, generation FROM operation_deliveries WHERE id=$1", [queued.id])).rows[0].status, 'delivered');
+        assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='operation.webhook' AND status='pending'", [runtime.config.workspaceId])).rows[0].n, 0);
+        // Pause and resume with parked deliveries: one that used its attempts fails, one that has some left continues
+        // from where it stopped, and neither draws on the manual budget (nothing was asked for by hand).
+        ok(await local('PATCH', path, { paused: true }));
+        const parked = ['spent', 'partial'].map(label => `whd_${unique(label).replaceAll('-', '')}`);
+        for (const [i, deliveryId] of parked.entries()) await db.query(`INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload,status,attempt_count,generation,last_error)
+          VALUES ($1,$2,$3,$4,$5,'paused',$6,2,'ENDPOINT_PAUSED')`, [deliveryId, runtime.config.workspaceId, endpoint.id, `evt_parked_${i}_${deliveryId}`, JSON.stringify({ id: `evt_parked_${i}_${deliveryId}`, type: 'email.delivered', createdAt: new Date().toISOString(), workspaceId: runtime.config.workspaceId, region: null, data: {} }), i === 0 ? 10 : 4]);
+        ok(await local('PATCH', path, { paused: false }));
+        assert.deepEqual((await db.query('SELECT status, last_error, generation FROM operation_deliveries WHERE id=$1', [parked[0]])).rows, [{ status: 'failed', last_error: 'WEBHOOK_RETRIES_EXHAUSTED', generation: 2 }]);
+        assert.deepEqual((await db.query('SELECT status, generation FROM operation_deliveries WHERE id=$1', [parked[1]])).rows, [{ status: 'pending', generation: 3 }]);
+        assert.deepEqual((await db.query("SELECT attempts, payload->>'generation' AS generation FROM jobs WHERE workspace_id=$1 AND type='operation.webhook' AND status='pending' AND payload->>'deliveryId' = ANY($2)", [runtime.config.workspaceId, parked])).rows, [{ attempts: 4, generation: '3' }]);
+        assert.equal((await db.query('SELECT used FROM mailbox_manual_delivery_budget WHERE workspace_id=$1', [runtime.config.workspaceId])).rows[0].used, 60);
         throw rollback;
       });
     } catch (cause) { if (cause !== rollback) throw cause; }
