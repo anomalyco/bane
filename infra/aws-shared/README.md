@@ -2,7 +2,7 @@
 
 Production (`009882681002`, `https://bane.mx`) and dev (`905840579680`, `https://dev.bane.mx`) have separate dedicated accounts. No policy or key is shared between them.
 
-The [hosted Pulumi stacks](../pulumi/README.md) own the runtime key and policies, the Ohio mail bucket and receipt rule, and the regional notification topic policies. Before deploying these resources, [authorize the deploy role and inventory existing resources](../../docs/receiving-operations.md). Do not rerun the key bootstrap in these accounts. The renderer below is the policy source for both stacks and the acceptance suite.
+The [hosted Pulumi stacks](../pulumi/README.md) manage the runtime key and three identity policies. Mail controls and both permissions boundaries are operator-owned. Before deploying, complete the [fenced policy transition and live verification](../../docs/receiving-operations.md). Do not rerun the key bootstrap in these accounts. The renderer below is the policy source for both stacks and the acceptance suite.
 
 ## Manual bootstrap reference (non-Pulumi installations)
 
@@ -15,11 +15,11 @@ The [hosted Pulumi stacks](../pulumi/README.md) own the runtime key and policies
    done
    ```
 
-   Review the [IAM boundaries](iam-review.md) and the rendered documents before attaching them to `bane-runtime` only. Use the dev account and origin together when rendering for dev.
+   Render `bane-runtime-boundary` with the same command and installation values. This checked-in v3 ceiling contains the current explicit runtime-action union, grouped to fit IAM's 6,144-character policy limit, with explicit denies for mail-control writes. An operator publishes it and attaches it as the user's permissions boundary **before** attaching identity policies or creating an access key. It is deliberately not part of Pulumi's three mutable identity-policy outputs. Review the [IAM boundaries](iam-review.md) and all rendered documents. Use the dev account and origin together when rendering for dev.
 3. Create an access key for **Application running outside AWS**. Store both values securely and configure `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as secrets on that environment's Worker. No session token. This is not an R2 or administrator key.
 4. Prepare sending independently in Ohio and Virginia; receiving is **Ohio only**. There is no per-domain receipt-rule setup on the shared account. Shared sends, including inline images and attachments, use tenant-conditioned SESv2 `SendEmail`. There is no classic raw-send or SMTP grant. [SES v2 authorization](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sesv2.html) · [classic SES authorization](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ses.html)
 
-Keep `bane-runtime` server-side: it can still send as pool tenants and read pooled mailbox objects. It verifies, but cannot rewrite, the bucket controls, receipt rules, topic policies, subscription attributes, pool configuration sets, their suppression or their event destinations. `bane-deploy` provisions those controls; the operator creates the four pool configuration sets once (below). Only an operator can create or activate a receipt rule **set**; classic SES does not support name-scoped receipt-rule permissions. Strict pauses individual tenants, but AWS still evaluates the account's overall reputation. [SES tenants](https://docs.aws.amazon.com/ses/latest/dg/tenants.html)
+Keep `bane-runtime` server-side: it can still send as pool tenants and read pooled mailbox objects. It verifies, but cannot rewrite, bucket controls, receipt rules, topic policies, subscription attributes, pool configuration sets, their suppression or their event destinations. An operator publishes those controls; ordinary `bane-deploy` cannot restore the removed writes through new runtime identity policies because the independently owned v3 boundary denies them. Only an operator can create or activate a receipt rule **set**; classic SES does not support name-scoped receipt-rule permissions. Strict pauses individual tenants, but AWS still evaluates the account's overall reputation. [SES tenants](https://docs.aws.amazon.com/ses/latest/dg/tenants.html)
 
 In the intended dedicated account, confirm there is no existing active set serving mail. Using the operator principal, not `bane-runtime`, create and activate the Ohio set:
 

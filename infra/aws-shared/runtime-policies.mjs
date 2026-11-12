@@ -13,8 +13,15 @@ export function render(mode, { account, origin } = {}) {
     return [name, policy];
   }));
 }
+// Operator-owned v3 ceiling. Never include it in render()'s Pulumi-managed identity policies.
+export function renderBoundary({ account, origin } = {}) {
+  render('--fresh', { account, origin }); // Same installation validation as the identity documents.
+  const policy = JSON.parse(readFileSync(new URL('./runtime-boundary-policy.json', import.meta.url), 'utf8').replaceAll('YOUR_AWS_ACCOUNT_ID', account).replaceAll('YOUR_STAGE_ORIGIN', origin));
+  if (JSON.stringify(policy).length > 6144) throw new Error('bane-runtime-boundary exceeds 6,144 characters');
+  return policy;
+}
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , mode, name, account, origin] = process.argv;
-  if (process.argv.length !== 6 || mode !== '--fresh' || !names.includes(name)) throw new Error(`Usage: node runtime-policies.mjs --fresh <${names.join('|')}> <account> <https origin>`);
-  console.log(JSON.stringify(render(mode, { account, origin })[name]));
+  if (process.argv.length !== 6 || mode !== '--fresh' || !(names.includes(name) || name === 'bane-runtime-boundary')) throw new Error(`Usage: node runtime-policies.mjs --fresh <${[...names,'bane-runtime-boundary'].join('|')}> <account> <https origin>`);
+  console.log(JSON.stringify(name === 'bane-runtime-boundary' ? renderBoundary({ account, origin }) : render(mode, { account, origin })[name]));
 }

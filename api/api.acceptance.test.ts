@@ -23,11 +23,12 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
   const like=(pattern:string,value:string)=>new RegExp('^'+pattern.replace(/[.+^${}()|[\]\\]/g,'\\$&').replaceAll('*','.*').replaceAll('?','.')+'$','is').test(value);
   const matches=(list:string|string[]|undefined,not:string|string[]|undefined,value:string)=>list!==undefined ? [list].flat().some(p=>like(p,value)) : not!==undefined && ![not].flat().some(p=>like(p,value));
   const condition=(op:string,key:string,want:string|string[])=>{
-    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat();
+    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat().map(value=>value.replace(/\$\{([^}]+)\}/g,(_match,name:string)=>typeof context[name]==='string'?context[name] as string:'\0missing'));
     switch(op){
       case 'StringEquals':case 'Bool':case 'ArnEquals':return values.length>0 && values.some(v=>wanted.includes(v));
       case 'StringLike':case 'ArnLike':return values.length>0 && values.some(v=>wanted.some(w=>like(w,v)));
       case 'StringNotEquals':return !values.some(v=>wanted.includes(v));
+      case 'StringNotLike':case 'ArnNotLike':return !values.some(v=>wanted.some(w=>like(w,v)));
       case 'StringEqualsIfExists':case 'ArnEqualsIfExists':return !values.length || values.some(v=>wanted.includes(v));
       case 'ForAllValues:StringEquals':return values.every(v=>wanted.includes(v));
       case 'Null':return (wanted[0]==='true')===(have===undefined);
@@ -201,6 +202,72 @@ test('deploy role documents: mail controls, gateway roles and task publication a
   const fence:IamStatement={Effect:'Deny',Action:'*',Resource:'*'};
   for(const interim of [unlimited,[...unlimited,...deploy],deploy]) for(const action of ['iam:CreatePolicyVersion','iam:PutRolePolicy','ecs:RegisterTaskDefinition','s3:PutBucketPolicy'])
     assert.equal(iamAllows([...interim,fence],action,'*',{}),false,`${stage} fenced ${action}`);
+  }
+});
+test('runtime boundary v3: every current runtime permission fits and mail-control escalation stays denied',async()=>{
+  const {render,renderBoundary}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href);
+  const unlimited:IamStatement[]=[{Effect:'Allow',Action:'*',Resource:'*'}];
+  const list=(value:string|string[]|undefined)=>value===undefined?[]:[value].flat();
+  const concrete=(value:string)=>value==='*'?'*':value.replace('arn:aws:iam::*:','arn:aws:iam::111122223333:').replaceAll('?','a').replaceAll('*','fixture');
+  // IAM only authorizes an action against its service's supported resource types. The checked-in
+  // identity policies group unrelated actions/resources, so don't manufacture impossible AWS calls.
+  const supported=(action:string,resource:string)=>{
+    if(resource==='*')return true;
+    if(action==='sts:AssumeRole')return resource.startsWith('arn:aws:iam:');
+    const service=action.split(':')[0];if(!resource.startsWith(`arn:aws:${service}:`))return false;
+    if(service!=='ses')return true;
+    const type=resource.split(':').slice(5).join(':').split('/')[0];
+    if(action==='ses:SendEmail')return ['identity','configuration-set'].includes(type!);
+    if(action.includes('TenantResourceAssociation'))return ['identity','configuration-set','tenant'].includes(type!);
+    if(action==='ses:UpdateReputationEntityPolicy')return ['tenant','reputation-policy'].includes(type!);
+    if(action==='ses:TagResource')return ['identity','tenant'].includes(type!);
+    if(action==='ses:ListResourceTenants')return type==='identity';
+    if(action.includes('ConfigurationSet'))return type==='configuration-set';
+    if(action.includes('Tenant'))return type==='tenant';
+    if(action.includes('Identity') || action==='ses:ListResourceTenants')return type==='identity';
+    return true;
+  };
+  for(const [account,origin] of [['905840579680','https://dev.bane.mx'],['009882681002','https://bane.mx']]){
+    const runtime=(Object.values(render('--fresh',{account,origin})) as {Statement:IamStatement[]}[]).flatMap(p=>p.Statement);
+    const document=renderBoundary({account,origin}) as {Statement:IamStatement[]},boundary=document.Statement;
+    assert.ok(JSON.stringify(document).length<=6144,'customer-managed policy size');
+    const actions=(statements:IamStatement[])=>[...new Set(statements.filter(s=>s.Effect==='Allow').flatMap(s=>list(s.Action)))].sort();
+    assert.deepEqual(actions(boundary),actions(runtime),'the boundary allows only the current explicit action union');
+    const exercised=new Set<string>();
+    for(const statement of runtime.filter(s=>s.Effect==='Allow'))for(const action of list(statement.Action))for(const pattern of list(statement.Resource)){
+      const resource=concrete(pattern);if(!supported(action,resource))continue;
+      const region=/^arn:aws:[^:]+:(us-east-[12]):/.exec(resource)?.[1]??'us-east-2';
+      const ctx:Record<string,string|string[]>={'aws:RequestedRegion':region,'aws:ResourceAccount':action==='sts:AssumeRole'?'111122223333':account!,'s3:ResourceAccount':account!,'ses:ClickTrackingEnabled':'true','ses:OpenTrackingEnabled':'true','ses:ApiVersion':'2'};
+      for(const op of ['StringLike','ArnLike','StringEquals','ArnEquals','ForAllValues:StringEquals','StringNotEquals','Null'])for(const [key,want] of Object.entries(statement.Condition?.[op]??{})){
+        const values=list(want).map(v=>v.replace(/\$\{([^}]+)\}/g,(_match,name:string)=>String(ctx[name]??'fixture')));
+        if(op==='Null'){if(values[0]==='true')delete ctx[key];else ctx[key]??='fixture';}
+        else if(op==='StringNotEquals'){if(values.includes(String(ctx[key])))ctx[key]='foreign';}
+        else if(op==='ForAllValues:StringEquals')ctx[key]=values;
+        else if(op.endsWith('Like'))ctx[key]=concrete(values[0]!);
+        else if(!values.includes(String(ctx[key])))ctx[key]=values[0]!;
+      }
+      assert.equal(iamAllows(runtime,action,resource,ctx),true,`runtime witness ${action} ${resource}`);
+      assert.equal(iamAllows(boundary,action,resource,ctx),true,`boundary excludes ${action} ${resource}`);
+      exercised.add(action);
+    }
+    assert.deepEqual([...exercised].sort(),actions(runtime),'every allowed action has an operational witness');
+    const mail=`arn:aws:s3:::bane-${account}-mail-us-east-2`,topic=`arn:aws:sns:us-east-2:${account}:bane-feedback`,identity=`arn:aws:ses:us-east-2:${account}:identity/bane.mx`;
+    for(const [action,resource] of [
+      ...['s3:PutBucketPolicy','s3:DeleteBucketPolicy','s3:PutBucketAcl','s3:PutBucketPublicAccessBlock','s3:PutLifecycleConfiguration'].map(a=>[a,mail]),
+      ...['sns:CreateTopic','sns:SetTopicAttributes','sns:SetSubscriptionAttributes','sns:AddPermission','sns:RemovePermission'].map(a=>[a,topic]),
+      ...['ses:PutIdentityPolicy','ses:DeleteIdentityPolicy','ses:CreateEmailIdentityPolicy','ses:UpdateEmailIdentityPolicy','ses:DeleteEmailIdentityPolicy'].map(a=>[a,identity]),
+      ...['ses:CreateReceiptRule','ses:UpdateReceiptRule','ses:DeleteReceiptRule','ses:CreateReceiptRuleSet','ses:DeleteReceiptRuleSet','ses:SetActiveReceiptRuleSet','ses:SetReceiptRulePosition','ses:ReorderReceiptRuleSet','ses:CreateConfigurationSet','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSetEventDestination','ses:PutConfigurationSetSuppressionOptions'].map(a=>[a,'*']),
+    ] as [string,string][]){
+      const ctx={'aws:RequestedRegion':'us-east-2','s3:ResourceAccount':account!};
+      assert.equal(iamAllows(boundary,action,resource,ctx),false,action);
+      assert.equal(iamAllows([...unlimited,...boundary],action,resource,ctx),false,`${action} is an explicit deny even after an unlimited grant`);
+    }
+    for(const [action,resource,ctx] of [
+      ['iam:CreateAccessKey',`arn:aws:iam::${account}:user/bane-runtime`,{}],['iam:CreatePolicyVersion',`arn:aws:iam::${account}:policy/bane-runtime-boundary`,{}],
+      ['sts:AssumeRole',`arn:aws:iam::${account}:role/Bane-${'a'.repeat(20)}`,{'sts:RoleSessionName':'Bane','aws:ResourceAccount':account!}],
+      ['sns:Subscribe',topic,{'sns:Protocol':'https','sns:Endpoint':'https://foreign.example/v1/events/ses'}],
+      ['ses:DeleteEmailIdentity',identity,{}],['ses:CreateTenantResourceAssociation',identity,{}],['ses:TagResource',identity,{}],
+    ] as [string,string,Record<string,string>][])assert.equal(iamAllows(boundary,action,resource,{'aws:RequestedRegion':'us-east-2',...ctx}),false,action);
   }
 });
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
