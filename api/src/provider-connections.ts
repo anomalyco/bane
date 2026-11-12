@@ -294,6 +294,35 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   }
 });
 
+// A pause disables the workspace's SES tenants in every region and a resume enables them, so a Bane bug still can't send
+// for a paused workspace. The job reads the current pause, not the one that queued it, so retries and races converge.
+// AWS denying the call (the runtime policy lacks ses:UpdateReputationEntityCustomerManagedStatus) ends the job; the hourly
+// health check queues it again until the applied status matches. Tenants not provisioned yet have nothing to switch.
+export const tenantStatusJob: JobHandler = retryDatabaseFailures(async (runtime, _payload, job) => {
+  if (!runtime.config.multiTenant) return;
+  const wid = job.workspaceId;
+  const { rows } = await runtime.db.execute<{ id: string; region: string; paused: boolean; tenant: string | null; arn: string | null; ready: boolean; managed_tenant: boolean }>(sql`SELECT c.id,r.region,c.paused_at IS NOT NULL AS paused,r.tenant_state='ready' AS ready,
+    CASE WHEN r.legacy THEN c.pool_tenant_name ELSE r.pool_tenant_name END AS tenant,o.arn,r.managed_tenant
+    FROM provider_connections c JOIN provider_connection_regions r ON r.connection_id=c.id LEFT JOIN hosted_tenant_ownership o ON o.workspace_id=c.workspace_id AND o.region=r.region
+    WHERE c.workspace_id=${wid} AND c.kind='shared' ORDER BY r.region`);
+  if (!rows.length) return;
+  const status = rows[0]!.paused ? 'DISABLED' : 'ENABLED';
+  if (!isSimulatedSes(runtime)) {
+    const { setTenantSendingStatus, mxResourceName } = await wrapModuleLoad(() => import('./ses-setup.js'));
+    for (const row of rows.filter(r => r.ready)) {
+      const name = row.tenant ?? (row.managed_tenant ? mxResourceName(wid) : `bane-${wid}`);
+      try { await setTenantSendingStatus(runtime, row.region, name, row.arn, status); }
+      catch (error) {
+        if (error instanceof ApiError && error.code === 'AWS_ACCESS_DENIED') { log('error', { code: 'SES_TENANT_STATUS_DENIED', workspaceId: wid, region: row.region, status }); return; }
+        throw error;
+      }
+    }
+  }
+  // Record only what was applied for the state just read; a pause or resume since then queued the job again.
+  await runtime.db.execute(sql`UPDATE provider_connections SET tenant_status_applied=${status} WHERE id=${rows[0]!.id} AND (paused_at IS NOT NULL)=${status === 'DISABLED'}`);
+  log('info', { code: 'SES_TENANT_STATUS_SET', workspaceId: wid, status, tenants: rows.filter(r => r.ready).length, simulated: isSimulatedSes(runtime) });
+});
+
 // Platform maintenance, never called by an HTTP request. One failed tenant or region must not stop the rest.
 export async function reconcileSharedConnections(runtime: Runtime) {
   if (!runtime.config.multiTenant || isSimulatedSes(runtime)) return;

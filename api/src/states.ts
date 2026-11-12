@@ -229,11 +229,26 @@ export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_st
 
 // This is a sending hold, not a provisioning failure: claims and inbound routing keep working.
 // `unhealthy` supplies the shared connection id, workspace, counts, and reason from the hourly snapshot.
-export const pauseHostedSending = (unhealthy: SQL) => sql`UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=h.reason
+// The same statement queues the SES tenant status job, which disables the workspace's tenants as a backstop.
+export const pauseHostedSending = (unhealthy: SQL) => sql`WITH paused AS (UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=h.reason
   FROM (${unhealthy}) h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND pc.resumed_at IS NOT DISTINCT FROM h.resumed_at AND h.reason IS NOT NULL
-  RETURNING pc.workspace_id,pc.pause_reason,h.sends,h.bounces,h.complaints`;
-export const resumeHostedSending = (wid: string) => sql`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resumed_at=clock_timestamp()
-  WHERE workspace_id=${wid} AND kind='shared' AND paused_at IS NOT NULL RETURNING workspace_id`;
+  RETURNING pc.workspace_id,pc.pause_reason,h.sends,h.bounces,h.complaints,h.rejected,h.screened), queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})
+  SELECT * FROM paused`;
+/** Queues the job that sets the workspace's SES tenants to match its pause (retry-safe by id; the job reads the current state). */
+export const queueTenantStatus = (workspaces: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'hosted.tenantStatus:'||workspace_id,'hosted.tenantStatus',workspace_id,'{}'::jsonb FROM (${workspaces}) w
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
+export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null };
+/** An operator resume. It keeps the sender's history (only the reviewed bounces and complaints before it are forgiven),
+ *  restores `percent` of the limit for 48 hours, re-enables the SES tenants and writes the audit row, in one statement. */
+export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null }: HostedResume) => sql`WITH previous AS (
+    SELECT id,paused_at,pause_reason FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' AND paused_at IS NOT NULL FOR UPDATE
+  ), resumed AS (UPDATE provider_connections pc SET paused_at=NULL,pause_reason=NULL,resumed_at=clock_timestamp(),
+    restore_until=${percent < 100 ? sql`clock_timestamp()+interval '48 hours'` : sql`NULL`},restore_percent=${percent < 100 ? percent : null}::smallint
+    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,pc.restore_until),
+  audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'resume-hosted-sending',
+    jsonb_build_object('reason',${reason}::text,'via',${via}::text,'operator',${operator}::text,'pauseReason',pause_reason,'restorePercent',${percent}::int,'restoreUntil',restore_until) FROM resumed),
+  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed`)})
+  SELECT workspace_id FROM resumed`;
 
 // Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its
 // delivery. `total`, `prepared` and `expanded` are cursors into the frozen recipient list, `canceled` counts

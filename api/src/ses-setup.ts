@@ -793,6 +793,20 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }
 
+/** Bane's own switch on a workspace tenant (customer-managed status), set by a pause or resume as a backstop to the
+ *  database hold. It is separate from AWS's own status: ENABLED never lifts a pause AWS applied. Returns the ARN. */
+export async function setTenantSendingStatus(runtime: Runtime, region: string, tenantName: string, arn: string | null, status: 'ENABLED' | 'DISABLED') {
+  const context = setupContext(20_000), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const { GetTenantCommand, UpdateReputationEntityCustomerManagedStatusCommand } = c.sdk.sesv2;
+  try {
+    const tenantArn = arn ?? (await c.ses.send(new GetTenantCommand({ TenantName: tenantName }), opts)).Tenant?.TenantArn;
+    if (!tenantArn?.startsWith(`arn:aws:ses:${region}:`)) throw new ApiError(409, 'TENANT_MISMATCH', 'SES did not return the expected tenant.');
+    await c.ses.send(new UpdateReputationEntityCustomerManagedStatusCommand({ ReputationEntityType: 'RESOURCE', ReputationEntityReference: tenantArn, SendingStatus: status }), opts);
+    return tenantArn;
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
+}
+
 export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string, managed=false,namespace?:'trusted'|'probation',persistedName?:string|null,
   journal?:{arn:string|null;created:(arn:string)=>Promise<void>;fence:()=>Promise<void>}) {
   const context = setupContext(20_000), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };

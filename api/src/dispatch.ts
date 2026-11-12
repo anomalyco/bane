@@ -40,6 +40,7 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
     if (type === 'hosted.trusted') return (await import('./trusted-pool.js')).trustedProvision;
     if (type === 'byo.verify') return (await import('./provider-connections.js')).byoVerifyJob;
     if (type === 'tenant.provision') return (await import('./provider-connections.js')).tenantJob;
+    if (type === 'hosted.tenantStatus') return (await import('./provider-connections.js')).tenantStatusJob;
     if (type.startsWith('byo.')) return (await import('./byo-regional.js')).regionalByoJobs[type];
     return undefined;
   });

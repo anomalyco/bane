@@ -824,8 +824,8 @@ pub struct Ws {
     pub pend_cap: Option<i64>,
     pub exempt: bool,
     pub paused: bool,
-    /// Weeks since the shared connection was created; clean accepted recipients a day ago in the
-    /// current health epoch (a resume starts a new epoch).
+    /// Weeks since the shared connection was created; clean accepted recipients a day ago. A resume
+    /// keeps this history (it forgives only the reviewed bounces and complaints).
     pub weeks: i64,
     pub history: i64,
 }
@@ -1158,9 +1158,6 @@ impl Send {
                                 break 'run true;
                             }
                             w.paused = op == "pause";
-                            if op == "resume" {
-                                w.history = 0;
-                            }
                             t.ws = Some((x, w));
                             t.result = json!("ok");
                         }
@@ -1200,12 +1197,7 @@ impl Send {
                 match t.words[0].as_str() {
                     "limits" => (cur.send_cap, cur.pend_cap) = (w.send_cap, w.pend_cap),
                     "exempt" => cur.exempt = w.exempt,
-                    _ => {
-                        cur.paused = w.paused;
-                        if t.words[0] == "resume" {
-                            cur.history = 0;
-                        }
-                    }
+                    _ => cur.paused = w.paused,
                 }
             }
         }

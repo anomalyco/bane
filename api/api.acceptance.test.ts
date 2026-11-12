@@ -6929,14 +6929,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const prepare=()=>trustedProvision(runtime,{connectionId:wid},{workspaceId:wid,id:'hosted.trusted:'+wid,attempts:1});
     // The operator creates both trusted sets with tenant suppression before enrollment (N7).
     for(const stream of POOL_STREAMS)sets.set(`bane-trusted-${stream}`,{ConfigurationSetName:`bane-trusted-${stream}`,Tags:Object.entries(tags('ses-feedback')).map(([Key,Value])=>({Key,Value})),SendingOptions:{SendingEnabled:true},SuppressionOptions:poolSuppression(stream),dest:[]});
-    await assert.rejects(setDomainPool(db,[wid,managed,'trusted'],{...flags,BANE_TRUSTED_POOL:'false'}),/enabled/);
+    await assert.rejects(setDomainPool(db,[wid,managed,'trusted','--reason','Synthetic pool placement'],{...flags,BANE_TRUSTED_POOL:'false'}),/enabled/);
     runtime.config.trustedPool=false;await assert.rejects(prepare(),JobDeferred);assert.deepEqual(calls,[]);runtime.config.trustedPool=true;
-    await setDomainPool(db,[wid,managed,'trusted'],flags);
-    await assert.rejects(setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted'],flags),/release-canary workspace/);
+    await setDomainPool(db,[wid,managed,'trusted','--reason','Synthetic pool placement'],flags);
+    await assert.rejects(setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted','--reason','Synthetic pool placement'],flags),/release-canary workspace/);
     await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('e2e.bane.mx',$1,$1,'verified')",[wid]);
     try {
       await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'e2e.bane.mx',$3)",['dom_'+randomUUID().replaceAll('-',''),wid,oh]);
-      await setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted'],flags);
+      await setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted','--reason','Synthetic pool placement'],flags);
     } finally {
       // This Ohio proof is only for operator authorization, not an SES identity in the Virginia mock.
       await db.query("DELETE FROM hosted_domain_tiers WHERE connection_id=$1 AND name='e2e-trusted.bane.mx'",[wid]);
@@ -6957,7 +6957,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     sets.get('bane-trusted-marketing')!.dest=[poolEventDestination('bane-trusted',topic)];
     await Promise.allSettled([prepare(),prepare()]);await prepare();
     assert.deepEqual(['SetTopicAttributesCommand','SetSubscriptionAttributesCommand','CreateTopicCommand','SubscribeCommand','CreateTenantCommand','CreateConfigurationSetCommand','CreateConfigurationSetEventDestinationCommand','PutConfigurationSetSuppressionOptionsCommand'].map(n=>calls.filter(c=>c===n).length),[0,0,0,1,1,0,0,0]);
-    const added=ok(await api('POST','/v1/domains',{name:managed}),201);assert.equal(added.region,va);await assert.rejects(setDomainPool(db,[wid,managed,'probation'],flags),/Already bound/);
+    const added=ok(await api('POST','/v1/domains',{name:managed}),201);assert.equal(added.region,va);await assert.rejects(setDomainPool(db,[wid,managed,'probation','--reason','Synthetic pool placement'],flags),/Already bound/);
     const {operationJobs}=await import('./src/operations.js');await operationJobs['domain.verify']!(runtime,{domainId:added.id,token:managedTags[0]!.Value},{workspaceId:wid,id:'verify',attempts:1});
     assert.equal(ok(await api('GET',`/v1/domains/${added.id}`)).ready,true);
     const {adoptionFacts}=await import('./src/adopted-identity.js');const rows=Array.from({length:12},(_,i)=>{const name=`adopted-${i}.fixture.test`;return {arn:`arn:aws:ses:${va}:${acct}:identity/${name}`,...adoptionFacts(identity(name) as any)};});
@@ -7948,7 +7948,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'limits.example', from = `sender@${domain}`;
       Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
-      const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending]);
+      const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending, '--reason', 'Synthetic limit change']);
       await assert.rejects(limits('100', 'default'), /No Hosted connection/);
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:feedback`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,created_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now()-interval '6 days 23 hours')`, [wid,REGION,pool]);
@@ -8081,7 +8081,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const c = ok(await local('POST','/v1/campaigns',{name:unique('guard'),from,subject:'Cap',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
       // 99 real recipients already admitted. 112 minus the 12-recipient reserve leaves one marketing slot.
       const {setHostedLimits}=await import('./scripts/set-hosted-limits.js');
-      await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default']);
+      await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default','--reason','Synthetic limit change']);
       error(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),422,'HOSTED_AUTO_PAUSE_REQUIRED');
       ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);
       error(await local('POST',`/v1/campaigns/${c.id}/pacing`,{perDay:null,autoPause:false}),422,'HOSTED_AUTO_PAUSE_REQUIRED');
@@ -8103,7 +8103,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await run('campaign.run');
       const resumed=ok(await local('GET',`/v1/campaigns/${c.id}`));
       assert.equal(resumed.delivery.expanded,3); assert.equal(resumed.delivery.waiting,null,'Hour expiry releases the tail without a resume request.');
-      await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']);
+      await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default','--reason','Synthetic limit change']);
       await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
       error(await batch(100),429,'SEND_LIMIT_REACHED');
       await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',100,0,0)",[wid]);
@@ -8130,7 +8130,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (const attempt of [send,()=>batch(1),thread,()=>send({to:simulator})]) error(await attempt(),409,'HOSTED_SENDING_PAUSED');
       const report = await runDispatcher(runtime,{region:REGION, accountId:pool}); assert.equal(report.sent,0); assert.equal(report.claimed,0);
       assert.deepEqual((await db.query('SELECT status,lease_until FROM sending_emails WHERE id=$1',[queued])).rows,[{status:'queued',lease_until:null}]);
-      await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await pause(),null);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100})); assert.equal(await pause(),null);
       await checkHostedHealth(runtime); assert.equal(await pause(),null,'Reviewed events cannot re-pause the workspace.');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const ses = t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
@@ -8144,20 +8144,102 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await event('complaint',1,2); await checkHostedHealth(runtime); assert.equal(await pause(),null);
       await event('complaint',2,3); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       error(await send(),409,'HOSTED_SENDING_PAUSED');
-      await runtime.db.execute(resumeHostedSending(wid));
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100}));
       await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1`,[wid]);
-      // At 200 sends, six hard bounces are exactly 3% (not over); seven exceed the rate despite being <10.
+      // A pause needs the count and the rate together. At 200 sends, nine hard bounces (4.5%) are fewer than ten.
       const accept200 = () => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at)
         SELECT gen_random_uuid()::text,$1,id,'accepted',false,clock_timestamp() FROM sending_emails WHERE workspace_id=$1 AND NOT simulated AND status<>'suppressed' AND to_addresses->>0<>$2 LIMIT 200`,[wid,simulator]);
       await accept200();
       assert.equal((await db.query(`SELECT count(*)::int n FROM sending_email_events WHERE workspace_id=$1`,[wid])).rows[0].n,200);
-      await event('bounce',0,6,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null);
-      await event('bounce',6,7,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.match((await pause()).reason,/hard-bounce/);
-      await runtime.db.execute(resumeHostedSending(wid));
+      await event('bounce',0,9,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await event('bounce',9,10,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.match((await pause()).reason,/hard-bounce/);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100}));
       await accept200();
-      await event('complaint',0,1); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      // One complaint (0.5% of 200) no longer pauses a small sender; a second one does.
+      await event('complaint',0,1); await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await event('complaint',1,2); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));
       error(await local('DELETE','/v1/connection'),409,'HOSTED_SENDING_PAUSED'); // No self-service unpause via disconnect.
+    });
+  });
+  test('MX: screen rejections are charged and can pause; a resume keeps history at half the limit for 48 h, switches the SES tenants and is audited', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { checkHostedHealth } = await import('./src/maintenance.js');
+      const { tenantStatusJob } = await import('./src/provider-connections.js');
+      const { resumeHosted } = await import('./scripts/resume-hosted-sending.js');
+      const { SESv2Client, GetTenantCommand, UpdateReputationEntityCustomerManagedStatusCommand } = await import('@aws-sdk/client-sesv2');
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'screened.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,created_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now()-interval '8 days')`,[wid,REGION,pool]);
+      await db.query(`UPDATE provider_connections SET pool_tenant_name='bane-probation-'||id WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
+      const me = async () => ok(await local('GET','/v1/me')).connection;
+      const usage = async () => Number((await db.query('SELECT coalesce(sum(recipients),0) AS n FROM hosted_usage_hourly WHERE workspace_id=$1',[wid])).rows[0].n);
+
+      // A content-screen rejection keeps its charge; any other rejection is refunded as before.
+      const [spam, broken] = ok(await local('POST','/v1/emails/batch',{emails:[{from,to:'a@example.net',subject:'S',text:'x'},{from,to:'b@example.net',subject:'S',text:'x'}]}),202).data;
+      assert.equal(await usage(), 2);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='CONTENT_REJECTED_SPAM' WHERE id=$1`,[spam.id]);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`,[broken.id]);
+      assert.equal(await usage(), 1, 'Only the screen rejection still counts against the limit.');
+
+      // 24 more rejections (25 in all) out of 225 screened is 11%: over both the count and the rate.
+      const insert = (n: number, status: string, code: string | null) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,error_code,provider_id,created_at)
+        SELECT 'email_'||md5(random()::text),$1,$2,'fixture',$3,'["c@example.net"]','[]','[]','S','{}',false,$4,$5,CASE WHEN $5::text IS NULL THEN md5(random()::text) END,now()-interval '1 hour' FROM generate_series(1,$6)`,[wid,REGION,from,status,code,n]);
+      await insert(198, 'delivered', null); await insert(23, 'rejected', 'CONTENT_REJECTED_SPAM');
+      await checkHostedHealth(runtime); assert.equal((await me()).sendingPause, null, '24 rejections are under the count.');
+      await insert(1, 'rejected', 'CONTENT_REJECTED_SPAM');
+      await checkHostedHealth(runtime);
+      assert.match((await me()).sendingPause.reason, /content screen/);
+      error(await local('POST','/v1/emails/send',{from,to:'d@example.net',subject:'S',text:'x'}),409,'HOSTED_SENDING_PAUSED');
+
+      // The pause queued the SES tenant switch. It disables every ready tenant and records what it applied.
+      const job = { id: 'job_tenant_status', workspaceId: wid, attempts: 1 };
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rows[0]?.status, 'pending');
+      let denied = true;
+      const calls: { status?: string; arn?: string }[] = [];
+      const ses = t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetTenantCommand) return { Tenant: { TenantName: cmd.input.TenantName, TenantArn: `arn:aws:ses:${REGION}:${pool}:tenant/${cmd.input.TenantName}/t-1` } };
+        assert.ok(cmd instanceof UpdateReputationEntityCustomerManagedStatusCommand);
+        if (denied) throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
+        calls.push({ status: cmd.input.SendingStatus, arn: cmd.input.ReputationEntityReference }); return {};
+      });
+      try {
+        await tenantStatusJob(runtime, {}, job);
+        assert.equal((await db.query(`SELECT tenant_status_applied FROM provider_connections WHERE id=$1`,[wid])).rows[0].tenant_status_applied, null, 'AWS denied the call: nothing was applied.');
+        await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`,[`hosted.tenantStatus:${wid}`]);
+        await checkHostedHealth(runtime);
+        assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rows[0].status, 'pending', 'The hourly check retries an unapplied status.');
+        denied = false;
+        await tenantStatusJob(runtime, {}, job);
+        assert.deepEqual(calls, [{ status: 'DISABLED', arn: `arn:aws:ses:${REGION}:${pool}:tenant/bane-probation-${wid}/t-1` }]);
+        assert.equal((await db.query(`SELECT tenant_status_applied FROM provider_connections WHERE id=$1`,[wid])).rows[0].tenant_status_applied, 'DISABLED');
+
+        // A history worth the second-week cap (1,000): eight days old and 150 clean recipients, all before the pause.
+        await db.query(`INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',150,0,0)`,[wid]);
+        await assert.rejects(resumeHosted(db as never, [wid, '--reason', 'short']), /at least 10 characters/);
+        await resumeHosted(db as never, [wid, '--reason', 'Reviewed: the template was fixed']);
+        const resumed = await me();
+        assert.equal(resumed.sendingPause, null);
+        assert.equal(resumed.sendingLimit.cap, 500, 'The resume keeps the history and restores half of the 1,000 limit.');
+        assert.equal(resumed.sendingLimit.nextCap, 1000);
+        assert.ok(Math.abs(Date.parse(resumed.sendingLimit.nextCapAt) - Date.now() - 48 * 3600_000) < 60_000, 'The full limit returns 48 hours after the resume.');
+        const [audit] = (await db.query(`SELECT action,details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='resume-hosted-sending'`,[wid])).rows;
+        assert.equal(audit.details.reason, 'Reviewed: the template was fixed'); assert.equal(audit.details.restorePercent, 50); assert.match(audit.details.pauseReason, /content screen/);
+        await tenantStatusJob(runtime, {}, job);
+        assert.deepEqual(calls.map(c => c.status), ['DISABLED', 'ENABLED']);
+        await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`,[`hosted.tenantStatus:${wid}`]);
+        await checkHostedHealth(runtime);
+        assert.equal((await me()).sendingPause, null, 'The reviewed rejections cannot pause the workspace again.');
+        assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rows[0].status, 'completed', 'Applied: the hourly check does not queue it again.');
+      } finally { ses.mock.restore(); runtime.config.liveEnabled = false; }
+      // Each operator script now refuses to run without a reason and records it in the same transaction.
+      const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
+      await assert.rejects(setHostedLimits(db, [wid, '--send-cap', '10', '--pending-cap', 'default']), /reason/);
+      await setHostedLimits(db, [wid, '--send-cap', '10', '--pending-cap', 'default', '--reason', 'Synthetic support ticket']);
+      const limits = (await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-hosted-limits'`,[wid])).rows[0].details;
+      assert.deepEqual(limits, { old: { sendCap: null, pendingCap: null }, new: { sendCap: 10, pendingCap: null }, reason: 'Synthetic support ticket', via: 'script' });
     });
   });
   test('MX: a workspace-only exemption admits all sending paths without resetting usage or disabling campaign health', async t => {
@@ -8208,7 +8290,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.hostedSendCaps.firstWeek=8;
       error(await send(),429,'SEND_LIMIT_REACHED');
       assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-workspace-exemption'`,[wid])).rows.map(r=>r.details).sort((a,b)=>Number(a.old)-Number(b.old)),
-        [{old:false,new:true,reason:'Synthetic exemption'},{old:true,new:false,reason:'Completed review'}]);
+        [{old:false,new:true,reason:'Synthetic exemption',via:'script'},{old:true,new:false,reason:'Completed review',via:'script'}]);
     });
   });
   for (const kind of ['Bounce','Complaint'] as const) test(`MX: ${kind==='Bounce'?'non-permanent bounces':'only explicit not-spam reports'} do not suppress or charge reputation on either feedback path`,async t=>{
@@ -8404,7 +8486,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await feedback('Complaint',1,[bcc[0],bcc[1],simulator]); await feedback('Complaint',1,[bcc[0].toUpperCase()]);
       assert.equal(await check(),null,'Two distinct complaints / 4,999 real recipients is below 0.05%, even with no sends today.');
       await feedback('Complaint',1,[bcc[2]]); assert.match((await check()).reason,/complaint/,'Three complaints on one envelope exceed the rate; do not double-count Send callbacks.');
-      await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await check(),null);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100})); assert.equal(await check(),null);
       await feedback('Bounce',1,[...bcc.slice(0,9),simulator]); await feedback('Bounce',1,bcc.slice(0,8));
       assert.equal(await check(),null,'Repeated hashes and a simulator bounce do not turn nine hard bounces into ten.');
       await feedback('Bounce',2,[bcc[0]]); assert.match((await check()).reason,/hard-bounce/,'The same Bcc address on another email is a separate hard bounce.');
@@ -8465,8 +8547,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wid=runtime.config.workspaceId; runtime.config.multiTenant=true; runtime.config.sharedRegions=[REGION];
       runtime.config.liveEnabled=true; runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
       const connect=()=>local('POST','/v1/connection',{kind:'shared',region:REGION});
-      ok(await connect(),201); await setHostedLimits(db,[wid,'--send-cap','2','--pending-cap','3']);
-      ok(await local('DELETE','/v1/connection')); await assert.rejects(setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']),/No Hosted connection/);
+      ok(await connect(),201); await setHostedLimits(db,[wid,'--send-cap','2','--pending-cap','3','--reason','Synthetic limit change']);
+      ok(await local('DELETE','/v1/connection')); await assert.rejects(setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default','--reason','Synthetic limit change']),/No Hosted connection/);
       ok(await connect(),201);
       const allowance=(await runtime.db.execute<{a:{cap:number;pendingCapOverride:number}}>(sql`SELECT ${hostedAllowance(runtime.config,wid,1)} a`)).rows[0].a;
       assert.deepEqual([allowance.cap,allowance.pendingCapOverride],[2,3]);

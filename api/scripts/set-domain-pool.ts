@@ -1,3 +1,4 @@
+import { parseArgs } from 'node:util';
 import { Client } from 'pg';
 import { postgresConnection } from '../src/adapters/node.js';
 import { claimNameAllowed, domainName } from '../src/domain-claims.js';
@@ -13,9 +14,12 @@ export function requirePoolFlags(env:Record<string,string|undefined>) {
 // two sending regions' DNS. A graduation requires a staged identity, drain and reviewed cutover.
 export async function setDomainPool(db:Client,args:string[],env:Record<string,string|undefined>=process.env) {
   const platformAccount=requirePoolFlags(env);
-  const [wid,host,tier]=args,prepare=args.length===2 && host==='--prepare-trusted';
+  const {positionals,values}=parseArgs({args,allowPositionals:true,options:{'prepare-trusted':{type:'boolean'},reason:{type:'string'}}});
+  const [wid,host,tier]=positionals,prepare=!!values['prepare-trusted'] && positionals.length===1,reason=values.reason?.trim();
   const canary=host==='e2e-trusted.bane.mx' && tier==='trusted';
-  if (!wid || !prepare && (args.length!==3 || !['probation','trusted'].includes(tier!) || domainName.safeParse(host).data!==host || (!canary && !await claimNameAllowed(host!,env.PUBLIC_URL ?? 'https://bane.mx')))) throw new Error('Usage: set-domain-pool.ts WORKSPACE_ID DOMAIN trusted|probation, or WORKSPACE_ID --prepare-trusted');
+  const usage='Usage: set-domain-pool.ts WORKSPACE_ID DOMAIN trusted|probation --reason "…", or WORKSPACE_ID --prepare-trusted --reason "…" (at least 10 characters)';
+  if (!reason || reason.length<10) throw new Error(usage);
+  if (!wid || !prepare && (values['prepare-trusted'] || positionals.length!==3 || !['probation','trusted'].includes(tier!) || domainName.safeParse(host).data!==host || (!canary && !await claimNameAllowed(host!,env.PUBLIC_URL ?? 'https://bane.mx')))) throw new Error(usage);
   const name=poolTenantName(wid,'trusted');
   await db.query('BEGIN');
   try {
@@ -30,8 +34,8 @@ export async function setDomainPool(db:Client,args:string[],env:Record<string,st
       if (bound && bound.region!==(tier==='trusted'?'us-east-1':'us-east-2')) throw new Error('Already bound in another region. A staged and drained migration is required.');
       const prior=(await db.query('SELECT tier FROM hosted_domain_tiers WHERE connection_id=$1 AND name=$2',[c.id,host])).rows[0]?.tier??'probation';
       await db.query('INSERT INTO hosted_domain_tiers VALUES($1,$2,$3) ON CONFLICT(connection_id,name) DO UPDATE SET tier=excluded.tier',[c.id,host,tier]);
-      await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'set-domain-pool',$2)`,[wid,{domain:host,from:prior,to:tier,connection:c.id}]);
-    }
+      await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'set-domain-pool',$2)`,[wid,{domain:host,from:prior,to:tier,connection:c.id,reason,via:'script'}]);
+    } else await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'prepare-trusted',$2)`,[wid,{connection:c.id,reason,via:'script'}]);
     if (prepare || tier==='trusted') {
       await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name) VALUES($1,'us-east-1',$2) ON CONFLICT DO NOTHING`,[c.id,name]);
       const r=(await db.query(`SELECT sending_state FROM provider_connection_regions WHERE connection_id=$1 AND region='us-east-1' AND NOT legacy AND pool_tenant_name=$2 AND receiving_state='off' FOR UPDATE`,[c.id,name])).rows[0];
