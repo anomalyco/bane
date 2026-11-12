@@ -510,6 +510,18 @@ async function poll(path: string, key: string, predicate: (body: Json) => boolea
 // Each top-level scenario owns its own randomly named fixtures. Operations inside
 // a scenario are sequential; no shared ordering dependency exists between scenarios.
 describe('Public contract and authentication', () => {
+  test('Node server: a public document asked for with HEAD first still serves its whole body', async () => {
+    // The Node server compresses each public document once and reuses the result. No other scenario reads this
+    // operation page, so the HEAD below is its first request with this encoding.
+    const path = '/docs/operations/revokeAgentToken.md', headers = { 'accept-encoding': 'gzip' };
+    assert.equal((await fetch(BASE + path, { method: 'HEAD', headers })).status, 200);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await fetch(BASE + path, { headers });
+      assert.equal(reply.status, 200);
+      assert.match(await reply.text(), /revokeAgentToken/, 'A HEAD must not replace the document with its own empty body.');
+    }
+    assert.equal((await fetch(BASE + path, { method: 'HEAD', headers })).status, 200);
+  });
   test('health and OpenAPI are public, protected routes require credentials', async () => {
     const healthReply = await http('GET', '/health');
     const health = ok(healthReply);
@@ -9895,6 +9907,47 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(readd,w,'The re-add is idempotent and returns the existing domain.');
     const outcome=await send!.then(()=>'committed',(e:Json)=>e===rollback ? queued : String(e?.cause?.code??e?.code??e));
     assert.equal(outcome,'queued','The send continues once the re-add commits.');
+  });
+  // Deadlock guard (docs/ci.md). The two tests above each pin one interleaving. This one runs the pairs behind every dev
+  // 40P01 so far, POST /v1/domains re-adding a domain while sends and mailbox replies from it are admitted, concurrently
+  // and ungated, many times, so a new lock-order inversion between them fails here, not on dev. Add a pair here once its
+  // own fix lands; CI also fails the job on any deadlock Postgres counts during the suite (.github/scripts/acceptance.sh).
+  test('lock order: concurrent domain re-adds, sends and mailbox replies on one domain never deadlock',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
+    const g=await fixtureDatabase(t),w=unique('ldead'),host=w+'.invalid',region='us-fixture-'+w.slice(-8),account=String(Date.now()).slice(-12).padStart(12,'6');
+    const readds=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:4,statement_timeout:10_000});cleanup(t,()=>readds.end());
+    cleanup(t,async()=>{
+      await g.query('DELETE FROM provider_pool_regions WHERE region=$1',[region]);
+      for (const table of ['mailbox_addresses','mailboxes','mailbox_domains','operation_domains','ses_installation_settings','job_schedule']) await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,inbound_bucket) VALUES($1,$2,'ready','fixture-mail')",[region,account]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')",[w,region,account]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    await g.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,receiving_host,region,status,enabled_at) VALUES($1,$1,$1,$2,$2,$3,'active',now())",[w,host,region]);
+    const mailbox=await createMailbox(runtime.db,{workspaceId:w},{domainId:w,domainName:host,address:`reply@${host}`,origin:'api'});
+    const actor={workspaceId:w,permissions:['send'],domains:[],keyId:'fixture-key'} as import('./src/core.js').Actor;
+    // Every mailbox send rolls back: the runner must never dispatch this fixture's mail.
+    const rollback=new Error('Roll back the fixture send');
+    const reply=()=>runtime.db.transaction(async tx=>{await sendFromMailbox(runtime,tx,{mailbox,actor,scope:{workspaceId:w},from:mailbox.address,
+      to:['reader@example.net'],cc:[],bcc:[],replyTo:[],subject:'Lock order',text:'Synthetic.',attachments:[],inReplyTo:null,references:[],headers:[]});throw rollback;}).catch((e:unknown)=>{if(e!==rollback)throw e;});
+    const errors=new Map<string,number>(),note=(e:Json)=>{const code=String(e?.cause?.code??e?.code??e?.message??e);errors.set(code,(errors.get(code)??0)+1);};
+    const started=Date.now();
+    for(let round=0;round<60;round++){
+      const work=[
+        ...Array.from({length:4},()=>readds.query('SELECT id FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')]).then(r=>assert.equal(r.rows[0].id,w,'A re-add returns the existing domain.'))),
+        ...Array.from({length:4},(_,i)=>runtime.db.transaction(tx=>sendingRegion(runtime,tx,actor,`reply@${host}`,undefined,i%2===1))),
+        ...Array.from({length:2},reply),
+      ];
+      for(const r of await Promise.allSettled(work))if(r.status==='rejected')note(r.reason);
+    }
+    t.diagnostic(`60 rounds of 4 re-adds, 4 sends and 2 mailbox replies in ${Date.now()-started} ms.`);
+    assert.deepEqual(Object.fromEntries(errors),{},'Every concurrent re-add and send completes. 40P01 is a lock-order inversion between them.');
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
