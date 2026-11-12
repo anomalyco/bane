@@ -4,6 +4,7 @@ import { useApi, useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Alert, Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
+import { isDuplicateSubmission } from '../../lib/single-flight'
 
 export const liveInterval = 3000
 export const heldInterval = 60_000
@@ -97,12 +98,13 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   }
   const pause = useApiMutation((api, id: string) => api.campaigns.pause(id), 'Sending paused', false, false)
   const resume = useApiMutation((api, id: string) => api.campaigns.resume(id), 'Sending resumed', false, false)
-  const update = useApiMutation((api, input: CampaignPacingInput) => api.campaigns.setPacing(campaign.id, input), 'Pacing updated', false, false)
+  const update = useApiMutation((api, input: CampaignPacingInput) => api.campaigns.setPacing(campaign.id, input), 'Pacing updated', false, false, campaign.id)
   const busy = pause.isPending || resume.isPending || update.isPending
   async function run(action: () => Promise<Campaign>) {
     setError('')
     try { accept(await action()) }
     catch (cause) {
+      if (isDuplicateSubmission(cause)) return
       setError(message(cause))
       // A conflict means the send moved on (finished, paused elsewhere); show its real state.
       void cache.invalidateQueries({ queryKey: campaignKey })

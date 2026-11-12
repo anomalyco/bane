@@ -22,6 +22,7 @@ import { ConceptLine } from './parts'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
+import { useSingleFlight } from '../../lib/single-flight'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -177,8 +178,10 @@ export function RitualsPage() {
       return r.diagnostics
     } catch { return [] }
   }
-  /** Saves the draft (and any attachment to add with it). Resolves false when it didn't save; the reason is shown. */
-  async function save(attachments?: Binding[]): Promise<boolean> {
+  /** Saves the draft (and any attachment to add with it). Resolves false when it didn't save; the reason is shown.
+   *  Single flight, like the writes below: a second Save or ⌘S before the first answers would send the same version again
+   *  and report a conflict next to the success; it gets the first one's result instead. */
+  const save = useSingleFlight('rituals.save', async (attachments?: Binding[]): Promise<boolean> => {
     if (!saved || !config || !keyValid) return false
     setPending(true); setProblems([])
     try {
@@ -193,9 +196,9 @@ export function RitualsPage() {
       toast(`Not saved: ${errorText(e)}`, 'error')
       return false
     } finally { setPending(false) }
-  }
+  })
   /** Attach, detach, reorder and "Run the next one too" save at once; the draft script is left as it is. */
-  async function saveBindings(attachments: Binding[], done: string) {
+  const saveBindings = useSingleFlight('rituals.attachments', async (attachments: Binding[], done: string) => {
     if (!saved) return
     // A ritual that was never saved can't be attached on its own: it is saved with its first attachment.
     if (!isSaved && attachments.some(b => b.ritual === key)) { if (await save(attachments)) setTarget(''); return }
@@ -205,14 +208,14 @@ export function RitualsPage() {
       setSaved(s); setTarget(''); refresh(); toast(done, 'success')
     } catch (e) { toast(errorText(e), 'error') }
     finally { setBinding(false) }
-  }
-  async function remove() {
+  })
+  const remove = useSingleFlight('rituals.delete', async () => {
     if (!saved) return
     const s = await request<Saved>(`/v1/rituals/scripts/${encodeURIComponent(key)}`, { method: 'DELETE', ifMatch: saved.version })
     setSaved(s); refresh(); toast(`${key} deleted`, 'success')
     open(s, s.config.rituals[0]?.key ?? '')
     setParams(current => { const p = new URLSearchParams(current); p.delete('key'); p.delete('new'); return p }, { replace: true })
-  }
+  }, key)
   const leaveGuard = useLeaveGuard(dirty, { what: `the changes to ${key || 'this ritual'}`, save: () => save() })
   // ⌘S / Ctrl+S saves the draft from anywhere on the page, the editor included. A new ritual can be saved as it starts.
   const saveRef = useRef(save)

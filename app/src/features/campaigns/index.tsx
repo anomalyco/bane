@@ -27,6 +27,7 @@ import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAtta
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
 import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { useSingleFlight } from '../../lib/single-flight'
 
 const message = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
@@ -471,14 +472,18 @@ function RescheduleDialog({ campaign, onClose }: { campaign: Campaign; onClose: 
   const [value, setValue] = useState(() => campaign.scheduledAt!.slice(0, 16))
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
-  async function submit(event: FormEvent) {
+  // Single flight: a second Reschedule before the first answers would send the same change again.
+  const reschedule = useSingleFlight('campaigns.reschedule', async (at: string) => {
+    setPending(true)
+    try { const next = await api.campaigns.reschedule(campaign.id, at); accept(next); toast(`Rescheduled for ${utcLabel(next.scheduledAt!)}`, 'success'); onClose() }
+    catch (cause) { setError(message(cause)) }
+    finally { setPending(false) }
+  }, campaign.id)
+  function submit(event: FormEvent) {
     event.preventDefault()
     const problem = scheduleError(value)
     if (problem) { setError(problem); return }
-    setPending(true)
-    try { const next = await api.campaigns.reschedule(campaign.id, parseUtc(value)!.toISOString()); accept(next); toast(`Rescheduled for ${utcLabel(next.scheduledAt!)}`, 'success'); onClose() }
-    catch (cause) { setError(message(cause)) }
-    finally { setPending(false) }
+    void reschedule(parseUtc(value)!.toISOString())
   }
   return <Dialog open onOpenChange={open => { if (!open && !pending) onClose() }} title="Reschedule campaign" description="The audience and message stay as they are. To change them, use Edit instead.">
     <form className="stack" onSubmit={submit} noValidate>
