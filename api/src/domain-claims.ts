@@ -110,10 +110,6 @@ export type SenderRoute = { region: string; verified: boolean; binding: SendingB
 /** Every sender check (admission, campaigns, mailbox replies, dispatch) reads its closest claim through this call,
  * which also applies the running platform-domain policy; a refused route is never verified. */
 export const regionalSender = (runtime:Runtime,wid:SQL|string,host:SQL|string) => sql`regional_sender(${wid},${host},${isSimulatedSes(runtime)},${platformPolicy(runtime.config)}::jsonb)`;
-/** Lock order for every sender check in a transaction: the admission lock (lockAdmission), then this settings row,
- * then claims. Reservations and connection changes take settings before claims; regional_sender and
- * verified_sending_domains lock the closest claim, so read them only after this CTE (dev 40P01s, Nov 12). */
-export const lockedSettings = (wid: string) => sql`settings AS MATERIALIZED (SELECT workspace_id,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=${wid} FOR SHARE)`;
 export const senderRoutes = (runtime:Runtime,wid:string,hosts:string[]) => sql`(SELECT coalesce(jsonb_object_agg(h.host,to_jsonb(r)),'{}'::jsonb)
   FROM jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb) h(host) CROSS JOIN LATERAL ${regionalSender(runtime,wid,sql`h.host`)} r)`;
 export function checkRoute(runtime: Runtime, route: SenderRoute | undefined, requested?: string) {
