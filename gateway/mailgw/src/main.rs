@@ -177,7 +177,17 @@ impl Gateway {
                 biased;
                 _=tokio::time::sleep_until(read_deadline)=>break,
                 _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
-                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{let generation=event?;if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;if idling&&let Some(store)=backend.as_mut()&&let Core::Imap(i)=&mut core{let r=tokio::task::block_in_place(||store.wake(i,&mut stale))?;write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
+                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{
+                    let generation=event?;
+                    if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}
+                    stale=true;
+                    if idling && let Some(store)=backend.as_mut() && let Core::Imap(i)=&mut core {
+                        let r = tokio::task::block_in_place(|| store.wake(i, &mut stale)).unwrap_or_else(snapshot_bye);
+                        write(&mut stream, &r.bytes).await?;
+                        if r.action == Action::Close {break}
+                    }
+                    continue
+                },
                 n=stream.read(&mut buf)=>n?,
                 _=tokio::time::sleep_until(heartbeat),if idling=>{
                     write(&mut stream,b"* OK Still here\r\n").await?;
@@ -327,9 +337,9 @@ impl Gateway {
                             Ok(match &mut core {
                                 // Store::imap refreshes a stale snapshot, steps the core and
                                 // finishes the command (drops an unclaimed APPEND spool).
-                                Core::Imap(i) => {
-                                    store.imap(i, &bytes, identity, &mut stale, now)?
-                                }
+                                Core::Imap(i) => store
+                                    .imap(i, &bytes, identity, &mut stale, now)
+                                    .unwrap_or_else(snapshot_bye),
                                 Core::Smtp(s) => {
                                     let reply = s.step(&bytes, identity, store, now);
                                     store.finish_command();
@@ -474,6 +484,12 @@ impl Gateway {
             }
         }
         Ok(())
+    }
+}
+fn snapshot_bye(e: mailgw_core::store::Error) -> Reply {
+    Reply {
+        action: Action::Close,
+        ..Reply::one(&format!("* BYE {e}"))
     }
 }
 async fn write(stream: &mut Stream, data: &[u8]) -> Result<()> {
