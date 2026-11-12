@@ -15,6 +15,30 @@ The host owns time: every pending job is parked, `run K d` makes only `d` due, `
 - Conformance: each step's result, the requests the endpoints received, and the committed view (every delivery's status, attempt count, error, fence state, job status and attempts, scheduled delay; endpoint state; box labels; forwards) equal the model's.
 - tear's temporal monitor, on the observations alone: `delivery.once` (no repeat after a success, an unknown outcome or an overlapping request, except to a replay-safe endpoint with the delivery's own Idempotency-Key), `delivery.attempts` (at most 1 + retryAttempts requests), `endpoint.held` (no request starts to an endpoint paused or deleted before the step) and `delivery.settles` (on drained walks, everything queued is delivered, dead-lettered, parked or deleted).
 
+## Bugs found
+
+Each was fixed in its own commit, with an acceptance test that fails before the fix, and its shortest witness is replayed by `ci`.
+
+| Bug | Witness |
+|---|---|
+| A pause that committed between a claim and the attempt fence still let the paused endpoint receive the POST. | 4 steps: `ingest m1 a`, `claim K m1:W`, `pause W`, `go K` |
+| A runner lost during the first attempt left no attempt budget on the job, so lease expiry re-claimed an endpoint with retryAttempts 0 and sent it again. | 4 steps (`--retries 0`): `ingest m1 z`, `run K m1:V`, `expire m1:V`, `run L m1:V` |
+| A rate-limit or breaker deferral reset the job's attempts to 0, so a failing endpoint behind a rate limit retried without end. | 5 steps: `rate W 1`, `ingest m1 a`, `run K m1:W`, `reply K 503`, `run K m1:W` |
+| A ritual that failed to junk for one recipient typed another recipient's routed webhook delivery as junk, and the webhook refused it. | 3 steps: `rituals over`, `ingest m1 b+z`, `run K m1:V` |
+| The same email under another SES receipt, or a reopened receipt after any route or ritual edit, queued earlier recipients' ritual actions and routes again (a second Slack post or forward). Completed by a follow-up: reopening the first receipt dropped the recipients the second had added. | 3 steps: `rituals slack`, `ingest m1 b`, `ingest d1 b`; follow-up 5 steps |
+| Mail first stored before any ritual ran had no forward-safety verdict, so a forward queued for it later was refused. | 4 steps: `ingest m1 z`, `rituals forward`, `ingest m1 b+z`, `run K m1:F` |
+| Unpausing resumed parked deliveries with a fresh attempt budget, so a delivery could be sent more than 1 + retryAttempts times. Completed by a follow-up counting attempts whose outcome was never recorded. Found by the temporal property `delivery.attempts`. | 8 steps; follow-up 9 steps |
+| A runner whose claim went stale still sent a delivery that had meanwhile settled (refused) or been resumed as a new generation. Found by `delivery.attempts`. | 6 steps: `ingest m1 a`, `claim K m1:W`, `expire m1:W`, `run L m1:W`, `reply L 400`, `go K` |
+
+## Recorded runs (after the fixes)
+
+| Run | Traces | Steps | Mismatches | Temporal violations | Time |
+|---|---:|---:|---:|---:|---:|
+| `edges 3 --alpha core` | 3,040 | 8,822 | 0 | 0 | 95 s |
+| `edges 2 --alpha ritual` | 1,183 | 2,331 | 0 | 0 | 27 s |
+| `random 400 30 --seed 303` with `--retries 1`, `0`, `2` | 1,200 (drained) | 50,630 | 0 | 0 | 3 min |
+| `ci` | 1,644 | about 7,000 | 0 | 0 | 55 s |
+
 tear is pinned by git rev in `Cargo.toml`. Cargo fetches it with your git credentials (`.cargo/config.toml`), so you need read access to `anomalyco/tear`. tear is a dev tool only: nothing here ships with the API.
 
 ## Database
@@ -44,10 +68,12 @@ cd api/tear/delivery && cargo run --release -- ci
 
 | Command | Traces | Time (idle laptop) |
 |---|---:|---:|
-| `cargo run --release -- edges 3 --alpha core` | 3,040 (8,822 steps) | about 75 s |
+| `cargo run --release -- edges 3 --alpha core` | 3,040 (8,822 steps) | about 95 s |
 | `cargo run --release -- edges 3 --alpha ritual` | 22,685 (66,837 steps) | about 8 min |
-| `cargo run --release -- random 2000 30 --seed $(date +%s)` | 2,000 walks plus drains | about 6 min |
-| `… random 2000 30 --retries 0` or `--retries 2` | | about 6 min |
+| `cargo run --release -- random 2000 30 --seed $(date +%s)` | 2,000 walks plus drains | about 5 min |
+| `… random 2000 30 --retries 0`, `--retries 2` or `--retries 9` | | about 5 min each |
+
+For a nightly run, rotate `--seed` by date and run all four `--retries` values. `ci --budget S` changes the PR budget.
 
 - `space N --alpha A` prints a graph's size per depth without touching the database.
 - `trace ACTION…` replays one trace, for example `trace "ingest m1 a" "claim K m1:W" "pause W" "go K"`. Add `--retries R` for the fixture's retryAttempts, and `TEAR_STEPS=1` to print every step.
