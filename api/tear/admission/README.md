@@ -6,10 +6,12 @@ A [tear](https://github.com/anomalyco/tear) model of admission. Each step runs o
 
 - **`recv`: the receive-side hourly window and ingest backlog.**
   - Uses two hosted workspaces, A < B, through the shared pool, so one SNS message can create receipts in both.
-  - Covers notifications through the real `acceptInboundNotification` and its triggers: the message limit, the backlog for every ingest-job producer, reopen coalescing, and the 100- and 200-recipient bounds.
+  - Covers notifications through the real `acceptInboundNotification` and its triggers: the message limit, the window-then-receipt lock order, reopen coalescing, and the 100- and 200-recipient bounds.
+  - Every ingest job passes the one check at the job insert (`mail_ingest_admit`): one active job per receipt and the backlog, whoever inserts it. A job end drains the backlog holds.
   - `legacy-accept` runs the previous Worker's route statement against the same database, which covers old/new Worker overlap.
-  - Covers the real global `release_receive_budget_holds(NULL)` (it must never wait) and the 72-hour hold expiry.
-  - Ingest `claim` and `done` are fixture steps with the store's settle fence.
+  - Covers the real global `release_receive_budget_holds(NULL)` (it must never wait, and moves a busy hold back) and the 72-hour hold expiry.
+  - `recover` runs the real lost-receipt recovery; `stash` and `replay` drive the real held-envelope replay.
+  - Ingest `claim`, `done`, `fail` and `lose` are fixture steps with the handler's settle fences.
 - **`send`: hosted send admission.**
   - Covers `POST /v1/emails/send` and `/batch` with a bearer key, through the one-statement atomic admission.
   - Covers the rolling 24-hour recipient cap shared by a quota sponsor's workspaces, the marketing reserve and the pending cap.
@@ -18,7 +20,7 @@ A [tear](https://github.com/anomalyco/tear) model of admission. Each step runs o
   - Covers refunds by the `hosted_adjust` trigger.
 - **`upload`: stored-attachment quota reservations.**
   - Covers reserve, R2 put, finish and refund in `POST /v1/attachments`.
-  - Covers the hourly sweeper and upload tombstones (the real `cleanup`) and the deletion jobs (the real job runner).
+  - Covers the hourly sweeper and upload tombstones (the real `cleanup`), storage reconciliation (the real `reconcileUploads` over a listing of the stored objects, which `day` ages) and the deletion jobs (the real job runner).
   - `Ux crash` stands for a Worker that dies after a late put, which also covers an older Worker's refund.
 
 Files:
@@ -53,7 +55,7 @@ psql postgresql://…@127.0.0.1:5432/tear_admission -c "DO \$\$ BEGIN EXECUTE fo
 export TEAR_DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_admission
 ```
 
-## Pull-request run (about 25–40 s after the build)
+## Pull-request run (about 30–40 s after the build)
 
 ```sh
 cd api/tear/admission && cargo run --release -- ci
@@ -61,11 +63,11 @@ cd api/tear/admission && cargo run --release -- ci
 
 `ci` runs the following, prints a JSON report with checklist coverage (`checklist.missing` should be empty), and exits 1 on any mismatch or error:
 
-1. The eleven bug witnesses (including the four from the #57 review) and 19 boundary traces.
+1. The 16 bug witnesses (including the four from the #57 review and the five from its recheck) and 22 boundary traces.
 2. Every transition of the core alphabet: `recv` to depth 2, `send` to depth 1, `upload` to depth 3.
 3. 540 seeded random walks over the full alphabet and every configuration (about 12,000 steps).
 
-It covers about 15,000 steps in 1,900 traces.
+It covers about 16,500 steps in 2,550 traces.
 
 Pass `--seed N` to rotate the walks.
 
@@ -73,11 +75,11 @@ Pass `--seed N` to rotate the walks.
 
 | Command | Size | Time (M-series Mac) |
 |---|---:|---:|
-| `cargo run --release -- edges 3 --profile recv` | 13,345 edges, 38,930 steps | about 2 min |
-| `cargo run --release -- edges 2 --profile send` | 2,399 edges, 4,738 steps | about 30 s |
+| `cargo run --release -- edges 3 --profile recv` | 37,478 edges, 110,697 steps | about 5 min |
+| `cargo run --release -- edges 2 --profile send` | 2,399 edges, 4,738 steps | about 20 s |
 | `cargo run --release -- edges 3 --profile send --budget 600` | 46,794 edges, 137,923 steps | about 10 min (8 min covers 84%) |
-| `cargo run --release -- edges 5 --profile upload` | 2,048 edges, 9,260 steps | about 12 s |
-| `cargo run --release -- random 2000 30 --profile P --seed $(date +%s)` | 60,000 steps | 1–2 min |
+| `cargo run --release -- edges 5 --profile upload` | 3,272 edges, 15,078 steps | about 30 s |
+| `cargo run --release -- random 2000 30 --profile P --seed $(date +%s)` | 60,000 steps | about 1.5 min |
 
 - `space N --profile P` prints the core graph's size per depth without touching the database.
 - `boundaries` replays only the bug witnesses and boundary traces.
