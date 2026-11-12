@@ -45,6 +45,13 @@ export type AuditEvent = {
  * The hourly maintenance purge deletes only rows past retain_until; the table refuses anything else.
  */
 export const RETENTION = { standard: '1 year', billing: '7 years', access: '90 days' } as const;
+// Hooks for work in flight (exact calls in the PR that added this file):
+// - Billing: in the transaction that posts a ledger entry, recordAudit(tx, systemContext('webhook', { type: 'stripe', id: event.id }),
+//   { action: 'billing.topup' | 'billing.refund' | 'billing.dispute' | …, workspaceId, retention: 'billing', … }); members' and operators'
+//   billing changes pass `c` or operatorContext(c, operator) instead.
+// - Sign-in (#89): recordAudit(tx, { actor: { type: 'member', id: userId, userId, via: 'dashboard' }, requestId, ipNetwork, userAgent },
+//   { action: 'auth.sign_in', workspaceId: null, userId, … }); then port userEmail() below to bane_users.
+// - Reputation (#111/#115): operator actions arrive through the hosted_operator_audit trigger (migration 262); nothing to call.
 
 const SECRET_KEY = /secret|password|passwd|token|api[_-]?key|private|credential|authorization|cookie|signature|hash|^dkim|^headers?$/i;
 const CONTENT_KEY = /^(?:html|text|body|bodies|content|raw|mime|snippet|preview|source|attachments?)$/i;
