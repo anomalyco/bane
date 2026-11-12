@@ -61,12 +61,25 @@ shard() (
     echo "${1}: auth readiness expected 401 AUTH_REQUIRED, got HTTP $status" >&2
     exit 1
   fi
-  timeout 8m node --import tsx --test --test-reporter=spec "$5" api.acceptance.test.ts
+  reporters=(--test-reporter=spec --test-reporter-destination=stdout)
+  if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then reporters+=(--test-reporter=junit "--test-reporter-destination=$ACCEPTANCE_JUNIT/$1.xml"); fi
+  timeout 8m node --import tsx --test "${reporters[@]}" "${@:5}" api.acceptance.test.ts
 )
 # Complementary filters: new suites run in the HTTP shard by default.
 pattern='^(SIMULATED SES:|Hosted account re-home:)'
-shard integration 8787 '' 4569 "--test-skip-pattern=$pattern" & integration=$!
-shard simulated 8788 _sim 4570 "--test-name-pattern=$pattern" & simulated=$!
+# Flake quarantine (docs/ci.md): a test whose name carries [flaky #N], N its open issue, never blocks a merge.
+# ACCEPTANCE_QUARANTINE: unset skips those tests (the required job), "only" runs just them (the non-blocking
+# quarantine job), "all" runs everything (nightly).
+flaky='\[flaky #[0-9]+\]'
+case ${ACCEPTANCE_QUARANTINE:-} in
+  only) integration_filter=(--test-skip-pattern="$pattern" --test-name-pattern="$flaky"); simulated_filter=(--test-name-pattern="$pattern.*$flaky") ;;
+  all) integration_filter=(--test-skip-pattern="$pattern"); simulated_filter=(--test-name-pattern="$pattern") ;;
+  '') integration_filter=(--test-skip-pattern="$pattern" --test-skip-pattern="$flaky"); simulated_filter=(--test-name-pattern="$pattern" --test-skip-pattern="$flaky") ;;
+  *) echo "ACCEPTANCE_QUARANTINE must be unset, only or all" >&2; exit 2 ;;
+esac
+if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then mkdir -p "$ACCEPTANCE_JUNIT"; fi
+shard integration 8787 '' 4569 "${integration_filter[@]}" & integration=$!
+shard simulated 8788 _sim 4570 "${simulated_filter[@]}" & simulated=$!
 rc=0
 wait "$integration" || rc=$?
 wait "$simulated" || rc=$?
