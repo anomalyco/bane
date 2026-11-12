@@ -43,7 +43,7 @@ export TEAR_DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_ses
 
 tear is pinned by git rev in `Cargo.toml`. Cargo fetches it with your git credentials, so you need read access to `anomalyco/tear`. tear is a dev tool only: nothing here ships with the API.
 
-## Pull-request run (about 25 s after the build)
+## Pull-request run (25–35 s after the build)
 
 ```sh
 cd api/tear/ses && cargo run --release -- ci
