@@ -76,9 +76,10 @@ and rejects positioning, display changes, CSS variables, calculations, URLs, exp
 ## Campaign personalization
 
 Use \`{{name}}\` placeholders in text and in quoted \`href\`/\`alt\` attributes. Values come
-from recipient properties plus the campaign \`defaults\`; every placeholder must resolve at
-review time. \`{{email}}\` and \`{{name}}\` are always available. Values are escaped
-automatically.
+from the contact (\`{{email}}\`, \`{{name}}\` and contact properties such as \`{{firstName}}\`),
+then the campaign \`defaults\` (the dashboard's fallback values). \`{{email}}\` always has a value;
+give every other placeholder a default, because one contact without a value fails the launch.
+Tests use \`data\`, then \`defaults\`. Values are escaped automatically.
 
 Templates are reusable concrete campaign drafts, not personalization presets. Template subject,
 preview text and HTML must contain literal example content and cannot contain \`{{placeholder}}\`

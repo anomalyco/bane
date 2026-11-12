@@ -369,6 +369,12 @@ impl Imap {
                 } else {
                     let pat = [path(reference)?.as_bytes(), pat].concat();
                     let names = s.folders();
+                    let glob = widest(&pat);
+                    let head = glob.iter().take_while(|c| !WILD.contains(c)).count();
+                    let listed: usize = names.iter().map(|n| n.len() + 1).sum();
+                    if (glob.len() - head).saturating_mul(listed) > LIST_WORK {
+                        return Err(Error::Limit);
+                    }
                     for name in &names {
                         let f = s.folder(name)?;
                         let parent = lsub
@@ -378,7 +384,7 @@ impl Imap {
                                 p.strip_prefix(name).is_some_and(|s| s.starts_with('/'))
                                     && s.folder(p).is_ok_and(|f| f.subscribed)
                             });
-                        if (!lsub || f.subscribed || parent) && wildcard(&pat, name.as_bytes()) {
+                        if (!lsub || f.subscribed || parent) && wildcard(&glob, name.as_bytes()) {
                             r.line(format!(
                                 "* {kind} ({}) \"/\" {}",
                                 if parent {
@@ -909,20 +915,48 @@ fn status(f: &Folder, s: &Status) -> String {
     };
     format!("{name} {n}")
 }
+const WILD: &[u8] = b"*%";
+/// Matching steps one LIST may spend past the pattern's literal start, across every folder:
+/// its wildcard part times the bytes of all names. Folder queries sit far below it.
+const LIST_WORK: usize = 1 << 20;
+/// The pattern with each run of wildcards written as its widest member, which matches the same names.
+fn widest(pat: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for &c in pat {
+        match out.last_mut() {
+            Some(last) if WILD.contains(last) && WILD.contains(&c) => *last = (*last).max(c),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 fn wildcard(pat: &[u8], name: &[u8]) -> bool {
+    let head = pat.iter().take_while(|c| !WILD.contains(c)).count();
+    let Some(name) = name.strip_prefix(&pat[..head]) else {
+        return false;
+    };
+    let pat = &pat[head..];
+    if pat.is_empty() {
+        return name.is_empty();
+    }
     let mut prev = vec![false; name.len() + 1];
+    let mut next = prev.clone();
     prev[0] = true;
     for &c in pat {
-        let mut next = vec![false; prev.len()];
-        next[0] = prev[0] && matches!(c, b'*' | b'%');
+        next[0] = prev[0] && WILD.contains(&c);
+        let mut open = next[0];
         for (i, &b) in name.iter().enumerate() {
             next[i + 1] = match c {
                 b'*' => prev[i + 1] || next[i],
                 b'%' => prev[i + 1] || (b != b'/' && next[i]),
                 _ => prev[i] && c == b,
-            }
+            };
+            open |= next[i + 1];
         }
-        prev = next
+        if !open {
+            return false;
+        }
+        std::mem::swap(&mut prev, &mut next);
     }
     prev[name.len()]
 }
@@ -1040,6 +1074,132 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    /// LIST reads `*` as any run and `%` as a run within one level. Writing each run of
+    /// wildcards as its widest member and comparing the literal start first changes no answer.
+    #[test]
+    fn list_patterns_keep_the_plain_reading_of_both_wildcards() {
+        fn plain(pat: &[u8], name: &[u8]) -> bool {
+            let mut prev = vec![false; name.len() + 1];
+            prev[0] = true;
+            for &c in pat {
+                let mut next = vec![false; prev.len()];
+                next[0] = prev[0] && matches!(c, b'*' | b'%');
+                for (i, &b) in name.iter().enumerate() {
+                    next[i + 1] = match c {
+                        b'*' => prev[i + 1] || next[i],
+                        b'%' => prev[i + 1] || (b != b'/' && next[i]),
+                        _ => prev[i] && c == b,
+                    }
+                }
+                prev = next
+            }
+            prev[name.len()]
+        }
+        fn words(alphabet: &[u8], longest: usize) -> Vec<Vec<u8>> {
+            let mut all = vec![vec![]];
+            let mut from = 0;
+            for _ in 0..longest {
+                let until = all.len();
+                for i in from..until {
+                    for &c in alphabet {
+                        let mut w = all[i].clone();
+                        w.push(c);
+                        all.push(w);
+                    }
+                }
+                from = until;
+            }
+            all
+        }
+        let names = words(b"ab/", 5);
+        for pat in words(b"a/*%", 5) {
+            let short = widest(&pat);
+            assert!(
+                !short
+                    .windows(2)
+                    .any(|w| WILD.contains(&w[0]) && WILD.contains(&w[1]))
+            );
+            for name in &names {
+                assert_eq!(
+                    wildcard(&short, name),
+                    plain(&pat, name),
+                    "{:?} on {:?}",
+                    String::from_utf8_lossy(&pat),
+                    String::from_utf8_lossy(name)
+                );
+            }
+        }
+    }
+
+    /// An inbox at its folder limits (200 folders, 255-byte names) lists for any pattern
+    /// with work set by its folders: a run of wildcards is one wildcard, a literal pattern
+    /// is a comparison, and a wildcard part too long for the listed names is refused before
+    /// any folder is matched.
+    #[test]
+    fn list_work_follows_the_folders_not_the_length_of_the_pattern() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Memory::default();
+        let now = Date::default();
+        let deep = vec!["x".repeat(27); 7].join("/");
+        let folder = |i: usize| format!("{deep}/{}{i:06}", "y".repeat(53));
+        let existing = store.folders().len();
+        for i in 0..200 - existing {
+            assert_eq!(folder(i).len(), 255);
+            store.edit_folder(&folder(i), FolderOp::Create).unwrap();
+        }
+        store
+            .edit_folder(&folder(7), FolderOp::Subscribe(true))
+            .unwrap();
+        let listed: usize = store.folders().iter().map(|n| n.len() + 1).sum();
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut list = |command: String| {
+            let r = imap.step(
+                format!("a {command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8_lossy(&r.bytes).into_owned()
+        };
+        let stars = "*".repeat(65_000);
+        let mixed = "%*".repeat(32_500);
+        assert_eq!(widest(format!("{stars}{stars}").as_bytes()), b"*");
+        assert_eq!(widest(format!("a{mixed}b%%c").as_bytes()), b"a*b%c");
+        for (command, lines) in [
+            ("LIST \"\" \"*\"".to_string(), 200),
+            (
+                format!("LIST {{65000+}}\r\n{stars} {{65000+}}\r\n{stars}"),
+                200,
+            ),
+            (format!("LIST \"\" {{65000+}}\r\n{mixed}"), 200),
+            (format!("LIST \"\" \"{deep}/%\""), 200 - existing),
+            (format!("LIST \"\" \"{}\"", folder(3)), 1),
+            (format!("LIST \"{deep}/\" \"%000003\""), 1),
+            (format!("LIST \"\" \"{}%\"", "x".repeat(27)), 0),
+            (format!("LIST \"\" {{65000+}}\r\n{}", "x".repeat(65_000)), 0),
+            (format!("LSUB \"\" {{65000+}}\r\n{mixed}"), existing + 1),
+        ] {
+            let text = list(command.clone());
+            let shown = &command[..command.len().min(40)];
+            assert!(text.ends_with("a OK  Completed\r\n"), "{shown}: {text}");
+            assert_eq!(text.matches("\r\n").count() - 1, lines, "{shown}");
+        }
+        let fits = LIST_WORK / listed;
+        let text = list(format!("LIST \"\" \"%{}\"", "y".repeat(fits - 1)));
+        assert_eq!(text, "a OK  Completed\r\n");
+        for command in ["LIST", "LSUB"] {
+            let text = list(format!("{command} \"\" \"%{}\"", "y".repeat(fits)));
+            assert_eq!(text, "a NO [LIMIT] Inbox limit exceeded\r\n");
+        }
+        let text = list(format!(
+            "LIST \"\" \"{}%{}\"",
+            "x".repeat(fits),
+            "y".repeat(8)
+        ));
+        assert_eq!(text, "a OK  Completed\r\n");
     }
 
     /// Found by gateway/tear on the Remote store (witness: B create Work, A select Work,
