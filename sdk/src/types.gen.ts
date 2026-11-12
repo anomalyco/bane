@@ -793,10 +793,10 @@ export type CampaignDelivery = {
         message: string;
     } | null;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. balance: the workspace's Bane balance is empty; releasing resumes when credit is added.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance';
         until: string;
     } | null;
 } | null;
