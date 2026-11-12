@@ -132,7 +132,7 @@ const zero: Window = { accepted: 0, bounces: 0, complaints: 0, marketingAccepted
 async function candidates(runtime: Runtime, limit: number, only?: string) {
   const screened = Boolean(runtime.config.screen && runtime.config.hostedScreen);
   return (await runtime.db.execute<Candidate>(sql`WITH c AS (
-      SELECT s.* FROM sender_standing s WHERE ${only ? sql`s.workspace_id=${only}` : sql`(s.computed_at IS NULL OR s.computed_at<now()-interval '6 hours' OR s.step<>'ok' OR s.phase<>'graded'
+      SELECT s.* FROM sender_standing s WHERE ${only ? sql`s.workspace_id=${only}` : sql`(s.computed_at IS NULL OR s.computed_at<now()-interval '6 hours' OR s.step<>'ok' OR s.phase='seed' OR (s.phase='calibrating' AND s.calibrated_at IS NOT NULL)
         OR s.score IS DISTINCT FROM s.target OR s.evidence_at>s.computed_at OR s.release_until IS NOT NULL OR s.strike_until IS NOT NULL
         OR EXISTS (SELECT FROM hosted_usage_hourly u WHERE u.workspace_id=s.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '47 hours')
         OR EXISTS (SELECT FROM hosted_health_hourly h WHERE h.workspace_id=s.workspace_id AND h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours'))`}
