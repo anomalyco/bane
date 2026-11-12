@@ -315,7 +315,10 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   if (!event || !event.recipients.length) return;
   if (!from || !sender || !runtime.config.multiTenant) { log('info', { code: 'STANDING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, step: event.to_step, reason: 'BANE_NOTIFY_FROM or the platform workspace is not configured' }); return; }
   const quarantine = event.kind === 'quarantine' ? { campaign: String(event.details.campaignName ?? 'campaign'), message: String(event.details.message ?? '') } : null;
-  const notice = noticeText({ workspace: event.name, step: event.to_step, reasons: event.reasons, quarantine, dashboard: runtime.config.publicUrl, marketingHeld: event.to_step === 'restrict' });
+  // Workspace and campaign names are the customer's: one line, bounded, so the subject is always a valid header.
+  const oneLine = (v: string) => v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) || 'your workspace';
+  if (quarantine) quarantine.campaign = oneLine(quarantine.campaign);
+  const notice = noticeText({ workspace: oneLine(event.name), step: event.to_step, reasons: event.reasons, quarantine, dashboard: runtime.config.publicUrl, marketingHeld: event.to_step === 'restrict' });
   const { sendSystemEmail } = await import('./sending.js');
   await sendSystemEmail(runtime, sender, { from, to: event.recipients, subject: notice.subject, text: notice.text, idempotencyKey: `standing:${String(payload.eventId)}` });
   log('info', { code: 'STANDING_NOTIFIED', workspaceId: job.workspaceId, step: event.to_step, recipients: event.recipients.length, simulated: isSimulatedSes(runtime) });
