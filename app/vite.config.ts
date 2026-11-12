@@ -1,6 +1,9 @@
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { MAX_RULES, withFileRules } from './asset-headers.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
 // explains why); everything else, the shim included, gets the real package.
@@ -10,8 +13,33 @@ const slimReactEmail: Plugin = {
   resolveId(source, importer) { return source === 'react-email' && importer?.includes('/node_modules/@react-email/editor/') ? reactEmailShim : null },
 }
 
+// dist/_headers for Cloudflare: public/_headers, then a cache rule for each built file under assets/ and each font
+// (asset-headers.ts explains why they are listed by name). The files every page loads come first, because past
+// Cloudflare's rule limit the rest only revalidate.
+const fileHeaders = (): Plugin => {
+  let publicDir = '', outDir = ''
+  return {
+    name: 'bane:file-headers', apply: 'build',
+    configResolved(config) { publicDir = config.publicDir; outDir = resolve(config.root, config.build.outDir) },
+    writeBundle(_options, bundle) {
+      const first = new Set<string>()
+      const add = (name: string) => {
+        const file = bundle[name]
+        if (first.has(name) || !file) return
+        first.add(name)
+        if (file.type === 'chunk') for (const dependency of [...file.imports, ...file.viteMetadata?.importedCss ?? []]) add(dependency)
+      }
+      for (const file of Object.values(bundle)) if (file.type === 'chunk' && file.isEntry) add(file.fileName)
+      const fonts = readdirSync(resolve(publicDir, 'fonts')).sort().map(name => `fonts/${name}`)
+      const { headers, uncached } = withFileRules(readFileSync(resolve(publicDir, '_headers'), 'utf8'), [...first, ...fonts, ...Object.keys(bundle).sort()])
+      writeFileSync(resolve(outDir, '_headers'), headers)
+      if (uncached.length) this.warn(`${uncached.length} files have no cache rule and revalidate on every load (Cloudflare reads ${MAX_RULES} rules, and a rule needs a plain file name): ${uncached.join(', ')}`)
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [slimReactEmail, react()],
+  plugins: [slimReactEmail, react(), fileHeaders()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),
