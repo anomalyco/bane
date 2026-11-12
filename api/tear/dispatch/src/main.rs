@@ -290,6 +290,8 @@ const SCENARIOS: &[(usize, &[&str], &str)] = &[
         "mkt2", "mkt2", "mkt2", "mkt2", "drain"], "the lease skips an envelope the allowance cannot afford"),
     (8, &["mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2",
         "mkt2", "mkt2", "mkt2", "mkt2", "mkt1", "drain"], "affordable mail behind an oversized head sends"),
+    // A second run on the same fresh sample skips the row up front: it must still arm a retry.
+    (8, &["mkt2", "drain", "drain"], "the lease skips an envelope the allowance cannot afford"),
     // Recheck of #52 (P2): every owner's head is too large; their affordable followers still send.
     (9, &["mkt2", "mkt2b", "mkt1", "mkt1b", "drain"], "affordable mail behind an oversized head sends"),
     (9, &["mkt2", "mkt2b", "mkt1", "mkt1b", "drain", "wait 1d", "wait 1m", "drain"], "affordable mail behind an oversized head sends"),
