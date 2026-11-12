@@ -43,7 +43,7 @@ const DATABASE_URL = await (async () => {
 })();
 
 const { S3Client } = await import('@aws-sdk/client-s3');
-const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, mailboxIngestJobs }, { mailboxEventJobs }, { processJobs }] = await Promise.all([
+const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, mailboxIngestJobs }, { mailboxEventJobs, pruneMailboxEvents }, { processJobs }] = await Promise.all([
   import('../../src/app.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-ingest.js'), import('../../src/mailbox-events.js'), import('../../src/jobs.js'),
 ]);
 const ENCRYPTION = hex(64), REGION_DEFAULT = 'us-east-1';
@@ -117,7 +117,7 @@ let ws = '', host = '', key = '', ids: Record<string, string> = {}, epOf: Record
 let sends: Send[] = [];
 let seen: Record<string, Json> = {};
 const mid = (m: string) => `${ws}_${m}`;
-const URLS: Record<string, string> = { W: 'https://w.example.com/hook', V: 'https://v.example.com/hook' };
+const URLS: Record<string, string> = { W: 'https://w.example.com/hook', V: 'https://v.example.com/hook', U: 'https://u.example.com/hook' };
 const errOf = (e: any) => `e:${e?.code ?? e?.cause?.code ?? e?.name ?? 'ERROR'}`;
 
 async function rest(method: string, path: string, body?: unknown) {
@@ -165,6 +165,8 @@ async function reset(r: number) {
   await must('PATCH', '/v1/endpoints/v', { idempotent: true });
   await must('POST', '/v1/endpoints', { type: 'slack', name: 's', url: `https://hooks.slack.com/services/T0/B0/${hex(16)}` });
   await must('POST', '/v1/endpoints', { type: 'forward', name: 'f', address: 'team@example.net', preverify: true });
+  // U: a plain event subscription to box@'s received mail (no routes, no rituals).
+  await must('POST', '/v1/inbound/webhooks', { url: URLS.U, key: 'u', addressIds: [`${ws}_box`], eventTypes: ['message.received'], retryAttempts: r });
   const rows = (await q(`SELECT id,key FROM mailbox_webhooks WHERE workspace_id=$1 AND key IS NOT NULL UNION ALL SELECT hook_id,split_part(ref,':',2) FROM mail_endpoints WHERE workspace_id=$1`, [ws])).rows;
   ids = Object.fromEntries(rows.map(x => [x.key.toUpperCase(), x.id]));
   epOf = Object.fromEntries(rows.map(x => [x.id, x.key.toUpperCase()]));
@@ -225,7 +227,7 @@ function startWorker(w: Worker, gate: boolean) {
   Object.assign(w, { gate, claimed: false, parked: null, inflight: null, done: false, error: null });
   const wr = { ...runtime, db: drizzle(w.pool), webhookFetch: async (url: string, init: Json) => {
     const h = new Headers(init.headers), u = new URL(url);
-    const ep = u.hostname === 'hooks.slack.com' ? 'S' : u.hostname.startsWith('w.') ? 'W' : u.hostname.startsWith('v.') ? 'V' : u.hostname;
+    const ep = u.hostname === 'hooks.slack.com' ? 'S' : u.hostname.startsWith('w.') ? 'W' : u.hostname.startsWith('v.') ? 'V' : u.hostname.startsWith('u.') ? 'U' : u.hostname;
     const send: Send = { ep, key: h.get('idempotency-key'), delivery: null, body: JSON.parse(String(init.body)) };
     return new Promise((resolve, reject) => { w.inflight = { send, resolve, reject }; w.wake?.(); });
   } } as Json;
@@ -314,7 +316,8 @@ async function act(action: string) {
       case 'expire': { const job = await jobOf(words[1]!); if (job) await q("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1", [job.id]); r = job ? 'ok' : null; break; }
       case 'tick': await q("DELETE FROM api_request_budgets WHERE workspace_id=$1 AND key_id LIKE 'ritual:%'", [ws]); r = 'ok'; break;
       case 'pause': case 'unpause': {
-        const e = rest('PATCH', `/v1/endpoints/${words[1]!.toLowerCase()}`, { paused: verb === 'pause' });
+        // U is a subscription (its own PATCH); the others are endpoints.
+        const e = words[1] === 'U' ? rest('PATCH', `/v1/inbound/webhooks/${ids.U}`, { paused: verb === 'pause' }) : rest('PATCH', `/v1/endpoints/${words[1]!.toLowerCase()}`, { paused: verb === 'pause' });
         const res = await e; r = res.error ?? 'ok';
         if (verb === 'unpause') { const jobs = (await q("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='mailbox.resumeDeliveries' AND status='pending' RETURNING id,payload", [ws])).rows; for (const j of jobs) await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime, j.payload, { id: j.id, workspaceId: ws, attempts: 1 }); }
         break;
@@ -322,7 +325,7 @@ async function act(action: string) {
       case 'delete': {
         // Detach the endpoint from routes and rituals, then delete it (deleteEndpoint refuses one in use).
         const e = words[1]!.toLowerCase();
-        if (e === 'w' || e === 'v') r = (await rest('DELETE', `/v1/inbound/webhooks/${ids[words[1]!]}?detach=true`)).error ?? 'ok';
+        if (e === 'w' || e === 'v' || e === 'u') r = (await rest('DELETE', `/v1/inbound/webhooks/${ids[words[1]!]}?detach=true`)).error ?? 'ok';
         else { await rest('PUT', '/v1/rituals', {}); r = (await rest('DELETE', `/v1/endpoints/${e}`)).error ?? 'ok'; }
         break;
       }
@@ -341,6 +344,10 @@ async function act(action: string) {
         r = res.status === 200 ? 'ok' : `e:${res.status}`;
         break;
       }
+      case 'age': { const id = deliveryIds[words[1]!]; r = id ? ((await q("UPDATE mailbox_webhook_deliveries SET created_at=created_at-interval '31 days' WHERE id=$1", [id])).rowCount ? 'ok' : null) : null; break; }
+      case 'prune': await pruneMailboxEvents(runtime); r = 'ok'; break;
+      // A row stored before ingest recorded forward verdicts.
+      case 'strip': await q("UPDATE mail_messages SET verdicts=verdicts-'forwardSafe'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=$2", [ws, mid(words[1]!)]); r = 'ok'; break;
       default: throw new Error(`unknown action ${action}`);
     }
   } catch (e) { r = errOf(e); if (process.env.TEAR_TRACE) process.stderr.write(`TEAR_ERROR ${action}: ${(e as Error)?.stack}\n`); }

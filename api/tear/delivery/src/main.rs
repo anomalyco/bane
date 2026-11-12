@@ -25,6 +25,9 @@
 //! - C2 [x] Pause, unpause or delete while a worker holds a claim (`claim K d`, `pause E`, `go K`).
 //! - C3 [x] Pause, unpause or delete while a request is in flight (`run K d`, `pause E`, `reply K`).
 //! - C4 [x] Ritual or route edits between an email's first receipt and a reopen or duplicate receipt.
+//! - C6 [x] Plain event subscriptions (U, box@'s message.received) take the same delivery path: the
+//!   pause and stale-claim fence and breaker accounting, with at-least-once retries and no
+//!   attempt row or rate slot.
 //! - C5 [ ] Two fences on one delivery at the same statement: the fence is one short transaction
 //!   whose attempt row serializes them (INSERT ... ON CONFLICT then FOR UPDATE); interleavings
 //!   inside it need statement checkpoints, as in the inbox checker. Not modelled.
@@ -39,6 +42,8 @@
 //! - R4 [x] Duplicate SNS notification (same receipt, same recipients), receipt reopen with more
 //!   recipients, and the same email under a second SES receipt (`ingest d1 ...`).
 //! - R5 [x] Retries exhaust at exactly 1 + retryAttempts (`--retries 0|1|2`), then dead-letter.
+//! - R7 [x] A claim lost before the fence (nothing sent) does not use up a fenced delivery's last
+//!   attempt (`claim K d`, `drop K`, `expire d`, `run L d` with `--retries 0`).
 //! - R6 [ ] A second forward of one message to one endpoint (mail_forward_once): unreachable now that
 //!   a message's recipients are routed once; a forward completes in one step (no in-flight state),
 //!   and its retryable failure (FORWARD_LIMIT) needs the hourly cap (L7). Acceptance tests cover it.
@@ -49,6 +54,8 @@
 //! - T3 [x] Rate-limit minute rollover (`tick`).
 //! - T4 [x] The 12 h backoff cap at the seventh attempt (`--retries 9` boundary trace).
 //!   [ ] Worker/database clock skew: Date.now() and now() are one clock here, so not reached.
+//! - T6 [x] Retention: settled deliveries past 30 days are pruned; a held one is dead-lettered
+//!   with a reason and kept 7 more days (`age d`, `prune`).
 //! - T5 [ ] Retry-After as an HTTP date: second-granular, so its delay is ±1 s; covered by the
 //!   acceptance tests of retryAfterMs.
 //!
@@ -67,8 +74,9 @@
 //!   rituals none.
 //!
 //! ## Revocation, deletion and pausing racing in-flight work
-//! - P1 [x] Endpoint paused before routing (new mail skips it), with queued work (parks, resumes on
-//!   unpause with a new generation), after the claim, and mid-request.
+//! - P1 [x] Endpoint paused before routing (new mail is held: queued, parked by its claim, sent on
+//!   unpause), with queued work (parks, resumes as a new generation), after the claim, mid-request,
+//!   and held past the 30-day retention (dead-lettered as ENDPOINT_PAUSED_EXPIRED).
 //! - P2 [x] Endpoint deleted with queued, claimed and in-flight deliveries (routes detached).
 //! - P3 [x] Forward declined (stop link) with queued work: CONNECTOR_UNAVAILABLE, nothing sent;
 //!   rituals can no longer call it.
@@ -80,12 +88,15 @@
 //! ## Old and new Worker overlap
 //! - O1 [x] Two runners with overlapping leases on one delivery (the overlap a deploy causes:
 //!   the old isolate keeps its request in flight while the new one claims after lease expiry).
-//! - O2 [ ] Mixed versions of the delivery code: no older delivery path is kept in tree; the
-//!   database functions are shared, so a migration changes both at once.
+//! - O2 [ ] Mixed versions of the delivery code: not modelled. Routing, fan-out and envelope fixes
+//!   live in shared database functions; the claim stamping, deferral accounting, fence and resume
+//!   are Worker code, so an old Worker keeps the old behaviour for the jobs it touches until it drains.
 //!
 //! ## Partial failures of external calls
 //! - E1 [x] Webhook, Slack: every response class above, timeouts, resets, a worker lost mid-call.
 //! - E2 [x] SES (the forward's send) commits with mail_forward_once in one transaction.
+//! - E4 [x] A message stored before ingest recorded forward verdicts (`strip m`) is still forwarded
+//!   when safe and refused when looped.
 //! - E3 [ ] S3/R2 reads for include=raw or the inbound format: the endpoints use the bane format
 //!   without includes; reads happen before the send and fail as retryable errors.
 //!
@@ -99,6 +110,9 @@
 //! - `endpoint.held`: no request starts to an endpoint that was paused or deleted before the step.
 //! - `delivery.settles`: on drained traces, every queued delivery is delivered, dead-lettered,
 //!   parked or deleted within the drain.
+//! Model property `delivery.kept`, on every state: every (email, endpoint) that routing or a ritual
+//! chose has a delivery, unless the endpoint was deleted or retention pruned a settled one; a
+//! paused endpoint holds its mail.
 mod fixture;
 mod model;
 
@@ -332,7 +346,7 @@ fn focus(step: &Value, path: &str) -> Value {
 }
 
 fn n_of(ep: &str, retries: u32) -> u64 {
-    1 + if ep == "W" || ep == "V" { retries as u64 } else { 9 }
+    1 + if ep == "W" || ep == "V" || ep == "U" { retries as u64 } else { 9 }
 }
 
 /// tear's temporal monitor over the observed steps of one trace (product observations only).
@@ -520,7 +534,31 @@ fn reached(m: &Model, label: &str, obs: &Value) -> Vec<&'static str> {
         }
         Act::Rate { n: 1, .. } => out.push("L1"),
         Act::Decline => out.push("P3"),
+        Act::Prune => {
+            out.push("T6");
+            if m.ds.iter().any(|d| d.aged && d.status == "paused") {
+                out.push("P1");
+            }
+        }
+        Act::Strip { .. } => out.push("E4"),
         _ => {}
+    }
+    if let Act::Run { d, .. } | Act::Go { w: d } = &a {
+        let label = match &a {
+            Act::Go { w } => match &m.workers[w] {
+                Wk::Parked { d, .. } => d.clone(),
+                _ => String::new(),
+            },
+            _ => d.clone(),
+        };
+        if label.ends_with(":U") {
+            out.push("C6");
+        }
+        if let Some(dd) = m.ds.iter().find(|x| x.label == label) {
+            if dd.job.as_ref().is_some_and(|j| j.status == "running" && j.expired && dd.tries < j.attempts) && dd.ep != "U" {
+                out.push("R7");
+            }
+        }
     }
     out
 }
@@ -538,6 +576,8 @@ fn campaign(name: &str, traces: Vec<(Vec<String>, Option<usize>)>, c: &Campaign,
     let mut coverage: BTreeMap<String, u64> = BTreeMap::new();
     let mut temporal_violations: Vec<Value> = vec![];
     let mut temporal_checked: BTreeMap<String, u64> = BTreeMap::new();
+    // The model's own no-loss property, on every state the trace reaches.
+    let (mut model_checked, mut model_lost) = (0u64, vec![]);
     for (trace, drained) in traces {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
@@ -555,6 +595,17 @@ fn campaign(name: &str, traces: Vec<(Vec<String>, Option<usize>)>, c: &Campaign,
                 *coverage.entry(item.to_string()).or_default() += 1;
             }
             m.step(parse(label).unwrap());
+        }
+        let mut whole = Model::initial(c.retries);
+        for label in &trace {
+            whole.step(parse(label).unwrap());
+            model_checked += 1;
+            if let Some(why) = whole.lost() {
+                if model_lost.len() < 10 {
+                    model_lost.push(json!({"lost": why, "trace": trace}));
+                }
+                break;
+            }
         }
         let receipt = temporal(&observed, c.retries, if run["status"] == json!("match") { drained } else { None })?;
         for p in receipt["properties"].as_array().into_iter().flatten() {
@@ -596,6 +647,7 @@ fn campaign(name: &str, traces: Vec<(Vec<String>, Option<usize>)>, c: &Campaign,
         "steps": steps, "fixtures": check.fixtures,
         "checkMs": checked.as_millis() as u64, "totalMs": start.elapsed().as_millis() as u64,
         "coverage": coverage, "temporal": {"checked": temporal_checked, "violations": temporal_violations},
+        "model": {"delivery.kept": {"checked": model_checked, "violations": model_lost}},
         "witnesses": witnesses,
     }))
 }
@@ -643,6 +695,7 @@ fn failed(r: &Value) -> bool {
     r["mismatched"].as_u64().is_some_and(|n| n > 0)
         || r["errors"].as_array().is_some_and(|e| !e.is_empty())
         || r["temporal"]["violations"].as_array().is_some_and(|v| !v.is_empty())
+        || r["model"]["delivery.kept"]["violations"].as_array().is_some_and(|v| !v.is_empty())
 }
 
 fn main() -> R<()> {
@@ -686,7 +739,7 @@ fn main() -> R<()> {
             let a = alpha.as_deref().unwrap_or("core");
             let (info, traces) = edges(nums.first().copied().unwrap_or(3), nums.get(1).copied().unwrap_or(500_000), a, retries)?;
             let mut r = campaign(&format!("edge coverage ({a})"), traces.into_iter().map(|t| (t, None)).collect(), &c, Host::spawn()?, None)?;
-            r["model"] = info;
+            r["graph"] = info;
             r
         }
         Some("ci") => {
@@ -716,7 +769,7 @@ fn main() -> R<()> {
             for (a, depth) in [("core", 2), ("ritual", 2)] {
                 let (info, traces) = edges(depth, 500_000, a, 1)?;
                 let mut r = campaign(&format!("edge coverage ({a}, depth {depth})"), traces.into_iter().map(|t| (t, None)).collect(), &Campaign { retries: 1, replays }, Host::spawn()?, None)?;
-                r["model"] = info;
+                r["graph"] = info;
                 parts.push(r);
             }
             let deadline = start + Duration::from_secs(budget);

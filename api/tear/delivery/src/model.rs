@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub const WORKERS: [&str; 2] = ["K", "L"];
-pub const EPS: [&str; 4] = ["W", "V", "S", "F"];
+pub const EPS: [&str; 5] = ["W", "V", "S", "F", "U"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Ep {
@@ -69,6 +69,10 @@ pub struct D {
     pub tries: u32,
     /// Bumped by every resume; a claim belongs to one generation.
     pub generation: u32,
+    /// Created more than the 30-day delivery retention ago (`age d`).
+    pub aged: bool,
+    /// Dead-lettered by the sweep after being held past retention (kept 7 more days).
+    pub expired_hold: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -104,6 +108,10 @@ pub struct Model {
     pub boxed: BTreeMap<String, Vec<String>>,
     pub forwards: Vec<String>,
     pub forward_sends: u32,
+    /// (email, endpoint) pairs routing or a ritual queued: none may be lost while its endpoint exists.
+    pub routed: Vec<(String, String)>,
+    /// Pairs whose settled delivery the retention sweep removed.
+    pub pruned: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +129,12 @@ pub enum Act {
     RouteSet { r: String, state: String },
     Rate { e: String, n: u32 },
     Decline,
+    /// The delivery's row is older than the 30-day retention.
+    Age { d: String },
+    /// The hourly retention sweep (pruneMailboxEvents).
+    Prune,
+    /// The stored message lost its ingest-time forward verdicts (a row stored before they existed).
+    Strip { m: String },
 }
 
 pub const RESPONSES: [&str; 10] = ["200", "503", "429 120", "400", "timeout", "408", "410", "429", "429 9999999", "reset"];
@@ -144,6 +158,9 @@ pub fn parse(label: &str) -> Option<Act> {
         "route" => Act::RouteSet { r: s(1)?, state: s(2)? },
         "rate" => Act::Rate { e: s(1)?, n: s(2)?.parse().ok()? },
         "decline" => Act::Decline,
+        "age" => Act::Age { d: s(1)? },
+        "prune" => Act::Prune,
+        "strip" => Act::Strip { m: s(1)? },
         _ => return None,
     })
 }
@@ -159,8 +176,19 @@ fn calls(mode: &str) -> Vec<(&'static str, u32)> {
         _ => vec![],
     }
 }
+/// After an unknown outcome the endpoint may be sent the call again (idempotent webhook, forward,
+/// and plain event subscriptions, which are at-least-once by contract).
 fn replay_safe(ep: &str) -> bool {
-    ep == "V" || ep == "F"
+    ep == "V" || ep == "F" || ep == "U"
+}
+/// A plain event subscription: fenced against pauses and stale claims like every delivery, but
+/// with no attempt row and no rate slot; any HTTP error except 410 is retried.
+fn plain(ep: &str) -> bool {
+    ep == "U"
+}
+/// Sends carry the delivery's Idempotency-Key except Slack and plain subscriptions.
+fn keyed(ep: &str) -> bool {
+    ep != "S" && ep != "U"
 }
 fn retry_after_ms(arg: Option<&str>) -> u64 {
     match arg {
@@ -189,12 +217,14 @@ impl Model {
             boxed: BTreeMap::new(),
             forwards: vec![],
             forward_sends: 0,
+            routed: vec![],
+            pruned: vec![],
         }
     }
 
     /// Attempts allowed for a delivery: 1 + the endpoint's retryAttempts (9 unless set).
     fn max_attempts(&self, ep: &str) -> u32 {
-        1 + if ep == "W" || ep == "V" { self.retries } else { 9 }
+        1 + if ep == "W" || ep == "V" || ep == "U" { self.retries } else { 9 }
     }
     fn d(&self, label: &str) -> Option<&D> {
         self.ds.iter().find(|d| d.label == label)
@@ -255,8 +285,11 @@ impl Model {
                     _ => false,
                 }
             }
-            Act::Rate { e, n } => self.eps.get(e).is_some_and(|x| x.per_minute != *n),
+            Act::Rate { e, n } => e != "U" && self.eps.get(e).is_some_and(|x| x.per_minute != *n),
             Act::Decline => self.eps.get("F").is_some_and(|f| !f.declined),
+            Act::Age { d } => self.d(d).is_some_and(|d| !d.aged),
+            Act::Prune => self.ds.iter().any(|d| d.aged),
+            Act::Strip { m } => self.emails.get(m).is_some_and(|e| e.stored.is_some()),
         }
     }
 
@@ -274,7 +307,7 @@ impl Model {
             Act::Reply { w, resp } => self.reply(&w, &resp, &mut sends),
             Act::Crash { w, sent } => {
                 if let (Wk::Flight { d, ep, .. }, true) = (self.worker(&w).clone(), sent) {
-                    sends.push(json!([ep, d, ep != "S"]));
+                    sends.push(json!([ep, d, keyed(&ep)]));
                 }
                 self.workers.insert(w, Wk::Idle);
                 json!("ok")
@@ -295,8 +328,9 @@ impl Model {
             Act::Pause { e, on } => {
                 self.eps.get_mut(&e).unwrap().paused = on;
                 if !on {
-                    // Resume: every parked delivery of the endpoint gets a new generation and job.
-                    let parked: Vec<String> = self.ds.iter().filter(|d| d.ep == e && d.status == "paused").map(|d| d.label.clone()).collect();
+                    // Resume: every parked delivery of the endpoint still within retention gets a new
+                    // generation and job. Older ones stay parked until the sweep dead-letters them.
+                    let parked: Vec<String> = self.ds.iter().filter(|d| d.ep == e && d.status == "paused" && !d.aged).map(|d| d.label.clone()).collect();
                     for label in parked {
                         self.stale(&label);
                         let d = self.dm(&label).unwrap();
@@ -347,6 +381,25 @@ impl Model {
                 self.eps.get_mut("F").unwrap().declined = true;
                 json!("ok")
             }
+            Act::Age { d } => {
+                self.dm(&d).unwrap().aged = true;
+                json!("ok")
+            }
+            Act::Prune => {
+                // Past retention: settled deliveries are deleted; a delivery still held for a paused
+                // endpoint is dead-lettered with a reason (and kept a while to be seen) instead.
+                for d in self.ds.iter_mut().filter(|d| d.aged && d.status == "paused") {
+                    d.status = "failed".into();
+                    d.err = Some("ENDPOINT_PAUSED_EXPIRED".into());
+                    d.expired_hold = true;
+                }
+                for d in self.ds.iter().filter(|d| d.aged && !d.expired_hold && (d.status == "delivered" || d.status == "failed")) {
+                    self.pruned.push((d.msg.clone(), d.ep.clone()));
+                }
+                self.ds.retain(|d| !(d.aged && !d.expired_hold && (d.status == "delivered" || d.status == "failed")));
+                json!("ok")
+            }
+            Act::Strip { .. } => json!("ok"),
         };
         (r, sends)
     }
@@ -410,16 +463,22 @@ impl Model {
                     "over" => vec!["ritual-error".into(), "spam".into()],
                     _ => vec![],
                 };
+                let fresh_box = !self.boxed.contains_key(&email);
                 self.boxed.entry(email.clone()).or_insert(labels);
+                // A paused endpoint holds new mail: it is queued like any other, then parked.
                 for (e, idx) in calls(&self.ritual) {
-                    if self.eps.get(e).is_some_and(|x| !x.paused) {
+                    if self.eps.contains_key(e) {
                         let label = format!("{email}:{e}{}", if e == "S" && idx > 0 { idx.to_string() } else { String::new() });
                         self.queue(&label, e, &email);
                     }
                 }
+                // U subscribes to box@'s message.received events (not junk: it skips junk).
+                if fresh_box && self.ritual != "over" && self.eps.contains_key("U") {
+                    self.queue(&format!("{email}:U"), "U", &email);
+                }
             } else if let Some(targets) = self.route_targets(&r) {
                 for e in targets {
-                    if self.eps.get(&e).is_some_and(|x| !x.paused) {
+                    if self.eps.contains_key(&e) {
                         let label = format!("{email}:{e}");
                         self.queue(&label, &e, &email);
                     }
@@ -429,6 +488,10 @@ impl Model {
         json!("ok")
     }
     fn queue(&mut self, label: &str, ep: &str, msg: &str) {
+        let pair = (msg.to_string(), ep.to_string());
+        if !self.routed.contains(&pair) {
+            self.routed.push(pair);
+        }
         if self.d(label).is_none() {
             self.ds.push(D {
                 label: label.into(),
@@ -442,6 +505,8 @@ impl Model {
                 delay: json!(0),
                 tries: 0,
                 generation: 0,
+                aged: false,
+                expired_hold: false,
             });
         }
     }
@@ -450,8 +515,10 @@ impl Model {
         let max = self.max_attempts(&self.d(label).unwrap().ep);
         let d = self.dm(label).unwrap();
         let job = d.job.as_mut().unwrap();
-        if job.status == "running" && job.attempts >= max {
-            // The last attempt's lease expired: dead-letter it.
+        // The last attempt's lease expired: dead-letter it. For a fenced delivery, a claim that never
+        // reached the fence (nothing was sent) does not use up the last attempt; one more is allowed.
+        let fenced_short = !plain(&d.ep) && d.tries < job.attempts;
+        if job.status == "running" && job.attempts >= max && (job.attempts > max || !fenced_short) {
             job.status = "failed".into();
             if d.status == "pending" {
                 d.status = "failed".into();
@@ -534,6 +601,14 @@ impl Model {
             self.settle(label, attempts, stale, Some(("completed", json!(null))), None);
             return done;
         }
+        if plain(&ep) {
+            if e.timeouts >= 3 {
+                self.settle(label, attempts, stale, Some(("pending", json!("d"))), None);
+                return done;
+            }
+            self.workers.insert(w.into(), Wk::Flight { d: label.into(), attempts, stale, ep: ep.clone(), generation });
+            return json!({"sending": ep, "d": label});
+        }
         match d.fence.as_deref() {
             Some("delivered") => {
                 self.settle(label, attempts, stale, Some(("completed", json!(null))), Some(("delivered", None)));
@@ -574,8 +649,10 @@ impl Model {
             return done;
         }
         if e.timeouts >= 3 {
-            // The transport breaker defers the call; nothing was sent.
-            self.dm(label).unwrap().fence = Some("retry".into());
+            // The transport breaker defers the call; nothing was sent, so it is not an attempt.
+            let d = self.dm(label).unwrap();
+            d.fence = Some("retry".into());
+            d.tries -= 1;
             self.settle(label, attempts, stale, Some(("pending", json!("d"))), None);
             return done;
         }
@@ -586,7 +663,7 @@ impl Model {
     fn reply(&mut self, w: &str, resp: &str, sends: &mut Vec<Value>) -> Value {
         let Wk::Flight { d: label, attempts, stale, ep, .. } = self.worker(w).clone() else { unreachable!() };
         self.workers.insert(w.into(), Wk::Idle);
-        sends.push(json!([ep, label, ep != "S"]));
+        sends.push(json!([ep, label, keyed(&ep)]));
         let mut words = resp.split(' ');
         let kind = words.next().unwrap_or_default();
         let arg = words.next();
@@ -610,6 +687,22 @@ impl Model {
                 m.settle(&label, attempts, stale, Some(("failed", json!(null))), Some(("failed", Some(code))));
             }
         };
+        if plain(&ep) {
+            // Event-subscription semantics: no attempt row; every HTTP error but 410 and every
+            // transport error is retried, with plain backoff (Retry-After is not read).
+            let status: u32 = kind.parse().unwrap_or(0);
+            if (200..300).contains(&status) {
+                self.settle(&label, attempts, stale, Some(("completed", json!(null))), Some(("delivered", None)));
+            } else {
+                let code = if status == 0 { "WEBHOOK_NETWORK_ERROR" } else { "WEBHOOK_HTTP_ERROR" };
+                if status != 410 {
+                    retry(self, code, 0);
+                } else {
+                    self.settle(&label, attempts, stale, Some(("failed", json!(null))), Some(("failed", Some(code))));
+                }
+            }
+            return json!("done");
+        }
         match kind {
             "timeout" | "reset" => {
                 fence(self, "unknown");
@@ -634,6 +727,15 @@ impl Model {
             }
         }
         json!("done")
+    }
+
+    /// Model property: every (email, endpoint) pair routing or a ritual queued still has its
+    /// delivery, unless the endpoint was deleted or retention removed a settled one.
+    pub fn lost(&self) -> Option<String> {
+        self.routed.iter().find_map(|(m, e)| {
+            let kept = !self.eps.contains_key(e) || self.ds.iter().any(|d| &d.msg == m && &d.ep == e) || self.pruned.contains(&(m.clone(), e.clone()));
+            (!kept).then(|| format!("{m}:{e} was routed but has no delivery"))
+        })
     }
 
     /// The committed state, in the host's shape.
@@ -694,7 +796,7 @@ pub fn alphabet(alpha: &str) -> Vec<String> {
         out.push(format!("pause {e}"));
         out.push(format!("unpause {e}"));
         out.push(format!("delete {e}"));
-        if alpha != "core" || e == "W" {
+        if e != "U" && (alpha != "core" || e == "W") {
             out.push(format!("rate {e} 1"));
             out.push(format!("rate {e} 60"));
         }
@@ -711,13 +813,20 @@ pub fn alphabet(alpha: &str) -> Vec<String> {
     }
     if alpha != "core" {
         out.push("decline".into());
+        for m in msgs.iter().filter(|m| m.starts_with('m')) {
+            out.push(format!("strip {m}"));
+        }
     }
+    for d in &labels {
+        out.push(format!("age {d}"));
+    }
+    out.push("prune".into());
     out
 }
 fn delivery_labels(msgs: &[&str]) -> Vec<String> {
     let mut out = vec![];
     for m in msgs.iter().filter(|m| m.starts_with('m')) {
-        for e in ["W", "V", "S", "S1", "S2", "F"] {
+        for e in ["W", "V", "S", "S1", "S2", "F", "U"] {
             out.push(format!("{m}:{e}"));
         }
     }
