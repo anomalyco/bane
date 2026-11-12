@@ -42,6 +42,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 /* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (three on a phone or
    tablet), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
 .page-surface > .standing-banner { animation: none; }
+/* The billing banner (an empty balance) shares it; its two lines are fixed text, so both always fit their reserved lines. */
+.standing-banner + .standing-banner { margin-top: calc(-1 * var(--page-gap) + var(--space-8)); }
 .standing-banner { flex-shrink: 0; display: flex; align-items: center; gap: var(--space-12); margin-bottom: var(--page-gap); padding: var(--space-8) var(--space-12); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .standing-banner__icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--tone-ink); }
 .standing-banner__text { flex: 1; min-width: 0; }
@@ -57,6 +59,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .app-shell--compact .standing-banner__text > .standing-banner__what { display: -webkit-box; height: calc(3 * var(--leading-sm)); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .app-shell--compact .standing-banner__text > .standing-banner__what:has(.ui-skeleton-block) { display: flex; align-items: flex-start; padding-top: 4px; }
 .app-shell--compact .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
+/* The billing banner's text is fixed, so it needs no reserved lines. */
+.app-shell--compact .billing-banner .standing-banner__text > .standing-banner__what { display: block; height: auto; -webkit-line-clamp: unset; }
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }
 .boot-loader { display: grid; place-items: center; height: 100dvh; background: var(--color-deep); color: var(--color-muted); }

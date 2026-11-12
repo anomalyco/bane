@@ -213,6 +213,11 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   HOSTED_SENDING_PAUSED: detail => `Sending is paused for this workspace while its reputation is reviewed${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
   SENDER_DOMAIN_NOT_VERIFIED: () => 'This sender’s domain isn’t verified yet. Open Domains to check its DNS records; you can send once it shows Verified.',
   SEND_LIMIT_REACHED: detail => detail,
+  BALANCE_EXHAUSTED: () => 'Sending is paused: your balance is empty. Add credit in Settings → Billing.',
+  PAYMENT_METHOD_REQUIRED: () => 'Save a card first: auto-recharge charges it.',
+  FIRST_TOP_UP_LIMIT: detail => detail,
+  TOP_UP_RATE_LIMITED: () => 'Too many payment attempts. Wait a few minutes, then try again.',
+  BILLING_NOT_CONFIGURED: () => 'Payments aren’t set up on this installation yet.',
   NETWORK_UNAVAILABLE: detail => detail,
   AUDIENCEQL_LIMIT_EXCEEDED: () => 'A bulk change can update at most 10,000 contacts at a time. Filter to a smaller list and try again.',
   AUDIENCE_PLAN_EXPIRED: () => 'This count is more than 15 minutes old. Count again, then confirm.',
@@ -312,7 +317,7 @@ export interface BaneApi {
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Bane staff only: the platform operator role, which opens /operator. */ operator?: 'operator' | 'operator:read' | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Bane staff only: the platform operator role, which opens /operator. */ operator?: 'operator' | 'operator:read' | null; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: ({ enforcement: 'off' | 'shadow' | 'enforce' } & import('./billing').BillingState) | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 // GET /v1/overview/setup: Overview's setup and next steps in one read. A part is null where its own list would refuse the caller.
