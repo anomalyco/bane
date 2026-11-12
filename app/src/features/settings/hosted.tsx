@@ -11,18 +11,20 @@ import { useSenderScore } from '../score'
 import { limitSummary, useSendingLimit } from '../overview/setup'
 import { MutationError } from './shared'
 import { WebhooksSection } from './webhooks'
+import { ActivitySection } from './activity'
+import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'account'
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
-const keys: SectionKey[] = ['general', 'members', 'sending', 'webhooks', 'account']
+const keys: SectionKey[] = ['general', 'members', 'sending', 'webhooks', 'activity', 'account']
 
 export function HostedSettings() {
   const { hash } = useLocation()
@@ -44,6 +46,7 @@ export function HostedSettings() {
       {section === 'members' && <Team />}
       {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
       {section === 'webhooks' && <WebhooksSection note={false} />}
+      {section === 'activity' && <ActivitySection />}
       {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
     </div>
   </div>
@@ -112,11 +115,14 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
+  const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
+    <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
+    {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
 // Members and invitations appear together once both are known, so the second table never pushes down.
