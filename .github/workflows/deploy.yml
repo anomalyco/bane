@@ -468,6 +468,8 @@ jobs:
             GOOGLE_CLIENT_ID,bane/${{ env.STAGE }}/GOOGLE_CLIENT_ID
             GOOGLE_CLIENT_SECRET,bane/${{ env.STAGE }}/GOOGLE_CLIENT_SECRET
             TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
+            STRIPE_SECRET_KEY,bane/${{ env.STAGE }}/STRIPE_SECRET_KEY
+            STRIPE_WEBHOOK_SECRET,bane/${{ env.STAGE }}/STRIPE_WEBHOOK_SECRET
           parse-json-secrets: false
 
       # Only dev runs a live E2E, so only dev has an E2E key to read.
