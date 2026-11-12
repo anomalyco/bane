@@ -43,7 +43,9 @@ function ReceivingCell({ domain, name }: { domain?: MailboxDomain; name: string 
 function DomainCardLine({ domain, receiving }: { domain: Domain; receiving?: MailboxDomain }) {
   if (domain.status !== 'verified' || ['pending', 'failed'].includes(domain.mailFromStatus) || domain.receivingIssue) return <span className={domain.receivingIssue ? 'text-warning' : undefined}>{setupSummary(domain)}</span>
   if (!receiving || receiving.status === 'off' || receiving.status === 'disabled') return <>Send only</>
-  return <>Receiving {receivingStatus[receiving.status].label.toLowerCase()}{receiving.name !== domain.name ? ` at ${receiving.name}` : ''} · {receiving.addressCount.toLocaleString('en-US')} {receiving.addressCount === 1 ? 'address' : 'addresses'}</>
+  // "Receiving" alone when active (its label is "Receiving"); otherwise the state, keeping MX in capitals.
+  const state = receiving.status === 'active' ? '' : `: ${receivingStatus[receiving.status].label.replace(/^./, c => c.toLowerCase())}`
+  return <>Receiving{state}{receiving.name !== domain.name ? ` at ${receiving.name}` : ''} · {receiving.addressCount.toLocaleString('en-US')} {receiving.addressCount === 1 ? 'address' : 'addresses'}</>
 }
 
 /** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
