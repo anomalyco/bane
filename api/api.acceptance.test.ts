@@ -9309,9 +9309,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const importer=runtime.importPublicImage;let imports=0;
         runtime.importPublicImage=async()=>{if(++imports===1)throw Error('Synthetic importer failure');return {data:Uint8Array.of(2),contentType:'image/png'};};
         try {
-          const attempt=()=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},'import-after-500');
-          assert.equal((await attempt()).status,500);const created=ok(await attempt(),201);
-          assert.equal(ok(await attempt(),201).id,created.id);assert.equal(imports,2);
+          const attempt=(key='import-after-500')=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},key);
+          assert.equal((await attempt()).status,500);
+          // The handler charged its render budget (a write) before the importer failed, so the outcome is unknown: the key never runs it again.
+          error(await attempt(),409,'IDEMPOTENCY_OUTCOME_UNKNOWN');assert.equal(imports,1);
+          const created=ok(await attempt('import-after-500-new-key'),201);
+          assert.equal(ok(await attempt('import-after-500-new-key'),201).id,created.id);assert.equal(imports,2);
         } finally {runtime.importPublicImage=importer;}
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
@@ -9328,6 +9331,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/bane_mbx_/);
         error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/bane_mbx_/);
         assert.deepEqual(await call('DELETE','/v1/endpoints/replay-hook'),{name:'replay-hook',deleted:true});await call('DELETE',`/v1/routing/routes/${route.body.id}`);
+      });
+      // tear witness (api/tear): mint key, lost list key k1 b1, create list key k1 b1 created a second list.
+      await t.test('create idempotency: a lost commit acknowledgement keeps the key, so the retry never creates twice',async st=>{
+        const post=(key:string)=>local('POST','/v1/lists',{name:'tear lost ack'},'live',{'idempotency-key':key});
+        const count=async()=>(await db.query("SELECT count(*)::int AS n FROM audience_lists WHERE workspace_id=$1 AND name='tear lost ack'",[runtime.config.workspaceId])).rows[0].n;
+        // Mock the prototype (as later tests do): an instance mock would leave an own property behind.
+        const query=pg.Client.prototype.query as (...args:unknown[])=>unknown;let lose=true;
+        // The INSERT commits on the server; the client sees the connection drop before the reply.
+        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+          if(this!==db||!lose||!/^insert into "audience_lists"/i.test(text))return query.apply(this,args);
+          lose=false;return (query.apply(this,args) as Promise<unknown>).then(()=>{throw Object.assign(new Error('Connection terminated unexpectedly'),{code:'ECONNRESET'});});} as typeof pg.Client.prototype.query);
+        try{error(await post('lost-ack-1'),503,'DATABASE_UNAVAILABLE');}finally{wire.mock.restore();}
+        assert.equal(await count(),1);
+        assert.match(error(await post('lost-ack-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN').message,/may have committed/);
+        assert.equal(await count(),1);
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),

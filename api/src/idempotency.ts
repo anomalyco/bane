@@ -8,7 +8,10 @@ import { sendingIdempotency } from './db/sending.js';
  * rest with the same table and the same rules: the same key and body return the original result
  * (with Idempotent-Replayed: true), a different body is 409 IDEMPOTENCY_CONFLICT, and a
  * concurrent duplicate gets a retryable conflict. A committed reservation prevents a second
- * create if the worker loses the result after the handler commits. No pool slot spans the handler.
+ * create if the worker loses the result after the handler commits. A handler that fails after it
+ * attempted a database write may have committed (a lost acknowledgement, a failed read after the
+ * write), so its key keeps an unknown outcome instead of being released. No pool slot spans the
+ * handler.
  *
  * A result that carries a secret (API key, token, webhook secret, inbox key) is never stored.
  * Replaying it returns 409 IDEMPOTENT_SECRET_WITHHELD naming what was created, so the caller can
@@ -37,6 +40,17 @@ function carriesSecret(value: unknown, depth = 0): boolean {
   return Object.entries(value).some(([k, v]) => (SECRET_FIELDS.has(k) && typeof v === 'string' && v.length > 0) || carriesSecret(v, depth + 1));
 }
 
+// The handler's view of the database: every call that can write (or runs raw SQL, which may)
+// marks the request as possibly committed before it starts.
+const WRITES = new Set<PropertyKey>(['insert', 'update', 'delete', 'execute', 'transaction']);
+function attemptedWrites(db: Ctx['env']['db'], mark: () => void): Ctx['env']['db'] {
+  return new Proxy(db, { get(target, prop) {
+    const value = Reflect.get(target, prop, target);
+    if (typeof value !== 'function') return value;
+    return WRITES.has(prop) ? (...args: unknown[]) => { mark(); return value.apply(target, args); } : value.bind(target);
+  } });
+}
+
 function idempotentCreates(paths: RegExp[]) {
   return async (c: Ctx, next: () => Promise<void>) => {
     const key = c.req.header('Idempotency-Key');
@@ -54,7 +68,8 @@ function idempotentCreates(paths: RegExp[]) {
     if (!claimed.length) {
       const [previous] = await db.select().from(sendingIdempotency).where(where);
       if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
-      const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; id?: string | null } | null;
+      const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; unknown?: boolean; id?: string | null } | null;
+      if (stored?.unknown) throw new ApiError(409, 'IDEMPOTENCY_OUTCOME_UNKNOWN', 'The original request failed after it may have committed. Check whether the resource was created before starting another request.');
       if (!stored?.status) {
         if (Date.now()-Date.parse(previous.createdAt)>=600_000) throw new ApiError(409,'IDEMPOTENCY_OUTCOME_UNKNOWN','No result was recorded within ten minutes. Check whether the resource was created before starting another request.');
         c.header('Retry-After','1');throw new ApiError(409,'IDEMPOTENCY_IN_PROGRESS','The original request has not recorded a result. Retry with the same key; do not repeat the create with a new key.',undefined,true);
@@ -67,13 +82,19 @@ function idempotentCreates(paths: RegExp[]) {
       }
       return c.json(stored.body as object, stored.status as 200);
     }
-    // Release only the winning request's reservation on handler failure. Once the
-    // handler succeeds, a failure recording its result must not permit another create.
+    // A 4xx is a refusal: release the winning request's reservation so the key can be retried.
+    // So is a failure before the handler attempted any write. A 5xx or thrown error after a write
+    // attempt may follow a commit, so the key keeps an unknown outcome: a retry never creates
+    // twice. Once the handler succeeds, a failure recording its result must not permit another.
+    let wrote = false;
+    c.env = { ...c.env, db: attemptedWrites(db, () => { wrote = true; }) };
+    const settle = (status: number) => status < 500 || !wrote ? db.delete(sendingIdempotency).where(where) : db.update(sendingIdempotency).set({ result: { status, unknown: true } }).where(where);
     try { await next(); }
-    catch (error) { await db.delete(sendingIdempotency).where(where); throw error; }
+    catch (error) { await settle(500); throw error; }
+    finally { c.env = { ...c.env, db }; }
     const status = c.res.status;
     if (status < 200 || status >= 300) {
-      if(status>=400)await db.delete(sendingIdempotency).where(where);
+      if (status >= 400) await settle(status);
       return c.res;
     }
     let body: unknown = null;
