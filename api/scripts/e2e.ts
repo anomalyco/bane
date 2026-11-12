@@ -160,8 +160,16 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   }
   // Keep the generated method's input/output tied to its key; no handwritten route or schema.
   const call = sdk[op] as (opts: Input<K>) => ReturnType<typeof sdk[K]>;
+  // A request that never got a response has no request ID: keep the error's name and cause code (never its message,
+  // which can carry the URL) so a transport failure says whether it was a timeout, a reset or a refused connection.
+  let transport: string | undefined;
   const result = await call({ ...input, client: input.client ?? client, signal: AbortSignal.timeout(ms), fetch: async (request: Request) => {
-    const response = await fetch(request);
+    let response: Response;
+    try { response = await fetch(request); } catch (error) {
+      const e = error as { name?: unknown; cause?: { code?: unknown; name?: unknown } };
+      transport = [e.name, e.cause?.code ?? e.cause?.name].filter(v => typeof v === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(v)).join(' ') || 'unknown';
+      throw error;
+    }
     if (state) state.requestId = response.headers.get('x-request-id');
     return response;
   }});
@@ -174,7 +182,7 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
     (result.response.ok ? successResponses : errorResponses).add(op);
   }
   // Never serialize SDK errors: request objects, tokens, and unrelated mail can all be sensitive.
-  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code);
+  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code ?? (transport && `(${transport})`));
   return result.data as Output<K>;
 }
 async function expectDenial(call: () => Promise<unknown>, status: number, code: string) {
@@ -609,6 +617,7 @@ async function webhook() {
   check(edited.description === subject && edited.headers?.[0]?.name === 'Authorization', 'webhook edit not persisted or dropped its custom header');
   check(hasId(await api('listWebhooks', { query: { limit: 100 } }), item.id), 'webhook not listed');
   const before = await api('revealWebhookSecret', { path });
+  check(item.secret.startsWith('whsec_') && item.secret === before.secret && !('secret' in created), 'createWebhook did not return the signing secret once');
   const after = await api('rotateWebhookSecret', { path });
   check(after.secret.startsWith('whsec_') && before.secret !== after.secret, 'test endpoint signing secret did not rotate');
   const test = await api('testWebhook', { path });
@@ -919,9 +928,13 @@ async function run() {
         ]);
       })(),
     ]);
-    await step('Regional metrics for this run window', async () => {
+    await step('Regional metrics, sender score and plan usage for this run window', async () => {
       const sender = await api('getSenderScore', {});
       check(sender.state === 'warmup' ? sender.score === null : sender.score !== null && sender.score >= 0 && sender.score <= 100, 'sender score outside its grading range');
+      // Plan & usage: pricing is information only, this run's sends are in the month, a manage key sees the received count
+      // (members and read-only keys get null), and the daily limit names its steps.
+      const usage = await api('getUsage', {});
+      check(usage.billing.enabled === false && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
       check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
     });

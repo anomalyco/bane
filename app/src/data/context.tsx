@@ -1,5 +1,5 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
@@ -10,8 +10,10 @@ import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, 
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { chunk } from '../lib/preloadable'
+import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
+import { useGuardedMutation } from '../lib/single-flight'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
@@ -85,7 +87,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       }
     },
   })
-  const join = useMutation({
+  const join = useGuardedMutation({
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
       await switchWorkspace(workspaceId)
@@ -223,10 +225,21 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     </div></main>}
   </SessionContext.Provider></ApiContext.Provider>
 }
-// The installation's public origin, for examples and connection URLs.
-export function usePublicOrigin() {
-  return useContext(SessionContext)?.identity?.origin || window.location.origin
+// The installation's canonical address (lib/public-origin.ts), for examples and connection URLs: PUBLIC_URL from
+// /v1/me when signed in, else from /health, never the page's own Host. null until known; foreign when the page is
+// open at another address.
+export function useCanonicalOrigin() {
+  const demo = useContext(ApiContext)?.mode === 'demo'
+  const identity = useContext(SessionContext)?.identity?.origin ?? null
+  const instance = useQuery({ queryKey: ['instance-origin'], enabled: !demo && !identity, staleTime: Infinity, gcTime: Infinity, retry: 2,
+    queryFn: async ({ signal }) => {
+      const response = await fetch('/health', { signal, headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error('Couldn’t load this installation’s address.')
+      return ((await response.json()) as { origin?: string }).origin ?? null
+    } })
+  return { ...canonicalOrigin({ identity, instance: instance.data, demo, page: window.location.origin }), error: identity ? null : instance.error, retry: () => void instance.refetch() }
 }
+export function usePublicOrigin(): string | null { return useCanonicalOrigin().origin }
 export function useApi() {
   const api = useContext(ApiContext)
   if (!api) throw new Error('ApiProvider is required')
@@ -245,11 +258,16 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: BaneApi, sig
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
-export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
+/** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
+ *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
+export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
-  return useMutation({
+  // One write while it is in flight: a repeat of the same operation on the same target with the same input is dropped
+  // (lib/single-flight.ts). The operation is the write's source, the same in every render.
+  return useGuardedMutation({
+    operation: write.toString(), target,
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {

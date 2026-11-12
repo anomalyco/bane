@@ -7,7 +7,7 @@ import { createApp } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
-import { admissionDenied, admissionPeer, ApiError, digest, log, guardPublicRequest } from './core.js';
+import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 
@@ -20,8 +20,8 @@ async function dashboardFile(request: Request, path: string, response: Response)
   if (!['GET', 'HEAD'].includes(request.method) || response.status !== 200) return response;
   // The public docs (the Docs page reads the 1.7 MB OpenAPI document) are the same for every reader: compress them too.
   // Exactly these paths: a longer one that only starts like them is a dashboard route, with its own answer below.
-  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/[^/]+)$/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
-  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(path)) return response;
+  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/[^/]+)$/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
+  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(path)) return response;
   const html = response.headers.get('content-type')?.startsWith('text/html');
   const asset = path.startsWith('/assets/') && !html, font = path.startsWith('/fonts/') && !html;
   if (!html && !asset && !font) return response;
@@ -52,6 +52,7 @@ async function encode(request: Request, path: string, response: Response, header
   return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { status: 200, headers });
 }
 
+setLogContext({ service: 'api', deploy: process.env.DEPLOY_SHA });
 try {
   const { runtime, close } = nodeRuntime(process.env);
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
@@ -62,7 +63,7 @@ try {
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });
   const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
-    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
+    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
     return assets(c, async () => {
       const response = await dashboard(c, next);
       if (response) c.res = response;
@@ -94,7 +95,7 @@ try {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });
   });
   server.on('error', error => {
-    log('error', { code: 'LISTEN_FAILED', message: 'Unable to bind the API port. Check PORT and HOST.', errorType: error.name });
+    logError(error, { code: 'LISTEN_FAILED' }); // Unable to bind the API port: check PORT and HOST.
     void close().then(() => { process.exitCode = 1; });
   });
   let stopping = false;
@@ -103,6 +104,6 @@ try {
     server.close(() => { void close().then(() => process.exit(0)); });
   });
 } catch (error) {
-  log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'API startup failed; check deployment configuration.' });
+  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' }); // Check the deployment configuration.
   process.exitCode = 1;
 }

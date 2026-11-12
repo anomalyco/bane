@@ -1,5 +1,6 @@
 // CLS gate: cumulative layout shift on every main dashboard page, light and dark, on a cold full load and on in-app
-// navigation, over a throttled network with slow API responses that arrive out of order; the main pages again on a
+// navigation, over a throttled network with slow API responses that arrive out of order (web fonts load before any text,
+// the same way every run; CLS_FONTS=late delays them instead); the main pages again on a
 // phone (390 × 844, touch: the tab bar, cards and native selects). Fails when any page's CLS
 // exceeds 0.001 (or a page errors). The longest task during each in-app navigation is reported, not gated: on CI's
 // shared runner the composer and rituals chunks measured 105–179 ms between runs of the same page, too close to a
@@ -12,8 +13,13 @@
 //   CLS_CHROME=<path>  Chrome executable; otherwise the installed Google Chrome
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
 //   CLS_PHONE=0        skip the phone pass
+//   CLS_FONTS=late     deliver web fonts 1.8 s late, to measure the fallback-to-web-font swap
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
+//
+// Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
+// beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
+// cold desktop load, hovering the first few reveals them without anything moving.
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
@@ -21,7 +27,7 @@
 // fixed sleeps, and polling pages settle between polls.
 import { mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { seed, start } from './cls-fixture.mjs';
@@ -47,7 +53,7 @@ const pages = ids => [
   ['Received email', `/logs/${ids.receivedEmail}`, { from: '/logs?view=received', row: 'Invoice for October' }],
   ['Receiving', '/receiving', { from: '/' }],
   ['Receiving · endpoints', '/receiving?tab=endpoints', { from: '/receiving', click: 'Endpoints' }],
-  ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving', row: 'support@northwind.example' }],
+  ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
   ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
   ['Receiving · trace', '/receiving/trace', { from: '/receiving' }],
   ['Receiving · rituals', '/receiving/rituals', { from: '/receiving' }],
@@ -75,18 +81,21 @@ const pages = ids => [
   ['Settings · sending', '/settings#sending', { from: '/settings' }],
   ['Settings · webhooks', '/settings#webhooks', { from: '/settings' }],
   ['Settings · account', '/settings#account', { from: '/settings' }],
+  ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Docs', '/docs', { from: '/' }],
   ['Operator', '/operator', { from: '/' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
+  ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
+  ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   ['Signed out', '/', { user: null }],
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -96,6 +105,12 @@ const devices = {
 // every run. Assets load through Chrome's own throttling (150 ms latency, 1.6 Mbps down).
 const apiDelay = path => { let h = 0; for (const c of path) h = (h * 31 + c.charCodeAt(0)) >>> 0; return 300 + (h % 6) * 200; };
 const throttle = { offline: false, latency: 150, downloadThroughput: 1.6 * 1024 * 1024 / 8, uploadThroughput: 750 * 1024 / 8 };
+// Web fonts are served at once from app/dist, not through the throttled network, so they have loaded before the
+// (throttled) script that renders any text runs. Before, whether a font arrived before or after the page's text varied
+// with the runner's load, and a page whose text changed size when the font swapped in failed only sometimes (Settings ·
+// webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
+// late, after the slowest API response, so text first paints in its local fallback (tokens.css).
+const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800, fontDir = join(app, 'dist', 'fonts');
 
 // Runs in the page before its own scripts.
 const probe = () => {
@@ -166,6 +181,51 @@ async function settle(page, net) {
 }
 const sharp = n => Math.round(n * 10000) / 10000;
 
+// Masked addresses, in the page. A seeded mailbox address (cls-fixture.mjs) may be spelled out only where it is typed or
+// chosen (a field, a picker, a dialog) or in a code example; everywhere else the page holds its first two characters.
+const maskedLeaks = () => {
+  const SEEDED = /[A-Za-z0-9._%+*-]+@(?:[a-z0-9-]+\.)*(?:northwind\.example|lumenlabs\.example|fieldnotes\.example|example\.net|example\.com)\b/gi;
+  const mailbox = value => value.slice(0, value.lastIndexOf('@')).replace(/\*/g, '') !== '';
+  const exempt = el => !!el.closest('input, textarea, select, option, datalist, [contenteditable=""], [contenteditable="true"], pre, code, [role=dialog], [role=alertdialog]');
+  const found = [], note = (what, value) => { if (found.length < 5) found.push(`${what} spells out ${value.slice(0, 2)}…`); };
+  for (const el of document.querySelectorAll('.private-address:not([data-revealed])')) {
+    const text = el.querySelector('.private-address__value')?.textContent ?? el.textContent;
+    if ([...text].length > 2 || !el.querySelector('.private-address__rest')) note('a masked address', text);
+  }
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node; (node = walker.nextNode());) for (const value of node.nodeValue.match(SEEDED) ?? []) if (mailbox(value) && !exempt(node.parentElement) && !node.parentElement.closest('[data-revealed]')) note(`text in <${node.parentElement.tagName.toLowerCase()} class="${node.parentElement.className}">`, value);
+  for (const el of document.body.querySelectorAll('[title], [aria-label], [aria-description], [alt], a[href]')) for (const name of ['title', 'aria-label', 'aria-description', 'alt', 'href']) {
+    let value = el.getAttribute(name) ?? ''; try { value = decodeURIComponent(value); } catch {}
+    for (const match of value.match(SEEDED) ?? []) if (mailbox(match) && !exempt(el)) note(`${name} on <${el.tagName.toLowerCase()} class="${el.className}">`, match);
+  }
+  return found;
+};
+// Where to hover the first few masked addresses in view that the pointer can reach, and what must stay where it is.
+const maskedTargets = () => [...document.querySelectorAll('.private-address:not([data-revealed])')].map((el, index) => {
+  const r = el.getBoundingClientRect(), x = r.left + 3, y = r.top + r.height / 2;
+  return r.width > 0 && r.top >= 0 && r.bottom <= innerHeight && el.contains(document.elementFromPoint(x, y)) ? { index, x, y } : null;
+}).filter(Boolean).slice(0, 3);
+const maskedState = index => {
+  const el = document.querySelectorAll('.private-address')[index], rect = node => { const r = node.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' '); };
+  return { revealed: el.hasAttribute('data-revealed'), text: el.querySelector('.private-address__value').textContent, own: rect(el), around: rect(el.closest('tr, li, dd, h1, p, section') ?? el.parentElement) };
+};
+async function masking(page, hover) {
+  const problems = await page.evaluate(maskedLeaks);
+  if (!hover) return problems;
+  const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  for (const { index, x, y } of await page.evaluate(maskedTargets)) {
+    const before = await page.evaluate(maskedState, index);
+    await page.mouse.move(x, y); await frame();
+    const shown = await page.evaluate(maskedState, index);
+    await page.mouse.move(1, 1); await frame();
+    const after = await page.evaluate(maskedState, index);
+    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`hovering ${before.text}… did not reveal it`);
+    else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
+    if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
+  }
+  return problems;
+}
+
 async function measure(browser, job, fx) {
   const origin = fx.origins[job.index % fx.origins.length];
   const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme });
@@ -184,6 +244,11 @@ async function measure(browser, job, fx) {
       await new Promise(done => setTimeout(done, apiDelay(url.pathname + url.search)));
       await route.continue().catch(() => {});
     });
+    await context.route(url => url.origin === origin && url.pathname.startsWith('/fonts/'), async route => {
+      if (lateFonts) { await new Promise(done => setTimeout(done, FONT_DELAY_MS)); return route.continue().catch(() => {}); }
+      const file = join(fontDir, basename(new URL(route.request().url()).pathname));
+      await route.fulfill({ path: file, contentType: 'font/woff2', headers: { 'cache-control': 'public, max-age=31536000, immutable' } }).catch(() => route.continue().catch(() => {}));
+    });
     page = await context.newPage();
     net = network(page);
     page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429)) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
@@ -192,6 +257,9 @@ async function measure(browser, job, fx) {
     await cdp.send('Network.enable');
     await cdp.send('Network.emulateNetworkConditions', throttle);
     await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'load', timeout: 60_000 });
+    // With late fonts, the fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
+    const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
+    for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
     if (job.mode === 'in-app') {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
@@ -221,6 +289,7 @@ async function measure(browser, job, fx) {
     }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);
+    problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
     if (result.cls > LIMIT || process.env.CLS_SHOTS) {
       await page.evaluate(() => { for (const n of window.__cls.nodes) if (n.isConnected && n.style) n.style.outline = '2px solid #f0f'; });
       result.screenshot = `${job.slug}.png`;
@@ -253,7 +322,7 @@ function summarize(results, seconds) {
   const lines = [
     `### Layout shift: ${failed.length ? `❌ ${failed.length} of ${results.length} measurements failed` : `✅ ${results.length} measurements, every page at CLS ≤ ${LIMIT}`}`,
     '',
-    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
+    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order, web fonts ${lateFonts ? `after ${FONT_DELAY_MS} ms` : 'before any text'}; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
     '',
     '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Phone load | Phone in-app | Longest task |',
     '| --- | --- | --: | --: | --: | --: | --: | --: | --: |',

@@ -10,6 +10,7 @@ import { ApiError, errors, json, lazyModule, page, response, security, type Acto
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages, retainedMail } from './db/mailbox.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
+import { boundedHtmlFragment } from './bounded-html.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
 import { IdempotencyHeaders, idempotent } from './sending.js';
 import { SuppressionReason } from './core.js';
@@ -23,6 +24,7 @@ const Address = z.object({ name: z.string().nullable(), address: z.string() });
 export const AddressState = z.object({addressId:Id, unreadCount:z.number().int(), archived:z.boolean(), starred:z.boolean(), trashed:z.boolean(), spam:z.boolean(), labels:z.array(z.string())}).openapi('InboundThreadAddressState');
 const Thread = z.object({
   id: z.string(), subject: z.string(), snippet: z.string(), lastMessageAt: z.string(),
+  from: Address.describe('Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address.'),
   addressIds: z.array(z.string()), messageCount: z.number().int().describe('Distinct messages visible within the requested address scope.'),
 }).openapi('InboundThread');
 const Message = z.object({
@@ -60,8 +62,9 @@ function visibleLinks(value: MailboxAccess, filter: Filter) {
 }
 
 // Delivery details (SMTP envelope, region, spam verdict, headers, raw message) go to owner and admin dashboard sessions and
-// unrestricted manage API keys only; MCP grants and agent tokens read mail without them. Shared with logs.ts.
-export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && v.admin);
+// unrestricted manage API keys only; MCP grants, agent tokens and the API keys a grant created read mail without them.
+// Shared with logs.ts.
+export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && !actor.grantId && v.admin);
 // Which stored messages a reader can see, and the receiving addresses each was delivered to. Shared with the unified
 // logs (logs.ts), so both lists apply the same rule.
 export const accessibleMessages = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
@@ -85,7 +88,7 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
   // must not replace the newest visible snippet, narrow the address list, or reduce the count.
   const visibility = visibleLinks(value, filter); // Also validates an explicit address filter against the grant.
   // Page the per-address summaries first: opening Inbound shouldn't aggregate every message ever received.
-  const rows = await db.execute<{ id: string; subject: string; snippet: string; at: string; address_ids: string[]; message_count: number }>(sql`
+  const rows = await db.execute<{ id: string; subject: string; snippet: string; from_name: string | null; from_address: string; at: string; address_ids: string[]; message_count: number }>(sql`
     WITH threads AS MATERIALIZED (
       SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids
       FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
@@ -94,13 +97,13 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
       GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
         ${state ? sql`AND bool_or(${state})` : sql``}
       ORDER BY last_at DESC, id DESC LIMIT ${options.limit + 1}
-    ) SELECT threads.id, m.subject, m.snippet, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
+    ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
       FROM threads CROSS JOIN LATERAL (SELECT count(DISTINCT mm.message_id)::int AS message_count,
         (array_agg(mm.message_id ORDER BY mm.received_at DESC, mm.message_id DESC))[1] AS latest_id
         FROM mailbox_messages mm WHERE mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) detail
       JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
   const last = rows.rows[options.limit - 1];
-  return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
+  return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, from: { name: row.from_name, address: row.from_address }, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
     nextCursor: rows.rows.length > options.limit && last ? encodeCursor(last.at, last.id) : null };
 }
 
@@ -207,21 +210,23 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
   const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
-    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
+    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),htmlTooComplex:z.boolean().describe('With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.'),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
+    // The same bounded parse every other reader of stored HTML uses; the body itself is returned as stored.
+    const body=(html:string|null)=>q.includeHtml==='true'&&html?{html,htmlTooComplex:!boundedHtmlFragment(html,'document')}:{html:null,htmlTooComplex:false};
     if (q.includeDelivery==='true') {
       const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
       if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
       const {row,addresses,addressIds,isRead}=result;
       const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
       const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,row,files);
-      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,html:q.includeHtml==='true'?row.html:null,
+      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),
         rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
     }
     const [row] = await c.env.db.select({...messageFields,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-    return c.json({...messageView(row,row.addressIds,row.isRead),html:q.includeHtml==='true'?row.html:null,attachments},200);
+    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),attachments},200);
   });
   // Persistent API-key URLs in webhook payloads; presign only after workspace-level authorization.
   app.get('/v1/inbound/messages/:messageId/parts/:part',async c=>{

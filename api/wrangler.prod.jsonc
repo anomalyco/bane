@@ -12,7 +12,7 @@
   "assets": {
     "directory": "../app/dist",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/health", "/health/*", "/internal/*", "/openapi.json", "/docs.md", "/docs/operations/*", "/llms.txt"]
+    "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/health", "/health/*", "/internal/*", "/openapi.json", "/docs.md", "/docs/operations/*", "/docs/tags/*", "/llms.txt"]
   },
   "vars": {
     "BANE_MAIL_BUCKET": "bane-prod-mail",
@@ -43,7 +43,13 @@
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "bane-prod-work",
     "WEBHOOK_QUEUE_NAME": "bane-prod-webhooks",
-    "FEEDBACK_QUEUE_NAME": "bane-prod-feedback"
+    "FEEDBACK_QUEUE_NAME": "bane-prod-feedback-v2",
+    "FEEDBACK_DLQ_NAME": "bane-prod-feedback-v2-dlq",
+    "LEGACY_FEEDBACK_DLQ_NAME": "bane-prod-feedback-dlq",
+    // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
+    "LEGACY_FEEDBACK_QUEUE_NAME": "bane-prod-feedback",
+    // Set once to the recorded UTC cutover after fencing old producers. Empty quarantines every unsigned item.
+    "LEGACY_FEEDBACK_CUTOVER": ""
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.
@@ -58,15 +64,21 @@
     "producers": [
       { "binding": "WAKE_QUEUE", "queue": "bane-prod-work" },
       { "binding": "WEBHOOK_QUEUE", "queue": "bane-prod-webhooks" },
-      { "binding": "FEEDBACK_DLQ", "queue": "bane-prod-feedback-dlq" },
-      { "binding": "FEEDBACK_QUEUE", "queue": "bane-prod-feedback" }
+      { "binding": "FEEDBACK_DLQ", "queue": "bane-prod-feedback-v2-dlq" },
+      { "binding": "LEGACY_FEEDBACK_DLQ", "queue": "bane-prod-feedback-dlq" },
+      { "binding": "FEEDBACK_QUEUE", "queue": "bane-prod-feedback-v2" }
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
       { "queue": "bane-prod-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Each wake opens up to six delivery slots. Don't merge a burst of wake hints into one drain.
       { "queue": "bane-prod-webhooks", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 12 },
-      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" }
+      { "queue": "bane-prod-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-v2-dlq" },
+      // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
+      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" },
+      // Both DLQs archive to PostgreSQL/R2, never ingest. Cross-redrive keeps storage outages recoverable.
+      { "queue": "bane-prod-feedback-v2-dlq", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 100, "retry_delay": 300, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" },
+      { "queue": "bane-prod-feedback-dlq", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 100, "retry_delay": 300, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-v2-dlq" }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

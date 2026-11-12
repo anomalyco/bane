@@ -79,8 +79,8 @@ const mapDomain = (r: Json): Domain => {
   const recordStatus = (d: Json) => d.status === 'verified' || d.status === 'pending' ? d.status : ((d.purpose ?? (d.type === 'CNAME' ? 'sending' : 'mail_from')) === 'mail_from' ? mailFromStatus : dkimStatus) === 'verified' ? 'verified' : 'pending'
   return { ...r, regionId: r.region, status: r.ready ? 'verified' : r.verificationStatus === 'FAILED' ? 'issue' : 'pending', dkimStatus, mailFromStatus, sending: r.sending ?? (r.ready ? 'verified' : 'pending'), receiving: r.receiving ?? 'pending', records: (r.dns ?? []).map((d: Json, i: number) => ({ ...d, id: String(i), value: d.priority === undefined ? d.value : `${d.priority} ${d.value}`, status: recordStatus(d) })) } as Domain
 }
-const mapDelivery = (r: Json): WebhookDelivery => ({ id: r.id, at: r.createdAt, regionId: r.payload.region ?? 'Workspace', event: r.payload.type, response: r.lastStatusCode, attempts: r.attemptCount, status: r.status, payload: r.payload })
-const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Signing secret is hidden', headers: r.headers ?? [], deliveries: [] })
+const mapDelivery = (r: Json): WebhookDelivery => ({ id: r.id, at: r.createdAt, regionId: r.payload.region ?? 'Workspace', event: r.payload.type, response: r.lastStatusCode, attempts: r.attemptCount, status: r.status, payload: r.payload, test: r.synthetic === true || r.payload?.data?.test === true })
+const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Hidden. Reveal it to copy, or rotate it to replace it.', headers: r.headers ?? [], deliveries: [], ...typeof r.secret === 'string' ? { secret: r.secret } : {} })
 function regionCatalog(value: unknown): RegionCatalog {
   const record = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
   const nullableString = (v: unknown) => v === null || typeof v === 'string'
@@ -244,7 +244,7 @@ export function createLiveApi(): BaneApi {
     },
     keys: {
       list: async (signal, cursor, includeRevoked = true) => { const result = await call(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
-      create: async (input, signal) => { const result = await call('/api-keys', 'POST', {name: input.name, permissions: input.permission === 'manage' ? ['read', 'send', 'manage'] : [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key: {...key, permission: input.permission}, secret} as any },
+      create: async (input, signal) => { const result = await call('/api-keys', 'POST', {name: input.name, permissions: input.permission === 'manage' ? ['read', 'send', 'manage'] : input.permission === 'read_send' ? ['read', 'send'] : [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key: {...key, permission: key.permissions.includes('manage') ? 'manage' : key.permissions.join(', ')}, secret} as any },
       revoke: async (id, signal) => { await call(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
     },
     credentials: {
@@ -324,7 +324,7 @@ export function createLiveApi(): BaneApi {
       setStatus: async (id, status, signal) => mapWebhook(await call(`/webhooks/${idPath(id)}`, 'PATCH', {paused: status === 'paused'}, signal)),
       test: async (id, signal) => { const queued = await call(`/webhooks/${idPath(id)}/test`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(queued.id)}`, 'GET', undefined, signal)) },
       retry: async (id, deliveryId, signal) => { await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}/retry`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}`, 'GET', undefined, signal)) },
-      rotate: (id, signal) => call<any>(`/webhooks/${idPath(id)}/rotate-secret`, 'POST', undefined, signal), remove: async (id, signal) => { await call(`/webhooks/${idPath(id)}`, 'DELETE', undefined, signal) }
+      rotate: (id, signal) => call<any>(`/webhooks/${idPath(id)}/rotate-secret`, 'POST', undefined, signal), reveal: (id, signal) => call<any>(`/webhooks/${idPath(id)}/secret`, 'GET', undefined, signal), remove: async (id, signal) => { await call(`/webhooks/${idPath(id)}`, 'DELETE', undefined, signal) }
     },
     webhookDeliveries: deliveries
   }

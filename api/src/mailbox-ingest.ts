@@ -26,6 +26,7 @@ const DEGRADED_PARSE_LIMIT = 256 * 1024; // Raw byte cap if postal-mime's intern
 const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
+const INGEST_OUTAGE_MS = 48 * 3600_000; // Below the 3-day staging lifecycle (mail-controls.ts), with a day to spare.
 
 export const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
   .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
@@ -407,12 +408,12 @@ export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submissi
 // the database fails a pending receipt only for its running job on that lease (164).
 const claimedBy=(recipients:string[])=>sql`${mailReceipts.status}='pending' AND ${mailReceipts.recipients}=${JSON.stringify(recipients)}::jsonb`;
 const claimToken=(job:Parameters<JobHandler>[2])=>`${job.id}|${job.leaseFence??''}`;
-const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void,claim:{recipients?:string[]}) => {
+const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void,claim:{recipients?:string[];createdAt?:string}) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
   const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
   if(!receipt)return;
-  claim.recipients=receipt.recipients;
+  claim.recipients=receipt.recipients;claim.createdAt=receipt.createdAt;
   if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
@@ -502,7 +503,9 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
   const verifiedFrom = !!sesTimestamp && authenticatedFrom(email, from.address, notification.mail, verdicts);
-  const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
+  // The store reads years 1 to 9999. A Date header outside them says nothing about when the mail was sent.
+  const sentMs = email?.date ? Date.parse(email.date) : NaN;
+  const sentAt = sentMs >= -62135596800000 && sentMs <= 253402300799999 ? new Date(sentMs).toISOString() : null;
 
   // Attachments are uploaded before the database commit with deterministic keys, so retries overwrite rather than duplicate.
   const attachments: (typeof mailAttachments.$inferInsert)[] = [];
@@ -561,14 +564,23 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
 const recoveryPage='mailbox.recoverReceipts';
 export async function recoverMailReceipts(runtime: Runtime,continuation=false) {
   const jobFor=sql`j.workspace_id=r.workspace_id AND j.type='mailbox.ingest' AND j.payload->>'sesMessageId'=r.ses_message_id`;
-  const result=await runtime.db.execute<{n:number}>(sql`WITH due AS (SELECT r.workspace_id,r.ses_message_id,EXISTS(SELECT FROM jobs j WHERE ${jobFor} AND j.attempts>=${MAX_ATTEMPTS} AND (j.status='failed' OR (j.status='running' AND j.lease_until<now()))) AS exhausted
+  // The durable reconcile: every pending receipt without a live job is queued again, at most every 30 minutes (this runs
+  // hourly), until it is two days old (below SES's 3-day staging lifecycle); then it fails. The budget comes from the
+  // receipt's timestamps, never from a counter a worker changes: first seen (created_at) and the sweep's own last re-queue
+  // (last_recovered_at). A receipt first seen over an hour ago (past the normal retry sequence) gets one final attempt per
+  // queue; mail_ingest_admit (205) applies the same rule to the jobs the backlog drain and hold release queue for it.
+  // A pending receipt is one whose message is not stored for its recipients: ingest stores and settles in one statement.
+  // recovery_attempts still counts every sweep, because migration 164's fence lets the sweep fail a receipt only with it.
+  const result=await runtime.db.execute<{n:number}>(sql`WITH due AS (SELECT r.workspace_id,r.ses_message_id,EXISTS(SELECT FROM jobs j WHERE ${jobFor} AND j.attempts>=${MAX_ATTEMPTS} AND (j.status='failed' OR (j.status='running' AND j.lease_until<now()))) AS exhausted,
+      r.created_at>now()-${INGEST_OUTAGE_MS/1000}*interval '1 second' AS young,r.created_at<now()-interval '1 hour' AS seasoned
     FROM mail_receipts r WHERE r.status='pending' AND coalesce(r.last_recovered_at,r.created_at)<now()-interval '30 minutes'
     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE ${jobFor} AND (j.status='pending' OR (j.status='running' AND (j.lease_until>=now() OR j.attempts<${MAX_ATTEMPTS}))))
     ORDER BY coalesce(r.last_recovered_at,r.created_at),r.workspace_id,r.ses_message_id LIMIT 100 FOR UPDATE OF r SKIP LOCKED), recovered AS (
-    UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),status=CASE WHEN d.exhausted OR r.recovery_attempts>=3 THEN 'failed' ELSE 'pending' END,
-      error=CASE WHEN d.exhausted THEN 'MAILBOX_INGEST_EXHAUSTED' WHEN r.recovery_attempts>=3 THEN 'MAILBOX_RECOVERY_EXHAUSTED' END,processed_at=CASE WHEN d.exhausted OR r.recovery_attempts>=3 THEN now() END
-    FROM due d WHERE r.workspace_id=d.workspace_id AND r.ses_message_id=d.ses_message_id RETURNING r.workspace_id,r.ses_message_id,r.status),
-    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM recovered WHERE status='pending' ORDER BY workspace_id,ses_message_id)
+    UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),status=CASE WHEN d.young THEN 'pending' ELSE 'failed' END,
+      error=CASE WHEN d.young THEN NULL WHEN d.exhausted THEN 'MAILBOX_INGEST_EXHAUSTED' ELSE 'MAILBOX_RECOVERY_EXHAUSTED' END,processed_at=CASE WHEN d.young THEN NULL ELSE now() END
+    FROM due d WHERE r.workspace_id=d.workspace_id AND r.ses_message_id=d.ses_message_id RETURNING r.workspace_id,r.ses_message_id,r.status,d.seasoned),
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id),
+      CASE WHEN seasoned THEN ${MAX_ATTEMPTS-1}::int ELSE 0 END FROM recovered WHERE status='pending' ORDER BY workspace_id,ses_message_id)
     SELECT count(*)::int AS n FROM recovered`);
   if(result.rows[0]!.n===100){
     if(continuation) throw new JobDeferred(new Date().toISOString());
@@ -604,9 +616,9 @@ const deleteMailObjects:JobHandler=async(runtime,payload,job)=>{
     throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);
   }
 };
-export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId)),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
+export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':retryDatabaseFailures(async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId))),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
-  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]),claim:{recipients?:string[]}={recipients:job.ingest?.recipients};
+  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]),claim:{recipients?:string[];createdAt?:string}={recipients:job.ingest?.recipients,createdAt:job.ingest?.createdAt};
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());
   inProgress.add(key);
   try { await ingestJob(runtime,payload,job,size=>{
@@ -621,6 +633,14 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'m
       if (!(error instanceof ApiError)) throw new ApiError(503,'MAILBOX_INGEST_UNAVAILABLE','Mailbox ingestion temporarily unavailable.',undefined,true);
       if (error.retryable) throw error;
       if (error.status>=500 || error.status===429) throw new ApiError(503,error.code,'Mailbox ingestion temporarily unavailable.',undefined,true);
+    }
+    // Out of attempts (about 81 minutes) on a transient failure (a storage, role or database outage) while SES's staged copy
+    // lives: write nothing to the receipt. This job fails through its own lease-fenced settlement and the receipt stays
+    // pending, so the hourly reconcile (recoverMailReceipts) queues it again until it is two days old. Workers never write
+    // outage state, so a worker whose lease was retired has nothing to restore.
+    else if ((!(error instanceof ApiError) || error.retryable || error.status>=500 || error.status===429) && claim.createdAt && Date.now()-Date.parse(claim.createdAt)<INGEST_OUTAGE_MS) {
+      log('warn',{code:'MAILBOX_INGEST_OUTAGE',cause:error instanceof ApiError?error.code:'MAILBOX_INGEST_FAILED',workspaceId:job.workspaceId,jobId:job.id});
+      throw new ApiError(503,error instanceof ApiError?error.code:'MAILBOX_INGEST_UNAVAILABLE','Mailbox ingestion temporarily unavailable; the hourly reconcile retries it.',undefined,true);
     }
     const code=error instanceof ApiError ? (error.code==='MAILBOX_ATTACHMENT_UPLOAD_FAILED'?'ATTACHMENT_UPLOAD_FAILED':error.code) : 'MAILBOX_INGEST_FAILED';
     await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString(),settledBy:claimToken(job)}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),claim.recipients?claimedBy(claim.recipients):eq(mailReceipts.status,'pending')));

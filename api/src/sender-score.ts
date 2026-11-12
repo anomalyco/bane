@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { cachedDashboardRead } from './dashboard-cache.js';
+import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { actor, ApiError, dashboardSession, errors, json, response, security, type App, type Runtime } from './core.js';
 import { burstFor, CALIBRATION, evaluateLadder, FACTOR_KEYS, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
 
@@ -165,7 +165,7 @@ export async function protocolScoreCap(runtime: Runtime, w: string) {
 const dashboardSecurity = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
-    description: 'The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds; a change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.',
+    description: `The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. ${DASHBOARD_CACHE_NOTE} A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.`,
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
@@ -174,8 +174,8 @@ export function registerSenderScore(app: App) {
     // Keyed by the standing's version and sequence too: a release, resume or operator action (or a limit change) shows at
     // once, on every isolate, instead of after the minute. One indexed read.
     const { rows: [standing] } = await c.env.db.execute<{ v: string | null }>(sql`SELECT version||'.'||sequence AS v FROM sender_standing WHERE workspace_id=${a.workspaceId}`);
-    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, standing?.v ?? '-', Math.floor(Date.now() / 60_000)].join('|'), compute);
-    c.header('x-bane-sender-score-cache', body.hit ? 'hit' : 'miss');
+    const body = await dashboardRead(c, ['sender-score', a.workspaceId, standing?.v ?? '-', Math.floor(Date.now() / 60_000)].join('|'), compute);
+    c.header('x-bane-sender-score-cache', body.cache);
     return c.json(body.value, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/sender-score/release', operationId: 'releaseSenderStanding', tags: ['Metrics'], security: dashboardSecurity,

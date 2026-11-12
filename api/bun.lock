@@ -22,12 +22,13 @@
         "@smithy/fetch-http-handler": "^5.8.0",
         "acorn": "^8",
         "better-auth": "1.7.20",
+        "devalue": "6.0.3",
         "drizzle-orm": "^0.45.2",
         "hono": "4.13.17",
         "parse5": "^8.0.1",
         "pg": "^8.23.0",
         "postal-mime": "4.2.1",
-        "re2js": "^2.10.0",
+        "re2js": "2.10.0",
         "zod": "4.6.7",
       },
       "devDependencies": {
@@ -360,6 +361,8 @@
     "destr": ["destr@2.0.5", "", {}, "sha512-ugFTXCtDZunbzasqBxrK93Ik/DRYsO6S/fedkWEMKqt04xZ4csmnmwGDBAb07QWNaGMAmnTIemsYZCksjATwsA=="],
 
     "detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
+
+    "devalue": ["devalue@6.0.3", "", {}, "sha512-3woMEITftG1wKeO/4d/QXH1DVKctTSZg3jNGPpjp9hNr5Hos8MCFF5McTML5ZtgKDObm2R591B0spRp2IVernA=="],
 
     "dotenv": ["dotenv@17.4.2", "", {}, "sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw=="],
 

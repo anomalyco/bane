@@ -49,7 +49,7 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // created with no membership; its session can only review and accept that invitation.
 export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
   if (!allowSignup) return !!invitationId && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`, region);
+  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s workspace`, region);
   return true;
 }
 

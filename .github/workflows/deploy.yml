@@ -489,6 +489,18 @@ jobs:
           DEFAULT_SES_REGION: us-east-2
           MULTI_TENANT: 'true'
 
+      # The live E2E's fixture workspace is exempt from the Hosted warm-up quota, so E2E volume can never hold its
+      # campaigns (Nov 12: three red deploys on hosted_daily_quota). Dev only, idempotent, audited in
+      # hosted_operator_audit; the script refuses any other stage or workspace (scripts/dev-e2e-fixture.ts).
+      - name: Apply the dev E2E fixture policy
+        if: needs.authorize.outputs.stage == 'dev'
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          PUBLIC_URL: ${{ env.PUBLIC_URL }}
+          BANE_E2E_DOMAIN_ID: ${{ vars.E2E_DOMAIN_ID }}
+        run: node --import tsx scripts/dev-e2e-fixture.ts
+
       - *stage-tip
 
       # Also syncs the mail gateway's key with the committed bane:mailGatewayEnabled in
@@ -500,6 +512,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
           AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
+          DEPLOY_SHA: ${{ needs.authorize.outputs.sha }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 
       - name: Health check
