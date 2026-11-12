@@ -572,11 +572,28 @@ impl Store {
         let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
             w.eq_ignore_ascii_case(b"SELECT") || w.eq_ignore_ascii_case(b"EXAMINE")
         });
-        if !selects && (*stale || self.dirty || self.stamp.elapsed() > Duration::from_secs(240)) {
-            self.refresh()?;
+        // IDLE's continuation and LOGOUT only finish protocol state. In particular,
+        // answering DONE must neither acquire a read permit nor mark the view fresh.
+        let local = core.idling()
+            || bytes
+                .splitn(2, |b| *b == b' ')
+                .nth(1)
+                .is_some_and(|body| body.eq_ignore_ascii_case(b"LOGOUT\r\n"));
+        if !local
+            && !selects
+            && (*stale || self.dirty || self.stamp.elapsed() > Duration::from_secs(240))
+        {
+            if let Err(e) = self.refresh() {
+                self.dirty = true;
+                self.finish_command();
+                let Ok(cmd) = mailgw_core::wire::imap(bytes) else {
+                    return Err(e);
+                };
+                return Ok(Reply::one(&format!("{} NO {e}", cmd.tag.inner())));
+            }
             *stale = false
         }
-        if selects {
+        if !local && selects {
             *stale = false;
         }
         let reply = core.step(bytes, identity, self, now);
@@ -1595,6 +1612,22 @@ mod tests {
         let before = script.snapshots.load(Ordering::SeqCst);
         assert_eq!(run(&mut store, b"d NOOP\r\n"), "d OK Completed\r\n");
         assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
+
+        // An old view only blocks commands that need it. DONE gets the IDLE tag
+        // even with the API down; NOOP retries the refresh on the same connection.
+        assert_eq!(run(&mut store, b"e IDLE\r\n"), "+ idling\r\n");
+        store.stamp -= Duration::from_secs(241);
+        script.down.store(true, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        assert_eq!(run(&mut store, b"DONE\r\n"), "e OK IDLE ended\r\n");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before);
+        assert_eq!(
+            run(&mut store, b"f NOOP\r\n"),
+            "f NO [UNAVAILABLE] Backend unavailable\r\n"
+        );
+        script.down.store(false, Ordering::SeqCst);
+        assert_eq!(run(&mut store, b"g NOOP\r\n"), "g OK Completed\r\n");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 2);
     }
 
     /// Large STORE/COPY/EXPUNGE sets run in 1,000-UID batches inside one command, each its own
