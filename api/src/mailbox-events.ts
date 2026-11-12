@@ -87,12 +87,14 @@ export async function pruneMailboxEvents(runtime: Runtime) {
   log('info', { code: 'MAILBOX_EVENTS_PRUNED' });
 }
 
-// A resumed delivery keeps the attempts it already made: a pause holds the retries, it does not refill them.
+// A resumed delivery keeps the attempts it already made, recorded or not (the action fence counts
+// every attempt it let through): a pause holds the retries, it does not refill them.
 const resumeDeliveries:JobHandler=async(runtime,payload,job)=>{
   const result=await runtime.db.execute(sql`WITH hook AS MATERIALIZED (SELECT id FROM mailbox_webhooks WHERE workspace_id=${job.workspaceId} AND id=${String(payload.hook)} AND NOT paused FOR SHARE),
     page AS (SELECT d.id FROM mailbox_webhook_deliveries d JOIN hook ON hook.id=d.webhook_id WHERE d.workspace_id=${job.workspaceId} AND d.status='paused' AND d.created_at>=now()-interval '30 days' ORDER BY d.id LIMIT 100 FOR UPDATE OF d),
     resumed AS (UPDATE mailbox_webhook_deliveries d SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() FROM page WHERE d.id=page.id RETURNING d.*)
-    INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation),attempt_count FROM resumed`);
+    INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',r.workspace_id,jsonb_build_object('deliveryId',r.id,'generation',r.generation),greatest(r.attempt_count,coalesce(a.attempts,0))
+    FROM resumed r LEFT JOIN mail_action_attempts a ON a.workspace_id=r.workspace_id AND a.delivery_id=r.id`);
   if(result.rowCount===100)throw new JobDeferred(new Date().toISOString());
 };
 export const mailboxEventJobs: Record<string, JobHandler> = { 'mailbox.webhook': retryDatabaseFailures(webhookJob),'mailbox.fanout':fanout,'mailbox.resumeDeliveries':retryDatabaseFailures(resumeDeliveries) };

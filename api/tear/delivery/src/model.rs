@@ -65,6 +65,8 @@ pub struct D {
     pub fence: Option<String>,
     pub job: Option<Job>,
     pub delay: Value,
+    /// Attempts the fence let through, recorded or not.
+    pub tries: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -299,7 +301,7 @@ impl Model {
                         d.status = "pending".into();
                         d.err = None;
                         // The attempts already made still count: a pause holds retries, it does not refill them.
-                        d.job = Some(Job { status: "pending".into(), attempts: d.count, expired: false });
+                        d.job = Some(Job { status: "pending".into(), attempts: d.count.max(d.tries), expired: false });
                         d.delay = json!(0);
                     }
                 }
@@ -431,6 +433,7 @@ impl Model {
                 fence: None,
                 job: Some(Job { status: "pending".into(), attempts: 0, expired: false }),
                 delay: json!(0),
+                tries: 0,
             });
         }
     }
@@ -533,7 +536,11 @@ impl Model {
             return done;
         }
         self.eps.get_mut(&ep).unwrap().used += 1;
-        self.dm(label).unwrap().fence = Some("sending".into());
+        {
+            let d = self.dm(label).unwrap();
+            d.fence = Some("sending".into());
+            d.tries += 1;
+        }
         if ep == "F" {
             let blocked = ["loop", "recv25"].contains(&self.emails[&email_of(&d.msg)].variant.as_str());
             let (status, err) = if e.declined {

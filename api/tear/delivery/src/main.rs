@@ -139,6 +139,7 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     (1, &["ingest m1 z loop", "rituals forward", "ingest m1 b+z loop", "run K m1:F"]),
     // A delivery resumed after a pause got a fresh attempt budget (found by delivery.attempts).
     (1, &["ingest m1 a", "run K m1:W", "reply K 503", "pause W", "run K m1:W", "unpause W", "run K m1:W", "reply K 503"]),
+    (1, &["ingest m1 z", "run K m1:V", "crash K", "expire m1:V", "pause V", "run L m1:V", "unpause V", "run L m1:V", "reply L 503"]),
 ];
 
 fn model(v: &Value) -> R<Model> {

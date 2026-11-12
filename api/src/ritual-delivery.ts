@@ -48,7 +48,7 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
       WHERE b.window_start<>excluded.window_start OR b.used<${policy.perMinute} RETURNING 1`);
     // Waiting for the next minute is not an attempt, and does not erase the attempts already made.
     if (!slot.rowCount) throw new JobDeferred(new Date((Math.floor(Date.now() / 60000) + 1) * 60000).toISOString(), undefined, true);
-    if (prior) await tx.execute(sql`UPDATE mail_action_attempts SET state='sending' WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`);
+    if (prior) await tx.execute(sql`UPDATE mail_action_attempts SET state='sending',attempts=attempts+1 WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`);
     return { policy, done: false };
   });
   if ('parked' in fence) return { status: 0, parked: true };

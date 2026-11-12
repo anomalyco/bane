@@ -10337,6 +10337,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
         assert.equal(posts,2);
         assert.deepEqual(await delivery(),{status:'failed',attempt_count:2});
+        // An attempt whose outcome was never recorded (its runner was lost) counts too.
+        await db.query("UPDATE mailbox_webhook_deliveries SET status='paused',attempt_count=0 WHERE id='mwd_held'");
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_held_resume_2',workspaceId:wid,attempts:1});
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid])).rows,[{attempts:2}]);
       }finally{runtime.webhookFetch=transport;}
     });
   });
