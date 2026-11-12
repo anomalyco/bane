@@ -243,7 +243,33 @@
               "nextCap",
               "nextCapAt"
             ],
-            "description": "Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED."
+            "description": "Hosted only: the daily limit (set by the sender score) that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED."
+          },
+          "standing": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "step": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "notice",
+                  "warn",
+                  "restrict",
+                  "pause"
+                ]
+              },
+              "marketingHeld": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "step",
+              "marketingHeld"
+            ],
+            "description": "Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release."
           },
           "domains": {
             "type": "object",
@@ -3139,7 +3165,8 @@
                 "enum": [
                   "pacing_window",
                   "ses_daily_quota",
-                  "hosted_daily_quota"
+                  "hosted_daily_quota",
+                  "list_probe"
                 ]
               },
               "until": {
@@ -3150,7 +3177,7 @@
               "reason",
               "until"
             ],
-            "description": "Why releasing recipients is currently held, and the best estimate of until when."
+            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest."
           }
         },
         "required": [
@@ -4941,7 +4968,8 @@
                 "email.delivery_delayed",
                 "email.opened",
                 "email.clicked",
-                "contact.subscription_changed"
+                "contact.subscription_changed",
+                "account.standing.changed"
               ]
             }
           },
@@ -5025,7 +5053,8 @@
                 "email.delivery_delayed",
                 "email.opened",
                 "email.clicked",
-                "contact.subscription_changed"
+                "contact.subscription_changed",
+                "account.standing.changed"
               ]
             },
             "minItems": 1,
@@ -5112,7 +5141,8 @@
                 "email.delivery_delayed",
                 "email.opened",
                 "email.clicked",
-                "contact.subscription_changed"
+                "contact.subscription_changed",
+                "account.standing.changed"
               ]
             },
             "minItems": 1,
@@ -5302,7 +5332,8 @@
               "email.delivery_delayed",
               "email.opened",
               "email.clicked",
-              "contact.subscription_changed"
+              "contact.subscription_changed",
+              "account.standing.changed"
             ]
           },
           "createdAt": {
@@ -5813,14 +5844,14 @@
               "warmup",
               "graded"
             ],
-            "description": "warmup until the workspace has sent its first 100 non-simulated emails."
+            "description": "warmup while calibrating: until 100 real recipients were accepted and 24 hours passed (Hosted), or the first 100 emails (self-hosted)."
           },
           "emails": {
             "type": "object",
             "properties": {
               "firstEmails": {
                 "type": "integer",
-                "description": "Non-simulated emails ever created, counted up to 100."
+                "description": "Real recipients accepted, counted up to 100."
               },
               "last30Days": {
                 "type": "integer"
@@ -5833,14 +5864,22 @@
           },
           "needed": {
             "type": "integer",
-            "description": "Emails before the first grade (100)."
+            "description": "Accepted recipients before the first score (100)."
+          },
+          "calibratedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the 100th recipient was accepted; the score starts 24 hours later."
           },
           "score": {
             "type": [
               "number",
               "null"
             ],
-            "description": "0–100, one decimal; null while warming up."
+            "description": "0–100, one decimal; null while warming up. It moves towards target by at most +5 or −10 a day."
           },
           "grade": {
             "type": [
@@ -5859,11 +5898,11 @@
           },
           "target": {
             "type": "number",
-            "description": "Where the score is heading: the 30-day result shrunk towards 75 by volume."
+            "description": "Where the score is heading: quality shrunk towards 60 by the decayed volume (250 emails count as much as the prior)."
           },
           "raw": {
             "type": "number",
-            "description": "The 30-day weighted factor result before shrinkage."
+            "description": "Quality: the weighted factor result before shrinkage. It is the ceiling the score can reach."
           },
           "band": {
             "type": [
@@ -5935,7 +5974,13 @@
                 "score"
               ]
             },
-            "description": "The replayed daily score, oldest first; the last entry is today."
+            "description": "The published daily score, oldest first, up to 14 days."
+          },
+          "limit": {
+            "$ref": "#/components/schemas/SenderLimit"
+          },
+          "standing": {
+            "$ref": "#/components/schemas/SenderStanding"
           },
           "computedAt": {
             "type": "string",
@@ -5946,6 +5991,7 @@
           "state",
           "emails",
           "needed",
+          "calibratedAt",
           "score",
           "grade",
           "target",
@@ -5954,6 +6000,8 @@
           "next",
           "factors",
           "history",
+          "limit",
+          "standing",
           "computedAt"
         ]
       },
@@ -5964,12 +6012,13 @@
             "type": "string",
             "enum": [
               "complaints",
-              "bounces",
               "content",
-              "auth",
+              "bounces",
               "hygiene",
-              "consistency"
-            ]
+              "auth",
+              "engagement"
+            ],
+            "description": "complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: first sends and suppression hits), auth, engagement."
           },
           "label": {
             "type": "string"
@@ -5983,7 +6032,7 @@
               "number",
               "null"
             ],
-            "description": "The measured rate or ratio for the 30 days to today; null when neutral."
+            "description": "The measured rate or ratio, decayed with a 30-day half-life; null when neutral."
           },
           "score": {
             "type": [
@@ -6021,6 +6070,353 @@
           "source",
           "basis"
         ]
+      },
+      "SenderLimit": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "daily": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Recipients per rolling 24 hours that admission enforces now. Null when the workspace has no hosted limit."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "calibrating",
+              "score",
+              "override",
+              "exempt"
+            ]
+          },
+          "band": {
+            "type": "integer",
+            "description": "The limit the score earns, before a resume or strike reduction."
+          },
+          "next": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "limit": {
+                "type": "integer"
+              },
+              "atScore": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "limit",
+              "atScore"
+            ],
+            "description": "The next band up and the score it starts at."
+          },
+          "override": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "daily": {
+                "type": "integer"
+              },
+              "expiresAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "daily",
+              "expiresAt"
+            ]
+          },
+          "restore": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "percent": {
+                "type": "integer"
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "percent",
+              "until"
+            ],
+            "description": "After a resume: this share of the limit until then."
+          },
+          "strikeCapUntil": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "perMinute": {
+            "type": "integer"
+          },
+          "marketingPerHour": {
+            "type": "integer"
+          },
+          "transactionalReserve": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "daily",
+          "source",
+          "band",
+          "next",
+          "override",
+          "restore",
+          "strikeCapUntil",
+          "perMinute",
+          "marketingPerHour",
+          "transactionalReserve"
+        ],
+        "description": "Hosted only: the daily limit the score sets and what changes it."
+      },
+      "SenderStanding": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "notice",
+              "warn",
+              "restrict",
+              "pause"
+            ],
+            "description": "ok; notice (dashboard only); warn (limit frozen, owners emailed); restrict (marketing held, transactional flows); pause (all sending stopped)."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StandingReason"
+            }
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "pauseKind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "bounce",
+              "full",
+              null
+            ],
+            "description": "bounce: only transactional bounces paused it, and an owner may resume it once in 30 days. full: complaints, the spam screen, abuse or an AWS tenant pause; an operator reviews it."
+          },
+          "marketingHeld": {
+            "type": "boolean"
+          },
+          "marketingRelease": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "percent": {
+                "type": "integer"
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "percent",
+              "until"
+            ],
+            "description": "An owner released a restrict: marketing is at this share of its allowance until then."
+          },
+          "strikes": {
+            "type": "integer",
+            "description": "Pauses in the last 90 days. A second caps the limit at 50% for 7 days after the resume; a third needs an operator for any resume."
+          },
+          "selfService": {
+            "type": "object",
+            "properties": {
+              "available": {
+                "type": "boolean"
+              },
+              "action": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "release_marketing",
+                  "resume_sending",
+                  null
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "availableAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "available",
+              "action",
+              "reason",
+              "availableAt"
+            ],
+            "description": "Whether an owner or admin can release this step from the dashboard (POST /v1/sender-score/release), and if not, why."
+          },
+          "version": {
+            "type": "integer",
+            "description": "Changes with every change of standing; account.standing.changed carries it."
+          },
+          "sequence": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "reasons",
+          "since",
+          "pauseKind",
+          "marketingHeld",
+          "marketingRelease",
+          "strikes",
+          "selfService",
+          "version",
+          "sequence"
+        ],
+        "description": "Hosted only: the enforcement step and why."
+      },
+      "StandingReason": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "metric": {
+            "type": "string",
+            "enum": [
+              "complaints",
+              "bounces",
+              "marketing_bounces",
+              "transactional_bounces",
+              "screen",
+              "external"
+            ]
+          },
+          "value": {
+            "type": "number",
+            "description": "The measured rate."
+          },
+          "count": {
+            "type": "integer"
+          },
+          "threshold": {
+            "type": "number",
+            "description": "The rate the line starts at."
+          },
+          "minimum": {
+            "type": "integer",
+            "description": "The count the line also needs."
+          },
+          "window": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "24h",
+              "7d",
+              null
+            ]
+          },
+          "step": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "notice",
+              "warn",
+              "restrict",
+              "pause"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "metric",
+          "value",
+          "count",
+          "threshold",
+          "minimum",
+          "window",
+          "step",
+          "message"
+        ]
+      },
+      "SenderStandingRelease": {
+        "type": "object",
+        "properties": {
+          "checklist": {
+            "type": "object",
+            "properties": {
+              "bouncedRemoved": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Contacts that bounced or complained are removed."
+              },
+              "listSourceConfirmed": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Every contact opted in; no bought or old lists."
+              }
+            },
+            "required": [
+              "bouncedRemoved",
+              "listSourceConfirmed"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "checklist"
+        ],
+        "additionalProperties": false
       },
       "RegionCatalog": {
         "type": "object",
@@ -13510,6 +13906,18 @@
                         "$ref": "#/components/schemas/Workspace"
                       },
                       "description": "Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted."
+                    },
+                    "operator": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "operator",
+                        "operator:read",
+                        null
+                      ],
+                      "description": "Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else."
                     }
                   },
                   "required": [
@@ -32194,7 +32602,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 non-simulated emails. The score moves at most +2 or −15 a day towards its target. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
@@ -32317,6 +32725,157 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/sender-score' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/sender-score/release": {
+      "post": {
+        "operationId": "releaseSenderStanding",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Owner self-service on the dashboard, after the fix checklist. A restrict (marketing held) can be released 24 hours after it started, once every 14 days, when the last 24 hours are back under the warn line: marketing resumes at 50% of its allowance for 48 hours. A pause caused only by transactional bounces can be resumed once every 30 days: the limit is 50% for 48 hours and marketing stays held for 24 hours. Anything else needs a review. Owners and admins only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SenderStandingRelease"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SenderScore"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { releaseSenderStanding } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await releaseSenderStanding({\n  client,\n  body: {\n    \"checklist\": {\n      \"bouncedRemoved\": true,\n      \"listSourceConfirmed\": true\n    }\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/sender-score/release' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"checklist\": {\n    \"bouncedRemoved\": true,\n    \"listSourceConfirmed\": true\n  }\n}'"
           }
         ]
       }

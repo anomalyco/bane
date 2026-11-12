@@ -8,7 +8,7 @@ export const realDestination = (address: string) => !address.toLowerCase().endsW
 export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string[] = []) =>
   (Array.isArray(to) ? to.length : 1) + cc.length + bcc.length;
 
-export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null; marketingHeld?: boolean; marketingHoldReason?: string | null };
+export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null; marketingHeld?: boolean; marketingHoldReason?: string | null; step?: string };
 // The current UTC hour plus the preceding 23 buckets. The same statement as admission,
 // independent of how many envelopes or destinations were admitted in those hours.
 // `read` is for display (GET /v1/me): the same figures from hosted_allowance_read, which takes no row locks.
@@ -32,5 +32,9 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
   }
 }
 
-/** A marketing hold (bounces only): marketing is refused while transactional mail keeps flowing. */
-export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', `${reason ?? 'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending.'} Remove the addresses that bounced; Bane reviews the hold.`);
+/**
+ * Restrict, an operator's hold, or a marketing hold placed before the standing took over (bounces only): marketing is
+ * refused while transactional mail keeps flowing. `reason` is that older hold's own message.
+ */
+export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', reason ? `${reason} Remove the addresses that bounced; Bane reviews the hold.`
+  : 'Marketing from this workspace is held while its sending standing is restricted: bounces or complaints crossed a published line (see GET /v1/sender-score). Transactional mail still sends. Fix the list, then release it from the dashboard or ask for a review.');

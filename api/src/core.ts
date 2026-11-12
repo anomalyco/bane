@@ -51,6 +51,8 @@ export interface Config {
   platformAccount?: string;
   /** The one Hosted workspace that may own the installation's own domain (PUBLIC_URL's host). */
   platformDomainWorkspace?: string;
+  /** Hosted only: From for Bane's own owner notices (sender standing), on the platform workspace's domain. */
+  notifyFrom?: string;
   regionalSending?: boolean;
   trustedPool?: boolean;
   receivingRedrive?:boolean;

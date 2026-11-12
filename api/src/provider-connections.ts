@@ -29,7 +29,9 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
     resetAt: z.iso.datetime().nullable().describe('When capacity next frees up or the limit changes.'),
     nextCap: z.number().int().nullable().describe('The next limit for a new workspace, or null once it has the mature limit.'),
     nextCapAt: z.iso.datetime().nullable().describe('When nextCap applies.'),
-  }).nullable().optional().describe('Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
+  }).nullable().optional().describe('Hosted only: the daily limit (set by the sender score) that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
+  standing: z.object({ step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), marketingHeld: z.boolean() }).nullable().optional()
+    .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
 }).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
@@ -93,6 +95,7 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   const allowance = row.allowance;
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
     sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
+    standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
     domains: { total: row.domains, verified: row.verified_domains } };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {

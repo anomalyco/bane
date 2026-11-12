@@ -1285,7 +1285,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
         const {sendingLimit,domains:claimed,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
-        assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null}); assert.deepEqual(claimed,{total:0,verified:0});
+        assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null,standing:{step:'ok',marketingHeld:false}}); assert.deepEqual(claimed,{total:0,verified:0});
         assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:100,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         // GET /v1/me reads the allowance without row locks: a pending operator pause or cap change (a row lock on the
@@ -1668,6 +1668,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const accepted=async(result:Awaited<ReturnType<typeof local>>)=>{const {id}=ok(result,202);await pool.query('DELETE FROM sending_emails WHERE workspace_id=$1 AND id=$2',[b.org.id,id]);};
             const recommended=(d:Json)=>d.dns.filter((r:Json)=>r.purpose==='dmarc').map((r:Json)=>r.value);
             try {
+              await gradedSender(pool,b.org.id); // Marketing needs more than the calibrating 100 a day, which is all transactional reserve.
               const {loadConfig}=await import('./src/config.js'), env={BETTER_AUTH_SECRET:'fixture-'.repeat(6),PUBLIC_URL:origin,MULTI_TENANT:'true'};
               assert.equal(loadConfig(env).requireDmarcForBulk,false);assert.equal(loadConfig({...env,MX_REQUIRE_DMARC_FOR_BULK:'true'}).requireDmarcForBulk,true);
               assert.equal(checked.dmarc.status,'missing');assert.deepEqual(recommended(checked),['v=DMARC1; p=none']);
@@ -4769,54 +4770,101 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts, { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 });
   });
 
-  test('sender score: warm-up until 100 real emails, measured and neutral factors, the replayed daily limit and workspace-wide reads', async t => {
+  test('sender score: the model publishes its limit table and ladder; the job calibrates, starts at 65, rises at most 5 a day and freezes under a warning', async t => {
+    const m = await import('./src/standing-model.js');
+    // Score → limit, with 2 points of hysteresis on the way down.
+    assert.deepEqual([60, 64.9, 65, 70, 75, 80, 85, 90, 99].map(s => m.bandFor(s).limit), [100, 100, 200, 500, 1000, 2000, 5000, 10000, 10000]);
+    assert.deepEqual([m.bandLimit(83.5, 5000), m.bandLimit(82.9, 5000), m.bandLimit(77.9, 5000), m.bandLimit(91, 5000)], [5000, 2000, 1000, 10000]);
+    assert.deepEqual([m.burstFor(100), m.burstFor(2000), m.burstFor(20000), m.marketingHourFor(100), m.marketingHourFor(10000), m.reserveFor(100), m.reserveFor(200), m.reserveFor(5000)], [50, 100, 500, 25, 2500, 100, 100, 500]);
+    // Shrinkage: quality sets the ceiling, volume earns the way up (design table, 100 perfect emails → 71, 1,000 → 92).
+    const perfect = (n: number) => [{ day: '2026-11-12', emails: n, accepted: n, delivered: n, bounced: 0, first_sends: 0, first_bounced: 0, complained: 0, screened: 0, rejected: 0, suppressed: 0, marketing_delivered: 0, unsubscribed: 0, clicked: 0 }];
+    assert.deepEqual([100, 250, 500, 1000, 1500].map(n => Math.round(m.quality(perfect(n), [], false, '2026-11-12').target)), [71, 80, 87, 92, 94]);
+    // A day of mail 30 days old counts half.
+    assert.equal(m.quality([{ ...perfect(200)[0]!, day: '2026-10-13' }], [], false, '2026-11-12').volume, 100);
+    // Calibration ends 24 hours after the 100th recipient at min(65, target); then +5 / −10 per UTC day.
+    const at = (h: number) => new Date(Date.parse('2026-11-12T01:00:00Z') + h * 3600_000);
+    let st = m.moveScore({ phase: 'calibrating', firstRecipients: 0, calibratedAt: null, score: null, dayScore: null, scoreDay: null }, 80, 100, at(0));
+    assert.deepEqual([st.phase, st.score, st.calibratedAt], ['calibrating', null, at(0).toISOString()]);
+    st = m.moveScore(st, 80, 100, at(23)); assert.equal(st.phase, 'calibrating');
+    st = m.moveScore(st, 80, 100, at(25)); assert.deepEqual([st.phase, st.score], ['graded', 65]);
+    st = m.moveScore(st, 80, 100, at(26)); assert.equal(st.score, 65, 'Same UTC day: the 65 start is that day\'s score.');
+    st = m.moveScore(st, 92, 100, at(48)); assert.equal(st.score, 70);
+    st = m.moveScore(st, 40, 100, at(72)); assert.equal(st.score, 60, 'A day falls at most 10.');
+    assert.equal(m.moveScore({ phase: 'calibrating', firstRecipients: 100, calibratedAt: at(0).toISOString(), score: null, dayScore: null, scoreDay: null }, 50, 100, at(30)).score, 50, '100 bad emails do not earn the first step.');
+    assert.equal(m.moveScore({ phase: 'seed', firstRecipients: 0, calibratedAt: null, score: null, dayScore: null, scoreDay: null }, 88, 4000, at(0)).score, 88, 'An existing sender starts at its target once.');
+    // Warn and above freeze the limit; a second strike halves it.
+    assert.deepEqual(m.dailyLimit({ phase: 'graded', score: 91, band: 2000, step: 'warn', currentLimit: 2000, strikeCapped: false }), { band: 2000, limit: 2000 });
+    assert.deepEqual(m.dailyLimit({ phase: 'graded', score: 91, band: 2000, step: 'ok', currentLimit: 2000, strikeCapped: true }), { band: 10000, limit: 5000 });
+    // The ladder: counts and rates together; bounces alone hold marketing and stop transactional mail only at 5% and 50.
+    const w = (o: Partial<import('./src/standing-model.js').Window> = {}) => ({ accepted: 1000, bounces: 0, complaints: 0, marketingAccepted: 0, marketingBounces: 0, marketingComplaints: 0, ...o });
+    const level = (day: ReturnType<typeof w>, extra: Partial<import('./src/standing-model.js').LadderInput> = {}) => { const r = m.evaluateLadder({ day, week: day, screened: 0, rejected: 0, ...extra }); return [r.level, r.pauseKind]; };
+    assert.deepEqual(level(w({ complaints: 1 })), ['notice', null]);
+    assert.deepEqual(level(w({ accepted: 300, complaints: 1 })), ['notice', null], 'One complaint never warns a small sender.');
+    assert.deepEqual(level(w({ complaints: 2 })), ['warn', null]);
+    assert.deepEqual(level(w({ complaints: 3 })), ['restrict', null]);
+    assert.deepEqual(level(w({ complaints: 5 })), ['pause', 'full']);
+    assert.deepEqual(level(w({ bounces: 9 })), ['ok', null]); assert.deepEqual(level(w({ bounces: 20 })), ['warn', null]);
+    assert.deepEqual(level(w({ bounces: 30, marketingAccepted: 600, marketingBounces: 30 })), ['restrict', null], 'Marketing at 5% holds marketing.');
+    assert.deepEqual(level(w({ bounces: 90, marketingAccepted: 900, marketingBounces: 90 })), ['restrict', null], 'Pool emergency from marketing alone still only holds marketing.');
+    assert.deepEqual(level(w({ bounces: 60, marketingAccepted: 0 })), ['pause', 'bounce'], 'Transactional mail itself at 6% and 60 stops everything.');
+    assert.deepEqual(level(w(), { screened: 1000, rejected: 25 }), ['warn', null]); assert.deepEqual(level(w(), { screened: 200, rejected: 25 }), ['pause', 'full']);
+    const warned = m.nextStanding({ step: 'ok', reasons: [], since: at(0).toISOString(), clearSince: null, pauseKind: null }, { day: w({ complaints: 2 }), week: w({ complaints: 2 }), screened: 0, rejected: 0 }, at(0));
+    const quiet = { day: w(), week: w(), screened: 0, rejected: 0 };
+    const still = m.nextStanding(warned, quiet, at(1)); assert.deepEqual([still.step, still.clearSince], ['warn', at(1).toISOString()]);
+    assert.equal(m.nextStanding(still, quiet, at(24)).step, 'warn'); assert.equal(m.nextStanding(still, quiet, at(25)).step, 'ok', 'A warning clears after 24 hours under 80% of its line.');
+    const restricted = m.nextStanding(warned, { ...quiet, day: w({ complaints: 3 }) }, at(2));
+    assert.equal(m.nextStanding(restricted, quiet, at(100)).step, 'restrict', 'A restrict never clears by itself.');
+
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId;
+      const { refreshStanding } = await import('./src/standing.js');
       // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs.
-      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; from?: string; daysAgo?: number } = {}) => db.query(
-        `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
-         SELECT $1 || n, $2, $3, 'fixture', $4, '["recipient@example.com"]', '[]', '[]', 'Score fixture', '{}', $5, $6::text, CASE WHEN $6::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $7, $8, date_trunc('day', now(), 'UTC') - make_interval(days => $10::int) + make_interval(secs => n)
-         FROM generate_series(1, $9::int) n`,
-        [unique('score-'), wid, REGION, options.from ?? 'Sender <hello@score.example>', options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0]);
+      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; campaign?: boolean; daysAgo?: number } = {}) => db.query(
+        `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
+         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', '["recipient@example.com"]', '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n)
+         FROM generate_series(1, $8::int) n`,
+        [unique('score-'), wid, REGION, options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, options.campaign ? 'campaign_fixture' : null]);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
       const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
-      // Simulated mail never counts; 99 real emails (5 three days ago, 5 two days ago) are still warming up, with no score, grade or history.
-      await insert(500, { simulated: true }); await insert(5, { daysAgo: 3 }); await insert(5, { daysAgo: 2 }); await insert(89);
+      // Self-hosted (no standing): simulated mail never counts; computed on read for display only, with no limit.
+      await insert(500, { simulated: true }); await insert(99);
       const warm = await read();
-      assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history], ['warmup', 99, 100, null, null, []]);
-      // Self-hosted has no stored domain records and no hosted screen: both are neutral and drop out of the weighting.
-      assert.deepEqual(warm.factors.filter((f: Json) => f.source === 'neutral').map((f: Json) => f.key), ['content', 'auth']);
-      // The 100th email grades it. Empty days hold the prior (75); the small early days nudge it to 75.3 and 75.6;
-      // today's target is 79.7, but a day rises at most 2. Today's 90 against two 5-email days counts as 4.5× (floor 20).
+      assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history, warm.limit, warm.standing], ['warmup', 99, 100, null, null, [], null, null]);
+      assert.deepEqual(warm.factors.filter((f: Json) => f.source === 'neutral').map((f: Json) => f.key), ['content', 'hygiene', 'auth', 'engagement']);
       await insert(1);
-      const first = await read();
-      assert.deepEqual([first.state, first.score, first.grade, first.target, first.emails.last30Days], ['graded', 77.6, 'C', 79.7, 100]);
-      assert.deepEqual([first.history.length, first.history[9].score, first.history[10].score, first.history[12].score, first.history.at(-1).score], [14, 75, 75.3, 75.6, 77.6]);
-      assert.deepEqual(first.band, { min: 70, max: 80 }); assert.deepEqual(first.next, { grade: 'B', at: 80 });
-      const factor = (body: Json, name: string) => body.factors.find((f: Json) => f.key === name);
-      assert.deepEqual([factor(first, 'complaints').score, factor(first, 'bounces').score, factor(first, 'hygiene').score, factor(first, 'consistency').value], [100, 100, 100, 4.5]);
-      // A burst of complaints and bounces the same day: the target falls to 41.9, but a day falls at most 15.
-      await insert(200, { status: 'complained', outcomes: 11 }); await insert(200, { status: 'bounced', outcomes: 5 });
-      const burst = await read();
-      assert.deepEqual([burst.target, burst.score, burst.grade, factor(burst, 'complaints').score, factor(burst, 'bounces').score, factor(burst, 'consistency').score], [41.9, 60.6, 'D', 0, 0, 0]);
-      // Hosted and screened: content and volume-weighted authentication are measured from stored results only.
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [], hostedScreen: true, screen: { apiKey: 'synthetic', endpoint: 'https://screen.invalid', model: 'synthetic', mode: 'reject', threshold: 0.7 } });
-      const connection = unique('conn'), signed = unique('score') + '.example', loose = unique('score') + '.example';
-      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')", [connection, wid, REGION]);
-      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,identity) VALUES
-        ($1,$3,$4,'verified',jsonb_build_object('ses',jsonb_build_object('DkimAttributes',jsonb_build_object('Status','SUCCESS','SigningEnabled',true),'MailFromAttributes',jsonb_build_object('MailFromDomainStatus','SUCCESS')),'dmarc',jsonb_build_object('status','reject'))),
-        ($2,$3,$4,'verified',jsonb_build_object('ses',jsonb_build_object('DkimAttributes',jsonb_build_object('Status','SUCCESS','SigningEnabled',true)),'dmarc',jsonb_build_object('status','none')))`, [signed, loose, wid, connection]);
-      await db.query('UPDATE sending_emails SET from_address=$2 WHERE workspace_id=$1 AND NOT simulated', [wid, `Sender <hello@mail.${signed}>`]);
-      await insert(25, { status: 'rejected', outcomes: 0, error: 'CONTENT_REJECTED_SPAM', from: `hello@${signed}` });
-      await insert(75, { status: 'suppressed', outcomes: 0, from: `hello@${signed}` });
-      const hosted = await read();
-      assert.deepEqual(hosted.factors.filter((f: Json) => f.source === 'neutral'), []);
-      // All the mail is from the fully authenticated domain (a subdomain counts towards its claim), so the half-set-up one weighs nothing.
-      assert.deepEqual([factor(hosted, 'auth').value, factor(hosted, 'auth').score], [1, 100]);
-      assert.deepEqual([factor(hosted, 'content').value, factor(hosted, 'hygiene').value], [25 / 600, 75 / 600].map(v => Math.round(v * 1e6) / 1e6));
-      assert.equal(hosted.emails.last30Days, 600);
+      const shown = await read();
+      assert.deepEqual([shown.state, shown.score, shown.grade, shown.raw], ['graded', 71.4, 'C', 100]);
+      // Hosted: the job stores the standing. 100 accepted recipients start calibration; a day later the score starts at 65 (200 a day).
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
+      const now = new Date();
+      await refreshStanding(runtime, { only: wid, now });
+      const calibrating = await read();
+      assert.deepEqual([calibrating.state, calibrating.score, calibrating.limit.daily, calibrating.limit.source, calibrating.standing.step, calibrating.emails.firstEmails], ['warmup', null, 100, 'calibrating', 'ok', 100]);
+      assert.ok(Date.parse(calibrating.calibratedAt) <= Date.now());
+      await refreshStanding(runtime, { only: wid, now: new Date(now.getTime() + 25 * 3600_000) });
+      const graded = await read();
+      assert.deepEqual([graded.state, graded.score, graded.grade, graded.limit.daily, graded.limit.band, graded.limit.next], ['graded', 65, 'D', 200, 200, { limit: 500, atScore: 70 }]);
+      assert.deepEqual([graded.limit.perMinute, graded.limit.marketingPerHour, graded.limit.transactionalReserve], [50, 50, 100]);
+      assert.deepEqual(graded.history.map((h: Json) => h.score), [65]);
+      // A bad day: complaints warn the workspace, and its limit stops rising (frozen at 200) though the score could rise.
+      await insert(3, { status: 'complained', outcomes: 11 });
+      await db.query("INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) VALUES($1,'-infinity',date_trunc('hour',now()),1000,0,3)", [wid]);
+      await refreshStanding(runtime, { only: wid, now: new Date(now.getTime() + 49 * 3600_000) });
+      const warnedView = await read();
+      assert.deepEqual([warnedView.standing.step, warnedView.standing.reasons.map((r: Json) => r.code), warnedView.limit.daily], ['restrict', ['COMPLAINTS_RESTRICT'], 200]);
+      assert.equal(warnedView.standing.marketingHeld, true);
+      assert.deepEqual(warnedView.standing.selfService, { available: false, action: 'release_marketing', reason: 'A restrict can be released 24 hours after it started.', availableAt: warnedView.standing.selfService.availableAt });
+      // The change is one event, one account.standing.changed webhook and one owner notice.
+      const events = (await db.query("SELECT kind,from_step,to_step,actor FROM standing_events WHERE workspace_id=$1 AND kind='step' ORDER BY sequence", [wid])).rows;
+      assert.deepEqual(events.map(e => [e.from_step, e.to_step, e.actor.kind]), [['ok', 'restrict', 'system']]);
+      const queued = (await db.query("SELECT type,payload FROM jobs WHERE workspace_id=$1 AND type IN ('operation.publish','standing.notify') ORDER BY created_at", [wid])).rows;
+      assert.deepEqual(queued.map(j => j.type).sort(), ['operation.publish', 'standing.notify']);
+      const published = queued.find(j => j.type === 'operation.publish')!.payload.event;
+      assert.equal(published.type, 'account.standing.changed');
+      assert.deepEqual([published.data.step, published.data.previousStep, published.data.marketingHeld, published.data.reasons[0].count], ['restrict', 'ok', true, 3]);
       // Workspace-wide: keys restricted to domains are refused; dashboard reads share a short cache.
-      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped score reader', permissions: ['read'], domains: [signed] }), 201); secrets.add(scoped.secret);
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped score reader', permissions: ['read'], domains: ['score.example'] }), 201); secrets.add(scoped.secret);
       assert.equal(error(await request('GET', '/v1/sender-score', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
       const dashboard = await local('GET', '/v1/sender-score'), again = await local('GET', '/v1/sender-score');
       assert.deepEqual([dashboard.status, dashboard.headers.get('x-bane-sender-score-cache'), again.headers.get('x-bane-sender-score-cache')], [200, 'miss', 'hit']);
@@ -5038,6 +5086,8 @@ describe('Campaign authorization and dispatch credentials', () => {
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')`, [REGION, acct]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('sub.sender.example',$1,$1,'verified')`, [wid]);
+      // The stored sender standing (score limit, ladder step) is read inside that same statement.
+      await gradedSender(db, wid, 2000);
       const meter = await queryBudget(t, db);
       await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
@@ -5899,6 +5949,9 @@ async function queryBudget(t:TestContext,db:pg.Client){
     if(max!==undefined)assert.ok(count<=max,`${label}: ${count} calls, budget ${max}`);return value;
   };
 }
+// A graded Hosted sender with this daily limit, as the standing job stores it, for tests about something else.
+const gradedSender = (db: { query: (text: string, values: unknown[]) => Promise<unknown> }, wid: string, limit = 10_000) => db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at)
+  VALUES($1,'graded',100,90,90,95,$2,$2,now(),now()) ON CONFLICT(workspace_id) DO UPDATE SET phase='graded',score=90,target=90,quality=95,band_limit=$2,daily_limit=$2,computed_at=now(),evidence_at=now()`, [wid, limit]);
 async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime: import('./src/core.js').Runtime;
   db: pg.Client;
@@ -7200,6 +7253,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1`,[wid,oh,va]);
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES($1,$2,$3,'ready','ohio-fixture')`,[oh,acct,old]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
+      await gradedSender(db,wid);
       await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`,[byo]);
       const byoTopic=`arn:aws:sns:${oh}:444455556666:legacy-feedback`;
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn,feedback_topic_arn) VALUES($1,$1,$2,'ready','byo','444455556666',gen_random_uuid(),'v4','fixture-role','fixture-platform',$3)`,[byo,oh,byoTopic]);
@@ -8027,7 +8081,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await local('POST',`${path}/schedule`,{revision:c.revision,scheduledAt:new Date(Date.now()+3600000).toISOString()}),202).queued,total);
       if (total===401) await db.query(`INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes)
         SELECT review_id,ordinal+1999599,recipient,recipient_bytes FROM sending_review_recipients WHERE review_id=(SELECT review_id FROM sending_campaigns WHERE id=$1)`, [c.id]);
-      await db.query(`UPDATE sending_campaigns SET total=2000000,prepared=1999599,expanded=1999599,scheduled_at=now() WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE sending_campaigns SET total=2000000,prepared=1999599,expanded=1999599,scheduled_at=now(),probe_cleared_at=now() WHERE id=$1`, [c.id]);
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES ($1,$2,20,20000,17000,clock_timestamp(),now()+interval '1 minute')`, [pool,REGION]);
       await run('campaign.run');
       const full = await view(); assert.equal(full.delivery.expanded,1999999); assert.equal(full.counts.byStatus.queued,400);
@@ -8111,8 +8165,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(resumed.delivery.expanded,3); assert.equal(resumed.delivery.waiting,null,'Hour expiry releases the tail without a resume request.');
       await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default','--reason','Synthetic limit change']);
       await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
-      error(await batch(100),429,'SEND_LIMIT_REACHED');
+      error(await batch(100),429,'SEND_LIMIT_REACHED'); // Age alone never raises the limit,
       await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',100,0,0)",[wid]);
+      error(await batch(100),429,'SEND_LIMIT_REACHED'); // nor does history: the stored score limit does.
+      await gradedSender(db,wid,1000);
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
@@ -8124,23 +8180,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           SELECT gen_random_uuid()::text,$1,x,$2,$3,$4,clock_timestamp()-$5::interval FROM unnest($6::text[]) x`,
           [wid,type,data,simulated,age,recipients.slice(start,end).map((r:Json)=>r.id)]);
       };
+      const standing = async () => (await db.query('SELECT step,pause_kind,reasons,strikes FROM sender_standing WHERE workspace_id=$1',[wid])).rows[0];
       await event('bounce',0,9,{bounceType:'Permanent'}); await event('bounce',0,1,{bounceType:'Permanent'}); // duplicate
       await event('bounce',9,10,{bounceType:'Transient'}); await event('complaint',0,1); await event('complaint',1,2,{},'25 hours');
       await event('bounce',9,10,{bounceType:'Permanent'},'0 hours',true);
       await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES(gen_random_uuid()::text,$1,$2,'complaint',false)`,[wid,sim.id]);
-      await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await checkHostedHealth(runtime); assert.equal(await pause(),null); assert.equal((await standing()).step,'notice','One complaint in 24 hours is a notice.');
       await db.query(`UPDATE sending_emails SET region='eu-west-1' WHERE id=$1`,[recipients[9].id]); // The final hard bounce is in another region.
       await event('bounce',9,10,{bounceType:'Permanent'});
-      // Bounces alone hold marketing: transactional mail keeps flowing and the SES tenants stay enabled.
-      const marketingHold = async () => (await db.query('SELECT marketing_held_at,marketing_hold_reason FROM provider_connections WHERE workspace_id=$1',[wid])).rows[0];
-      await checkHostedHealth(runtime); assert.equal(await pause(),null);
-      assert.match((await marketingHold()).marketing_hold_reason,/hard-bounce/);
-      assert.equal(error(await send({kind:'marketing'}),409,'MARKETING_HELD').message,'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending. Remove the addresses that bounced; Bane reviews the hold.');
-      ok(await send(),202); ok(await thread(),202);
-      assert.equal((await db.query(`SELECT FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rowCount,0,'A marketing hold never disables the SES tenants.');
-      // Complaints pause everything, the stronger signal, even while marketing is held.
-      await event('complaint',2,4);
-      await checkHostedHealth(runtime); const held = await pause(); assert.match(held.reason,/complaint/); assert.ok(Date.parse(held.at));
+      await checkHostedHealth(runtime);
+      assert.equal(await pause(),null,'Ten hard bounces warn; bounces alone never stop transactional mail below the pause line.');
+      assert.deepEqual([(await standing()).step,(await standing()).reasons.map((r:Json)=>r.code)],['warn',['BOUNCES_WARN']]);
+      // Transactional mail itself bouncing at 5% and 50 pauses everything (a bounce-only pause an owner may resume).
+      await event('bounce',10,50,{bounceType:'Permanent'});
+      await checkHostedHealth(runtime); const held = await pause(); assert.match(held.reason,/hard-bounce rate on transactional mail/); assert.ok(Date.parse(held.at));
+      assert.deepEqual([(await standing()).step,(await standing()).pause_kind,(await standing()).strikes.length],['pause','bounce',1]);
       await checkHostedHealth(runtime); assert.deepEqual(await pause(),held);
       for (const attempt of [send,()=>batch(1),thread,()=>send({to:simulator})]) error(await attempt(),409,'HOSTED_SENDING_PAUSED');
       assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rows[0].status,'pending');
@@ -8149,7 +8203,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps})); assert.equal(await pause(),null);
       assert.equal((await marketingHold()).marketing_held_at,null,'The resume lifts the marketing hold too.');
       await checkHostedHealth(runtime); assert.equal(await pause(),null,'Reviewed events cannot re-pause the workspace.');
-      assert.equal((await marketingHold()).marketing_held_at,null,'Nor hold its marketing again.');
+      assert.equal((await standing()).step,'warn','A resume leaves the workspace at warn, its limit frozen.');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const ses = t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
@@ -8160,23 +8214,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // The queued message plus the two transactional messages admitted during the marketing hold.
       assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,3); assert.equal(ses.mock.callCount(),4);
       assert.equal(ok(await local('GET',`/v1/emails/${blocked.id}`)).status,'suppressed');
-      await event('complaint',1,2); await checkHostedHealth(runtime); assert.equal(await pause(),null);
-      await event('complaint',2,3); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      // Complaints stop everything at 0.3% and 5 in 24 hours.
+      await event('complaint',1,5); await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await event('complaint',5,6); await checkHostedHealth(runtime); assert.match((await pause()).reason,/spam-complaint/);
+      assert.deepEqual([(await standing()).pause_kind,(await standing()).strikes.length],['full',2]);
       error(await send(),409,'HOSTED_SENDING_PAUSED');
-      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps}));
-      await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1`,[wid]);
-      // A pause needs the count and the rate together. At 200 sends, nine hard bounces (4.5%) are fewer than ten.
-      const accept200 = () => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at)
-        SELECT gen_random_uuid()::text,$1,id,'accepted',false,clock_timestamp() FROM sending_emails WHERE workspace_id=$1 AND NOT simulated AND status<>'suppressed' AND to_addresses->>0<>$2 LIMIT 200`,[wid,simulator]);
-      await accept200();
-      assert.equal((await db.query(`SELECT count(*)::int n FROM sending_email_events WHERE workspace_id=$1`,[wid])).rows[0].n,200);
-      await event('bounce',0,9,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null); assert.equal((await marketingHold()).marketing_held_at,null);
-      await event('bounce',9,10,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null); assert.match((await marketingHold()).marketing_hold_reason,/hard-bounce/);
-      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps}));
-      await accept200();
-      // One complaint (0.5% of 200) no longer pauses a small sender; a second one does.
-      await event('complaint',0,1); await checkHostedHealth(runtime); assert.equal(await pause(),null);
-      await event('complaint',1,2); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));
       error(await local('DELETE','/v1/connection'),409,'HOSTED_SENDING_PAUSED'); // No self-service unpause via disconnect.
     });
@@ -8365,8 +8407,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await post(`${path}/resume`,{})); await run('campaign.run');
       assert.equal((await view()).delivery.expanded,1); assert.equal((await view()).delivery.waiting,null);
       await set('off','Completed review');
-      // At seven prior direct recipients plus one campaign recipient, a freshly raised ordinary cap of eight is still full.
-      runtime.config.hostedSendCaps.firstWeek=8;
+      // At seven prior direct recipients plus one campaign recipient, an ordinary limit of eight is still full.
+      await db.query('UPDATE sender_standing SET daily_limit=8 WHERE workspace_id=$1',[wid]);
       error(await send(),429,'SEND_LIMIT_REACHED');
       assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-workspace-exemption'`,[wid])).rows.map(r=>r.details).sort((a,b)=>Number(a.old)-Number(b.old)),
         [{old:false,new:true,reason:'Synthetic exemption',via:'script'},{old:true,new:false,reason:'Completed review',via:'script'}]);
@@ -8561,15 +8603,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           ...(kind==='Bounce'?{bounce:{bounceType:'Permanent',bouncedRecipients:rows,timestamp}}:{complaint:{complainedRecipients:rows,timestamp}})}}]);
         assert.deepEqual(result,{ok:true});
       };
-      const check = async () => { await checkHostedHealth(runtime); return ok(await local('GET','/v1/me')).connection.sendingPause; };
+      // What the ladder counts (src/standing.ts): real destinations over yesterday's and today's accepted volume.
+      const { liveLadder } = await import('./src/standing.js');
+      const check = async () => { await checkHostedHealth(runtime); const live = (await liveLadder(runtime, wid))!;
+        const { step } = (await db.query('SELECT step FROM sender_standing WHERE workspace_id=$1',[wid])).rows[0]; return { step, ...live.day }; };
       await feedback('Complaint',1,[bcc[0],bcc[1],simulator]); await feedback('Complaint',1,[bcc[0].toUpperCase()]);
-      assert.equal(await check(),null,'Two distinct complaints / 4,999 real recipients is below 0.05%, even with no sends today.');
-      await feedback('Complaint',1,[bcc[2]]); assert.match((await check()).reason,/complaint/,'Three complaints on one envelope exceed the rate; do not double-count Send callbacks.');
-      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps})); assert.equal(await check(),null);
+      assert.deepEqual(await check(),{step:'notice',accepted:4999,bounces:0,complaints:2,marketingAccepted:0,marketingBounces:0,marketingComplaints:0},
+        'Two distinct complaints / 4,999 real recipients is below 0.05%, even with no sends today: a notice, not a warning.');
+      await feedback('Complaint',1,[bcc[2]]);
+      assert.deepEqual([(await check()).step,(await check()).complaints],['warn',3],'Three complaints on one envelope cross the warn line; Send callbacks are not double-counted.');
+      // An operator resume is the evidence boundary: only feedback after it counts.
+      await db.query(`UPDATE provider_connections SET paused_at=now(),pause_reason='Synthetic hold' WHERE workspace_id=$1`,[wid]);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps})); assert.equal((await check()).complaints,0);
       await feedback('Bounce',1,[...bcc.slice(0,9),simulator]); await feedback('Bounce',1,bcc.slice(0,8));
-      assert.equal(await check(),null,'Repeated hashes and a simulator bounce do not turn nine hard bounces into ten.');
-      await feedback('Bounce',2,[bcc[0]]); assert.equal(await check(),null,'Bounces alone never pause transactional mail.');
-      assert.match((await db.query('SELECT marketing_hold_reason FROM provider_connections WHERE id=$1',[wid])).rows[0].marketing_hold_reason,/hard-bounce/,'The same Bcc address on another email is a separate hard bounce: marketing is held.');
+      assert.equal((await check()).bounces,9,'Repeated hashes and a simulator bounce do not turn nine hard bounces into ten.');
+      await feedback('Bounce',2,[bcc[0]]); assert.equal((await check()).bounces,10,'The same Bcc address on another email is a separate hard bounce.');
       const {email_id,recipient_hashes}= (await db.query(`SELECT email_id,recipient_hashes FROM sending_email_events WHERE workspace_id=$1 AND type='bounce' AND cardinality(recipient_hashes)=9`,[wid])).rows[0];
       assert.ok(recipient_hashes.every((h:string)=>/^[0-9a-f]{64}$/.test(h)));
       const visible=JSON.stringify([ok(await local('GET',`/v1/emails/${email_id}/events`)),(await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1`,[wid])).rows]);
@@ -8939,26 +8987,42 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('hosted limits count sibling usage and require seasoned, healthy accepted mail',async t=>{
+  test('hosted limits count sibling usage and follow the stored score limit, its marketing reserve, override expiry and burst caps',async t=>{
     await simulatedSesFixture(t,async({db,runtime})=>{
       const wid=runtime.config.workspaceId, sibling=wid+'-sibling',sponsor=unique('sponsor');
       await db.query('UPDATE workspaces SET quota_sponsor=$1 WHERE id=$2',[sponsor,wid]);
       await db.query('INSERT INTO workspaces(id,slug,name,quota_sponsor) VALUES($1,$1,$1,$2)',[sibling,sponsor]);
       for(const id of [wid,sibling]) await db.query("INSERT INTO provider_connections(id,workspace_id,kind,state,region,tenant_state,created_at) VALUES($1,$1,'shared','ready',$2,'ready',now()-interval '30 days')",[id,REGION]);
-      const limit=async()=>{
-        const {rows:[{admitted,shown}]}=await db.query(`SELECT (SELECT allowance FROM hosted_allowance($1,1,0,100,1000,10000,10)) AS admitted,
-          (SELECT allowance FROM hosted_allowance_read($1,1,0,100,1000,10000,10)) AS shown`,[wid]);
+      const limit=async(marketing=0)=>{
+        const {rows:[{admitted,shown}]}=await db.query(`SELECT (SELECT allowance FROM hosted_allowance($1,1,$2,100,1000,10000,10)) AS admitted,
+          (SELECT allowance FROM hosted_allowance_read($1,1,$2,100,1000,10000,10)) AS shown`,[wid,marketing]);
         assert.deepEqual(shown,admitted); return admitted;
       };
       await db.query("INSERT INTO hosted_usage_hourly VALUES($1,date_trunc('hour',now()),89)",[sibling]);
-      assert.equal((await limit()).used,89); assert.equal((await limit()).cap,100);
-      await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '2 days',100,0,0)",[wid]);
-      assert.equal((await limit()).cap,1000);
-      await db.query('UPDATE hosted_health_hourly SET accepted=1000 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,10000);
-      await db.query('SELECT refresh_hosted_minute_tiers()');assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,500);
-      await db.query('UPDATE hosted_health_hourly SET complaints=1 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,100);
-      await db.query('UPDATE hosted_health_hourly SET complaints=0,bounces=20 WHERE workspace_id=$1',[wid]);assert.equal((await limit()).cap,100);
-      await db.query('SELECT refresh_hosted_minute_tiers()');assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,50);
+      // A workspace the standing job has not seen yet is calibrating: 100 a day, all of it the transactional reserve.
+      assert.deepEqual([(await limit()).used,(await limit()).cap,(await limit()).marketingCap,(await limit()).step],[89,100,0,'ok']);
+      // Age and history no longer raise it; the stored score limit does.
+      await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '2 days',1000,0,0)",[wid]);
+      assert.equal((await limit()).cap,100);
+      await gradedSender(db,wid,2000);
+      assert.deepEqual([(await limit()).cap,(await limit()).marketingCap],[2000,1800]);
+      await db.query('UPDATE sender_standing SET daily_limit=200 WHERE workspace_id=$1',[wid]);
+      assert.deepEqual([(await limit()).cap,(await limit()).marketingCap],[200,100],'A small sender always keeps 100 a day for receipts and resets.');
+      assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,50);
+      await db.query('UPDATE sender_standing SET daily_limit=10000 WHERE workspace_id=$1',[wid]);
+      assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,500);
+      // A restrict holds marketing in the same statement; an owner's release gives back a share of it.
+      await db.query("UPDATE sender_standing SET step='restrict' WHERE workspace_id=$1",[wid]);
+      assert.equal((await limit()).marketingHeld,true);
+      await db.query("UPDATE sender_standing SET release_until=now()+interval '1 hour',release_percent=50 WHERE workspace_id=$1",[wid]);
+      assert.deepEqual([(await limit()).marketingHeld,(await limit()).marketingCap],[false,4500]);
+      // An operator override applies until it expires, then the score limit is back (and siblings share again).
+      await db.query("UPDATE workspaces SET send_cap_override=25000,send_cap_override_expires_at=now()+interval '1 day' WHERE id=$1",[wid]);
+      assert.deepEqual([(await limit()).cap,(await limit()).used],[25000,0]);
+      await db.query("UPDATE workspaces SET send_cap_override_expires_at=now()-interval '1 second' WHERE id=$1",[wid]);
+      assert.deepEqual([(await limit()).cap,(await limit()).used],[10000,89]);
+      await db.query("UPDATE sender_standing SET daily_limit=100 WHERE workspace_id=$1",[wid]);
+      assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,50);
       assert.equal((await db.query("SELECT hosted_burst_ok($1,'a.example',50) AS ok",[wid])).rows[0].ok,true);
       assert.equal((await db.query("SELECT hosted_burst_ok($1,'b.example',1) AS ok",[sibling])).rows[0].ok,false);
     });
