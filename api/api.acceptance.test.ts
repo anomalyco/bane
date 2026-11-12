@@ -9123,6 +9123,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const holds=(await g.query("SELECT workspace_id,ses_message_id,status,budget_retry_at>now() AS later FROM mail_receipts WHERE workspace_id=ANY($1) AND ses_message_id LIKE 'held-%' ORDER BY 1",[ids])).rows;
     assert.deepEqual(holds.map(h=>[h.ses_message_id,h.status,h.later]),[['held-a','held',false],['held-b','held',true]]);
   });
+  // Review of #57, P2 (tear witness, 4 steps: accept m1 h, claim, done, legacy-accept m1 x -> the previous Worker's
+  // route refused 100 known recipients plus one new, and the new recipient never got the message).
+  test('receipt reopen: the previous Worker\'s duplicate-counting bound merges new recipients during overlap',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('rold');
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_ingest_turns'])await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);});
+    const to=(n:number,p='r')=>Array.from({length:n},(_,i)=>`${p}${String(i).padStart(3,'0')}@rold.invalid`);
+    // The upsert of the route before 96c9c9f: its bound counted old || new, duplicates included.
+    const legacy=(c:pg.Client,mid:string,recipients:string[])=>c.query(`INSERT INTO mail_receipts AS r(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'tear-bucket','key',$4,'{}')
+      ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status=CASE WHEN r.status='held' THEN 'held' ELSE 'pending' END,processed_at=NULL
+      WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients AND jsonb_array_length(r.recipients||excluded.recipients)<=200 RETURNING status`,[w,mid,REGION,JSON.stringify([...recipients].sort())]);
+    const count=async(mid:string)=>(await a.query('SELECT jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid])).rows[0].n;
+    assert.equal((await legacy(a,'m1',to(100))).rowCount,1);
+    await a.query("UPDATE mail_receipts SET status='processed' WHERE workspace_id=$1",[w]);
+    assert.deepEqual((await legacy(a,'m1',[...to(100),'new@rold.invalid'])).rows,[{status:'pending'}]);
+    assert.equal(await count('m1'),101);
+    // With another reopen in flight the bound is still exact: the subtraction waits for its commit.
+    assert.equal((await legacy(a,'m2',to(100))).rowCount,1);
+    const pid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    await a.query('BEGIN');
+    try {
+      await legacy(a,'m2',[...to(100),'y@rold.invalid','z@rold.invalid']);
+      const second=legacy(b,'m2',[...to(100),'w@rold.invalid']);
+      for(let i=0;i<400&&(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type!=='Lock';i++)await new Promise(r=>setTimeout(r,5));
+      await a.query('COMMIT');
+      assert.equal((await second).rowCount,1);
+    } finally { await a.query('ROLLBACK'); }
+    assert.equal(await count('m2'),103);
+  });
   // tear witness (5 steps): U1 upload, expire, sweep, purge, U1 ok -> the object outlived its reservation with no deletion queued.
   test('attachment upload: a put that outlasts its swept reservation still queues the object for deletion',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
