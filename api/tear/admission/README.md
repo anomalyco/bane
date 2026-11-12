@@ -12,6 +12,7 @@ A [tear](https://github.com/anomalyco/tear) model of admission. Each step runs o
   - Covers the real global `release_receive_budget_holds(NULL)` (it must never wait, and moves a busy hold back) and the 72-hour hold expiry.
   - `recover` runs the real lost-receipt recovery; `stash` and `replay` drive the real held-envelope replay.
   - Ingest `claim`, `done`, `fail` and `lose` are fixture steps with the handler's settle fences.
+  - `legacy-fail` runs the previous Worker's terminal failure write, unfenced, at any time: an old invocation keeps running after its lease is retired. The settle fence (164) must drop it.
 - **`send`: hosted send admission.**
   - Covers `POST /v1/emails/send` and `/batch` with a bearer key, through the one-statement atomic admission.
   - Covers the rolling 24-hour recipient cap shared by a quota sponsor's workspaces, the marketing reserve and the pending cap.
@@ -21,6 +22,7 @@ A [tear](https://github.com/anomalyco/tear) model of admission. Each step runs o
 - **`upload`: stored-attachment quota reservations.**
   - Covers reserve, R2 put, finish and refund in `POST /v1/attachments`.
   - Covers the hourly sweeper and upload tombstones (the real `cleanup`), storage reconciliation (the real `reconcileUploads` over a listing of the stored objects, which `day` ages) and the deletion jobs (the real job runner).
+  - `foreign` stores objects of other key families in the same bucket (a workspace named `attachments`'s kept mail, a mail attachment, a template asset). Nothing may delete them.
   - `Ux crash` stands for a Worker that dies after a late put, which also covers an older Worker's refund.
 
 Files:
@@ -63,11 +65,11 @@ cd api/tear/admission && cargo run --release -- ci
 
 `ci` runs the following, prints a JSON report with checklist coverage (`checklist.missing` should be empty), and exits 1 on any mismatch or error:
 
-1. The 16 bug witnesses (including the four from the #57 review and the five from its recheck) and 22 boundary traces.
+1. The 18 bug witnesses (the four from the #57 review, the five from its first recheck and the two from its second) and 24 boundary traces.
 2. Every transition of the core alphabet: `recv` to depth 2, `send` to depth 1, `upload` to depth 3.
 3. 540 seeded random walks over the full alphabet and every configuration (about 12,000 steps).
 
-It covers about 16,500 steps in 2,550 traces.
+It covers about 16,800 steps in 2,640 traces.
 
 Pass `--seed N` to rotate the walks.
 
@@ -75,10 +77,10 @@ Pass `--seed N` to rotate the walks.
 
 | Command | Size | Time (M-series Mac) |
 |---|---:|---:|
-| `cargo run --release -- edges 3 --profile recv` | 37,478 edges, 110,697 steps | about 5 min |
+| `cargo run --release -- edges 3 --profile recv` | 37,758 edges, 111,531 steps | about 5 min |
 | `cargo run --release -- edges 2 --profile send` | 2,399 edges, 4,738 steps | about 20 s |
 | `cargo run --release -- edges 3 --profile send --budget 600` | 46,794 edges, 137,923 steps | about 10 min (8 min covers 84%) |
-| `cargo run --release -- edges 5 --profile upload` | 3,272 edges, 15,078 steps | about 30 s |
+| `cargo run --release -- edges 5 --profile upload` | 4,619 edges, 21,394 steps | about 40 s |
 | `cargo run --release -- random 2000 30 --profile P --seed $(date +%s)` | 60,000 steps | about 1.5 min |
 
 - `space N --profile P` prints the core graph's size per depth without touching the database.
