@@ -62,7 +62,11 @@ export interface Campaign { counts?: { total: number; byStatus: Record<string, n
 export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
 export interface CampaignDelivery { total: number; prepared: number; expanded: number; canceled: number; error: { code: string; message: string } | null; pacing?: CampaignPacing; pausedAt?: ISODate | null; pauseReason?: { code: string; message: string } | null; waiting?: { reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota'; until: ISODate } | null }
 export interface CampaignPacingInput { perDay: number | null; autoPause?: boolean; rateShare?: number }
-export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; templateId?: string; idempotencyKey?: string }
+type CampaignRate = { value: number | null; numerator: number; denominator: number }
+// Lifetime distinct email outcomes (GET /v1/campaigns/{id}/stats); outcomes overlap and simulated mail is counted separately.
+export interface CampaignStats { tracking: boolean; totals: { accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }; rates: Record<'delivery' | 'bounce' | 'complaint' | 'open' | 'click', CampaignRate> }
+// defaults are the fallback values for {{placeholders}} a contact has no value for (the API's draft.defaults).
+export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
 export interface ApiKey { revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
@@ -188,8 +192,6 @@ export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; 
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null }
 // An update without regionIds keeps the endpoint's saved region scope.
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionIds?: Webhook['regionIds']; id?: string; headers?: WebhookHeaderInput[] }
-export interface ImportRow { email: string; name?: string; country?: string; subscribed?: boolean }
-export interface ImportResult { created: number; matched: number; skipped: number; issues: { row: number; message: string }[] }
 // Plain-language copy with a next step for errors a new workspace can meet. The server's message stays in `detail`.
 const friendlyErrors: Record<string, (detail: string) => string> = {
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
@@ -198,6 +200,9 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   SENDER_DOMAIN_NOT_VERIFIED: () => 'This sender’s domain isn’t verified yet. Open Domains to check its DNS records; you can send once it shows Verified.',
   SEND_LIMIT_REACHED: detail => detail,
   NETWORK_UNAVAILABLE: detail => detail,
+  AUDIENCEQL_LIMIT_EXCEEDED: () => 'A bulk change can update at most 10,000 contacts at a time. Filter to a smaller list and try again.',
+  AUDIENCE_PLAN_EXPIRED: () => 'This count is more than 15 minutes old. Count again, then confirm.',
+  STALE_AUDIENCE_PLAN: () => 'Some of these contacts changed after they were counted. Count again, then confirm.',
 }
 export class ApiError extends Error {
   /** The server's own message. */
@@ -221,12 +226,14 @@ export class ApiError extends Error {
 // Dates cross the boundary as ISO-8601 strings; rates are ratios, not formatted percentages.
 export type CursorItems<T> = T[] & { nextCursor?: string | null }
 export interface BaneApi {
-  consentHistory?: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
+  consentHistory: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
   emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   attachments: AttachmentApi
   templateAssets: AttachmentApi
-  imports?: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}): Promise<ImportPreview>; commit(id: string): Promise<ImportPreview> }
-  consent?: (id: string, input: ConsentInput) => Promise<Contact>
+  imports: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}): Promise<ImportPreview>; commit(id: string, input?: ImportCommitInput): Promise<ImportPreview> }
+  consent: (id: string, input: ConsentInput) => Promise<Contact>
+  /** AudienceQL bulk changes: plan counts and samples the contacts a statement changes; apply changes exactly those. */
+  audienceQuery: { plan(statement: string): Promise<AudiencePlan>; apply(input: { planId: string; confirmResubscribe?: boolean; evidence?: string }): Promise<{ affected: number }> }
   webhookDeliveries?: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>
   readonly mode: 'demo' | 'live'
   regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt>; updateAutoValidation(region: string, stream: Stream, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, signal?: AbortSignal): Promise<{stream: Stream; mode: AutoValidationMode}> }
@@ -235,11 +242,11 @@ export interface BaneApi {
   senderScore: { get(signal?: AbortSignal): Promise<SenderScore> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email> }
   logs: { list(input: PageRequest & { direction?: LogDirection }, signal?: AbortSignal): Promise<PageResult<LogEntry>> }
-  campaigns: { list(input: PageRequest & { archived?: boolean }, signal?: AbortSignal): Promise<PageResult<Campaign>>; get(id: string, signal?: AbortSignal): Promise<Campaign>; state(id: string, signal?: AbortSignal): Promise<CampaignState>; preview(id: string, signal?: AbortSignal): Promise<CampaignPreview>; setArchived(input: { id: string; archived: boolean }, signal?: AbortSignal): Promise<Campaign>; save(input: CampaignInput, signal?: AbortSignal): Promise<Campaign>; audience(input: { id: string; listId: string; segmentId: string | null }, signal?: AbortSignal): Promise<AudiencePreview>; send(input: SendCampaignInput, signal?: AbortSignal): Promise<Campaign | CampaignSendReceipt>; pause(id: string, signal?: AbortSignal): Promise<Campaign>; resume(id: string, signal?: AbortSignal): Promise<Campaign>; setPacing(id: string, input: CampaignPacingInput, signal?: AbortSignal): Promise<Campaign>; test(input: { id: string; to: string }, signal?: AbortSignal): Promise<{ accepted: boolean; id?: string; status?: string; simulated?: boolean }> }
+  campaigns: { list(input: PageRequest & { archived?: boolean }, signal?: AbortSignal): Promise<PageResult<Campaign>>; get(id: string, signal?: AbortSignal): Promise<Campaign>; state(id: string, signal?: AbortSignal): Promise<CampaignState>; preview(id: string, signal?: AbortSignal): Promise<CampaignPreview>; setArchived(input: { id: string; archived: boolean }, signal?: AbortSignal): Promise<Campaign>; save(input: CampaignInput, signal?: AbortSignal): Promise<Campaign>; audience(input: { id: string; listId: string; segmentId: string | null }, signal?: AbortSignal): Promise<AudiencePreview>; send(input: SendCampaignInput, signal?: AbortSignal): Promise<Campaign | CampaignSendReceipt>; pause(id: string, signal?: AbortSignal): Promise<Campaign>; resume(id: string, signal?: AbortSignal): Promise<Campaign>; setPacing(id: string, input: CampaignPacingInput, signal?: AbortSignal): Promise<Campaign>; unschedule(id: string, signal?: AbortSignal): Promise<Campaign>; reschedule(id: string, scheduledAt: ISODate, signal?: AbortSignal): Promise<Campaign>; cancel(id: string, signal?: AbortSignal): Promise<{ canceled: number; inFlight: number }>; stats(id: string, signal?: AbortSignal): Promise<CampaignStats>; test(input: { id: string; to: string; data?: Record<string, string> }, signal?: AbortSignal): Promise<{ accepted: boolean; id?: string; status?: string; simulated?: boolean }> }
   templates: { list(input?: PageRequest & { archived?: boolean; publishedOnly?: boolean }, signal?: AbortSignal): Promise<PageResult<CampaignTemplateSummary>>; get(id: string, signal?: AbortSignal): Promise<CampaignTemplate>; create(input: {name: string; description?: string}, signal?: AbortSignal): Promise<CampaignTemplate>; update(id: string, revision: number, draft: CampaignTemplateDraft, signal?: AbortSignal): Promise<CampaignTemplate>; publish(id: string, revision: number, signal?: AbortSignal): Promise<CampaignTemplate>; archive(id: string, archived: boolean, signal?: AbortSignal): Promise<CampaignTemplate>; remove(id: string, signal?: AbortSignal): Promise<void>; preview(id: string, published?: boolean, signal?: AbortSignal): Promise<CampaignPreview> }
-  contacts: { list(input: PageRequest & { email?: string }, signal?: AbortSignal): Promise<PageResult<Contact>>; get(id: string, signal?: AbortSignal): Promise<Contact>; save(input: ContactInput, signal?: AbortSignal): Promise<Contact>; import(input: { listId: string; rows: ImportRow[] }, signal?: AbortSignal): Promise<ImportResult> }
+  contacts: { list(input: PageRequest & { email?: string }, signal?: AbortSignal): Promise<PageResult<Contact>>; get(id: string, signal?: AbortSignal): Promise<Contact>; save(input: ContactInput, signal?: AbortSignal): Promise<Contact> }
   lists: { list(input?: PageRequest & { counts?: boolean }, signal?: AbortSignal): Promise<PageResult<AudienceList>>; get(id: string, signal?: AbortSignal): Promise<AudienceList>; create(input: { name: string }, signal?: AbortSignal): Promise<AudienceList>; remove(id: string, signal?: AbortSignal): Promise<void> }
-  segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: SegmentInput, signal?: AbortSignal): Promise<AudiencePreview> }
+  segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: SegmentInput & { listId?: string }, signal?: AbortSignal): Promise<AudiencePreview> }
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
   credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void> }
   domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost?(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
@@ -306,6 +313,9 @@ export interface WorkspaceInvitationPreview { id: string; workspaceId: string; w
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }
 export interface ConsentInput { status: "subscribed" | "unsubscribed"; source?: string; evidence?: string; policyVersion?: string; occurredAt?: string; confirmResubscribe?: boolean }
 export interface ConsentEvent { id: string; status: "subscribed" | "unsubscribed"; source: string; evidence: string | null; policyVersion: string | null; occurredAt: string }
-export interface ImportPreview { id: string; status: "preview" | "committed"; imported: number; rows: {row: number; email: string; name?: string}[]; errors: {row: number; field: string; message: string}[] }
+export interface ImportPreview { id: string; status: "preview" | "committed"; imported: number; rows: {row: number; email: string; name?: string}[]; errors: {row: number; field: string; message: string}[]; /** Set by commit: contacts it marked subscribed. */ subscribed?: number }
+/** Commit an import; `consent` records that everyone imported without a consent decision agreed to marketing email. */
+export interface ImportCommitInput { consent?: { status: 'subscribed'; evidence: string; policyVersion?: string } }
+export interface AudiencePlan { id: string; operation: 'update_contacts' | 'add_to_list' | 'remove_from_list'; matched: number; sample: { id: string; email: string; name: string | null; consent: 'unknown' | 'subscribed' | 'unsubscribed'; suppressed: boolean }[]; warnings: string[]; requiresResubscribeConfirmation: boolean; expiresAt: string }
 
 export interface CampaignSendReceipt { id: string; state: "preparing"; queued: number; scheduledAt: string | null; simulated: boolean }

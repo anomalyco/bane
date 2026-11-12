@@ -3,14 +3,21 @@ set -euo pipefail
 umask 077
 export HOME="$RUNNER_TEMP/fixture-home"
 mkdir -p "$HOME"
+export PGPORT=${PGPORT:-5432}
 admin() { PGPASSWORD=fixture-admin psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 "$@"; }
 admin <<'SQL'
+-- Deadlock guard (docs/ci.md): find a lock cycle after 50 ms instead of 1 s, log every lock wait longer than that,
+-- and end a statement that waits 15 s for a lock with an error instead of hanging the job.
+ALTER SYSTEM SET deadlock_timeout = '50ms';
+ALTER SYSTEM SET log_lock_waits = on;
+SELECT pg_reload_conf();
 CREATE ROLE fixture LOGIN NOSUPERUSER PASSWORD 'fixture';
 CREATE DATABASE fixture OWNER fixture;
 -- These are small OLTP fixtures: don't spend the job compiling one-off plans.
 ALTER ROLE fixture SET jit = off;
+ALTER ROLE fixture SET lock_timeout = '15s';
 SQL
-export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:5432/fixture
+export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:$PGPORT/fixture
 export HOST=127.0.0.1
 export AUTH_ALLOWED_EMAILS=operator@example.com ACCOUNT_CLIENT_ID=fixture ACCOUNT_CLIENT_PRIVATE_KEY=unused-by-session-fixture
 BANE_ROOT_SECRET=$(openssl rand -hex 36); export BANE_ROOT_SECRET
@@ -61,13 +68,43 @@ shard() (
     echo "${1}: auth readiness expected 401 AUTH_REQUIRED, got HTTP $status" >&2
     exit 1
   fi
-  timeout 8m node --import tsx --test --test-reporter=spec "$5" api.acceptance.test.ts
+  reporters=(--test-reporter=spec --test-reporter-destination=stdout)
+  if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then reporters+=(--test-reporter=junit "--test-reporter-destination=$ACCEPTANCE_JUNIT/$1.xml"); fi
+  timeout 8m node --import tsx --test "${reporters[@]}" "${@:5}" api.acceptance.test.ts
 )
 # Complementary filters: new suites run in the HTTP shard by default.
 pattern='^(SIMULATED SES:|Hosted account re-home:)'
-shard integration 8787 '' 4569 "--test-skip-pattern=$pattern" & integration=$!
-shard simulated 8788 _sim 4570 "--test-name-pattern=$pattern" & simulated=$!
+# Flake quarantine (docs/ci.md): a test whose name carries [flaky #N], N its open issue, never blocks a merge.
+# ACCEPTANCE_QUARANTINE: unset skips those tests (the required job), "only" runs just them (the non-blocking
+# quarantine job), "all" runs everything (nightly).
+flaky='\[flaky #[0-9]+\]'
+case ${ACCEPTANCE_QUARANTINE:-} in
+  only) integration_filter=(--test-skip-pattern="$pattern" --test-name-pattern="$flaky"); simulated_filter=(--test-name-pattern="$pattern.*$flaky") ;;
+  all) integration_filter=(--test-skip-pattern="$pattern"); simulated_filter=(--test-name-pattern="$pattern") ;;
+  '') integration_filter=(--test-skip-pattern="$pattern" --test-skip-pattern="$flaky"); simulated_filter=(--test-name-pattern="$pattern" --test-skip-pattern="$flaky") ;;
+  *) echo "ACCEPTANCE_QUARANTINE must be unset, only or all" >&2; exit 2 ;;
+esac
+if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then mkdir -p "$ACCEPTANCE_JUNIT"; fi
+shard integration 8787 '' 4569 "${integration_filter[@]}" & integration=$!
+shard simulated 8788 _sim 4570 "${simulated_filter[@]}" & simulated=$!
 rc=0
 wait "$integration" || rc=$?
 wait "$simulated" || rc=$?
+
+# Deadlock guard: fail on any deadlock Postgres detected during the suite, including one a retry absorbed or a test
+# never asserted on. A backend reports its counters when it exits, so wait for the shards' connections to close.
+for ((i=0; i<50; i++)); do
+  [[ $(admin -Atc "SELECT count(*) FROM pg_stat_activity WHERE datname LIKE 'fixture%'") == 0 ]] && break
+  sleep .1
+done
+sleep 1
+deadlocks=$(admin -Atc "SELECT coalesce(sum(deadlocks), 0) FROM pg_stat_database WHERE datname LIKE 'fixture%'")
+if (( deadlocks > 0 )); then
+  echo "::error title=Deadlock guard::Postgres detected $deadlocks deadlock(s) (40P01) during the acceptance suite. Two code paths lock the same rows in opposite orders; see docs/ci.md."
+  # The service container's log has each cycle: both statements, their locks and the processes that held them.
+  if [[ -n ${PG_CONTAINER:-} ]]; then docker logs "$PG_CONTAINER" 2>&1 | grep -B2 -A12 'deadlock detected' | head -n 200 || :; fi
+  rc=1
+else
+  echo 'Deadlock guard: Postgres detected no deadlocks.'
+fi
 exit "$rc"
