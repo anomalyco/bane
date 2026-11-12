@@ -167,9 +167,13 @@ jobs:
       - *bun-cache
       # The stdio MCP acceptance test starts ../mcp/src/server.ts, which needs the MCP package's dependencies.
       - run: for pkg in api mcp .github/s3-fixture; do (cd "$pkg" && bun install --frozen-lockfile); done
+      # Also the deadlock guard: Postgres detects lock cycles after 50 ms and logs lock waits, and the job fails on
+      # any deadlock it counted, printing each cycle from the service's log (docs/ci.md).
       - name: Run all acceptance tests with isolated database and object storage
         run: bash ../.github/scripts/acceptance.sh
         working-directory: api
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
 
   # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
