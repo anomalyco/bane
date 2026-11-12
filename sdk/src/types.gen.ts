@@ -4035,6 +4035,15 @@ export type BillingSummary = {
      * Where a person adds credit.
      */
     topUpUrl: string;
+    /**
+     * Set when Anomaly made this workspace free (mode exempt): nothing is charged and sending never pauses for the balance. Usage is still measured, and monthToDate shows what it would cost.
+     */
+    freePlan: {
+        /**
+         * When the free plan ends; null: no end date.
+         */
+        until: string | null;
+    } | null;
 };
 
 /**
@@ -4321,10 +4330,14 @@ export type GetCurrentIdentityResponses = {
          */
         operator?: 'operator' | 'operator:read' | null;
         /**
-         * Hosted dashboard sessions: whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
+         * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
          */
         billing?: {
             enforcement: 'off' | 'shadow' | 'enforce';
+            /**
+             * Anomaly made this workspace free: never charged or paused for the balance.
+             */
+            free: boolean;
             sending: 'ok' | 'low' | 'paused';
             receiving: 'ok' | 'grace' | 'held';
             autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped';

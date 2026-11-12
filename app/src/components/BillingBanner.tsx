@@ -16,7 +16,8 @@ export function BillingBanner() {
   const billing = useSession()?.identity?.billing
   const { canAdminister } = useWorkspaceAccess()
   const { pathname, hash } = useLocation()
-  if (!billing || billing.enforcement !== 'enforce') return null
+  // A free workspace (courtesy of Anomaly) never shows a balance banner.
+  if (!billing || billing.enforcement !== 'enforce' || billing.free) return null
   const kind = billing.receiving === 'held' ? 'held' : billing.sending === 'paused' ? 'paused' : billing.autoRecharge === 'failed' ? 'recharge' : null
   if (!kind) return null
   const copy = COPY[kind], here = pathname === '/settings' && hash === '#billing'

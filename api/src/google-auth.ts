@@ -368,8 +368,8 @@ export function registerGoogleAuth(app: App) {
     responses: { 200: response(z.object({ id: z.string(), workspaceId: z.string(), role: WorkspaceRole.nullable(), multiTenant: z.boolean(), simulated: z.boolean(), email: z.string().nullable(), name: z.string().nullable(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), origin: z.string().url(), host: z.string(), connection: ConnectionSummary.nullable().openapi({ description: 'Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).' }),
       workspaces: z.array(Workspace).nullable().openapi({ description: 'Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted.' }),
       operator: z.enum(['operator', 'operator:read']).nullable().optional().openapi({ description: 'Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.' }),
-      billing: z.object({ enforcement: z.enum(['off', 'shadow', 'enforce']), sending: z.enum(['ok', 'low', 'paused']), receiving: z.enum(['ok', 'grace', 'held']), autoRecharge: z.enum(['off', 'on', 'pending', 'failed', 'capped']) })
-        .nullable().optional().openapi({ description: 'Hosted dashboard sessions: whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.' }) })), ...errors },
+      billing: z.object({ enforcement: z.enum(['off', 'shadow', 'enforce']), free: z.boolean().describe('Anomaly made this workspace free: never charged or paused for the balance.'), sending: z.enum(['ok', 'low', 'paused']), receiving: z.enum(['ok', 'grace', 'held']), autoRecharge: z.enum(['off', 'on', 'pending', 'failed', 'capped']) })
+        .nullable().optional().openapi({ description: 'Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.' }) })), ...errors },
   }), async c => {
     const identity = c.get('actor');
     const userId = identity.keyId.startsWith('user_') ? identity.keyId.slice(5) : null;
@@ -377,7 +377,7 @@ export function registerGoogleAuth(app: App) {
     // One statement at a time: a Workers request holds one connection.
     const connection = hosted ? await connectionSummary(c.env, identity.workspaceId) : null;
     const session = hosted && identity.credential === 'dashboard' && userId ? await sessionMemberships(c.env.db, userId) : null;
-    const billing = session ? await import('./billing/state.js').then(async ({ readBilling }) => { const b = await readBilling(c.env.db, identity.workspaceId, { amounts: false }); return { enforcement: b.enforcement, ...b.state }; }) : null;
+    const billing = session ? await import('./billing/state.js').then(async ({ readBilling }) => { const b = await readBilling(c.env.db, identity.workspaceId, { amounts: false }); return { enforcement: b.enforcement, free: b.mode === 'exempt', ...b.state }; }) : null;
     return c.json({ id: userId ?? identity.keyId, workspaceId: identity.workspaceId, role: WorkspaceRole.nullable().parse(identity.role ?? null), multiTenant: hosted, simulated: isSimulatedSes(c.env), email: identity.email ?? null, name: identity.name ?? null, permissions: identity.permissions, domains: identity.domains, origin, host: new URL(origin).host, connection, workspaces: session?.workspaces ?? null, operator: session?.operator ?? null, billing }, 200);
   });
 }

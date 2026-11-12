@@ -13952,6 +13952,25 @@
           "topUpUrl": {
             "type": "string",
             "description": "Where a person adds credit."
+          },
+          "freePlan": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "until": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "When the free plan ends; null: no end date."
+              }
+            },
+            "required": [
+              "until"
+            ],
+            "description": "Set when Anomaly made this workspace free (mode exempt): nothing is charged and sending never pauses for the balance. Usage is still measured, and monthToDate shows what it would cost."
           }
         },
         "required": [
@@ -13965,7 +13984,8 @@
           "autoRecharge",
           "paymentMethod",
           "prices",
-          "topUpUrl"
+          "topUpUrl",
+          "freePlan"
         ]
       },
       "MicroCents": {
@@ -14716,6 +14736,10 @@
                             "enforce"
                           ]
                         },
+                        "free": {
+                          "type": "boolean",
+                          "description": "Anomaly made this workspace free: never charged or paused for the balance."
+                        },
                         "sending": {
                           "type": "string",
                           "enum": [
@@ -14745,11 +14769,12 @@
                       },
                       "required": [
                         "enforcement",
+                        "free",
                         "sending",
                         "receiving",
                         "autoRecharge"
                       ],
-                      "description": "Hosted dashboard sessions: whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail."
+                      "description": "Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail."
                     }
                   },
                   "required": [

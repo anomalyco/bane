@@ -353,6 +353,8 @@ export async function seed(fx) {
   await domain(db, 'ws_fresh', await hosted(db, 'ws_fresh'), 'lumenlabs.example');
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
   void nia;
+  // Lumen Labs is a design partner: free (not billed) for 60 days, so its Billing page shows the free plan.
+  await db.query("SELECT billing_set_workspace_free('ws_fresh', true, 'Design partner', now()+interval '60 days', 'operator:user_dana')");
   return {
     restricted: 'ws_harbor', email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id,

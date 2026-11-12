@@ -38,6 +38,8 @@ export const BillingSummarySchema = z.object({
   paymentMethod: z.object({ brand: z.string(), last4: z.string(), expMonth: z.number().int(), expYear: z.number().int() }).nullable(),
   prices: Prices,
   topUpUrl: z.string().describe('Where a person adds credit.'),
+  freePlan: z.object({ until: z.string().nullable().describe('When the free plan ends; null: no end date.') }).nullable()
+    .describe('Set when Anomaly made this workspace free (mode exempt): nothing is charged and sending never pauses for the balance. Usage is still measured, and monthToDate shows what it would cost.'),
 }).openapi('BillingSummary');
 const LedgerEntry = z.object({
   id: z.string(), at: z.string(), kind: z.enum(['topup', 'usage', 'grant', 'refund_hold', 'refund_release', 'dispute', 'dispute_reversal', 'write_off', 'adjustment']),
@@ -70,7 +72,13 @@ function moneySession(c: Ctx) {
   const session = dashboardSession(c, true);
   return { ...session, actor: `user:${session.userId}` };
 }
-const summary = (c: Ctx, workspaceId: string, amounts: boolean) => readBilling(c.env.db, workspaceId, { amounts, publicUrl: c.env.config.publicUrl.replace(/\/$/, '') });
+/** The summary plus, for a free workspace, when its free plan ends (one more statement, only then). */
+async function summary(c: Ctx, workspaceId: string, amounts: boolean) {
+  const b = await readBilling(c.env.db, workspaceId, { amounts, publicUrl: c.env.config.publicUrl.replace(/\/$/, '') });
+  if (b.mode !== 'exempt') return { ...b, freePlan: null };
+  const { rows: [row] } = await c.env.db.execute<{ until: string | null }>(sql`SELECT to_char((billing_free_state(${workspaceId})->>'until')::timestamptz AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS until`);
+  return { ...b, freePlan: { until: row?.until ?? null } };
+}
 
 // ---------- ledger wording ----------
 const count = (n: unknown) => Number(n ?? 0).toLocaleString('en-US');
@@ -238,9 +246,16 @@ export function registerBilling(app: App) {
 const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit log (at least 10 characters).');
 const WorkspaceParam = z.object({ wid: z.string().min(1).max(100) });
 const Mutation = z.object({ 'Idempotency-Key': z.string().min(1).max(200).optional() });
-type Account = { mode: string; balance_uc: string; promo_uc: string; unpaid_since: string | null };
-const accountOf = async (tx: DbExecutor, wid: string, lock = false) => (await tx.execute<Account>(sql`SELECT mode,balance_uc::text,promo_uc::text,unpaid_since::text FROM billing_accounts
-  WHERE workspace_id=${wid} ${lock ? sql`FOR UPDATE` : sql``}`)).rows[0] ?? { mode: 'prepaid', balance_uc: '0', promo_uc: '0', unpaid_since: null };
+type Account = { mode: string; paid_mode: string; balance_uc: string; promo_uc: string; unpaid_since: string | null; free_via: string | null; free_until: string | null; free_reason: string | null };
+const accountOf = async (tx: DbExecutor, wid: string, lock = false) => (await tx.execute<Account>(sql`SELECT mode,paid_mode,balance_uc::text,promo_uc::text,unpaid_since::text,free_via,free_until::text,free_reason
+  FROM billing_accounts WHERE workspace_id=${wid} ${lock ? sql`FOR UPDATE` : sql``}`)).rows[0] ?? { mode: 'prepaid', paid_mode: 'prepaid', balance_uc: '0', promo_uc: '0', unpaid_since: null, free_via: null, free_until: null, free_reason: null };
+const FreeUntil = z.iso.datetime({ offset: true }).nullable().optional().describe('When it ends (in the future, at most 5 years ahead); omit or null for no end.');
+function futureUntil(until: string | null | undefined) {
+  if (!until) return null;
+  const at = Date.parse(until);
+  if (!(at > Date.now()) || at > Date.now() + 5 * 366 * 86_400_000) throw new ApiError(422, 'VALIDATION_FAILED', 'until must be in the future and at most 5 years ahead.', 'until');
+  return new Date(at).toISOString();
+}
 async function existingWorkspace(db: DbExecutor, wid: string) {
   const { rows: [row] } = await db.execute<{ id: string }>(sql`SELECT id FROM workspaces WHERE id=${wid}`);
   if (!row) notFound('Workspace');
@@ -248,21 +263,37 @@ async function existingWorkspace(db: DbExecutor, wid: string) {
 type Posted = { applied: boolean; entryId?: string; balanceUc: string; promoUc: string };
 const post = async (tx: DbExecutor, wid: string, kind: LedgerKind, source: string, paid: bigint, promo: bigint, detail: Record<string, unknown>, who: string) =>
   (await tx.execute<{ r: Posted }>(sql`SELECT billing_post(${wid}::text,${kind}::text,${source}::text,${paid.toString()}::bigint,${promo.toString()}::bigint,${JSON.stringify(detail)}::jsonb,${who}::text) AS r`)).rows[0]!.r;
+const isoAt = (column: ReturnType<typeof sql>) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')`;
 const sourceKey = (c: Ctx, operatorId: string) => { const key = c.req.header('Idempotency-Key'); return key ? `${operatorId}:${key}` : randomUUID(); };
+
+const OperatorFree = z.object({ free: z.boolean(), via: z.enum(['workspace', 'account']).nullable(), until: z.string().nullable(),
+  workspace: z.object({ at: z.string(), until: z.string().nullable(), reason: z.string().nullable(), by: z.string().nullable(), expired: z.boolean() }).nullable(),
+  people: z.array(z.object({ userId: z.string(), email: z.string(), role: z.string(), free: z.object({ reason: z.string(), until: z.string().nullable(), grantedAt: z.string(), grantedBy: z.string(), live: z.boolean() }).nullable() })) });
 
 function registerOperatorBilling(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/billing/{wid}', operationId: 'operatorGetBilling', request: { params: WorkspaceParam },
-    responses: { 200: response(z.object({ account: z.unknown().nullable(), position: z.unknown(), ledger: z.array(z.unknown()), payments: z.array(z.unknown()), refunds: z.array(z.unknown()), notices: z.array(z.unknown()) })), ...errors } }), async c => {
+    responses: { 200: response(z.object({ account: z.unknown().nullable(), position: z.unknown(), ledger: z.array(z.unknown()), payments: z.array(z.unknown()), refunds: z.array(z.unknown()), notices: z.array(z.unknown()),
+      free: OperatorFree })), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
     const wid = c.req.valid('param').wid;
     await existingWorkspace(c.env.db, wid);
-    const { rows: [row] } = await c.env.db.execute<{ account: unknown; position: BillingPosition; ledger: unknown[]; notices: unknown[]; refunds: unknown[] }>(sql`SELECT
+    const { rows: [row] } = await c.env.db.execute<{ account: unknown; position: BillingPosition; ledger: unknown[]; notices: unknown[]; refunds: unknown[]; free: unknown }>(sql`SELECT
       (SELECT to_jsonb(a) FROM billing_accounts a WHERE a.workspace_id=${wid}) AS account, billing_position(${wid}) AS position,
       coalesce((SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id DESC) FROM (SELECT * FROM billing_ledger WHERE workspace_id=${wid} ORDER BY id DESC LIMIT 50) l),'[]') AS ledger,
       coalesce((SELECT jsonb_agg(to_jsonb(n) ORDER BY n.created_at DESC) FROM (SELECT * FROM billing_notices WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) n),'[]') AS notices,
-      coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.created_at DESC) FROM (SELECT * FROM billing_refunds WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) r),'[]') AS refunds`);
+      coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.created_at DESC) FROM (SELECT * FROM billing_refunds WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) r),'[]') AS refunds,
+      billing_free_state(${wid}) || jsonb_build_object(
+        'workspace', (SELECT jsonb_build_object('at',${isoAt(sql`free_at`)},'until',${isoAt(sql`free_until`)},'reason',free_reason,'by',free_by,'expired',coalesce(free_until<=now(),false))
+          FROM billing_accounts WHERE workspace_id=${wid} AND free_at IS NOT NULL),
+        'people', coalesce((SELECT jsonb_agg(jsonb_build_object('userId',m.user_id,'email',u.email,'role',m.role,'free',f.free) ORDER BY m.role,u.email)
+          FROM workspace_members m JOIN auth_user u ON u.id=m.user_id
+          LEFT JOIN LATERAL (SELECT jsonb_build_object('reason',p.reason,'until',${isoAt(sql`p.until`)},'grantedAt',${isoAt(sql`p.granted_at`)},'grantedBy',p.granted_by,'live',p.until IS NULL OR p.until>now()) AS free
+            FROM billing_user_identities(m.user_id) i JOIN billing_free_people p ON p.issuer=i.issuer AND p.subject=i.subject ORDER BY p.granted_at DESC LIMIT 1) f ON true
+          WHERE m.workspace_id=${wid}),'[]')) AS free`);
     const payments = (await listPayments(c.env.db, wid, null, 50)).data;
-    return c.json({ account: row!.account, position: row!.position, ledger: row!.ledger, payments, refunds: row!.refunds, notices: row!.notices }, 200);
+    const free = row!.free as z.infer<typeof OperatorFree>;
+    return c.json({ account: row!.account, position: row!.position, ledger: row!.ledger, payments, refunds: row!.refunds, notices: row!.notices,
+      free: { ...free, until: free.until ? new Date(free.until).toISOString() : null } }, 200);
   });
 
   const moneyChange = async (c: Ctx, wid: string, body: { reason: string; ticketRef?: string }, action: string, change: (tx: DbExecutor, before: Account, who: string, operatorId: string) => Promise<Posted | Account>) => {
@@ -314,9 +345,45 @@ function registerOperatorBilling(app: App) {
     request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ mode: z.enum(['prepaid', 'invoiced', 'exempt']), reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) },
     responses: { 200: response(Done), ...errors } }), async c => {
     const wid = c.req.valid('param').wid, body = c.req.valid('json');
-    return c.json(await moneyChange(c, wid, body, 'billing-mode', async (tx, before) => {
-      await tx.execute(sql`UPDATE billing_accounts SET mode=${body.mode},updated_at=now() WHERE workspace_id=${wid}`);
+    // exempt is the workspace's free flag (no end); prepaid or invoiced is what it pays as, and clears that flag. A free
+    // owner's account still keeps it free (see /free and /people/{userId}/free).
+    return c.json(await moneyChange(c, wid, body, 'billing-mode', async (tx, before, who) => {
+      await tx.execute(sql`SELECT billing_set_mode(${wid}, ${body.mode}, ${body.reason}, ${who})`);
       return before;
+    }), 200);
+  });
+
+  const FreeBody = z.object({ free: z.boolean(), until: FreeUntil, reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict();
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/billing/{wid}/free', operationId: 'operatorSetWorkspaceFree',
+    request: { params: WorkspaceParam, headers: Mutation, body: json(FreeBody) }, responses: { 200: response(Done), ...errors } }), async c => {
+    const wid = c.req.valid('param').wid, body = c.req.valid('json'), until = body.free ? futureUntil(body.until) : null;
+    if (!body.free && body.until) throw new ApiError(422, 'VALIDATION_FAILED', 'until applies only when making the workspace free.', 'until');
+    return c.json(await moneyChange(c, wid, body, body.free ? 'billing-free-on' : 'billing-free-off', async (tx, before, who) => {
+      await tx.execute(sql`SELECT billing_set_workspace_free(${wid}, ${body.free}, ${body.reason}, ${until}::timestamptz, ${who})`);
+      return before;
+    }), 200);
+  });
+
+  // A person's flag: every workspace they own is free while they own it. Bound to their sign-in identity, not an email.
+  // One audit row for the person (workspace 'platform') and one for each workspace it changes, all in one transaction.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/billing/people/{userId}/free', operationId: 'operatorSetPersonFree',
+    request: { params: z.object({ userId: z.string().min(1).max(100) }), headers: Mutation, body: json(FreeBody) },
+    responses: { 200: response(z.object({ ok: z.literal(true), workspaces: z.array(z.object({ workspaceId: z.string(), free: z.boolean(), via: z.string().nullable(), until: z.string().nullable(), mode: z.string() })) })), ...errors } }), async c => {
+    const operator = await operatorActor(c, 'operator'), userId = c.req.valid('param').userId, body = c.req.valid('json'), until = body.free ? futureUntil(body.until) : null, who = `operator:${operator.userId}`;
+    if (!body.free && body.until) throw new ApiError(422, 'VALIDATION_FAILED', 'until applies only when making the account free.', 'until');
+    const { rows: [person] } = await c.env.db.execute<{ id: string | null; identities: number }>(sql`SELECT (SELECT id FROM auth_user WHERE id=${userId}) AS id,(SELECT count(*)::int FROM billing_user_identities(${userId})) AS identities`);
+    if (!person?.id) notFound('User');
+    if (body.free && !person.identities) throw new ApiError(422, 'NO_SIGN_IN_IDENTITY', 'This person has no sign-in identity to bind a free account to; they need to sign in once first.');
+    type Changed = { workspaceId: string; free: boolean; via: string | null; until: string | null; mode: string };
+    return c.json(await mutate(c, operator, 'platform', body, async tx => {
+      const owned = (await tx.execute<{ id: string; mode: string | null }>(sql`SELECT m.workspace_id AS id,a.mode FROM workspace_members m LEFT JOIN billing_accounts a USING (workspace_id) WHERE m.user_id=${userId} AND m.role='owner'`)).rows;
+      const { rows: [r] } = await tx.execute<{ r: Changed[] }>(sql`SELECT billing_set_person_free(${userId}, ${body.free}, ${body.reason}, ${until}::timestamptz, ${who}) AS r`);
+      const workspaces = r!.r.map(w => ({ ...w, until: w.until ? new Date(w.until).toISOString() : null }));
+      for (const w of workspaces) {
+        const was = owned.find(o => o.id === w.workspaceId)?.mode ?? 'prepaid';
+        if (was !== w.mode) await writeOperatorAudit(tx, c, operator, w.workspaceId, { action: body.free ? 'billing-free-owner-on' : 'billing-free-owner-off', before: { mode: was }, after: { mode: w.mode, via: w.via, userId }, reason: body.reason, ticketRef: body.ticketRef });
+      }
+      return { result: { ok: true as const, workspaces }, audit: { action: body.free ? 'billing-free-account-on' : 'billing-free-account-off', before: { userId }, after: { userId, until, workspaces: workspaces.map(w => w.workspaceId) }, reason: body.reason, ticketRef: body.ticketRef } };
     }), 200);
   });
 

@@ -3,6 +3,7 @@
 .billing-balance { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 20px 44px 20px; align-content: center; height: 120px; border-bottom: 1px solid var(--color-border-muted); }
 .billing-balance__label { display: flex; align-items: center; gap: var(--space-8); }
 .billing-balance__amount { display: flex; align-items: center; font-family: var(--font-mono); font-size: 36px; line-height: 44px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.billing-balance__amount--plan { font-family: var(--font-body); font-size: 30px; font-weight: var(--font-weight-bold); letter-spacing: -.01em; }
 .billing-balance__detail { display: flex; align-items: center; font-size: var(--text-xs); line-height: var(--leading-xs); font-variant-numeric: tabular-nums; }
 .billing-section { display: flex; flex-direction: column; gap: var(--space-12); }
 .billing-slot { display: inline-flex; vertical-align: middle; }

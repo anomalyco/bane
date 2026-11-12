@@ -22,7 +22,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
   const omens = useApiDef(queries.billingMonth(), { enabled: canAdminister })
   const usage = query.data, b = billing.data
   // From the session (GET /v1/me), so the note is final on the first frame.
-  const enforcement = useSession()?.identity?.billing?.enforcement ?? 'off'
+  const enforcement = useSession()?.identity?.billing?.enforcement ?? 'off', free = useSession()?.identity?.billing?.free === true
   if (query.isError && !usage) return <><SectionHeader title="Plan & usage" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
   const value = (ready: unknown, render: () => ReactNode, width = 120) => ready ? render() : <Skeleton width={width} height={20} />
   const enforced = b?.enforcement === 'enforce', state = b ? balanceState(b) : null
@@ -32,16 +32,16 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
   const steps = usage ? usage.steps : [null, null, null]
   return <>
     <SectionHeader title="Plan & usage" />
-    <p className="muted usage-note">{enforcement === 'enforce' ? 'Prepaid: usage is taken from your balance hourly.' : enforcement === 'shadow' ? 'Billing starts soon: nothing is charged yet.' : 'Billing isn’t on yet, so nothing is charged.'} Simulator sends count like any other send.{canAdminister ? '' : ' Received mail counts and amounts are shown to owners and admins.'}</p>
+    <p className="muted usage-note">{free ? 'Free plan, courtesy of Anomaly: nothing is charged. Usage is still measured.' : enforcement === 'enforce' ? 'Prepaid: usage is taken from your balance hourly.' : enforcement === 'shadow' ? 'Billing starts soon: nothing is charged yet.' : 'Billing isn’t on yet, so nothing is charged.'} Simulator sends count like any other send.{canAdminister ? '' : ' Received mail counts and amounts are shown to owners and admins.'}</p>
     <div className="settings-rows usage-rows">
-      <Row title="Balance" hint={enforced ? 'Usage comes off it hourly' : 'Nothing is charged yet'}>{value(b, () => <span className="cluster settings-inline">
-        <StatusBadge status={enforced || b!.mode === 'exempt' ? state!.label : 'Not charged yet'} tone={enforced || b!.mode === 'exempt' ? state!.tone : 'neutral'} />
-        {b!.balance && <Link to="/settings#billing" replace className="settings-score"><span>{usd(total(b!.balance))}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>}
+      <Row title="Balance" hint={free ? 'Courtesy of Anomaly' : enforced ? 'Usage comes off it hourly' : 'Nothing is charged yet'}>{value(b, () => <span className="cluster settings-inline">
+        <StatusBadge status={enforced || free ? state!.label : 'Not charged yet'} tone={enforced || free ? state!.tone : 'neutral'} />
+        {b!.balance && !free && <Link to="/settings#billing" replace className="settings-score"><span>{usd(total(b!.balance))}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>}
       </span>, 160)}</Row>
       <Row title="Free this month" hint="Sent and received, this UTC month">{value(b, () => <Meter used={b!.free.emails.used} cap={b!.free.emails.limit} label="Free emails used this month" />, 160)}</Row>
       <Row title="Stored past 90 days" hint="1 GB free, then $0.25 per GB-month">{value(b, () => `${gigabytes(aged)} of ${gigabytes(b!.free.storage.limitBytes)}`, 140)}</Row>
       <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)} sent`, usage!.month.received === null ? null : `${number(usage!.month.received)} received`, canAdminister && !omens.isError ? `${number(omenCount)} Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
-      <Row title="Estimated cost" hint={b?.monthToDate ? 'At $0.20 per 1,000 emails' : usage?.month.received === null ? 'Sent mail only' : 'This month'}>{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</Row>
+      <Row title="Estimated cost" hint={free ? 'Not charged: free plan' : b?.monthToDate ? 'At $0.20 per 1,000 emails' : usage?.month.received === null ? 'Sent mail only' : 'This month'}>{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</Row>
       <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? 'Custom, set by the Bane team' : 'Recipients, last 24 hours'}>{value(usage, () => !usage!.daily ? <span className="muted">Connect sending first</span> : usage!.daily.cap === null ? 'No daily limit' : <DailyMeter used={usage!.daily.used} cap={usage!.daily.cap} resetAt={usage!.daily.resetAt} />, 160)}</Row>
     </div>
     <section className="usage-steps-section" aria-labelledby="usage-steps-title">

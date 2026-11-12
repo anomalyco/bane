@@ -6,7 +6,7 @@ import { Alert, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, Dropd
 import { useApiDef, useApiQuery, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError } from '../../data/types'
-import { balanceState, billingApi, cardBrand, centsUsd, declineText, monthDay, parseDollars, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
+import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
 import { useCursorPagination } from '../../lib/pagination'
 import { date, number } from '../../lib/format'
 import './billing.css'
@@ -36,6 +36,7 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
   const b = query.data
   useCheckoutReturn()
   if (query.isError && !b) return <><SectionHeader title="Billing" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
+  if (state?.free) return <FreePlan summary={b} Row={Row} />
   const note = state?.enforcement === 'enforce' ? 'Prepaid: usage is taken from your balance hourly. Sending pauses at $0; received mail is accepted for 7 more days. Nothing is deleted.'
     : 'Billing starts soon: nothing is charged yet. Credit you add now is kept for when it starts.'
   return <>
@@ -54,6 +55,24 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
     <AutoRecharge summary={b} Row={Row} />
     <History />
     {b && <AddCredit open={adding} onOpenChange={setAdding} summary={b} />}
+  </>
+}
+
+// A workspace Anomaly made free: the plan instead of a balance, no Add credit, card or auto-recharge, and what its usage
+// would cost, since it is still measured. The history keeps its $0 usage rows.
+function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
+  return <>
+    <SectionHeader title="Billing" />
+    <p className="muted usage-note">Nothing is charged and sending never pauses for a balance. Usage is still measured, so you can see what it would cost.</p>
+    <div className="settings-rows billing-rows">
+      <div className="billing-balance">
+        <span className="billing-balance__label">Plan</span>
+        <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
+        <span className="muted billing-balance__detail">{b ? `Courtesy of Anomaly · ${b.freePlan?.until ? `until ${fullDay(b.freePlan.until)}` : 'no end date'}` : <Skeleton width={220} height={16} />}</span>
+      </div>
+      <Row title="This month" hint={b ? `${number(b.free.emails.used)} of ${number(b.free.emails.limit)} free emails used` : 'Usage after the free emails'}>{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
+    </div>
+    <History />
   </>
 }
 

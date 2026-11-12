@@ -36,9 +36,11 @@ export const domainColumnDefs: SkeletonColumn[] = [
   { key: 'dmarc', label: 'DMARC', width: 112, card: 'inline' },
 ]
 export const memberColumnDefs: SkeletonColumn[] = [
-  { key: 'email', label: 'Email', width: '50%' },
+  { key: 'email', label: 'Email', width: '40%' },
   { key: 'role', label: 'Role', width: 120, card: 'aside' },
   { key: 'user', label: 'User', card: 'line' },
+  { key: 'billing', label: 'Billing', width: 180, card: 'line' },
+  { key: 'actions', label: '', width: 48, card: 'end' },
 ]
 export const campaignColumnDefs: SkeletonColumn[] = [
   { key: 'name', label: 'Campaign', width: '30%' },

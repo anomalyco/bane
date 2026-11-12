@@ -6645,7 +6645,7 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual(ledger[0].detail, {}, 'Operator reasons and tickets never reach the customer.');
       const rest = ok(await local('GET', `/v1/billing/ledger?cursor=${ok(await local('GET', '/v1/billing/ledger?limit=3')).nextCursor}`));
       assert.deepEqual([rest.data.map((e: Json) => [e.kind, e.paymentId, e.balanceAfter]), rest.nextCursor], [[['topup', 'bpa_fixture_one', '2500000000']], null]);
-      assert.deepEqual(ok(await local('GET', '/v1/me')).billing, { enforcement: 'enforce', sending: 'ok', receiving: 'ok', autoRecharge: 'off' });
+      assert.deepEqual(ok(await local('GET', '/v1/me')).billing, { enforcement: 'enforce', free: false, sending: 'ok', receiving: 'ok', autoRecharge: 'off' });
       assert.equal(ok(await request('GET', '/v1/me', manage)).billing, null, 'Only dashboard sessions carry it.');
 
       // A manage key reads amounts and may ask for a top-up link (Stripe isn't configured here), never charge a card.
@@ -6881,6 +6881,89 @@ describe('Billing: API, MCP and notices', () => {
       assert.equal(mode.account.mode, 'exempt');
       assert.deepEqual(ok(await local('GET', base)).ledger.map((l: Json) => l.kind), ['write_off', 'adjustment', 'adjustment', 'grant']);
       error(await local('GET', '/v1/operator/billing/no-such-workspace'), 404, 'NOT_FOUND');
+    });
+  });
+
+  test('free workspaces and people: never gated or charged, usage still metered; a person’s flag binds to their identity and follows ownership; operator-only and audited', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), me = manager!.userId, base = `/v1/operator/billing/${wid}`;
+      await enforcement(db, 'enforce');
+      const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
+      const gate = async (w = wid) => (await db.query('SELECT billing_gate($1, 10, false) AS g', [w])).rows[0].g;
+      const mode = async (w = wid) => (await db.query('SELECT mode,free_via FROM billing_accounts WHERE workspace_id=$1', [w])).rows[0] ?? { mode: 'prepaid', free_via: null };
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_emails_used) VALUES ($1,date_trunc('month',now() AT TIME ZONE 'UTC')::date,3000)`, [wid]);
+      assert.deepEqual([(await gate()).ok, (await gate()).enforced], [false, true], 'A prepaid workspace at $0 past its free emails is gated.');
+      // Operators only.
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      const on = { free: true, until, reason: 'Partner workspace, courtesy of Anomaly' };
+      error(await local('PUT', `${base}/free`, on), 403, 'OPERATOR_REQUIRED');
+      error(await request('PUT', `/v1/operator/billing/people/${me}/free`, key.secret, on), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
+      error(await local('PUT', `${base}/free`, { ...on, until: new Date(Date.now() - 1000).toISOString() }), 422, 'VALIDATION_FAILED');
+
+      // The workspace flag: free until a date, audited with the change; customers see the free plan and no gate.
+      ok(await local('PUT', `${base}/free`, on));
+      const [audit] = (await db.query(`SELECT xmin::text AS x,reason,after->>'mode' AS mode FROM hosted_operator_audit WHERE workspace_id=$1 AND action='billing-free-on'`, [wid])).rows;
+      assert.deepEqual([audit.reason, audit.mode, audit.x], [on.reason, 'exempt', (await db.query('SELECT xmin::text AS x FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].x]);
+      const free = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([free.mode, free.freePlan, free.state.sending], ['exempt', { until: until.replace(/\.\d{3}Z$/, 'Z') }, 'ok']);
+      assert.equal(ok(await local('GET', '/v1/me')).billing.free, true);
+      assert.deepEqual([(await gate()).ok, (await gate()).enforced], [true, false], 'A free workspace is never gated.');
+      // Usage is metered and settled at $0, with what it would have cost.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now())-interval '1 hour','send',2000)`, [wid]);
+      await db.query(`SELECT billing_settle($1, date_trunc('hour', now()))`, [wid]);
+      const [usage] = (await db.query(`SELECT paid_uc::text,promo_uc::text,detail->>'costUc' AS cost,detail->>'charged' AS charged FROM billing_ledger WHERE workspace_id=$1 AND kind='usage'`, [wid])).rows;
+      assert.deepEqual(usage, { paid_uc: '0', promo_uc: '0', cost: '40000000', charged: 'false' });
+      const metered = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([metered.balance.paid, metered.monthToDate.cost], ['0', '40000000'], 'The month shows what free usage would cost.');
+      // Expiry: the hourly sweep returns it to prepaid; the operator view keeps the expired flag for the record.
+      await db.query(`UPDATE billing_accounts SET free_until=now()-interval '1 second' WHERE workspace_id=$1`, [wid]);
+      await db.query('SELECT billing_free_sweep()');
+      assert.equal((await mode()).mode, 'prepaid');
+      const expired = ok(await local('GET', base)).free;
+      assert.deepEqual([expired.free, expired.workspace.expired, expired.workspace.reason], [false, true, on.reason]);
+      assert.equal(ok(await local('GET', '/v1/billing')).freePlan, null);
+
+      // A person's flag: the workspaces they own are free, the ones they only belong to are not; it binds to their
+      // sign-in identity, so a changed email doesn't matter.
+      const other = unique('free-other'), owner2 = unique('user');
+      await db.query('INSERT INTO workspaces (id,name,slug) VALUES ($1,$1,$1)', [other]);
+      await db.query(`INSERT INTO auth_user (id,name,email,email_verified) VALUES ($1,'Second owner',$2,true)`, [owner2, `${owner2}@example.com`]);
+      await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member')`, [unique('wm'), other, owner2, unique('wm'), me]);
+      error(await local('PUT', `/v1/operator/billing/people/${owner2}/free`, { free: true, reason: 'A friend of the company' }), 422, 'NO_SIGN_IN_IDENTITY');
+      const granted = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: true, reason: 'Anomaly staff account', ticketRef: 'OPS-1' }));
+      assert.deepEqual(granted.workspaces.map((w: Json) => [w.workspaceId, w.mode, w.via]), [[wid, 'exempt', 'account']]);
+      assert.equal((await mode(other)).mode, 'prepaid', 'A member’s workspace is not free.');
+      assert.deepEqual((await db.query(`SELECT workspace_id,action FROM hosted_operator_audit WHERE action LIKE 'billing-free-%' AND operator_id=$1 AND workspace_id IN ($2,'platform') ORDER BY action`, [me, wid])).rows.map(r => [r.workspace_id, r.action]),
+        [['platform', 'billing-free-account-on'], [wid, 'billing-free-on'], [wid, 'billing-free-owner-on']]);
+      await db.query(`UPDATE auth_user SET email=$2 WHERE id=$1`, [me, `renamed-${me}@example.com`]);
+      await db.query('SELECT billing_free_sweep()');
+      assert.deepEqual(await mode(), { mode: 'exempt', free_via: 'account' }, 'Bound to the identity, not the email.');
+      await db.query(`UPDATE auth_user SET email=$2 WHERE id=$1`, [me, AUTH_EMAIL]);
+      // Ownership transfer re-evaluates: handing the workspace to someone else ends it; taking another one over starts it.
+      await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('wm'), wid, owner2]);
+      await db.query(`UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
+      assert.equal((await mode()).mode, 'prepaid');
+      await db.query(`UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, [other, me]);
+      assert.deepEqual(await mode(other), { mode: 'exempt', free_via: 'account' });
+      const view = ok(await local('GET', `/v1/operator/billing/${other}`)).free;
+      assert.deepEqual([view.free, view.via, view.people.find((p: Json) => p.userId === me).free.reason], [true, 'account', 'Anomaly staff account']);
+      // Removing the flag ends it everywhere they own.
+      const revoked = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: false, reason: 'Left the partner program' }));
+      assert.deepEqual(revoked.workspaces.map((w: Json) => [w.workspaceId, w.mode]), [[other, 'prepaid']].sort());
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_free_people WHERE user_id=$1', [me])).rows[0].n, 0);
+      await db.query(`UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
+
+      // The scripts: a workspace until a date, and a person by the email they sign in with.
+      const { setBillingFree } = await import('./scripts/set-billing-free.js');
+      await assert.rejects(setBillingFree(db, ['workspace', wid, 'on', '--until', '2020-01-01', '--reason', 'Past dates are refused']), /future date/);
+      const scripted = await setBillingFree(db, ['workspace', wid, 'on', '--until', new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), '--reason', 'Conference sponsor this week']) as { old: Json; new: Json };
+      assert.deepEqual([scripted.old.free, scripted.new.free, scripted.new.via], [false, true, 'workspace']);
+      const person = await setBillingFree(db, ['account', AUTH_EMAIL, 'on', '--reason', 'Anomaly staff account']) as { workspaces: Json[] };
+      assert.deepEqual(person.workspaces.map(w => [w.workspaceId, w.via]).sort(), [[other, 'account'], [wid, 'workspace']].sort());
+      await assert.rejects(setBillingFree(db, ['account', 'nobody@example.net', 'on', '--reason', 'Anomaly staff account']), /No signed-in person/);
+      assert.deepEqual((await db.query(`SELECT action FROM hosted_operator_audit WHERE action LIKE 'set-billing-free%' AND workspace_id IN ($1,'platform') ORDER BY at`, [wid])).rows.map(r => r.action), ['set-billing-free-on', 'set-billing-free-account-on']);
     });
   });
 

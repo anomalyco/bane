@@ -17,6 +17,8 @@ export interface BillingSummary {
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null
   prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' }
   topUpUrl: string
+  /** Anomaly made this workspace free: nothing is charged; usage is still measured (monthToDate is what it would cost). */
+  freePlan: { until: string | null } | null
 }
 export type LedgerKind = 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment'
 export interface LedgerEntry { id: string; at: string; kind: LedgerKind; amount: string; paid: string; promo: string; balanceAfter: string; description: string; detail: Record<string, unknown>; paymentId: string | null; invoiceUrl: string | null }
@@ -68,10 +70,11 @@ export const declineText = (code: string) => DECLINES[code] ?? 'The last charge 
 
 /** The one-word state of the balance, for Plan & usage and the Billing header. */
 export function balanceState(b: Pick<BillingSummary, 'mode' | 'state'>): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
-  if (b.mode === 'exempt') return { label: 'Exempt', tone: 'neutral' }
+  if (b.mode === 'exempt') return { label: 'Free plan', tone: 'success' }
   if (b.state.receiving === 'held') return { label: 'Receiving held', tone: 'danger' }
   if (b.state.sending === 'paused') return { label: 'Sending paused', tone: 'danger' }
   if (b.state.sending === 'low') return { label: 'Low', tone: 'warning' }
   return { label: 'Funded', tone: 'success' }
 }
 export const monthDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+export const fullDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })

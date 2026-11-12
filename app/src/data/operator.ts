@@ -16,6 +16,14 @@ export interface OperatorWorkspace {
   domains: OperatorDomain[]; members: OperatorMember[]; siblings: { id: string; name: string }[]
   override: { daily: number; expiresAt: string | null } | null; exempt: boolean; campaigns: OperatorCampaign[]
 }
+/** Billing as an operator sees it: whether the workspace is free (not billed), why, and each member's free account. */
+export interface OperatorBillingFree {
+  free: boolean; via: 'workspace' | 'account' | null; until: string | null
+  workspace: { at: string; until: string | null; reason: string | null; by: string | null; expired: boolean } | null
+  people: { userId: string; email: string; role: string; free: { reason: string; until: string | null; grantedAt: string; grantedBy: string; live: boolean } | null }[]
+}
+export interface OperatorBilling { account: { mode?: string; paid_mode?: string; balance_uc?: number; promo_uc?: number } | null; free: OperatorBillingFree }
+export type FreeInput = OperatorWhy & { free: boolean; until?: string | null }
 export type TimelineKind = 'standing' | 'limit' | 'quarantine' | 'release' | 'tenant' | 'operator' | 'score' | 'audit' | 'bounces' | 'rejection'
 export interface OperatorTimelineItem { at: string; kind: TimelineKind; title: string; detail: unknown }
 export interface OperatorAction { at: string; workspaceId: string; action: string; operatorId: string | null; via: string | null; reason: string | null; ticketRef: string | null; requestId: string | null; before: unknown; after: unknown; details: unknown }
@@ -52,4 +60,8 @@ export const operatorApi = {
   marketing: (workspaceId: string, input: OperatorWhy & { held: boolean }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/marketing`, 'PUT', { held: input.held, ...why(input) }, guard),
   limit: (workspaceId: string, input: OperatorWhy & { daily: number | null; expiresAt: string | null }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/limit`, 'PUT', { daily: input.daily, expiresAt: input.daily === null ? null : input.expiresAt, ...why(input) }, guard),
   releaseCampaign: (campaignId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/campaigns/${id(campaignId)}/release`, 'POST', why(input), guard),
+  billing: (workspaceId: string, signal?: AbortSignal) => request<OperatorBilling>(`${base}/billing/${id(workspaceId)}`, { signal }),
+  /** Free (not billed): the workspace's own flag, or a person's (every workspace they own, bound to their sign-in). */
+  workspaceFree: (workspaceId: string, input: FreeInput, guard: OperatorGuard) => request(`${base}/billing/${id(workspaceId)}/free`, { method: 'PUT', body: { free: input.free, ...input.free && input.until ? { until: input.until } : {}, ...why(input) }, idempotencyKey: guard.idempotencyKey }),
+  personFree: (userId: string, input: FreeInput, guard: OperatorGuard) => request(`${base}/billing/people/${id(userId)}/free`, { method: 'PUT', body: { free: input.free, ...input.free && input.until ? { until: input.until } : {}, ...why(input) }, idempotencyKey: guard.idempotencyKey }),
 }
