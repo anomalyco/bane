@@ -44,7 +44,9 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
   if (change.pause && !row.paused_at) strikes.push({ at, reason: change.reasons?.[0]?.code ?? 'PAUSED', kind: change.pauseKind ?? 'full' });
   // The second strike in 90 days caps the limit at half for 7 days after the resume.
   const strikeUntil = change.resume && strikes.length >= 2 ? new Date(now.getTime() + 7 * 86_400_000).toISOString() : row.strike_until;
-  const releaseUntil = change.release ? new Date(now.getTime() + change.release.hours * 3600_000).toISOString() : change.resume?.marketingHours ? null : step === 'ok' || step === 'notice' ? null : row.release_until;
+  // A new rise ends an owner's marketing release: the restrict (or pause) holds marketing again.
+  const escalated = stepRank(step) > stepRank(previousStep) && stepRank(step) >= stepRank('restrict');
+  const releaseUntil = change.release ? new Date(now.getTime() + change.release.hours * 3600_000).toISOString() : change.resume?.marketingHours || escalated ? null : step === 'ok' || step === 'notice' ? null : row.release_until;
   const marketingHold = change.marketingHold ?? (change.resume?.marketingHours ? true : row.marketing_hold);
   const reasons = change.reasons ?? (step === row.step ? row.reasons : []);
   const sequence = Number(row.sequence) + 1, version = row.version + 1, eventId = id('stev');
@@ -299,7 +301,7 @@ export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]
     : ['Find the campaign or domain named above and stop sending to the addresses that bounced or complained.', 'Remove contacts you cannot show opted in, and old or bought lists.', o.step === 'warn' ? 'Keep sending as usual: the warning clears by itself after 24 hours under the line.' : 'Open the dashboard to follow the checklist, release it when allowed, or ask for a review.'];
   const what = o.quarantine ? o.quarantine.message : o.reasons.filter(r => r.step !== 'notice').map(r => `- ${r.message}`).join('\n') || '- Sending standing changed.';
   return { subject: o.quarantine ? `Bane paused a campaign in ${o.workspace}` : `Bane: ${o.workspace} is ${stepWords[o.step]}`,
-    text: `What happened\n${what}\n\nWhat Bane did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${o.dashboard}\nThe thresholds are published at ${o.dashboard.replace(/\/$/, '')}/docs/sending-limits\n` };
+    text: `What happened\n${what}\n\nWhat Bane did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${o.dashboard}\nThe thresholds are published at ${o.dashboard.replace(/\/$/, '')}/docs#sending-limits\n` };
 }
 /**
  * Emails the workspace's owners and admins about a standing change, through the platform workspace's own sending
