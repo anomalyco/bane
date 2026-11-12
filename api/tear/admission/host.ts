@@ -62,7 +62,7 @@ const { recoverMailReceipts } = await import('../../src/mailbox-ingest.js');
 // No egress: object storage points at a closed loopback port and fetch refuses every call, so an
 // unmodelled job or adapter fails locally instead of reaching a real endpoint.
 globalThis.fetch = (async (input: unknown) => { throw new Error(`tear host: network access refused (${String(input)})`); }) as typeof fetch;
-const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), ACCOUNT_CLIENT_ID: 'tear-fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear-fixture',
+const instance = nodeRuntime({ DATABASE_URL, BANE_ROOT_SECRET: hex(64), ACCOUNT_CLIENT_ID: 'tear-fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear-fixture',
   AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear',
   S3_ENDPOINT: 'http://127.0.0.1:9' });
 const runtime = instance.runtime;

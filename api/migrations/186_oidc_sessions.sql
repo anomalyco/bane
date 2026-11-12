@@ -1,7 +1,7 @@
 CREATE UNIQUE INDEX bane_oidc_identity_owner ON bane_oidc_identities(issuer,subject,user_id);
 CREATE TABLE bane_sessions (
   token_hash text PRIMARY KEY, user_id text NOT NULL, issuer text NOT NULL, subject text NOT NULL,
-  expires_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL, verified_email text,
   FOREIGN KEY (issuer,subject,user_id) REFERENCES bane_oidc_identities(issuer,subject,user_id) ON DELETE CASCADE
 );
 CREATE INDEX bane_sessions_expiry ON bane_sessions(expires_at);

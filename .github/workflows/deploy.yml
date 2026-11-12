@@ -407,7 +407,6 @@ jobs:
       # reads the same keys from its own bane/<stage>/ folder below.
       - name: Configure the stage
         env:
-          AUTH_ALLOWED_DOMAINS: ${{ vars.AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ vars.AUTH_ALLOWED_EMAILS }}
         run: |
           case "$STAGE" in
@@ -418,7 +417,6 @@ jobs:
           {
             echo "PUBLIC_URL=$public_url"
             echo "WRANGLER_CONFIG=$wrangler_config"
-            echo "AUTH_ALLOWED_DOMAINS=$AUTH_ALLOWED_DOMAINS"
             echo "AUTH_ALLOWED_EMAILS=$AUTH_ALLOWED_EMAILS"
           } >> "$GITHUB_ENV"
 
@@ -443,7 +441,7 @@ jobs:
         with:
           secret-ids: |
             DATABASE_URL,bane/${{ env.STAGE }}/DATABASE_URL
-            BETTER_AUTH_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
+            BANE_ROOT_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
             ACCOUNT_CLIENT_PRIVATE_KEY,bane/${{ env.STAGE }}/ACCOUNT_CLIENT_PRIVATE_KEY
             TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
           parse-json-secrets: false
@@ -476,7 +474,6 @@ jobs:
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
-          AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 

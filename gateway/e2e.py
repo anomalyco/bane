@@ -136,7 +136,7 @@ def real_services():
             HOST="127.0.0.1",
             PORT=str(http),
             PUBLIC_URL=url,
-            BETTER_AUTH_SECRET=secret,
+            BANE_ROOT_SECRET=secret,
             DATABASE_URL=db,
             ENABLE_LIVE_SES="false",
             S3_BUCKET="mailgw",

@@ -89,8 +89,9 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         }
       }
     }
-    await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES
-      (${await digest(session)},${userId},${claims.iss},${claims.sub},now()+interval '7 days')`);
+    const emailAtLogin = claims.email_verified === true ? verifiedEmail.safeParse(claims.email).data : undefined;
+    await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES
+      (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},now()+interval '7 days')`);
   });
   return {session, returnUrl:returnUrl.href};
 }
@@ -107,12 +108,12 @@ async function currentSession(runtime: Runtime, headers: Headers) {
   return digest(token);
 }
 
-export async function accountSessionUser(runtime: Runtime, headers: Headers) {
+export async function accountSessionUser(runtime: Runtime, headers: Headers, requireCurrentEmail = false) {
   const hash = await currentSession(runtime, headers);
   if (!hash) return null;
   const {rows:[user]} = await runtime.db.execute<{id:string;email:string}>(sql`SELECT u.id,u.email FROM bane_sessions s
     JOIN bane_users u ON u.id=s.user_id WHERE s.token_hash=${hash} AND s.issuer=${runtime.config.accountIssuer}
-    AND s.expires_at>now() AND u.email_verified`);
+    AND s.expires_at>now() AND u.email_verified ${requireCurrentEmail ? sql`AND lower(u.email)=lower(s.verified_email)` : sql``}`);
   return user ?? null;
 }
 

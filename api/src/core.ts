@@ -45,7 +45,6 @@ export interface Config {
   accountIssuer?: string;
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
   allowedEmails: string[];
-  allowedDomains: string[];
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   platformAccount?: string;

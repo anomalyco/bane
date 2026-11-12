@@ -48,7 +48,7 @@ const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, mailboxInges
 ]);
 const ENCRYPTION = hex(64), REGION_DEFAULT = 'us-east-1';
 const { ensureRegionSettings } = await import('../../src/ses-region-state.js');
-const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), ENCRYPTION_KEY: ENCRYPTION, ACCOUNT_CLIENT_ID: 'tear-fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear-fixture',
+const instance = nodeRuntime({ DATABASE_URL, BANE_ROOT_SECRET: hex(64), ENCRYPTION_KEY: ENCRYPTION, ACCOUNT_CLIENT_ID: 'tear-fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear-fixture',
   AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear', S3_ENDPOINT: 'http://127.0.0.1:9', AWS_EC2_METADATA_DISABLED: 'true', DEFAULT_SES_REGION: REGION_DEFAULT, SIMULATED_SES_LATENCY_MS: '0' });
 const runtime = instance.runtime;
 runtime.config.aws = { accessKeyId: 'tear-synthetic', secretAccessKey: 'tear-synthetic' } as Json;

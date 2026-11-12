@@ -11,7 +11,7 @@ OpenSend MX is the hosted, multi-tenant OpenSend at `https://opensend.mx`. It be
 
 ## Customer flow
 
-1. **Sign up** with Google (allowlisted domains only for now). Invitees join the inviting workspace; everyone else gets a new workspace named after them ("Ryan Vogel's Organization", editable) and is its owner.
+1. **Sign up** with the configured issuer (invitation or allowlisted verified address). Invitees join the inviting workspace; everyone else gets a new workspace named after them ("Ryan Vogel's Organization", editable) and is its owner.
 2. **"How do you want to send?"**
    - **Bring your own AWS:** create one CloudFormation stack. Its signed SNS callback identifies the account; OpenSend verifies the external-ID role and imports available verified domains. You pay AWS directly.
    - **OpenSend shared sending:** $0.11 per 1,000 emails (displayed only; no billing yet). us-east-2 now, eu-west-1 later.
@@ -27,7 +27,7 @@ OpenSend MX is the hosted, multi-tenant OpenSend at `https://opensend.mx`. It be
 
 | # | Step | Done when |
 |---|---|---|
-| 1 | **Real sign-up and workspaces.** The allowlist gates only uninvited sign-up; requests and sends are authorized by membership. New workspace per sign-up; invites; Better Auth's owner/admin/member roles enforced in the API, MCP and dispatch; workspace switcher. | Two allowlisted users get isolated workspaces; an invited teammate joins as admin or member. |
+| 1 | **Real sign-up and workspaces.** The allowlist gates only uninvited sign-up; requests and sends are authorized by membership. New workspace per sign-up; invites; Bane’s owner/admin/member roles enforced in the API, MCP and dispatch; workspace switcher. | Two allowlisted users get isolated workspaces; an invited teammate joins as admin or member. |
 | 2 | **Onboarding choice.** `provider_connections` (shared or bring-your-own). Shared: two shared configuration sets per region and a lazily created SES tenant per workspace (Strict policy, tenant suppression). Bring-your-own: CloudFormation quick-create, `sts:AssumeRole` check, unique AWS account, then the existing provisioning. | A new workspace reaches "ready" either way. |
 | 3 | **Connection-aware sending.** Exclusive claims cannot overlap across workspaces. Shared requires TXT proof and never adopts existing identities. BYO imports identities read-only for its account and region; SES verification and successful DKIM permit sending, not exclusive ownership. Publishing the claim’s `_opensend` TXT and verifying upgrades it to an exclusive claim if no exclusive owner overlaps. Disconnect forgets account-scoped imports. `TenantName` on shared sends; dispatcher shards and SNS trust are keyed by AWS account and region. | Shared and bring-your-own workspaces both send live and get feedback without interfering. |
 | 4 | **Inbound and webhooks across workspaces.** Remove the remaining hardcoded workspace reads; split shared receipts by recipient domain owner; per-workspace webhook destinations with a self-origin denylist. | Inbound and webhooks work across two workspaces. |

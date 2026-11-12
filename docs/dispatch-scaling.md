@@ -106,7 +106,7 @@ Commits `be8076e` → `7f82248` on `main`.
   events, webhook deliveries, throttled requeue). Recording overlaps the next group.
 - Group size six = the Workers limit of six connections awaiting response headers per invocation,
   and the exposure window if the host is reset mid-call (see §6).
-- Origin authorization (permissions, sender domain, Google approval, MCP grant) is evaluated once per
+- Origin authorization (permissions, sender domain, workspace membership, MCP grant) is evaluated once per
   actor/domain per run and cached 10 s; durable key revocation is enforced inside the claim statement.
 - Recovery: rows `attempting` for >3 min become `acceptance_unknown` (never auto-resent; SES has no
   idempotency key). Leases expire after 2 min. Preflight failures reject or retry after 15 s.

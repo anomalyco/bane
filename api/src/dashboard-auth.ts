@@ -13,14 +13,14 @@ export async function reserveSignIn(runtime:Runtime,headers:Headers) {
 export function requireDashboardOrigin(runtime:Runtime,headers:Headers) {
   if (headers.get('origin')!==new URL(runtime.config.publicUrl).origin) throw new ApiError(403,'CSRF_ORIGIN_INVALID','Use the dashboard.');
 }
-export async function verifiedDashboardUser(runtime:Runtime,headers:Headers) {
-  const user=!headers.has('authorization') && await accountSessionUser(runtime,headers);
+export async function verifiedDashboardUser(runtime:Runtime,headers:Headers,requireCurrentEmail=false) {
+  const user=!headers.has('authorization') && await accountSessionUser(runtime,headers,requireCurrentEmail);
   if (!user) throw new ApiError(401,'AUTH_REQUIRED','Sign in to Bane.');
   return {userId:user.id,email:user.email};
 }
 export async function invitationRecipient(runtime:Runtime,headers:Headers) {
   requireDashboardOrigin(runtime,headers);
-  return verifiedDashboardUser(runtime,headers);
+  return verifiedDashboardUser(runtime,headers,true);
 }
 export const getDashboardActor = accountSessionActor;
 export function registerDashboardAuth(app: App) {

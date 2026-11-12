@@ -57,8 +57,8 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `dev` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `ACCOUNT_CLIENT_PRIVATE_KEY`, `TYPESAFE_API_KEY`, `E2E_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
-| `production` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `ACCOUNT_CLIENT_PRIVATE_KEY`, `TYPESAFE_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
+| `dev` | `DATABASE_URL`, `BANE_ROOT_SECRET`, `ACCOUNT_CLIENT_PRIVATE_KEY`, `TYPESAFE_API_KEY`, `E2E_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
+| `production` | `DATABASE_URL`, `BANE_ROOT_SECRET`, `ACCOUNT_CLIENT_PRIVATE_KEY`, `TYPESAFE_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
 
 For a self-hosted installation, register a confidential OIDC client with your issuer and follow the [dashboard sign-in setup](api/README.md#dashboard-sign-in).
 

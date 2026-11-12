@@ -13,7 +13,7 @@ SQL
 export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:5432/fixture
 export HOST=127.0.0.1
 export AUTH_ALLOWED_EMAILS=operator@example.com ACCOUNT_CLIENT_ID=fixture ACCOUNT_CLIENT_PRIVATE_KEY=unused-by-session-fixture
-BETTER_AUTH_SECRET=$(openssl rand -hex 36); export BETTER_AUTH_SECRET
+BANE_ROOT_SECRET=$(openssl rand -hex 36); export BANE_ROOT_SECRET
 export ENABLE_LIVE_SES=false AWS_EC2_METADATA_DISABLED=true WEBHOOK_ALLOWED_HOSTS=example.com
 export S3_ACCESS_KEY_ID=S3RVER S3_SECRET_ACCESS_KEY=S3RVER S3_BUCKET=fixture
 export SIMULATED_SES_LATENCY_MS=0 SIMULATED_SES_DELIVERY_DELAY_MS=0

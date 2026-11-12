@@ -12,11 +12,11 @@ set +x
 umask 077
 secrets_file=$(mktemp "${RUNNER_TEMP:?}/bane-app-secrets.XXXXXX.json")
 trap 'rm -f -- "$secrets_file"' EXIT
-for name in BETTER_AUTH_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
+for name in BANE_ROOT_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done
 # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
-app_secrets='$ENV | {BETTER_AUTH_SECRET, ACCOUNT_CLIENT_PRIVATE_KEY, TYPESAFE_API_KEY}'
+app_secrets='$ENV | {BANE_ROOT_SECRET, ACCOUNT_CLIENT_PRIVATE_KEY, TYPESAFE_API_KEY}'
 
 # The IMAP/SMTP gateway's shared key (gateway/PHASE2.md). The stage's committed
 # bane:mailGatewayEnabled is the only switch, so neither state can fail open:
@@ -65,7 +65,6 @@ else
 fi
 args+=(--secrets-file "$secrets_file")
 if [[ -n ${AUTH_ALLOWED_EMAILS:-} ]]; then args+=(--var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"); fi
-if [[ -n ${AUTH_ALLOWED_DOMAINS:-} ]]; then args+=(--var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"); fi
 WRANGLER_LOG=error "$wrangler" "${args[@]}"
 if bound; then state=true; else state=false; fi
 [[ $state == "$gateway" ]] || { echo "::error::Worker MAILGW_API_TOKEN bound=$state, but bane:mailGatewayEnabled=$gateway"; exit 1; }

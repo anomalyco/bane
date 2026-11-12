@@ -181,7 +181,7 @@ export function registerWorkspaces(app: App) {
     description: 'Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.',
     request: { params: IdParams }, responses: { 200: response(InvitationPreview), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
-    const a = await verifiedDashboardUser(c.env, c.req.raw.headers), invitationId = c.req.valid('param').id;
+    const a = await verifiedDashboardUser(c.env, c.req.raw.headers,true), invitationId = c.req.valid('param').id;
     // Same conditions as claimInvitation for a pending invitation, plus the idempotent accepted case.
     const result = await c.env.db.execute<z.infer<typeof InvitationPreview>>(sql`SELECT i.id, i.workspace_id AS "workspaceId", w.name AS "workspaceName", w.slug AS "workspaceSlug",
         u.name AS "inviterName", u.email AS "inviterEmail", i.role, i.expires_at AS "expiresAt", CASE WHEN i.status = 'accepted' THEN 'accepted' ELSE 'pending' END AS status
