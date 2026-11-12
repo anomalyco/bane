@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Copy } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -89,12 +89,23 @@ export function zoneLines(records: DnsRecord[]) {
   }).join('\n')
 }
 
+// On a phone each record is a card: name and value on one line each, and Copy in the row's action sheet. A copy
+// button inside a card's 20 px line would clip it and the wrapped value under it.
 export function DnsRecordTable({ domain, records, status }: { domain: string; records: DnsRecord[]; status?: string }) {
+  const toast = useToast()
+  const copy = async (value: string, what: string) => {
+    try { await navigator.clipboard.writeText(value); toast(`Copied ${what}`, 'success') }
+    catch { toast('Couldn’t copy to clipboard.', 'error') }
+  }
   return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
     { ...settingsColumns.dns[0], render: record => record.type },
-    { ...settingsColumns.dns[1], width: '44%', render: record => <div className="settings-copy-cell"><code title={record.name}>{relativeHost(record.name, domain)}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div> },
-    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—' },
-    { key: 'status', label: 'Status', width: 112, render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
+    { ...settingsColumns.dns[1], width: '44%', render: record => <div className="settings-copy-cell"><code title={record.name}>{relativeHost(record.name, domain)}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: record => <code>{relativeHost(record.name, domain)}</code> },
+    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{record.value}</code> : '—' },
+    { key: 'status', label: 'Status', width: 112, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
+    { key: 'copy', label: '', card: 'end', table: false, render: record => <DropdownMenu label={`Copy ${record.type} record`} title={`${record.type} ${relativeHost(record.name, domain)}`} items={[
+      { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'name') },
+      { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'value') },
+    ]} /> },
   ]} />
 }
 
