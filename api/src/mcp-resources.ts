@@ -64,7 +64,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     upload: 'uploadTemplateAsset', importImage: 'importTemplateImage', get: 'getTemplateAsset', delete: 'deleteTemplateAsset', content: 'getTemplateAssetContent',
   } },
   campaigns: { label: 'Campaigns', actions: {
-    list: 'listCampaigns', get: 'getCampaign', create: 'createCampaign', update: 'updateCampaign', delete: 'deleteCampaign', stats: 'getCampaignStats', contentGuide: 'getCampaignContentGuide', preview: 'previewCampaign', audience: 'previewCampaignAudience', previewImage: 'renderCampaignPreviewImage', state: 'getCampaignState', archive: 'setCampaignArchived', test: 'testCampaign', send: 'sendCampaign', schedule: 'scheduleCampaign', cancel: 'cancelCampaign', pause: 'pauseCampaign', resume: 'resumeCampaign', pacing: 'setCampaignPacing',
+    list: 'listCampaigns', get: 'getCampaign', create: 'createCampaign', update: 'updateCampaign', delete: 'deleteCampaign', stats: 'getCampaignStats', contentGuide: 'getCampaignContentGuide', preview: 'previewCampaign', audience: 'previewCampaignAudience', previewImage: 'renderCampaignPreviewImage', state: 'getCampaignState', archive: 'setCampaignArchived', test: 'testCampaign', send: 'sendCampaign', schedule: 'scheduleCampaign', unschedule: 'unscheduleCampaign', reschedule: 'rescheduleCampaign', cancel: 'cancelCampaign', pause: 'pauseCampaign', resume: 'resumeCampaign', pacing: 'setCampaignPacing',
   } },
   keys: { label: 'Credentials', actions: {
     list: 'listApiKeys', create: 'createApiKey', revoke: 'revokeApiKey', listTokens: 'listAgentTokens', createToken: 'createAgentToken', revokeToken: 'revokeAgentToken', listInbound: 'listInboundKeys', createInbound: 'createInboundKey', revokeInbound: 'revokeInboundKey',

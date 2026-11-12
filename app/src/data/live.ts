@@ -64,7 +64,6 @@ export async function request<T = Json>(path: string, options: { method?: string
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
   return data as T
 }
-const unsupported = (message: string): never => { throw new ApiError(message, 'UNSUPPORTED_OPERATION') }
 const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, consent: { source: '', at: null }, suppressionReason: r.suppressionReason ?? undefined } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
 const mapSegment = (r: Json): Segment => ({ ...r, rule: r.rule, match: r.rule?.operator === 'or' ? 'any' : 'all', rules: [], matched: undefined, eligible: undefined } as unknown as Segment)
@@ -190,7 +189,7 @@ export function createLiveApi(): BaneApi {
         if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region}, signal, idempotencyKey: input.idempotencyKey}))
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
-        const draft = { ...existing, name: input.name, region, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
+        const draft = { ...existing, name: input.name, region, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], defaults: input.defaults ?? existing.defaults ?? {}, audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
         return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },
@@ -203,7 +202,11 @@ export function createLiveApi(): BaneApi {
       pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),
       resume: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/resume`, 'POST', {}, signal)),
       setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause}), ...(input.rateShare === undefined ? {} : {rateShare: input.rateShare})}, signal)),
-      test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
+      unschedule: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/unschedule`, 'POST', {}, signal)),
+      reschedule: async (id, scheduledAt, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/reschedule`, 'POST', {scheduledAt}, signal)),
+      cancel: async (id, signal) => { const result = await request<{canceled: number; inFlight: number}>(`/v1/campaigns/${idPath(id)}/cancel`, {method: 'POST', signal, idempotencyKey: crypto.randomUUID()}); return {canceled: result.canceled, inFlight: result.inFlight} },
+      stats: (id, signal) => call(`/campaigns/${idPath(id)}/stats`, 'GET', undefined, signal),
+      test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to, ...(input.data && Object.keys(input.data).length ? {data: input.data} : {})}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),
@@ -229,15 +232,15 @@ export function createLiveApi(): BaneApi {
         for (const listId of oldLists.filter(x => !input.listIds.includes(x))) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
         return getContact(result.id, signal)
       },
-      import: async () => unsupported('Upload the original CSV and review the server preview before committing.')
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
-    imports: { preview: input => call<any>('/contact-imports', 'POST', input), commit: id => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST') },
+    imports: { preview: input => call<any>('/contact-imports', 'POST', input), commit: (id, input) => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST', input?.consent ? input : undefined) },
+    audienceQuery: { plan: statement => call<any>('/audience-query/plan', 'POST', {statement}), apply: input => call<any>('/audience-query/apply', 'POST', input) },
     lists: { list: (input = {}, signal) => page('/lists', input, mapList, {search: input.search, counts: input.counts === false ? 'false' : undefined}, signal), get: async (id, signal) => mapList(await call(`/lists/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapList(await call('/lists', 'POST', input, signal)), remove: async (id, signal) => { await call(`/lists/${idPath(id)}`, 'DELETE', undefined, signal) } },
     segments: {
       list: (input = {}, signal) => page('/segments', input, mapSegment, {search: input.search}, signal), get: async (id, signal) => mapSegment(await call(`/segments/${idPath(id)}`, 'GET', undefined, signal)),
       save: async (input, signal) => { if (!input.rule) throw new ApiError('Enter a valid public segment rule.', 'RULE_REQUIRED'); return mapSegment(await call(input.id ? `/segments/${idPath(input.id)}` : '/segments', input.id ? 'PATCH' : 'POST', {name: input.name, rule: input.rule}, signal)) },
-      preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', {}, signal), contacts: []} as any }
+      preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', input.listId ? {listId: input.listId} : {}, signal), contacts: []} as any }
     },
     keys: {
       list: async (signal, cursor, includeRevoked = true) => { const result = await call(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },

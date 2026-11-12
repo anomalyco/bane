@@ -91,6 +91,8 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `pauseCampaign` | `campaigns` · `pause` · sending |
 | `resumeCampaign` | `campaigns` · `resume` · sending |
 | `setCampaignPacing` | `campaigns` · `pacing` · sending |
+| `unscheduleCampaign` | `campaigns` · `unschedule` · sending |
+| `rescheduleCampaign` | `campaigns` · `reschedule` · sending |
 | `getWorkspaceSettings` | `settings` · `get` · admin |
 | `updateWorkspaceSettings` | `settings` · `update` · admin |
 | `getSesSettings` | `settings` · `ses` · admin |

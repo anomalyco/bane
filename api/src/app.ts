@@ -75,9 +75,26 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
 
+// Names the first invalid field and why, so a person can fix it. Zod messages carry types, limits and schema
+// options, never submitted values; unknown keys are quoted as field names, truncated.
+type Issue = { code: string; path: PropertyKey[]; message: string; keys?: string[] };
+function invalidFields(issues: readonly Issue[]) {
+  const described = issues.map(issue => {
+    const path = issue.path.map(String).join('.');
+    if (issue.code === 'unrecognized_keys' && issue.keys?.length) {
+      const fields = issue.keys.slice(0, 3).map(key => [path, key.slice(0, 64)].filter(Boolean).join('.'));
+      return { fields, text: `${fields.join(', ')} ${fields.length > 1 ? 'are not supported fields' : 'is not a supported field'}` };
+    }
+    if (issue.code === 'invalid_type' && /received undefined$/.test(issue.message)) return { fields: [path], text: `${path || 'The request body'} is required` };
+    return { fields: [path], text: path ? `${path}: ${issue.message}` : issue.message };
+  });
+  const first = described[0];
+  return { message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
+}
+
 function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
-    if (!result.success) throw new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid.', result.error.issues.map(i => i.path.join('.')).filter(Boolean).join(', '));
+    if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field); }
   } });
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });

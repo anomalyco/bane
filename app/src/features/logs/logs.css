@@ -63,3 +63,5 @@
   .message-identifiers .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; }
 }
+/* Long campaign names truncate, so the filter row keeps one height and Export stays on it. */
+.logs-campaign-chip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
