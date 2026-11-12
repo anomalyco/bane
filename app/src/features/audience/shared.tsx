@@ -30,3 +30,22 @@ export function ContactTable({ contacts, lists = [], members = false, loading = 
     return date(row.createdAt)
   } }))} />
 }
+
+// A segment's public rule (API SegmentRule) as one readable line: `Country is DE`, `Not opened in 90 days`,
+// `Plan is pro and (Country is DE or Country is FR)`.
+type PublicRule = { field?: string; operator?: string; value?: unknown; days?: unknown; rules?: PublicRule[] }
+const ruleFields: Record<string, string> = { email: 'Email', firstName: 'First name', plan: 'Plan', country: 'Country' }
+export function ruleSummary(rule: unknown, nested = false): string {
+  const r = (rule ?? {}) as PublicRule
+  if (Array.isArray(r.rules)) {
+    const parts = r.rules.map(child => ruleSummary(child, true))
+    const text = parts.join(r.operator === 'or' ? ' or ' : ' and ')
+    return nested && parts.length > 1 ? `(${text})` : text || 'Everyone'
+  }
+  if (r.field === 'lastOpenAt' || r.field === 'lastClickAt') {
+    const verb = r.field === 'lastOpenAt' ? 'opened' : 'clicked', days = number(Number(r.days))
+    return r.operator === 'inactive' ? `Not ${verb} in ${days} days` : `${verb[0].toUpperCase()}${verb.slice(1)} in the last ${days} days`
+  }
+  const op = r.operator === 'neq' ? 'is not' : r.operator === 'contains' ? 'contains' : 'is'
+  return `${ruleFields[r.field ?? ''] ?? r.field ?? 'Value'} ${op} ${String(r.value ?? '')}`
+}

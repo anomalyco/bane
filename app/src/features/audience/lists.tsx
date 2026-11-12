@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Plus } from 'lucide-react'
 import { useApiMutation, useApiQuery } from '../../data/context'
-import { Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs } from '../../components/ui'
+import { SearchField, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs } from '../../components/ui'
 import { listColumns, ListDetailBodySkeleton } from './skeletons'
 import { ContactTable, date, fieldError, MutationError, number, statusOptions } from './shared'
 import { ImportContactsDialog } from './import'
@@ -17,8 +16,8 @@ export function ListsPage() {
   useEffect(() => setPage(1), [pageSize])
   const params = { page, pageSize, search }
   const query = useApiQuery(['lists', params], (api, signal) => api.lists.list(params, signal))
-  return <div className="audience-page"><AudienceHeader actions={<Button variant="primary" onClick={() => setCreate(true)}><Plus size={16} />Create list</Button>} />
-    <div className="data-toolbar"><Input className="audience-search" aria-label="Search lists" placeholder="Search lists" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
+  return <div className="audience-page"><AudienceHeader actions={<Button variant="primary" onClick={() => setCreate(true)}>Create list</Button>} />
+    <div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search lists" placeholder="Search lists" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rowKey={row => row.id} columns={[{ ...listColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/audience/lists/${row.id}`}>{row.name}</Link> }, { ...listColumns[1], render: row => number(row.subscribed) }, { ...listColumns[2], render: row => number(row.suppressed) }, { ...listColumns[3], render: row => number(row.unsubscribed) }, { ...listColumns[4], render: row => number(row.unknown) }, { ...listColumns[5], render: row => number(row.total) }, { ...listColumns[6], render: row => date(row.createdAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
     {create && <CreateListDialog onClose={() => setCreate(false)} />}
   </div>

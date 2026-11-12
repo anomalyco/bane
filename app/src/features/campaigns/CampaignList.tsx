@@ -4,7 +4,7 @@ import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { composer } from './composer-chunk'
 import { campaignEditable, type Campaign } from '../../data/types'
-import { Button, DataTable, EmptyState, ErrorState, Input, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
+import { SearchField, Button, DataTable, EmptyState, ErrorState, Input, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
 import { campaignColumns } from './skeletons'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
@@ -44,7 +44,7 @@ export function CampaignsPage() {
   }
   return <>
     <CampaignsHeader actions={<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />
-    <div className="data-toolbar"><div className="cluster"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
+    <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={search} onChange={event => filter('search', event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
       { value: 'sending', label: 'Sending' }, { value: 'paused', label: 'Paused' }, { value: 'done', label: 'Done' }, { value: 'failed', label: 'Failed' }, { value: 'canceled', label: 'Canceled' },
       { value: 'archived', label: 'Archived' },
