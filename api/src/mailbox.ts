@@ -11,10 +11,10 @@ import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, w
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
-import { webhookUrlHint, WebhookUrlHint } from './core.js';
+import { webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
 import { chargeManualDelivery, JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
-import {registerRituals,ownReceiving} from './rituals.js';
+import {registerRituals,ownReceiving,resumeNeedsUrl} from './rituals.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -777,7 +777,11 @@ function registerInboundWebhooks(app: App) {
       const access = manageHook(c);
       // Same lock order as endpoint writes: the address lane before the webhook row.
       if (input.key) await lockMailboxLane(tx, access.workspaceId, 'address');
+      // The approval is held before the webhook row is locked, the order a removal takes them in. The row stays
+      // locked until the update, so a removal that lands meanwhile holds the webhook again afterwards.
+      await ownReceiving(tx,c,'endpoint',webhookId);
       const { row } = await getWebhook(c, webhookId, access, tx);
+      if (row.paused && row.reconfirm && input.paused === false && !input.url) throw resumeNeedsUrl();
       const eventTypes = input.eventTypes && [...new Set(input.eventTypes)], types = eventTypes ?? row.eventTypes;
       const format = input.format ?? row.format, junk = input.junk ?? (format !== row.format ? defaultJunk(format) : row.junk);
       checkScope(input.addressIds === undefined ? row.mailboxIds : input.addressIds, types, format);
@@ -789,7 +793,7 @@ function registerInboundWebhooks(app: App) {
       }
       const url = input.url ? webhookUrl(c.env, input.url) : undefined;
       if (input.key && input.key !== row.key) await (await import('./ritual-endpoints.js')).assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
-      await ownReceiving(tx,c,'endpoint',webhookId);const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
+      const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, reconfirm: url ? false : undefined, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
         encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });
@@ -805,12 +809,19 @@ function registerInboundWebhooks(app: App) {
     description: 'Posts a synthetic message.received for an example message, in the webhook\'s format or the one given, and returns the response status. overrideUrl sends it elsewhere, signed with a throwaway secret and without the webhook\'s custom headers.',
     request: { params: IdParam, body: json(z.object({ format: hookOptions.format.optional(), overrideUrl: z.string().max(2048).optional() }).strict().openapi('TestInboundWebhook')) }, responses: { 200: response(z.object({ statusCode: z.number().int() }).openapi('InboundWebhookTestResult')), ...errors } }), async c => {
     const { row } = await getWebhook(c, c.req.valid('param').id), input = c.req.valid('json');
+    // Nothing is posted to a held webhook's saved URL, a test included; a test to another URL is not affected.
+    if (row.paused && row.reconfirm && !input.overrideUrl) throw resumeNeedsUrl();
     await chargeManual(c.env.db,row.workspaceId,1);
     const { sendTestWebhook } = await import('./inbound-webhook.js');
     try { return c.json({ statusCode: (await sendTestWebhook(c.env, row, input)).status }, 200); }
     catch (error) {
       if (error instanceof JobDeferred) throw new ApiError(503, 'WEBHOOK_COOLING_DOWN', `This endpoint timed out three times in a row; Bane tries it again after ${error.availableAt}.`, undefined, true);
-      throw error;
+      if (error instanceof ApiError) throw error;
+      // The receiver timed out, refused the connection or failed its TLS handshake: the test's result, not a server failure (a 500).
+      // Node reports a socket or certificate code; a Worker's fetch reports a TypeError. Anything else is a bug and stays a 500.
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'), code = (error as { code?: unknown }).code;
+      if (!timedOut && !(error instanceof TypeError) && !(typeof code === 'string' && /^(?:E[A-Z]+|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_\w+|SELF_SIGNED_\w+)$/.test(code))) throw error;
+      throw new ApiError(503, 'WEBHOOK_UNREACHABLE', timedOut ? `The endpoint did not answer within ${row.timeoutSeconds} seconds.` : 'The endpoint could not be reached.', undefined, true);
     }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver a message to its route webhooks',
@@ -827,8 +838,8 @@ function registerInboundWebhooks(app: App) {
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/rotate-secret`, operationId: 'rotateInboundWebhookSecret', security, tags, request: { params: IdParam }, responses: { 200: response(z.object({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the new X-Webhook-Verification-Token, which changes with the secret.') }).openapi('InboundWebhookRotatedSecret')), ...errors } }), async c => {
     const access=manageHook(c), secret=webhookSecret();
     const row=await c.env.db.transaction(async tx=>{
+      await ownReceiving(tx,c,'endpoint',c.req.valid('param').id);
       const {row}=await getWebhook(c,c.req.valid('param').id,access,tx);
-      await ownReceiving(tx,c,'endpoint',row.id);
       await tx.update(mailboxWebhooks).set({encryptedSecret:await encrypt(c.env,secret,webhookSecretBinding(access.workspaceId,row.id)),updatedAt:new Date().toISOString()}).where(eq(mailboxWebhooks.id,row.id));
       return row;
     });
@@ -839,8 +850,9 @@ function registerInboundWebhooks(app: App) {
     const p=c.req.valid('param');await c.env.db.transaction(async tx=>{const {row}=await getWebhook(c,p.id,admin(c),tx);if(row.paused)throw new ApiError(409,'ENDPOINT_PAUSED','Resume the webhook before retrying.');if(!(await tx.execute(requeue(row.workspaceId,sql`webhook_id=${row.id} AND id=${p.deliveryId} AND status='failed'`))).rowCount)throw new ApiError(409,'DELIVERY_NOT_FAILED','No failed delivery on this endpoint.');await chargeManual(tx,row.workspaceId,1);});c.get('actor').wakeJobs=1;return c.json({ok:true as const},202);
   });
   app.openapi(createRoute({ method: 'get', path: `${path}/{id}/deliveries`, operationId: 'listInboundWebhookDeliveries', security, tags, request: { params: IdParam, query: z.object({ cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(DeliverySchema, 'InboundWebhookDeliveryPage')), ...errors } }), async c => {
-    const { value, row } = await getWebhook(c, c.req.valid('param').id,manageHook(c)); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, value.workspaceId), eq(mailboxWebhookDeliveries.webhookId, row.id), q.cursor ? lt(mailboxWebhookDeliveries.id, q.cursor) : undefined)).orderBy(desc(mailboxWebhookDeliveries.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(item => ({ id: item.id, webhookId: item.webhookId, eventId: String(item.payload.id), status: item.status, attemptCount: item.attemptCount, lastStatusCode: item.lastStatusCode, lastError: item.lastError, createdAt: iso(item.createdAt)!, updatedAt: iso(item.updatedAt)! })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    // Newest first by creation time: delivery IDs are random, so ordering by ID showed an arbitrary sample, not the latest.
+    const { value, row } = await getWebhook(c, c.req.valid('param').id,manageHook(c)); const q = c.req.valid('query'), binding = `inbound-webhook-deliveries:${row.id}`, cursor = readCursor(q.cursor, binding);
+    const rows = await c.env.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, value.workspaceId), eq(mailboxWebhookDeliveries.webhookId, row.id), cursor ? sql`(${mailboxWebhookDeliveries.createdAt},${mailboxWebhookDeliveries.id})<(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(desc(mailboxWebhookDeliveries.createdAt), desc(mailboxWebhookDeliveries.id)).limit(q.limit + 1);
+    return c.json({ data: rows.slice(0, q.limit).map(item => ({ id: item.id, webhookId: item.webhookId, eventId: String(item.payload.id), status: item.status, attemptCount: item.attemptCount, lastStatusCode: item.lastStatusCode, lastError: item.lastError, createdAt: iso(item.createdAt)!, updatedAt: iso(item.updatedAt)! })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
 }
