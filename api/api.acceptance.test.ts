@@ -212,6 +212,39 @@ test('dashboard receiving health: stale proof and identity show repair actions; 
   assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
   for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
 });
+// PR #139 review: the dashboard sends a write once while the same one is in flight, keyed by the workspace it is sent
+// for, its operation, its target and its input (app/src/lib/single-flight.ts); the entry leaves when it settles.
+test('dashboard in-flight writes: one per workspace, operation, target and input, released when they settle', async () => {
+  const { once, flightKey } = await import('../app/src/lib/flight.js');
+  const client = {}; // The app's QueryClient: any object scopes a registry.
+  let workspace = 'ws_northwind'; // What the dashboard has selected (data/live.ts selectedWorkspace) when a write is made.
+  const selectWorkspace = (id: string) => { workspace = id };
+  const pending: { resolve: () => void; reject: (error: Error) => void }[] = [];
+  let sent = 0;
+  const write = () => { sent++; return new Promise<void>((resolve, reject) => { pending.push({ resolve, reject }) }) };
+  const attempt = (operation: string, target: unknown, input: unknown) => once(client, flightKey(workspace, operation, target, input), write);
+  // Round 3: renaming two workspaces to the same name is two writes; back in the first while its write runs, a repeat
+  // there is still the same write.
+  selectWorkspace('ws_northwind');
+  const rename = attempt('workspaceApi.rename', null, 'Round3 same name');
+  assert.equal(attempt('workspaceApi.rename', null, 'Round3 same name').duplicate, true, 'the same rename in the same workspace');
+  selectWorkspace('ws_lumen');
+  assert.equal(attempt('workspaceApi.rename', null, 'Round3 same name').duplicate, false, 'the same rename in another workspace');
+  selectWorkspace('ws_northwind');
+  assert.equal(attempt('workspaceApi.rename', null, 'Round3 same name').duplicate, true, 'back in the first workspace while it runs');
+  // Round 2 and 1: the same thread is one write whatever renders between; another thread or another input is its own.
+  assert.equal(attempt('updateThread', ['thr_a', 'mbx_1'], { starred: false }).duplicate, false);
+  assert.equal(attempt('updateThread', ['thr_a', 'mbx_1'], { starred: false }).duplicate, true, 'the same thread, the same change');
+  assert.equal(attempt('updateThread', ['thr_b', 'mbx_1'], { starred: false }).duplicate, false, 'another thread');
+  assert.equal(attempt('updateThread', ['thr_a', 'mbx_1'], { starred: true }).duplicate, false, 'another change');
+  assert.equal(sent, 5);
+  // Settling, by failure or success, releases the write.
+  pending[0]!.reject(new Error('synthetic failure')); await rename.call.catch(() => {});
+  assert.equal(attempt('workspaceApi.rename', null, 'Round3 same name').duplicate, false, 'retried after a failure');
+  for (const { resolve } of pending.splice(1)) resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(attempt('updateThread', ['thr_a', 'mbx_1'], { starred: false }).duplicate, false, 'sent again after it succeeded');
+});
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
   const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';

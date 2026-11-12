@@ -1,27 +1,12 @@
-import { useMutation, useQueryClient, type DefaultError, type QueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query'
+import { useMutation, useQueryClient, type DefaultError, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query'
+import { selectedWorkspace } from '../data/live'
+import { flightKey, once } from './flight'
 
 /** A write dropped because the same write is still in flight. It rejects once that write settles, and is never shown. */
 export class DuplicateSubmission extends Error {
   constructor() { super('This is already being sent.'); this.name = 'DuplicateSubmission' }
 }
 export const isDuplicateSubmission = (error: unknown): error is DuplicateSubmission => error instanceof DuplicateSubmission
-
-// The writes in flight, one registry per QueryClient (so per app, and fresh in each test), outside React: a re-render,
-// a remount or another component making the same write all see the same entries. A key is the operation, its target
-// and its input, serialized; an entry leaves when its write settles, whether it succeeded or failed.
-const registries = new WeakMap<QueryClient, Map<string, Promise<unknown>>>()
-const registryOf = (client: QueryClient) => registries.get(client) ?? registries.set(client, new Map()).get(client)!
-/** The key of a write: undefined when a part can't be serialized, and then the write isn't guarded. */
-export function flightKey(operation: string, target: unknown, input: unknown) {
-  try { return JSON.stringify([operation, target ?? null, input ?? null]) } catch { return undefined }
-}
-function track<T>(client: QueryClient, key: string, call: Promise<T>) {
-  const registry = registryOf(client)
-  registry.set(key, call)
-  const release = () => { if (registry.get(key) === call) registry.delete(key) }
-  call.then(release, release)
-  return call
-}
 
 /** What a guarded write is: the operation (by default its function's source, which is the same in every render and
  *  remount, and differs between call sites unless they make the same call) and the target its function closes over
@@ -41,11 +26,8 @@ export function useGuardedMutation<TData = unknown, TError = DefaultError, TVari
   const mutation = useMutation(options)
   const name = operation ?? options.mutationFn?.toString()
   const mutateAsync = ((...args: Parameters<typeof mutation.mutateAsync>) => {
-    const key = name === undefined ? undefined : flightKey(name, target, args[0])
-    const running = key === undefined ? undefined : registryOf(client).get(key)
-    if (running) return new Promise<TData>((_, reject) => { const drop = () => reject(new DuplicateSubmission()); running.then(drop, drop) })
-    const call = mutation.mutateAsync(...args)
-    return key === undefined ? call : track(client, key, call)
+    const { call, duplicate } = once(client, name === undefined ? undefined : flightKey(selectedWorkspace(), name, target, args[0]), () => mutation.mutateAsync(...args))
+    return duplicate ? new Promise<TData>((_, reject) => { const drop = () => reject(new DuplicateSubmission()); call.then(drop, drop) }) : call
   }) as typeof mutation.mutateAsync
   const mutate = ((...args: Parameters<typeof mutation.mutate>) => { mutateAsync(...args).catch(() => {}) }) as typeof mutation.mutate
   return { ...mutation, mutate, mutateAsync }
@@ -60,9 +42,6 @@ export function useGuardedMutation<TData = unknown, TError = DefaultError, TVari
 export function useSingleFlight<A extends unknown[], R>(operation: string, run: (...args: A) => Promise<R>, target?: unknown) {
   const client = useQueryClient()
   return (...args: A): Promise<R> => {
-    const key = flightKey(operation, target, args)
-    if (key === undefined) return run(...args)
-    const running = registryOf(client).get(key) as Promise<R> | undefined
-    return running ?? track(client, key, run(...args))
+    return once(client, flightKey(selectedWorkspace(), operation, target, args), () => run(...args)).call
   }
 }
