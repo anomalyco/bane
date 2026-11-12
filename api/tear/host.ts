@@ -26,6 +26,16 @@ import { createInterface } from 'node:readline';
 const quiet = process.env.TEAR_VERBOSE !== '1';
 for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) console[level] = (...args: unknown[]) => { if (!quiet) process.stderr.write(args.map(String).join(' ') + '\n'); };
 
+// An unhandled rejection or exception would end the host mid-trace. Report it as a violation
+// of the trace it happened in (the dispatcher must not leak failures) and keep serving.
+const leaked: string[] = [];
+const leak = (kind: string) => (error: unknown) => {
+  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
+  process.stderr.write(`host ${kind}: ${text}\n`); leaked.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 100)}`);
+};
+process.on('unhandledRejection', leak('unhandled-rejection'));
+process.on('uncaughtException', leak('uncaught-exception'));
+
 // ---- virtual clock -------------------------------------------------------------------
 const RealDate = Date;
 let clockBase = 0, clockReal = RealDate.now();
@@ -129,7 +139,7 @@ async function reset(cfg: Partial<Config>) {
   epoch = Math.ceil((Math.max(lastVirtual, RealDate.now()) + 3_600_000) / 3_600_000) * 3_600_000;
   await setClock(epoch + 50);
   W = `tear_${process.pid}_${trace}`; R = regionName(trace); SECRET = 'bane_' + createHash('sha256').update(W).digest('hex');
-  mails = new Map(); byName = new Map(); names = 0; gates = new Map(); instances = new Map(); sesAccepted = []; safety = []; canceledAt = null; events = []; lastExpanded = 0; marketingAccepted = [];
+  mails = new Map(); byName = new Map(); names = 0; gates = new Map(); instances = new Map(); sesAccepted = []; safety = []; canceledAt = null; events = []; lastExpanded = 0; marketingAccepted = []; accountPaused = false; pauseRefusedAt.clear();
   const contacts = config.recipients.map((p, i) => ({ id: `${W}_c${i + 1}`, email: `${p}-c${i + 1}@example.com` }));
   await db.execute(sql`WITH w AS (INSERT INTO workspaces(id,name,slug) VALUES (${W},${W},${W}) RETURNING id),
     k AS (INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT ${W + '_key'},id,'tear',${createHash('sha256').update(SECRET).digest('hex')},${SECRET.slice(0, 14)},'["read","send","manage"]','[]' FROM w),
@@ -170,7 +180,7 @@ const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).lengt
 // GetAccount and SendEmail, for this trace's region only. A stepped instance parks before the call.
 (SESv2Client.prototype as any).send = async function (command: any) {
   const name = command.constructor.name, input = command.input;
-  if (name === 'GetAccountCommand') return { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: config.quota, SentLast24Hours: config.quota < 0 ? 0 : withinDay() } };
+  if (name === 'GetAccountCommand') return { SendingEnabled: !accountPaused, SendQuota: { MaxSendRate: 1000, Max24HourSend: config.quota, SentLast24Hours: config.quota < 0 ? 0 : withinDay() } };
   if (name !== 'SendEmailCommand') throw new Error(`unexpected SES call ${name}`);
   const id = (input.EmailTags as { Name: string; Value: string }[]).find(t => t.Name === 'bane_email_id')!.Value;
   const store = ctx.getStore();
@@ -185,6 +195,10 @@ const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).lengt
   const campaign = mail.name.startsWith('c');
   const event = (out: string) => events.push({ at: vnow(), kind: 'send', mail: mail.name, proc: store?.instance ? `${store.instance}#${store.generation}` : 'runner', out, campaign });
   if (canceledAt !== null && campaign && !preCancel.has(mail.name)) safety.push(`sent-after-cancel:${mail.name}`);
+  if (accountPaused) {
+    event('paused'); if (!pauseRefusedAt.has(mail.name)) pauseRefusedAt.set(mail.name, vnow());
+    throw providerError(400, 'SendingPausedException', 'Sending is paused for this account.');
+  }
   if (config.quota >= 0 && withinDay() >= config.quota) { event('quota'); throw providerError(400, 'MessageRejected', 'Daily message quota exceeded.'); }
   const outcome = mail.persona === 'thr' && mail.calls === 1 ? 'throttle' : mail.persona === 'thr' ? 'ok' : mail.persona;
   event(outcome === 'throttle' ? 'throttled' : outcome === 'rej' ? 'refused' : outcome === 'unk' ? 'unknown' : 'accepted');
@@ -205,6 +219,9 @@ const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).lengt
 };
 let preCancel = new Set<string>();
 let marketingAccepted: number[] = [];
+// Account-wide sending pause (SES SendingPausedException; GetAccount reports SendingEnabled false).
+let accountPaused = false;
+const pauseRefusedAt = new Map<string, number>(); // first pause refusal per message
 
 // ---- stepped instances ---------------------------------------------------------------
 function classify(text: string): Pending['kind'] | undefined {
@@ -255,7 +272,9 @@ async function step(name: string) {
     })).then(() => undefined, (error: Error) => error.message).then(error => {
       if (inst.generation !== generation) return;
       inst.done = true; inst.running = undefined; inst.error = error; inst.wake?.();
-      if (error && config.invariants) safety.push(`dispatcher-error:${error.slice(0, 120)}`);
+      // A paused account makes the quota refresh fail with a retryable 503; the Durable Object
+      // retries in 15 s. Anything else is a dispatcher failure.
+      if (error && config.invariants && !/SES sending is disabled/.test(error)) safety.push(`dispatcher-error:${error.slice(0, 120)}`);
     });
   } else {
     const next = inst.parked.shift();
@@ -305,6 +324,7 @@ async function nameReleased() {
 // Liveness: let a day pass at a time and run every process to completion, the run job and
 // the sweep, until nothing is queued or attempting; whatever remains after a week is stuck.
 async function settle() {
+  accountPaused = false; // Liveness is promised once the provider accepts mail again.
   for (const name of ['D1', 'D2']) crash(name); // Parked work is abandoned, as on a restart.
   for (let day = 0; day < 7; day++) {
     clockBase = vnow() + 86_400_000 + 60_000; clockReal = RealDate.now();
@@ -369,6 +389,7 @@ async function act(label: string) {
     }
     case 'recover': await dispatchPartitions(runtime, true); break;
     case 'settle': await settle(); break;
+    case 'ses': accountPaused = args[0] === 'pause'; break;
     case 'D1': case 'D2':
       if (args[0] === 'step') await step(verb); else crash(verb);
       break;
@@ -394,9 +415,15 @@ async function observe(result: unknown) {
   for (const name of ['D1', 'D2']) if (instances.has(name)) d[name] = phase(name);
   // Properties checked against the real state, independent of the model's prediction.
   for (const m of mails.values()) if (m.accepted.length > 1) safety.push(`double-send:${m.name}`);
+  safety.push(...leaked.splice(0));
   if (state!.depth !== state!.queued + config.seed) safety.push(`depth:${state!.depth}!=${state!.queued}+${config.seed}`);
   if (config.quota >= 0 && withinDay() > config.quota) safety.push(`quota:${withinDay()}>${config.quota}`);
   // Campaign mail never spends the 10% reserve kept for transactional mail (rounded up).
+  // A row is given up as pause-expired only 24 h after its first pause refusal (or later).
+  for (const r of await q<{ id: string }>(sql`SELECT id FROM sending_emails WHERE workspace_id=${W} AND error_code='SES_ACCOUNT_PAUSE_EXPIRED'`)) {
+    const first = pauseRefusedAt.get(nameOf(r.id));
+    if (first !== undefined && vnow() < first + 86_400_000) safety.push(`pause-expired-early:${nameOf(r.id)}`);
+  }
   if (config.quota > 0) {
     const reserve = Math.ceil(config.quota * 10 / 100), marketing = marketingAccepted.filter(at => at > vnow() - 86_400_000).length;
     if (marketing > config.quota - reserve) safety.push(`reserve:${marketing}>${config.quota - reserve}`);

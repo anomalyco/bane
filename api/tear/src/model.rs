@@ -74,6 +74,9 @@
 //! Partial failures of external calls
 //! - [x] SES: accept, throttle, permanent refusal, 5xx, a call that never returns (crash at the
 //!       provider call), a response that is lost (crash before the record), a daily-quota refusal.
+//! - [x] An account-wide sending pause (`ses pause`/`ses resume`, quota profile): the quota refresh
+//!       fails and the run retries; pause refusals brake for 5 min; a row is given up as
+//!       pause-expired only 24 h after its first refusal; everything settles after resume.
 //! - [ ] R2 attachments and webhooks: no attachments or webhooks in these traces.
 //!
 //! Reference model of Bane's send path: admission (with Idempotency-Key and the pending cap),
@@ -987,7 +990,7 @@ pub fn alphabet(profile: &str) -> Vec<String> {
     let dispatch = ["send ok", "send thr", "send rej", "send unk", "D1 step", "D1 crash", "D2 step", "D2 crash", "recover", "drain", "wait 4s", "wait 59s"];
     let campaign = ["launch", "schedule", "pause", "resume", "cancel", "jobs", "drain", "D1 step", "D1 crash", "recover", "wait 59s", "wait 1d"];
     let admission = ["send ok", "sendk k1 ok", "sendk k1 rej", "dupk k2 ok", "drain"];
-    let quota = ["send ok", "send unk", "launch", "jobs", "D1 step", "D2 step", "D1 crash", "D2 crash", "recover", "wait 1d", "settle"];
+    let quota = ["send ok", "send unk", "launch", "jobs", "D1 step", "D2 step", "D1 crash", "D2 crash", "recover", "wait 1m", "wait 1d", "settle", "ses pause", "ses resume"];
     let pick: Vec<&str> = match profile {
         "quota" => quota.to_vec(),
         "dispatch" => dispatch.to_vec(),
