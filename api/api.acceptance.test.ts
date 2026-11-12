@@ -688,6 +688,28 @@ test('MCP cutover expires legacy approvals and tokens but keeps the objects they
   } finally {await db.query('ROLLBACK');}
 });
 
+// Ported from #90: the connection list shows a client's self-chosen name as one short line of drawn characters.
+test('an MCP client name is shown as one short line of the characters that are drawn',async t=>{
+  assert.ok(manager);
+  const db=await fixtureDatabase(t);
+  await db.query('BEGIN');
+  try {
+    const names:Record<string,string>={long:`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`,
+      shaped:'\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D',blank:'\u034F\u00AD\u206A',cells:'\u2800 \u3164\u{E0041}\uFEFF'};
+    for(const [id,name] of Object.entries(names)) await db.query("INSERT INTO bane_expired_approvals(id,user_id,client_id,name,scopes,created_at,updated_at) VALUES($1,$2,$1,$3,'{bane:read}',now(),now())",['legacy_name_'+id,manager.userId,name]);
+    const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
+    const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
+    const {data}=await (await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections?limit=100',{headers:{cookie:manager.cookie}}),runtime)).json() as {data:{id:string;name:string|null}[]};
+    const shown=(id:string)=>data.find(g=>g.id==='legacy_name_'+id)?.name;
+    const label=`Desk helper notes ${'x'.repeat(142)}`;
+    assert.equal(label.length,160);
+    assert.equal(shown('long'),label,'Reordering marks, invisible and control characters go; the name is cut at 160.');
+    assert.equal(shown('shaped'),'👩\u200D💻 ❤\uFE0F می\u200Cخواهم Support','Joiners and one variation selector that shape what is drawn stay.');
+    assert.equal(shown('blank'),null,'A name with nothing to draw is no name.');
+    assert.equal(shown('cells'),null);
+  } finally {await db.query('ROLLBACK');}
+});
+
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
   const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});

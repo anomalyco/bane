@@ -6,6 +6,32 @@ export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGran
 
 const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),workspaceId:z.string().nullable(),receiving:z.boolean()}).openapi('McpConnection');
 const Binding=z.object({workspaceId:z.string().min(1).max(200),receiving:z.boolean()}).strict().openapi('McpConnectionBinding');
+// How a client's self-chosen name is shown in the connections list (ported from #90):
+// - Every space, line break and control character, and the blank cells U+2800, U+FFFC and U+1D159, become one space.
+// - Characters that are never drawn are dropped: default-ignorable code points (soft hyphen, grapheme joiner,
+//   direction marks and overrides, word joiners, fillers, tags), lone surrogates and annotation marks.
+// - Two of those shape their neighbours, so they stay where they do: a zero-width joiner or non-joiner between two
+//   shown characters, and one variation selector directly after a shown character. Emoji sequences and joining
+//   scripts keep their form; emoji tag sequences fall back to their base.
+// - At most 160 characters. A name left without a letter, number, punctuation mark or symbol has no label ('').
+const NAME_BLANK = /[\s\p{Cc}\p{Zl}\p{Zp}\u2800\uFFFC\u{1D159}]+/gu, NAME_SHOWN = /[\p{L}\p{N}\p{P}\p{S}]/u;
+const NAME_HIDDEN = /^[\p{Default_Ignorable_Code_Point}\p{Cs}\uFFF9-\uFFFB]$/u;
+const NAME_JOINER = /^[\u200C\u200D]$/, NAME_SELECTOR = /^[\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]$/u;
+export function clientLabel(name: string | null | undefined) {
+  const out: string[] = [];
+  // A joiner needs a shown character after it.
+  const settle = () => { while (out.length && NAME_JOINER.test(out.at(-1)!)) out.pop(); };
+  for (const ch of (name ?? '').replace(NAME_BLANK, ' ')) {
+    const last = out.at(-1);
+    if (ch === ' ') { settle(); if (out.length && out.at(-1) !== ' ') out.push(ch); }
+    else if (!NAME_HIDDEN.test(ch)) out.push(ch);
+    else if (last !== undefined && last !== ' ' && !NAME_JOINER.test(last) && (NAME_JOINER.test(ch) || (NAME_SELECTOR.test(ch) && !NAME_SELECTOR.test(last)))) out.push(ch);
+  }
+  out.length = Math.min(out.length, 160);
+  settle();
+  const label = out.join('').trim();
+  return NAME_SHOWN.test(label) ? label : '';
+}
 function owner(c:Ctx) {
   const principal=c.get('actor');
   if(principal.credential!=='dashboard') throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use your dashboard session.');
@@ -24,7 +50,7 @@ export function registerMcpAuth(app:App) {
         FROM bane_resource_grants g WHERE g.user_id=${user}
         UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false FROM bane_expired_approvals WHERE user_id=${user})
       SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${cursor?sql`WHERE a.id>${cursor}`:sql``} ORDER BY a.id LIMIT ${limit+1}`);
-    return c.json({data:rows.slice(0,limit).map(r=>({id:r.id,clientId:r.client_id,name:r.name,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving})),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
+    return c.json({data:rows.slice(0,limit).map(r=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving})),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
   });
   // Chooses (or changes) the workspace an approval acts in. Credentials it created elsewhere stop at their next
   // use: agent tokens, mailbox keys and protocol passwords all check the approval's current workspace.
