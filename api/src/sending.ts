@@ -663,7 +663,9 @@ async function validateHtmlUrls(html: string | undefined) {
   }
 }
 export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
-  const bytes = new TextEncoder().encode((snapshot.raw ?? '') + (snapshot.html ?? '') + (snapshot.text ?? '') + snapshot.subject).length;
+  // Count UTF-8 bytes without flattening all body parts into another full-size string
+  // and allocating a second full-size buffer during dispatch.
+  const bytes = [snapshot.raw, snapshot.html, snapshot.text, snapshot.subject].reduce<number>((n,part)=>n+(part ? Buffer.byteLength(part) : 0),0);
   // Conservatively reserve base64/MIME expansion, line folding and headers. This is an application cap, not SES's 40 MB maximum.
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
   if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');

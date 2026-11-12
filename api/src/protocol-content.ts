@@ -79,14 +79,18 @@ export async function contentWrite(c: Ctx, p: Content) {
     // Acquire the issuer/revoker's fence BEFORE taking the statement snapshot used to authorize.
     await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${who.w} AND inbox_id=${who.b} FOR UPDATE`);
     const active = (
-      await tx.execute<{ owned: string[]; suppressed: boolean; daily: number; monthly: number }>(
+      await tx.execute<{ owned: string[]; suppressed: boolean; space: boolean; daily: number; monthly: number }>(
         sql`WITH a AS (${auth}) SELECT ${ownership} AS owned,s.protocol_daily daily,s.protocol_monthly monthly,
+          (s.messages < coalesce(b.quota_messages,100000) AND s.bytes + ${raw.length} <= coalesce(b.quota_bytes,1073741824)) AS space,
           EXISTS(SELECT FROM audience_contacts WHERE workspace_id=a.w AND email=ANY(${sql.param(p.to.map(v=>v.toLowerCase()))}::text[]) AND suppressed) AS suppressed
-          FROM a JOIN inbox_state s ON s.inbox_id=a.b FOR UPDATE OF s`,
+          FROM a JOIN inbox_state s ON s.inbox_id=a.b JOIN mailboxes b ON b.id=a.b FOR UPDATE OF s`,
       )
     ).rows[0];
     if (!box || !active) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
     if (!ownsSenders(active.owned)) throw denied();
+    // Same limits as mailgw_append. Hold inbox_state until the membership insert
+    // charges these bytes and one message; do not charge the counters twice.
+    if (!active.space) throw new ApiError(507, 'INBOX_OVER_QUOTA', 'The Sent copy exceeds the inbox storage quota.');
     // SMTP submissions have no reply-author suppression exemption. Don't acknowledge
     // known undeliverable mail; dispatch still rechecks for changes after this commit.
     if (active.suppressed) throw new ApiError(422, 'RECIPIENT_INELIGIBLE', 'Recipient is not eligible for delivery.');

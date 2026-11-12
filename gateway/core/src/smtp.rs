@@ -16,6 +16,8 @@ pub enum SubmitError {
     Unavailable,
     #[error("552 5.3.4 Message exceeds submission size limits")]
     TooLarge,
+    #[error("552 5.2.2 Inbox storage quota exceeded")]
+    InboxFull,
     #[error("550 5.7.1 Rejected")]
     Rejected,
 }

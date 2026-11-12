@@ -392,6 +392,14 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
       await new Promise(resolve=>setTimeout(resolve,25));
     }
   });
+  const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
+  const before=await usage();
+  for(const [quota,value] of [['quota_messages',before.messages],['quota_bytes',Number(before.bytes)+1]] as const){
+    await db.query(`UPDATE mailboxes SET ${quota}=$2 WHERE id=$1`,[bid,value]);
+    const full=await submit('Subject: no space\r\n\r\nNo send\r\n');assert.equal(full.status,507);
+    assert.equal(((await full.json()) as Json).error.code,'INBOX_OVER_QUOTA');assert.deepEqual(await usage(),before);
+    await db.query(`UPDATE mailboxes SET ${quota}=NULL WHERE id=$1`,[bid]);
+  }
   await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'sink@example.invalid',true)",[unique('contact'),wid]);
   const denied=await submit('Subject: suppressed\r\n\r\nNo send\r\n');assert.equal(denied.status,422);
   assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
@@ -8937,6 +8945,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('dispatch leases return bounded inline snapshots and deliver deferred content intact',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const text='fixture '.repeat(12500), inputs=[text,'ordinary',text,text].map((body,i)=>({from:'from@example.invalid',to:address(),subject:`bounded-${i}`,text:body}));
+      ok(await local('POST','/v1/emails/batch',{emails:inputs}),202);
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send, delivered:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(cmd instanceof SendEmailCommand){const content=cmd.input.Content!.Simple!;delivered.push(content.Subject!.Data!);assert.equal(content.Body!.Text!.Data,inputs.find(v=>v.subject===content.Subject!.Data)?.text);}
+        return Reflect.apply(send,this,[cmd]);
+      });
+      const queries=t.mock.method(db,'query');
+      const result=await (await import('./src/dispatcher.js')).dispatchDue(runtime,REGION);
+      const leases=queries.mock.calls.filter(c=>(c.arguments[0] as any)?.text?.includes('queued_owners'));
+      assert.ok(leases.length);let leased=0;
+      for(const entry of leases){
+        const {rows}=await entry.result as unknown as pg.QueryResult;
+        const snapshots=rows.filter(r=>r.id).map(r=>r.snapshot);leased+=snapshots.length;
+        assert.ok(snapshots.reduce((n,s)=>n+Buffer.byteLength(JSON.stringify(s)),0)<=snapshots.length*65536,'oversize content reached the lease caller');
+      }
+      assert.equal(leased,inputs.length);assert.equal(result.sent,inputs.length);assert.deepEqual(delivered.sort(),inputs.map(v=>v.subject));
+    });
+  });
   test('query budget: API key admission, dispatch, acceptance and delivery at one and 100 envelopes',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {runDispatcher}=await import('./src/dispatcher.js'),{ingestFeedbackBatch}=await import('./src/operations.js');

@@ -1071,6 +1071,7 @@ impl Submitter for Store {
     fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
         self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|status| match status {
             413 => SubmitError::TooLarge,
+            507 => SubmitError::InboxFull,
             429 | 402 => SubmitError::Cap,
             400..500 => SubmitError::Rejected,
             _ => SubmitError::Unavailable,

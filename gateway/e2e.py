@@ -1025,6 +1025,9 @@ def quotas(tmp):
                     ok(c.append('Quota',None,None,RAW))
                 before=ok(c.search(None,'ALL'))
                 assert c.append('Quota',None,None,RAW)[0]=='NO'
+                with smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=10) as smtp:
+                    smtp.login(ALIAS,PASS); smtp.mail(ALIAS); smtp.rcpt('sink@example.invalid')
+                    assert smtp.data(RAW) == (552,b'5.2.2 Inbox storage quota exceeded')
                 assert ok(c.search(None,'ALL'))==before
                 sql(f"UPDATE mailboxes SET {column}=NULL WHERE id='mbx_fixture'")
         finally:
