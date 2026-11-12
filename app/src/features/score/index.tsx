@@ -104,6 +104,7 @@ export function useNextSteps(report: SenderScore | undefined): { items: NextItem
   const step = bestStep(report, list); if (step) items.push(step)
   const candidate = list.find(d => d.status === 'verified')
   if (candidate && !list.some(d => d.receiving === 'verified')) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
+  items.push({ key: 'agent', text: 'Connect an AI agent over MCP', to: '/api-keys?connect=1' })
   if (setup.data?.webhooks?.total === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
   const pending = setup.data?.invitations?.pending ?? 0
   if (pending) items.push({ key: 'invite', text: `${number(pending)} ${pending === 1 ? 'invitation' : 'invitations'} pending`, to: '/settings#members' })
