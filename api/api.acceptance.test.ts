@@ -4379,7 +4379,11 @@ describe('Billing: metering, gate and settlement', () => {
   test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt, invoiced and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
-      // Off (the migration default): sends are metered from the first one, recipients counted, in the same statement.
+      // Billing launches enforced (249); a workspace created since is prepaid. Off, the kill-switch: sends are metered
+      // from the first one, recipients counted, in the same statement.
+      assert.deepEqual((await db.query(`SELECT mode FROM billing_config WHERE singleton`)).rows[0].mode, 'enforce');
+      assert.equal((await f.position()).mode, 'prepaid');
+      await f.mode('off');
       await meter('billing-off-admitted', async () => ok(await f.send(2), 202), 1);
       assert.equal(await f.open('send'), 2);
       // Enforce, nothing paid and the free 3,000 used: refused in the same single statement, before anything else.
@@ -4494,14 +4498,18 @@ describe('Billing: metering, gate and settlement', () => {
       // Receives: one per message with an SES message ID (spam included), Omens from verdicts.omenCalls, stored bytes per day.
       const thread = unique('thread');
       await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)`, [thread, f.wid]);
-      const message = (id: string, ses: string | null, extra: { spam?: boolean; omen?: number; bytes?: number; days?: number } = {}) => db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,spam,verdicts,size_bytes,received_at)
-        VALUES ($1,$2,'inbound',$3,$4,$5,$6,$7,now()-make_interval(days=>$8))`, [id, f.wid, thread, ses, !!extra.spam, JSON.stringify(extra.omen ? { omenCalls: extra.omen } : {}), extra.bytes ?? 1000, extra.days ?? 0]);
+      const message = (id: string, ses: string | null, extra: { spam?: boolean; verdict?: string; omen?: number; bytes?: number; days?: number } = {}) => db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,spam,verdicts,size_bytes,received_at)
+        VALUES ($1,$2,'inbound',$3,$4,$5,$6,$7,now()-make_interval(days=>$8))`, [id, f.wid, thread, ses, !!extra.spam, JSON.stringify({ ...extra.omen ? { omenCalls: extra.omen } : {}, ...extra.verdict ? { spam: extra.verdict } : {} }), extra.bytes ?? 1000, extra.days ?? 0]);
       await message(unique('msg'), unique('ses'), { omen: 2, bytes: 5000 });
-      await message(unique('msg'), unique('ses'), { spam: true });
+      await message(unique('msg'), unique('ses'), { spam: true }); // Junked without an SES spam verdict: billed.
       await message(unique('msg'), null, { bytes: 700 }); // IMAP APPEND or a sandbox copy: stored, never a receive.
-      assert.deepEqual([(await usage()).receive, (await usage()).omen], [2, 2]);
+      // Mail SES's spam scan flagged (FAIL or GRAY) is free: no receive unit and no stored bytes, but its Omen calls count.
+      await message(unique('msg'), unique('ses'), { spam: true, verdict: 'FAIL', bytes: 9000, omen: 1 });
+      await message(unique('msg'), unique('ses'), { spam: true, verdict: 'GRAY', bytes: 9000 });
+      await message(unique('msg'), unique('ses'), { verdict: 'FAIL', bytes: 9000 }); // Not junked: billed.
+      assert.deepEqual([(await usage()).receive, (await usage()).omen], [3, 3]);
       const today = Number((await db.query(`SELECT bytes FROM mail_storage_days WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date`, [f.wid])).rows[0].bytes);
-      assert.equal(today, 6700);
+      assert.equal(today, 15700);
       // Storage: bytes older than 90 days roll into the aged sum, which is metered beyond the free 1 GB, at $0 until storage_billing_from.
       const aged = unique('msg');
       await message(aged, unique('ses'), { bytes: 1_500_000_000, days: 120 });
@@ -4577,6 +4585,57 @@ describe('Billing: metering, gate and settlement', () => {
       await restoreJob(runtime, {}, job);
       assert.deepEqual(await receipt(), { status: 'pending', error: null, object_key: 'held/' + mid });
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2`, [wid, mid])).rows[0].n, 1);
+    });
+  });
+  test('refunds return promo first, a refund from an earlier month is priced against that month, and write-offs repeat per day', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const account = async (wid = f.wid) => (await db.query('SELECT balance_uc::text,promo_uc::text,promo_spent_uc::text FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      const row = (id: string, wid: string, created: string, recipients = 1) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        VALUES ($1,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$5::int) n),'[]','[]','Fixture','{}',false,${created})`, [id, wid, REGION, f.from, recipients]);
+      const settleAll = (wid = f.wid) => settle(db, wid, "now() + interval '1 hour'");
+      // Promo pays first; when refunds outweigh new usage, the money goes back to promo up to what promo paid.
+      await f.freeUsed(3000);
+      await f.post('grant', 'grant:fixture-promo', 0n, 100_000n);
+      const sent = unique('promo-paid');
+      await row(sent, f.wid, 'now()', 3);
+      await settleAll();
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '40000', promo_spent_uc: '60000' });
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
+      assert.equal((await settleAll()).costUc, '-60000');
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '100000', promo_spent_uc: '0' }, 'Not a cent of promo became paid (refundable) credit.');
+      // A send admitted last month and charged there (beyond that month's free 3,000) is refunded this month: the refund
+      // lands in last month's last hour and returns exactly what last month charged for it.
+      const lastMonth = "date_trunc('month', now(), 'UTC') - interval '2 days'";
+      const old = unique('cross-month');
+      await row(old, f.wid, lastMonth, 2);
+      // As last month settled it: 3,000 free units and these 2 paid ones (the insert trigger meters into the current hour).
+      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-2 WHERE workspace_id=$1 AND hour=date_trunc('hour', now(), 'UTC') AND meter='send'`, [f.wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 3002, 3002)`, [f.wid]);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
+      const target = (await db.query(`SELECT hour = date_trunc('month', now(), 'UTC') - interval '1 hour' AS last_hour, quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [f.wid])).rows;
+      assert.deepEqual(target, [{ last_hour: true, d: '-2' }]);
+      assert.equal((await settleAll()).costUc, '-40000', 'Both refunded recipients were paid for last month, so both come back.');
+      // A refund of last month's free sends returns nothing, even though this month's free tier is spent.
+      const other = unique('billing-free-month'), free = unique('cross-month-free');
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [other, REGION]);
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_emails_used) VALUES ($1,3000)`, [other]);
+      await row(free, other, lastMonth);
+      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-1 WHERE workspace_id=$1 AND meter='send'`, [other]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 10, 10)`, [other]);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [free]);
+      assert.equal((await settleAll(other)).costUc, '0');
+      // Write-offs: debt that builds up again under the same unpaid episode is written off again (the key carries the day).
+      const wo = unique('billing-writeoff'), post = (kind: string, src: string, paid: number) => db.query(`SELECT billing_post($1,$2,$3,$4,0,'{}','system')`, [wo, kind, src, paid]);
+      await post('adjustment', 'adjustment:debt-1', -300_000);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '70 days' WHERE workspace_id=$1`, [wo]);
+      // The first write-off, under 248's key (the episode's date alone).
+      await db.query(`SELECT billing_post($1,'write_off','write_off:'||$1||':'||((now()-interval '70 days') AT TIME ZONE 'UTC')::date,300000,0,'{}','system')`, [wo]);
+      await post('adjustment', 'adjustment:debt-2', -50_000);
+      assert.ok((await db.query('SELECT billing_unpaid_scan() AS s')).rows[0].s.writtenOff >= 1);
+      const after = (await db.query('SELECT balance_uc::text, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wo])).rows[0];
+      assert.deepEqual(after, { balance_uc: '0', unpaid: true }, 'Written off again; unpaid_since (and a receive hold) stays until a top-up.');
     });
   });
   test('244 removed the per-inbox IMAP charge; password revocation still notifies open sessions', async t => {

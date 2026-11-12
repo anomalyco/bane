@@ -425,14 +425,15 @@ Hosted installations (`MULTI_TENANT=true`) bill a prepaid USD balance per worksp
 
 | Mode | Meters | Settlement | 402 gate, campaign waits, notices, auto-recharge |
 | --- | --- | --- | --- |
-| `off` (migration default) | record | none | none |
-| `shadow` | record | hourly; usage rows post $0 with the would-be cost in `detail.costUc` | would-be denials log `BILLING_SHADOW_DENY`; notices are not sent |
-| `enforce` | record | hourly; usage is taken from promotional credit, then paid credit | live |
+| `enforce` (the default since migration 249) | record | hourly; usage is taken from promotional credit, then paid credit | live |
+| `shadow` (kill-switch) | record | hourly; usage rows post $0 with the would-be cost in `detail.costUc` | would-be denials log `BILLING_SHADOW_DENY`; notices are not sent |
+| `off` (kill-switch) | record | none | none |
 
 - Metering adds no round trip: statement triggers on `sending_emails` (sends, pre-SES refunds into the current hour) and `mail_messages` (receives, `verdicts.omenCalls`, stored bytes per day). Admission stays one statement; ingest stays two (three with files).
 - The hourly job (`billing/cron.ts`) settles closed hours per workspace (`billing_settle`) and once a UTC day runs the storage day, the unpaid scan, the drift check (`BILLING_DRIFT`) and the BYO fair-use report. `BILLING_SETTLE_LAG` logs an error when unsettled usage is older than 3 hours.
 - With an empty balance under `enforce`: the API returns `402 BALANCE_EXHAUSTED`, campaigns wait with `waiting_reason='balance'` until a credit, SMTP submission gets `451 4.7.1`, and Omens return their `onError` value without calling Jev. Received mail is accepted (and billed) for 7 days, then held under `held/` in the pool bucket when `billing_config.receive_hold` is on; a top-up releases it. A debt older than 60 days is written off, but the hold stays until a top-up.
-- `billing_accounts.mode`: `prepaid` (default), `invoiced` (charged into a negative balance, never gated or held) or `exempt` (settled at $0). `BANE_PLATFORM_DOMAIN_WORKSPACE` is never gated; set Anomaly's workspaces to `exempt` before `shadow`.
+- `billing_accounts.mode`: `prepaid` (default), `invoiced` (charged into a negative balance, never gated or held) or `exempt` (settled at $0). `BANE_PLATFORM_DOMAIN_WORKSPACE` is never gated. Migration 249 made every workspace that existed at launch (all Anomaly's) `exempt`; workspaces created later are `prepaid`.
+- Received mail that SES's spam scan flagged (verdict FAIL or GRAY, which ingest junks) is free: no receive unit, no free-tier use, no stored bytes. Omen evaluations on it are still metered.
 - `billing_config.storage_billing_from` prices storage at $0 before that date (the 90 days' notice). `bill_simulated` meters installation-simulated sends (dev and E2E only).
 - Turning on `receive_hold` needs `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject` on `arn:aws:s3:::<pool bucket>/held/*` for the Worker's pool role, and no lifecycle rule on `held/`.
 

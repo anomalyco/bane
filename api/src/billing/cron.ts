@@ -7,7 +7,7 @@ const LAG_ALERT_MS = 3 * 3_600_000, BYO_FAIR_USE = 10_000_000;
 /**
  * Hourly (worker.ts `7 * * * *`, runner.ts hourly), Hosted only: once a UTC day the storage day, the unpaid scan, the
  * drift check and the BYO fair-use report; then settlement of every workspace with unsettled usage in closed hours.
- * Nothing runs while billing_config.mode is 'off' (meters still record).
+ * Nothing runs while billing_config.mode is 'off' (an operator kill-switch; meters still record).
  */
 export async function billingHourly(runtime: Runtime): Promise<void> {
   const { rows: [cfg] } = await runtime.db.execute<{ mode: string }>(sql`SELECT mode FROM billing_config WHERE singleton`);
@@ -67,7 +67,9 @@ export async function billingDaily(runtime: Runtime): Promise<void> {
 /** Settles every workspace with unsettled usage before the current hour, four at a time, within a 60 s budget. */
 export async function settleClosedHours(runtime: Runtime, cutoff?: string): Promise<{ workspaces: number; entries: number; busy: number }> {
   const started = Date.now(), deadline = started + SETTLE_BUDGET_MS;
-  const at = cutoff ? sql`${cutoff}::timestamptz` : sql`date_trunc('hour', now(), 'UTC')`;
+  // Closed hours only, and at least five minutes closed: the Node runner's hourly tick is not aligned to :07 like the
+  // Worker cron, and a writer that started before the boundary may still be upserting the previous hour's row.
+  const at = cutoff ? sql`${cutoff}::timestamptz` : sql`date_trunc('hour', now() - interval '5 minutes', 'UTC')`;
   let workspaces = 0, entries = 0, busy = 0;
   const seen = new Set<string>();
   while (Date.now() < deadline) {
