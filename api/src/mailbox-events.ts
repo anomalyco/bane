@@ -13,6 +13,8 @@ export const webhookSecretBinding = (workspaceId: string, webhookId: string) => 
 
 // Both ingest and outbound sync append the same immutable event and webhook snapshots. Take the
 // workspace lanes in a consistent order before allocating sequence numbers, so cursors never skip a commit.
+// A paused subscription holds its copy (the claim parks it, unpause resumes it): active ones first,
+// at most 32 of them, then up to 32 paused ones.
 export function mailboxEventCtes(source:SQL) {
   return sql`items AS MATERIALIZED (${source}), lanes AS (
     INSERT INTO mailbox_write_lanes(workspace_id,lane) SELECT DISTINCT workspace_id,'events' FROM items ORDER BY workspace_id
@@ -21,16 +23,17 @@ export function mailboxEventCtes(source:SQL) {
     SELECT workspace_id,type,mailbox_id,thread_id,message_id,data FROM items JOIN lanes USING(workspace_id) ORDER BY workspace_id,ord RETURNING *
   ), deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload)
     SELECT 'mwd_'||gen_random_uuid(),e.workspace_id,h.id,e.seq,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',e.data)
-    FROM events e JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND NOT h.paused
+    FROM events e CROSS JOIN LATERAL (SELECT h.id FROM mailbox_webhooks h WHERE h.workspace_id=e.workspace_id
       AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id))
-      AND h.event_types ? e.type RETURNING id,workspace_id
+      AND h.event_types ? e.type ORDER BY h.paused,h.id LIMIT 64) h RETURNING id,workspace_id
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries RETURNING 1)`;
 }
 
 const fanout:JobHandler=retryDatabaseFailures(async(runtime,payload,job)=>{
   // Snapshot endpoint IDs at commit, not at expansion: a new subscription never receives historical mail.
+  // A routed ref carries its recipient's junk decision (159); the event's type is only a fallback for older refs.
   const records=sql`deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,routed,format,payload)
-    SELECT CASE WHEN ref?'ritualAction' THEN 'mwd_'||md5(e.workspace_id||':'||(ref->>'ritualAction')||':'||h.id) ELSE 'mwd_'||gen_random_uuid() END,e.workspace_id,h.id,CASE WHEN NOT ref?'ritualAction' THEN e.seq END,jsonb_typeof(ref)='object' AND NOT ref?'subscription',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','junk',e.type='message.junk','subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)||CASE WHEN ref?'body' THEN jsonb_build_object('ritualBody',ref->'body') ELSE '{}'::jsonb END||CASE WHEN ref?'ritualAction' THEN jsonb_build_object('ritualAction',ref->'ritualAction') ELSE '{}'::jsonb END||CASE WHEN ref?'grants' THEN jsonb_build_object('grants',ref->'grants') ELSE '{}'::jsonb END
+    SELECT CASE WHEN ref?'ritualAction' THEN 'mwd_'||md5(e.workspace_id||':'||(ref->>'ritualAction')||':'||h.id) ELSE 'mwd_'||gen_random_uuid() END,e.workspace_id,h.id,CASE WHEN NOT ref?'ritualAction' THEN e.seq END,jsonb_typeof(ref)='object' AND NOT ref?'subscription',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',CASE WHEN ref?'junk' THEN CASE WHEN (ref->>'junk')::boolean THEN 'message.junk' ELSE 'message.received' END ELSE e.type END,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','junk',CASE WHEN ref?'junk' THEN (ref->>'junk')::boolean ELSE e.type='message.junk' END,'subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)||CASE WHEN ref?'body' THEN jsonb_build_object('ritualBody',ref->'body') ELSE '{}'::jsonb END||CASE WHEN ref?'ritualAction' THEN jsonb_build_object('ritualAction',ref->'ritualAction') ELSE '{}'::jsonb END||CASE WHEN ref?'grants' THEN jsonb_build_object('grants',ref->'grants') ELSE '{}'::jsonb END
     FROM settled CROSS JOIN jsonb_each(${JSON.stringify(payload)}::jsonb) s(seq,hooks) JOIN mailbox_events e ON e.workspace_id=${job.workspaceId} AND e.seq=s.seq::bigint
     CROSS JOIN jsonb_array_elements(s.hooks) ref JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND h.id=coalesce(ref->>'id',ref#>>'{}')
     ON CONFLICT DO NOTHING RETURNING id,workspace_id),
@@ -66,7 +69,10 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   const {deliverInboundWebhook}=await loadWebhookOps();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   let actionError:ActionRetry|undefined;try {
-    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery));if(result.status===410)retryable=false;
+    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery),job);
+    // Paused after the claim (the fence parked it for resume), or no longer this claim's: nothing was sent.
+    if(result.parked)return;
+    if(result.status===410)retryable=false;
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { if(e instanceof ActionRetry)actionError=e;if (e instanceof ModuleLoadError || e instanceof JobDeferred) throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < mailboxWebhookAttempts(delivery);
@@ -76,18 +82,24 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (error) throw new ApiError(503, error, 'Mailbox webhook delivery failed; it will be retried.', undefined, retry);
 };
 
+// Deliveries are kept 30 days. One still held for a paused endpoint after that is dead-lettered with
+// ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
 export async function pruneMailboxEvents(runtime: Runtime) {
   await runtime.db.execute(sql`WITH expired AS (DELETE FROM mailbox_events WHERE seq IN (SELECT seq FROM mailbox_events WHERE created_at<now()-interval '30 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
-    ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
-    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed','paused') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
+    ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
+    held AS (UPDATE mailbox_webhook_deliveries SET status='failed',last_error='ENDPOINT_PAUSED_EXPIRED',updated_at=now() WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status='paused' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
+    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at<now()-interval '7 days') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
   log('info', { code: 'MAILBOX_EVENTS_PRUNED' });
 }
 
+// A resumed delivery keeps the attempts it already made, recorded or not (the action fence counts
+// every attempt it let through): a pause holds the retries, it does not refill them.
 const resumeDeliveries:JobHandler=async(runtime,payload,job)=>{
   const result=await runtime.db.execute(sql`WITH hook AS MATERIALIZED (SELECT id FROM mailbox_webhooks WHERE workspace_id=${job.workspaceId} AND id=${String(payload.hook)} AND NOT paused FOR SHARE),
     page AS (SELECT d.id FROM mailbox_webhook_deliveries d JOIN hook ON hook.id=d.webhook_id WHERE d.workspace_id=${job.workspaceId} AND d.status='paused' AND d.created_at>=now()-interval '30 days' ORDER BY d.id LIMIT 100 FOR UPDATE OF d),
     resumed AS (UPDATE mailbox_webhook_deliveries d SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() FROM page WHERE d.id=page.id RETURNING d.*)
-    INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`);
+    INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',r.workspace_id,jsonb_build_object('deliveryId',r.id,'generation',r.generation),greatest(r.attempt_count,coalesce(a.attempts,0))
+    FROM resumed r LEFT JOIN mail_action_attempts a ON a.workspace_id=r.workspace_id AND a.delivery_id=r.id`);
   if(result.rowCount===100)throw new JobDeferred(new Date().toISOString());
 };
 export const mailboxEventJobs: Record<string, JobHandler> = { 'mailbox.webhook': retryDatabaseFailures(webhookJob),'mailbox.fanout':fanout,'mailbox.resumeDeliveries':retryDatabaseFailures(resumeDeliveries) };
