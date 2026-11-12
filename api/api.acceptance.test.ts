@@ -8428,12 +8428,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // The warning: one operator alert for the strongest line, once a day however often the check runs.
       const [alert, ...more] = (await db.query(`SELECT payload FROM jobs WHERE workspace_id=$1 AND type='reputation.alert'`, [f.wid])).rows.map(r => r.payload);
       assert.deepEqual([alert.code, alert.line, alert.scope, Number(alert.complaints), more.length], ['HOSTED_EXEMPT_OVER_LINE', 'complaints', 'all', 10, 0]);
+      // The ladder still computes the standing, and stops at warn: owners get the notice and the webhook is published.
+      const standing = (await db.query('SELECT step,reasons FROM sender_standing WHERE workspace_id=$1', [f.wid])).rows[0];
+      assert.deepEqual([standing.step, standing.reasons.some((r: Json) => r.step === 'pause')], ['warn', true]);
+      const warnings = (await db.query(`SELECT type,payload FROM jobs WHERE workspace_id=$1 AND type IN ('standing.notify','operation.publish')`, [f.wid])).rows;
+      assert.deepEqual(warnings.map(j => j.type === 'standing.notify' ? 'owner notice' : j.payload.event.type + ':' + j.payload.event.data.step).sort(), ['account.standing.changed:warn', 'owner notice']);
       await t.test('the alert reaches the operators\' Slack channel', async t => {
         const posted: string[] = [];
         t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => { assert.equal(String(url), 'https://hooks.slack.invalid/fixture'); posted.push(JSON.parse(String(init!.body)).text); return new Response('ok'); });
         runtime.config.reputationAlertUrl = 'https://hooks.slack.invalid/fixture';
         try { await reputationAlertJobs['reputation.alert'](runtime, alert, { id: 'job_alert', workspaceId: f.wid, attempts: 1 }); } finally { runtime.config.reputationAlertUrl = undefined; }
-        assert.match(posted[0]!, new RegExp(`First-party workspace over the spam complaints line.*${f.wid}[\\s\\S]*Bane did not pause its sending`));
+        assert.match(posted[0]!, new RegExp(`First-party workspace over the spam complaints line.*${f.wid}[\\s\\S]*Bane did not pause its sending[\\s\\S]*/operator/workspaces/${f.wid}`));
       });
       // Only an operator pauses it, and only with a reason.
       await assert.rejects(pauseHosted(db, [f.wid, '--reason', 'short']), /at least 10 characters/);

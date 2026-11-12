@@ -38,9 +38,9 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
   const wid = change.workspaceId;
   await db.execute(sql`INSERT INTO sender_standing(workspace_id) SELECT workspace_id FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' ON CONFLICT DO NOTHING`);
   // A pause that is resuming (waiting for its SES tenants to be enabled again) counts as lifted: a new pause re-arms it.
-  const [row] = (await db.execute<StandingRow & { paused_at: string | null; held: boolean; connection_id: string }>(sql`SELECT s.*,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,
-    pc.marketing_held_at IS NOT NULL AS held,pc.id AS connection_id FROM sender_standing s
-    JOIN provider_connections pc ON pc.workspace_id=s.workspace_id AND pc.kind='shared' WHERE s.workspace_id=${wid} FOR UPDATE OF s,pc`)).rows;
+  const [row] = (await db.execute<StandingRow & { paused_at: string | null; held: boolean; exempt: boolean; connection_id: string }>(sql`SELECT s.*,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,
+    pc.marketing_held_at IS NOT NULL AS held,w.exempt_hosted_quotas AS exempt,pc.id AS connection_id FROM sender_standing s
+    JOIN provider_connections pc ON pc.workspace_id=s.workspace_id AND pc.kind='shared' JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=${wid} FOR UPDATE OF s,pc`)).rows;
   if (!row) return null;
   if (change.expectVersion !== undefined && change.expectVersion !== row.version) throw new ApiError(412, 'STANDING_VERSION_CHANGED', `The standing changed since version ${change.expectVersion} (now ${row.version}). Reload and try again.`);
   const now = new Date(), at = now.toISOString(), previousStep = row.step;
@@ -74,7 +74,7 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
   }
   // A marketing hold placed by the hourly check before the standing shipped ends here: a restrict or pause now holds
   // marketing instead, and a release or resume lifts it with the step.
-  if (row.held && (stepRank(step) >= stepRank('restrict') || change.release || change.resume)) await db.execute(sql`UPDATE provider_connections SET marketing_held_at=NULL,marketing_hold_reason=NULL WHERE id=${row.connection_id}`);
+  if (row.held && (row.exempt || stepRank(step) >= stepRank('restrict') || change.release || change.resume)) await db.execute(sql`UPDATE provider_connections SET marketing_held_at=NULL,marketing_hold_reason=NULL WHERE id=${row.connection_id}`);
   const actor = { kind: change.actor.kind, ...(change.actor.id ? { id: change.actor.id } : {}), via: change.actor.via ?? (change.actor.kind === 'system' ? 'job' : 'dashboard') };
   const details = { ...change.details, ...(change.pause ? { paused: true } : {}),
     ...(change.resume ? { resumed: { percent: change.resume.percent, marketingHours: change.resume.marketingHours, limitBefore: resumed?.base ?? null, restoreCap: resumed?.restore_cap ?? null, waitsForTenants: resumed?.pending ?? false } } : {}),
@@ -99,7 +99,7 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
 }
 
 // ---------- the job ----------
-type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; screened_workspace: boolean; accepted_total: number;
+type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number;
   days: DayEvidence[] | null; domains: DomainAuth[] | null; win: { day: Window; week: Window } | null; screen: { screened: number; rejected: number } | null };
 const MAIL_ACCEPTED = sql`e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)`;
 /** Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). */
@@ -158,7 +158,7 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
         OR EXISTS (SELECT FROM provider_connections pc WHERE pc.workspace_id=s.workspace_id AND pc.kind='shared' AND (pc.marketing_held_at IS NOT NULL OR pc.paused_at IS NOT NULL)))`}
       ORDER BY s.computed_at NULLS FIRST LIMIT ${limit})
     SELECT c.*,pc.id AS connection_id,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,pc.pause_reason,
-      pc.marketing_held_at IS NOT NULL AS legacy_hold,pc.marketing_hold_reason,${screened} AND pc.kind='shared' AS screened_workspace,
+      pc.marketing_held_at IS NOT NULL AS legacy_hold,pc.marketing_hold_reason,(SELECT exempt_hosted_quotas FROM workspaces WHERE id=c.workspace_id) AS exempt,${screened} AND pc.kind='shared' AS screened_workspace,
       (SELECT coalesce(sum(accepted),0)::int FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id) AS accepted_total,
       (SELECT json_agg(d ORDER BY d.day) FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id AND d.day>=(now() AT TIME ZONE 'UTC')::date-180) AS days,
       (SELECT json_agg(json_build_object('name',name,'dkim',identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
@@ -216,8 +216,14 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     if (row.paused_at && next.step !== 'pause') next = { step: 'pause', reasons: [{ code: 'ACCOUNT_PAUSED', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'pause', message: row.pause_reason ?? 'Sending is paused.' }], since: row.paused_at, clearSince: null, pauseKind: 'full' };
     else if (!row.paused_at && prev.step === 'pause' && next.step === 'pause') next = { step: 'warn', reasons: prev.reasons, since: now.toISOString(), clearSince: null, pauseKind: null };
     // A bounce-only marketing hold from before the standing shipped becomes a restrict, so the ladder releases it.
-    if (row.legacy_hold && stepRank(next.step) < stepRank('restrict')) next = { step: 'restrict', reasons: [...next.reasons.filter(r => r.step !== 'restrict'), { code: 'MARKETING_HELD', metric: 'bounces', value: 0, count: 0, threshold: 0, minimum: 0, window: '24h', step: 'restrict',
+    if (row.legacy_hold && !row.exempt && stepRank(next.step) < stepRank('restrict')) next = { step: 'restrict', reasons: [...next.reasons.filter(r => r.step !== 'restrict'), { code: 'MARKETING_HELD', metric: 'bounces', value: 0, count: 0, threshold: 0, minimum: 0, window: '24h', step: 'restrict',
       message: row.marketing_hold_reason ?? 'Marketing was held after a high hard-bounce rate.' }], since: now.toISOString(), clearSince: null, pauseKind: null };
+    // An exempt (first-party) workspace is never held or paused by the ladder: its standing stops at warn (owners are
+    // emailed, account.standing.changed is published) and the operators are alerted; only an operator pauses it.
+    if (row.exempt && !row.paused_at && stepRank(next.step) > stepRank('warn')) {
+      await alertExempt(runtime, row.workspace_id, next, input);
+      next = { ...next, step: 'warn', pauseKind: null, ...(prev.step === 'warn' ? { since: prev.since } : {}) };
+    }
     const strikeCapped = !!row.strike_until && Date.parse(row.strike_until) > now.getTime();
     const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, currentLimit: row.daily_limit, strikeCapped });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
@@ -258,6 +264,17 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
   // Any workspace whose SES tenants differ from what Bane wants (a missed job, a tenant ready after the pause) is queued.
   if (!options.only) await runtime.db.execute(queueTenantStatus(tenantStatusDrift()));
   return { evaluated: rows.length, changed };
+}
+
+const LINE: Record<Reason['metric'], string> = { complaints: 'complaints', screen: 'screen', bounces: 'bounces', marketing_bounces: 'bounces', transactional_bounces: 'bounces', external: 'external' };
+/** An exempt workspace crossed a restrict or pause line: one operator alert per line per UTC day (reputation.alert). */
+async function alertExempt(runtime: Runtime, wid: string, next: { step: Step; reasons: Reason[] }, input: LadderInput) {
+  const top = [...next.reasons].sort((a, b) => stepRank(b.step) - stepRank(a.step))[0];
+  const line = top ? LINE[top.metric] : 'reputation', scope = next.step === 'pause' ? 'all' : 'marketing';
+  const { rows } = await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('exempt-over-line:'||${wid}::text||':'||${line}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${wid},
+    ${JSON.stringify({ code: 'HOSTED_EXEMPT_OVER_LINE', line, scope, step: next.step, reasons: next.reasons.map(r => r.code), sends: input.day.accepted, bounces: input.day.bounces, complaints: input.day.complaints, rejected: input.rejected, screened: input.screened })}::jsonb)
+    ON CONFLICT(id) DO NOTHING RETURNING id`);
+  if (rows.length) log('error', { code: 'HOSTED_EXEMPT_OVER_LINE', workspaceId: wid, line, step: next.step, held: false });
 }
 
 /** Queued mail of a workspace paused for 72 hours is canceled (ACCOUNT_PAUSED); expired operator overrides end. */
@@ -313,7 +330,10 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
     ...(pause ? { step: 'pause', pauseKind: 'full', pause: { message: 'Hosted sending paused: AWS paused this workspace’s SES tenant. Bane reviews it with AWS before sending resumes.' },
       reasons: [{ code: 'SES_TENANT_PAUSED', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'pause', message: event.cause ?? 'AWS paused the SES tenant.' }] } : {}),
     details: { tenant: event.arn, origin: event.origin, status: event.status, cause: event.cause } }));
-  log(pause ? 'warn' : 'info', { code: 'SES_TENANT_STATUS', workspaceId: owner.workspace_id, origin: event.origin, status: event.status, paused: pause });
+  log(pause ? 'error' : 'info', { code: 'SES_TENANT_STATUS', workspaceId: owner.workspace_id, origin: event.origin, status: event.status, paused: pause });
+  // AWS's pause applies to every workspace, exempt (first-party) ones included: alert the operators loudly, once per tenant a day.
+  if (pause) await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'tenant-paused:'||${event.arn}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${owner.workspace_id},
+    jsonb_build_object('code','SES_TENANT_PAUSED','tenant',${event.arn}::text,'cause',${event.cause}::text,'exempt',w.exempt_hosted_quotas) FROM workspaces w WHERE w.id=${owner.workspace_id} ON CONFLICT(id) DO NOTHING`);
 }
 
 // ---------- owner emails ----------

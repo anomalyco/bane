@@ -113,6 +113,7 @@ const deliver: JobHandler = async (runtime, payload, job) => {
     const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:`SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.`}),redirect:'manual',signal:AbortSignal.timeout(5000)});await r.body?.cancel();if(!r.ok)throw new ApiError(503,'REPUTATION_ALERT_FAILED','Quota alert delivery failed.',undefined,true);return;
   }
   if (payload.code === 'HOSTED_EXEMPT_OVER_LINE') return post(url, exemptAlertText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl));
+  if (payload.code === 'SES_TENANT_PAUSED') return post(url, tenantPausedText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl));
   const { region, metric, level, previous, value } = payload;
   if (typeof region !== 'string' || !(metric === 'bounceRate' || metric === 'complaintRate') || !LEVELS.includes(level as Level) || !LEVELS.includes(previous as Level) || typeof value !== 'number') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid reputation alert job.');
   const text = reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl });
@@ -130,6 +131,12 @@ export function exemptAlertText(p: Record<string, unknown>, publicUrl: string) {
   const n = (v: unknown) => Number(v ?? 0).toLocaleString('en-US');
   return `:rotating_light: *First-party workspace over the ${lineText[String(p.line)] ?? 'reputation'} line* · ${String(p.workspaceId ?? '')}\n`
     + `${n(p.bounces)} hard bounces and ${n(p.complaints)} complaints on ${n(p.sends)} sends; ${n(p.rejected)} of ${n(p.screened)} screened rejected. `
-    + `Bane did not ${p.scope === 'all' ? 'pause its sending' : 'hold its marketing'}: the workspace is exempt. Review it now; only an operator pauses it.\n<${publicUrl}|Bane>`;
+    + `Bane did not ${p.scope === 'all' ? 'pause its sending' : 'hold its marketing'}: the workspace is exempt. Review it now; only an operator pauses it.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in Bane>`;
+}
+const operatorPage = (publicUrl: string, wid: unknown) => `${publicUrl.replace(/\/$/, '')}/operator/workspaces/${encodeURIComponent(String(wid ?? ''))}`;
+/** AWS paused a workspace's SES tenant: sending stops whatever Bane decides, so a person has to look now. */
+export function tenantPausedText(p: Record<string, unknown>, publicUrl: string) {
+  return `:rotating_light: *AWS paused an SES tenant*${p.exempt ? ' of a first-party (exempt) workspace' : ''} · ${String(p.workspaceId ?? '')}\n`
+    + `${String(p.tenant ?? '')}: ${String(p.cause ?? 'no cause given')}. Bane paused the workspace to match; only an operator resumes it, after AWS reinstates the tenant.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in Bane>`;
 }
 export const reputationAlertJobs = { [JOB]: deliver };
