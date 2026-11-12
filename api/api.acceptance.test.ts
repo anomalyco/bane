@@ -283,6 +283,21 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
+  const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
+  await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
+  for(const client of [writer,ddl])await client.query(`SET search_path TO ${schema}`);
+  await writer.query('CREATE TABLE mail_messages(id text PRIMARY KEY)');
+  const install=await readFile(new URL('./migrations/158_protocol_preview.sql',import.meta.url),'utf8');
+  const validate=await readFile(new URL('./migrations/159_validate_protocol_preview.sql',import.meta.url),'utf8');
+  await writer.query("BEGIN; INSERT INTO mail_messages VALUES('one')");
+  await ddl.query('BEGIN');await assert.rejects(ddl.query(install),{code:'55P03'});await ddl.query('ROLLBACK');
+  await writer.query('COMMIT');await ddl.query('BEGIN');await ddl.query(install);await ddl.query('COMMIT');
+  const valid=async()=>(await ddl.query("SELECT convalidated FROM pg_constraint WHERE conrelid='mailgw_previews'::regclass AND contype='f'")).rows[0].convalidated;
+  assert.equal(await valid(),false);
+  await writer.query("BEGIN; INSERT INTO mail_messages VALUES('two')");
+  await ddl.query('BEGIN');await ddl.query(validate);await ddl.query('COMMIT');assert.equal(await valid(),true);
+});
 test('mail gateway: exact wire projections distinguish complete objects from header-only data',async(t)=>{
   const {previewPage}=await import('./src/protocol-preview.js');
   const runtime=fixtureWorker?.runtime;if(!runtime)return t.skip('requires disposable loopback object storage');
