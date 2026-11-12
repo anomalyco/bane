@@ -164,6 +164,10 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     (1, &["pause W", "ingest m1 a", "run K m1:W", "unpause W", "run K m1:W", "reply K 200"]),
     (1, &["pause S", "rituals slack", "ingest m1 b", "run K m1:S", "unpause S", "run K m1:S", "reply K 200"]),
     (1, &["pause U", "ingest m1 b", "run K m1:U", "unpause U", "run K m1:U", "reply K 200"]),
+    // Plain event subscriptions bypassed the fence: paused after the claim, a stale claim, the breaker.
+    (1, &["ingest m1 b", "claim K m1:U", "pause U", "go K"]),
+    (1, &["ingest m1 b", "claim K m1:U", "expire m1:U", "run L m1:U", "reply L 410", "go K"]),
+    (1, &["ingest m1 b", "run K m1:U", "reply K timeout", "ingest m2 b", "run K m2:U", "reply K timeout", "ingest m3 b", "run K m3:U", "reply K timeout", "run K m1:U"]),
     // A delivery held past retention was deleted silently; it is dead-lettered with a reason.
     (1, &["ingest m1 a", "pause W", "run K m1:W", "age m1:W", "prune", "prune"]),
     // Boundary: backoff 15 s x 4^n reaches its 12 h cap at the seventh attempt (retryAttempts 9).

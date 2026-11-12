@@ -10991,6 +10991,50 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{
+    // tear/delivery witnesses: ingest m1 b, claim K m1:U, pause U, go K; ingest m1 b, claim K m1:U, expire m1:U,
+    // run L m1:U, reply L 410, go K; three timeouts, then run K m1:U (the breaker defers, attempts kept).
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs,inboundHookClaim}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js'),{sql}=await import('drizzle-orm');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      const sub=ok(await local('POST','/v1/inbound/webhooks',{url:'https://example.com/plain-sub',eventTypes:['message.received']}),201);
+      let seq=0;
+      const delivery=async(id:string)=>{await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload) VALUES($1,$2,$3,$4,$5)',[id,wid,sub.id,++seq,{id:'mev_'+id,type:'message.received',messageId:'msg_'+id,data:{}}]);return id;};
+      const claim=async(id:string)=>(await runtime.db.execute<import('./src/core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT 'job_plain'::text AS id,${wid}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify({deliveryId:id})}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0]!;
+      const handle=(id:string,webhook?:import('./src/core.js').ClaimedWebhook,generation?:number)=>mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id,...(generation===undefined?{}:{generation})},{id:'job_plain',workspaceId:wid,attempts:1,...(webhook?{webhook}:{})});
+      const state=async(id:string)=>(await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[id])).rows[0];
+      const transport=runtime.webhookFetch;let posts=0,reply:number|'timeout'=204;
+      runtime.webhookFetch=async()=>{posts++;if(reply==='timeout')throw Object.assign(new Error('synthetic timeout'),{name:'TimeoutError'});return {status:reply};};
+      try{
+        // Paused between the claim and the send: parked, then sent once on unpause.
+        const paused=await delivery('mwd_plain_paused'),claimed=await claim(paused);
+        ok(await local('PATCH',`/v1/inbound/webhooks/${sub.id}`,{paused:true}));
+        await handle(paused,claimed);
+        assert.equal(posts,0);assert.deepEqual(await state(paused),{status:'paused',last_error:'ENDPOINT_PAUSED'});
+        ok(await local('PATCH',`/v1/inbound/webhooks/${sub.id}`,{paused:false}));
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:sub.id},{id:'job_plain_resume',workspaceId:wid,attempts:1});
+        await handle(paused,undefined,1);
+        assert.equal(posts,1);assert.equal((await state(paused)).status,'delivered');
+        // A stale claim: another runner settled it (410) meanwhile, so the stale runner sends nothing.
+        const stale=await delivery('mwd_plain_stale'),old=await claim(stale);
+        reply=410;await assert.rejects(handle(stale));
+        assert.equal(posts,2);assert.equal((await state(stale)).status,'failed');
+        reply=204;await handle(stale,old);
+        assert.equal(posts,2);
+        // Behind the timeout breaker: the deferral keeps the three attempts already spent.
+        await delivery('mwd_plain_breaker');await db.query("DELETE FROM jobs WHERE workspace_id=$1",[wid]);
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_plain_breaker','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_plain_breaker\"}')",[wid]);
+        const due=()=>db.query("UPDATE jobs SET available_at=now() WHERE id='job_plain_breaker'");
+        reply='timeout';
+        for(let i=0;i<3;i++){await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');}
+        assert.equal(posts,5);
+        await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,5);
+        assert.deepEqual((await db.query("SELECT status,attempts,last_error FROM jobs WHERE id='job_plain_breaker'")).rows[0],{status:'pending',attempts:3,last_error:null});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
     await simulatedSesFixture(t,async({runtime,local,db})=>{
       const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
