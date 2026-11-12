@@ -8305,6 +8305,40 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: when SES stops answering, the dispatcher holds queued mail instead of failing all of it as acceptance_unknown', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local}) => {
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js');
+      const wid=runtime.config.workspaceId, account='111122223333', domain='outage.example';
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[domain,wid]);
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1',[wid]);
+      let down=true,calls=0;const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
+        calls++; if (down) throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ECONNREFUSED'}}); return {MessageId:unique('fake-ses')};
+      });
+      ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:50},(_,i)=>mail({from:`no-reply@${domain}`,to:`user${i}@example.net`,subject:'Verify your email'}))}),202);
+      const statuses=async()=>Object.fromEntries((await db.query(`SELECT status,count(*)::int n FROM sending_emails WHERE workspace_id=$1 GROUP BY 1`,[wid])).rows.map(r=>[r.status,r.n]));
+      const gate=initialGate();
+      const report=await runDispatcher(runtime,{region:REGION,accountId:account,gate});
+      // Ambiguous calls are never replayed, so the ones in flight stay unknown; the shard stops, and what it had
+      // already claimed goes back to the queue until SES answers.
+      const lost=calls;
+      assert.ok(lost>=1 && lost<=6,`only the calls in flight reach SES (${lost})`);
+      assert.deepEqual(await statuses(),{acceptance_unknown:lost,queued:50-lost});
+      assert.ok(report.paceRetryAt!>Date.now()+10000,'the shard waits before probing again');
+      const held=(await db.query(`SELECT count(*)::int n,bool_and(scheduled_at>now()+interval '10 seconds') later FROM sending_emails WHERE workspace_id=$1 AND error_code='SES_UNAVAILABLE'`,[wid])).rows[0];
+      assert.ok(held.n>0 && held.later,'claimed mail is requeued after the outage window');
+      // SES answers again once the window has passed: the held mail is sent and the probe ends the outage.
+      down=false; gate.outageUntil=gate.brakeUntil=gate.nextAllowedAt=Date.now();
+      await db.query(`UPDATE sending_emails SET scheduled_at=now() WHERE workspace_id=$1 AND status='queued'`,[wid]);
+      for (let i=0;i<5 && (await statuses()).queued;i++) await runDispatcher(runtime,{region:REGION,accountId:account,gate});
+      assert.deepEqual(await statuses(),{acceptance_unknown:lost,accepted:50-lost});
+      assert.equal(gate.outageStreak,undefined);
+    });
+  });
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
     // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
     await simulatedSesFixture(t,async ({runtime,local,db})=>{
