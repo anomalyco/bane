@@ -189,6 +189,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
     assert.ok(branch, `${name}.${action}`); assert.deepEqual(branch.required ?? [], catalog.get(operation)!.tool.inputSchema.required ?? []);
   }
   for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
+  // Campaign delivery controls are owner/admin only; MCP listings follow REST, so a member's grant is never offered them.
+  for (const name of ['sendCampaign', 'scheduleCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'cancelCampaign']) assert.equal(catalog.get(name)?.ownerOnly, true, name);
 });
 test('rituals: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
   const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const source=(s:string)=>`export default function route(email,ctx){\n${s}\n}`;
@@ -2241,6 +2243,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       });
       error(await local('PUT', `/v1/regions/${memberRegions.defaultRegion}`, { enabled: true }, guest), 403, 'PERMISSION_DENIED');
       error(await local('POST', '/v1/campaigns/nope/send', { revision: 1 }, guest), 403, 'PERMISSION_DENIED');
+      // PR #86 review: a member could unschedule an owner's approved campaign (back to a draft, its frozen audience
+      // dropped). Unschedule and reschedule are owner/admin delivery controls, like send and cancel, in REST and MCP.
+      const ownerCampaign = ok(await local('POST', '/v1/campaigns', { name: unique('owner-schedule') }, a.cookie), 201), ownerReview = unique('review');
+      await pool.query("INSERT INTO sending_campaign_reviews (id, workspace_id, campaign_id, revision, draft, content_hash) VALUES ($1,$2,$3,$4,$5::jsonb,'synthetic')", [ownerReview, a.org.id, ownerCampaign.id, ownerCampaign.revision, JSON.stringify(ownerCampaign.draft)]);
+      await pool.query("UPDATE sending_campaigns SET state='scheduled', review_id=$3, total=1, prepared=1, scheduled_at=now()+interval '1 day' WHERE workspace_id=$1 AND id=$2", [a.org.id, ownerCampaign.id, ownerReview]);
+      cleanup(t, async () => { await pool.query('DELETE FROM sending_campaigns WHERE workspace_id=$1 AND id=$2', [a.org.id, ownerCampaign.id]); await pool.query('DELETE FROM sending_campaign_reviews WHERE id=$1', [ownerReview]); });
+      error(await local('POST', `/v1/campaigns/${ownerCampaign.id}/unschedule`, {}, guest), 403, 'PERMISSION_DENIED');
+      error(await local('POST', `/v1/campaigns/${ownerCampaign.id}/reschedule`, { scheduledAt: new Date(Date.now() + 7_200_000).toISOString() }, guest), 403, 'PERMISSION_DENIED');
+      const untouched = ok(await local('GET', `/v1/campaigns/${ownerCampaign.id}`, undefined, a.cookie));
+      assert.deepEqual({ state: untouched.state, review: (await pool.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [ownerCampaign.id])).rows[0].review_id }, { state: 'scheduled', review: ownerReview }, 'The owner\'s schedule and frozen audience stay.');
       const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
       error(await local('GET', `/v1/contacts/${contact.id}`, undefined, b.cookie), 404);
       const { originAllowed } = await import('./src/sending.js');
@@ -3724,6 +3736,48 @@ describe('Lists, compound segments, imports and exports', () => {
     assert.equal(report.status, 'committed');
     assert.deepEqual(report.errors.map((row: Json) => ({ row: row.row, field: row.field })), preview.errors.map((row: Json) => ({ row: row.row, field: row.field })), 'The committed import must retain a downloadable per-row error report.');
   });
+
+  test('an attested import or bulk change records consent only for contacts without a decision', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('consent-import') });
+    const optedOut = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, optedOut.id, 'unsubscribed'));
+    const subscribed = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, subscribed.id, 'subscribed'));
+    const fresh = [address(), address()];
+    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${[optedOut.email, subscribed.email, ...fresh].join('\n')}\n`, listId: list.id, mapping: { email: 'email' } }), 201);
+    const missing = error(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed' } }), 422, 'VALIDATION_FAILED');
+    assert.equal(missing.field, 'consent.evidence');
+    assert.match(missing.message, /consent\.evidence is required/);
+    const extra = error(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed', evidence: 'x', source: 'csv' } }), 422, 'VALIDATION_FAILED');
+    assert.equal(extra.field, 'consent.source');
+    assert.match(extra.message, /consent\.source is not a supported field/);
+    const committed = ok(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed', evidence: 'Opted in at checkout', policyVersion: '2026-11' } }));
+    assert.equal(committed.imported, 4);
+    assert.equal(committed.subscribed, 2, 'Only the two contacts without a decision are subscribed.');
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed', evidence: 'Again' } })).subscribed, 0, 'A repeated commit changes nothing.');
+    const members = page(await http('GET', `/v1/lists/${list.id}/members`, key.secret));
+    for (const row of members) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${row.id}`, key.secret), [200, 404]); });
+    assert.equal(members.find(row => row.id === optedOut.id)?.marketingConsent, 'unsubscribed', 'An import never overrides an opt-out.');
+    assert.equal(page(await http('GET', `/v1/contacts/${subscribed.id}/consent`, key.secret)).length, 1, 'An existing subscription is not recorded twice.');
+    for (const email of fresh) {
+      const row = members.find(member => member.email === email)!;
+      assert.equal(row.marketingConsent, 'subscribed');
+      const [event] = page(await http('GET', `/v1/contacts/${row.id}/consent`, key.secret));
+      assert.deepEqual({ status: event.status, source: event.source, evidence: event.evidence, policyVersion: event.policyVersion }, { status: 'subscribed', source: 'import', evidence: 'Opted in at checkout', policyVersion: '2026-11' });
+    }
+    // Without an attestation an import leaves new contacts undecided; a bulk change can record consent with evidence later.
+    const later = address();
+    const second = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${later}\n`, listId: list.id, mapping: { email: 'email' } }), 201);
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${second.id}/commit`, key.secret)).subscribed, 0);
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement: `UPDATE contacts SET consent = 'subscribed' WHERE list = '${list.id}' AND consent = 'unknown'` }), 201);
+    assert.equal(plan.matched, 1);
+    assert.equal(ok(await http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id, evidence: 'Signed up at the event' })).affected, 1);
+    const [laterContact] = page(await http('GET', `/v1/contacts?email=${encodeURIComponent(later)}`, key.secret));
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${laterContact.id}`, key.secret), [200, 404]); });
+    const [bulk] = page(await http('GET', `/v1/contacts/${laterContact.id}/consent`, key.secret));
+    assert.deepEqual({ status: bulk.status, source: bulk.source, evidence: bulk.evidence }, { status: 'subscribed', source: 'audienceql', evidence: 'Signed up at the event' });
+  });
 });
 
 describe('Import property boundaries', () => {
@@ -3989,6 +4043,7 @@ describe('Private attachment assets and campaign revisions', () => {
     const failed = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
     assert.equal(failed.state, 'failed');
     assert.equal(failed.delivery.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    assert.equal(failed.delivery.error.message, 'A recipient has no value for {{missing}} (MISSING_TEMPLATE_VARIABLE). Add a fallback value for missing and send again.', 'The failure names the fix, never the contact.');
     assert.equal(failed.delivery.prepared, 0);
     assert.equal(failed.counts.total, 0);
     assert.equal(failed.url, invalid.url, 'A failed campaign opens in the editor again.');
@@ -4079,6 +4134,60 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(canceled.inFlight, 0);
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).state, 'canceled');
     error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, key.secret, {}), 409, 'CAMPAIGN_NOT_SENDING');
+  });
+
+  test('a scheduled campaign moves to another time or back to an editable draft until it starts sending', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('reschedule-list') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Ada' });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    error(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() - 1000).toISOString() }), 422, 'INVALID_SCHEDULE');
+    const later = new Date(Date.now() + 7_200_000).toISOString();
+    const moved = ok(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: later }));
+    assert.equal(moved.state, 'scheduled');
+    assert.equal(Date.parse(moved.scheduledAt), Date.parse(later));
+    assert.equal(moved.delivery.total, 1, 'Rescheduling keeps the frozen audience.');
+    assert.equal(moved.revision, campaign.revision);
+    // Back to a draft: nothing was sent, the snapshot and reservation are released, and the draft is editable again.
+    const draft = ok(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}));
+    assert.equal(draft.state, 'draft');
+    assert.equal(draft.scheduledAt, null);
+    assert.equal(draft.delivery, null);
+    assert.equal(draft.counts.total, 0);
+    assert.equal(draft.revision, campaign.revision);
+    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}/state`, key.secret)).state, 'draft');
+    const edited = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: draft.revision, draft: { ...draft.draft, subject: 'Fixed typo {{firstName}}' } }));
+    assert.equal(edited.state, 'draft');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    // Schedule again, then move it to two seconds from now: the waiting run is woken and sends at the new, earlier time.
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: edited.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 2000).toISOString() }));
+    const sent = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
+    assert.equal(sent.state, 'done');
+    assert.equal(sent.counts.total, 1);
+    error(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_NOT_SCHEDULED');
+  });
+
+  test('missing personalization names the placeholder and the fallback that fixes it', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('personalize-list') });
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { subject: 'Hello', html: '<p>Hi {{name}}</p>', defaults: {} });
+    const test = error(await http('POST', `/v1/campaigns/${campaign.id}/test`, key.secret, { to: address() }), 422, 'MISSING_TEMPLATE_VARIABLE');
+    assert.match(test.message, /\{\{name\}\}/);
+    assert.match(test.message, /fallback/);
+    assert.doesNotMatch(test.message, /test-recipient/);
+    assert.equal(test.field, 'data.name');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/test`, key.secret, { to: address(), data: { name: 'Sample' } }), 202);
+    const withFallback = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<p>Hi {{name}}</p>', defaults: { name: 'there' } } }));
+    ok(await http('POST', `/v1/campaigns/${withFallback.id}/test`, key.secret, { to: address() }), 202);
   });
 });
 
@@ -12597,6 +12706,75 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await local('POST', `/v1/campaigns/${campaign.id}/pause`, {}), 409, 'CAMPAIGN_NOT_SENDING');
       assert.equal(page(await local('GET', `/v1/emails?campaignId=${campaign.id}`)).length, 0);
       assert.equal((await jobs('email.dispatch')).length, 0);
+    });
+  });
+
+  // PR #86 review: rescheduling raced the campaign's one run job. Both PoCs drive the real handler; the first also the
+  // real processJobs claim and settlement, with a session-local jobs table so no other scenario's job is claimed.
+  async function scheduledCampaign(local: (method: string, path: string, body?: Json) => Promise<Reply>, run: (type: string) => Promise<void>, inMs: number) {
+    const list = ok(await local('POST', '/v1/lists', { name: unique('reschedule-race') }), 201);
+    const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+    ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'acceptance-fixture', evidence: 'Synthetic reserved-domain fixture.' }));
+    ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+    const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('reschedule-race'), from: 'sender@example.com', subject: 'Scheduled', html: '<p>Scheduled content.</p>', audience: { listId: list.id } }), 201);
+    ok(await local('POST', `/v1/campaigns/${campaign.id}/schedule`, { revision: campaign.revision, scheduledAt: new Date(Date.now() + inMs).toISOString() }), 202);
+    await run('campaign.run');
+    assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'scheduled');
+    return campaign as Json;
+  }
+  test('an earlier reschedule wins over a run that already decided to wait for the old time', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const [{ processJobs, JobDeferred }, { jobHandlers }, { sql }] = await Promise.all([import('./src/jobs.js'), import('./src/sending.js'), import('drizzle-orm')]);
+      const campaign = await scheduledCampaign(local, run, 3_600_000), jobId = `campaign.run:${campaign.id}`;
+      await runtime.db.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);
+      try {
+        await runtime.db.execute(sql`INSERT INTO jobs SELECT * FROM public.jobs WHERE id = ${jobId}`);
+        await runtime.db.execute(sql`UPDATE jobs SET available_at = now() - interval '1 second' WHERE id = ${jobId}`);
+        const token = (await db.query('SELECT payload FROM jobs WHERE id = $1', [jobId])).rows[0].payload.run;
+        // The handler reads the old time and throws its deferral; the owner moves the send earlier before it settles.
+        const earlier = new Date(Date.now() + 1_800_000).toISOString();
+        let moved: Json | undefined;
+        const racing: import('./src/core.js').JobHandler = async (rt, payload, job) => {
+          try { await jobHandlers['campaign.run']!(rt, payload, job); }
+          catch (cause) { if (cause instanceof JobDeferred && !moved) moved = ok(await local('POST', `/v1/campaigns/${campaign.id}/reschedule`, { scheduledAt: earlier })); throw cause; }
+        };
+        assert.equal(await processJobs(runtime, { 'campaign.run': racing }, 1, 1), 1);
+        assert.equal(Date.parse(moved!.scheduledAt), Date.parse(earlier));
+        const requeued = (await db.query('SELECT status, available_at, payload FROM jobs WHERE id = $1', [jobId])).rows[0];
+        assert.equal(requeued.status, 'pending');
+        assert.notEqual(requeued.payload.run, token, 'The reschedule requeued the run with a fresh token, so the old deferral could not settle.');
+        assert.ok(new Date(requeued.available_at).getTime() <= Date.parse(earlier), `The run wakes by the new time, not the old one (job at ${new Date(requeued.available_at).toISOString()}).`);
+        // The fresh run waits for exactly the new, earlier time.
+        assert.equal(await processJobs(runtime, { 'campaign.run': jobHandlers['campaign.run']! }, 1, 1), 1);
+        const waiting = (await db.query('SELECT status, available_at FROM jobs WHERE id = $1', [jobId])).rows[0];
+        assert.deepEqual({ status: waiting.status, at: new Date(waiting.available_at).getTime() }, { status: 'pending', at: Date.parse(earlier) });
+      } finally { await runtime.db.execute(sql`DROP TABLE IF EXISTS pg_temp.jobs`); }
+    });
+  });
+  test('a run that found the old time due cannot start sending after a later reschedule', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const [{ JobDeferred }, { jobHandlers }, { PgDialect }] = await Promise.all([import('./src/jobs.js'), import('./src/sending.js'), import('drizzle-orm/pg-core')]);
+      const campaign = await scheduledCampaign(local, run, 3_600_000), jobId = `campaign.run:${campaign.id}`;
+      // The send time has come: the run will find it due and move scheduled -> sending.
+      await db.query("UPDATE sending_campaigns SET scheduled_at = now() - interval '1 second' WHERE id = $1", [campaign.id]);
+      const later = new Date(Date.now() + 7_200_000).toISOString(), dialect = new PgDialect();
+      let moved: Json | undefined;
+      // Pause the run right before its scheduled -> sending statement and reschedule two hours later through REST.
+      const paused = new Proxy(runtime.db, { get(target, property) {
+        const value = Reflect.get(target, property);
+        if (property !== 'execute') return typeof value === 'function' ? value.bind(target) : value;
+        return async (query: Parameters<typeof target.execute>[0]) => {
+          const text = typeof query === 'object' && 'getSQL' in query ? dialect.sqlToQuery(query.getSQL()) : null;
+          if (!moved && text?.sql.startsWith('UPDATE sending_campaigns SET state=') && text.params[0] === 'sending' && text.params.includes('scheduled')) moved = ok(await local('POST', `/v1/campaigns/${campaign.id}/reschedule`, { scheduledAt: later }));
+          return target.execute(query);
+        };
+      } });
+      const payload = (await db.query('SELECT payload FROM jobs WHERE id = $1', [jobId])).rows[0].payload;
+      await assert.rejects(jobHandlers['campaign.run']!({ ...runtime, db: paused }, payload, { id: jobId, attempts: 1, workspaceId: runtime.config.workspaceId }), (cause: unknown) => cause instanceof JobDeferred && Date.parse(cause.availableAt) === Date.parse(later), 'The run reads the new time and waits for it.');
+      assert.ok(moved, 'The reschedule ran between the due decision and the start.');
+      const current = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.deepEqual({ state: current.state, expanded: current.delivery.expanded, emails: current.counts.total, at: Date.parse(current.scheduledAt) }, { state: 'scheduled', expanded: 0, emails: 0, at: Date.parse(later) }, 'Nothing is released before the new time.');
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/unschedule`, {})).state, 'draft', 'The promised edit window is still open.');
     });
   });
 
