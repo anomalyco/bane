@@ -44,7 +44,7 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
       <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint={urlHint ? 'Leave blank to keep the saved URL, or enter a replacement.' : 'A public HTTPS URL. Signed with Standard Webhooks headers.'}><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder={urlHint ?? 'https://agents.acme.com/hooks/mail'} /></Field>
     </div>
     <div className="form-grid">
-      <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')} hint={input.routeOnly ? <>Add it to a route on the <Link to="/receiving/routing">Routing</Link> page.</> : input.addressIds === null ? 'Includes addresses created later.' : undefined}>
+      <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')} hint={input.routeOnly ? <>Send mail to it from an address’s <Link to="/receiving">Goes to</Link>.</> : input.addressIds === null ? 'Includes addresses created later.' : undefined}>
         <Select id="mailbox-webhook-scope" value={input.routeOnly ? 'routed' : input.addressIds === null ? 'all' : 'selected'} disabled={disabled}
           onValueChange={value => onChange({ ...input, routeOnly: value === 'routed', addressIds: value === 'selected' ? [] : null, eventTypes: value === 'selected' ? input.eventTypes.filter(type => type !== 'message.stored') : input.eventTypes.length ? input.eventTypes : ['message.received'] })}
           options={[{ value: 'all', label: 'Every address' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail a route sends here' }]} />
@@ -89,7 +89,7 @@ function WebhooksList() {
     try { const result = await create.mutateAsync({ ...payloadOf(input), headers: headerPayload(headers) }); setOpen(false); setSecret({ value: result.secret, id: result.webhook.id }) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title="Inbound webhooks" backTo="/receiving" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
+    <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
     <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail on inbound addresses: received messages and the replies you send from them. Without a public URL, long-poll <code>GET /v1/inbound/events</code>. For email sent through the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/webhooks/${row.id}`)}
       empty={<EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
