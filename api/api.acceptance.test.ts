@@ -7123,6 +7123,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
+  test('Sent-copy archiving and reputation alerts retry a transient failure instead of failing for good', async t => {
+    await simulatedSesFixture(t, async ({ runtime }) => {
+      const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js'), { reputationAlertJobs } = await import('./src/reputation-alerts.js');
+      const wid = runtime.config.workspaceId, retryable = { code: 'OPERATION_TEMPORARILY_UNAVAILABLE', retryable: true };
+      // A storage or network error that is not an ApiError (an S3 SlowDown, a timed-out post) used to fail the job on its first attempt.
+      const slowDown = () => { throw Object.assign(new Error('Please reduce your request rate.'), { name: 'SlowDown', $metadata: { httpStatusCode: 503 } }); };
+      for (const method of ['execute', 'select'] as const) t.mock.method(runtime.db, method, slowDown);
+      await assert.rejects(mailboxIngestJobs['mail.archiveSent']!(runtime, { messageId: 'msg_archive' }, { id: 'job_archive', workspaceId: wid, attempts: 1 }), retryable);
+      for (const method of ['execute', 'select'] as const) (runtime.db[method] as unknown as { mock: { restore(): void } }).mock.restore();
+      runtime.config.reputationAlertUrl = 'https://hooks.slack.example/alerts';
+      // Swapped by hand: a t.mock of fetch would reinstall the fixture's own fetch mock for later tests when it is restored again.
+      const fixtureFetch = globalThis.fetch;
+      globalThis.fetch = async () => { throw new DOMException('The operation timed out.', 'TimeoutError'); };
+      try { await assert.rejects(reputationAlertJobs['reputation.alert']!(runtime, { region: REGION, metric: 'bounceRate', level: 'warning', previous: 'ok', value: 0.03 }, { id: 'job_alert', workspaceId: wid, attempts: 1 }), retryable); }
+      finally { globalThis.fetch = fixtureFetch; }
+      // A malformed alert is still a permanent failure.
+      await assert.rejects(reputationAlertJobs['reputation.alert']!(runtime, { region: REGION, metric: 'nope' }, { id: 'job_alert_bad', workspaceId: wid, attempts: 1 }), { code: 'JOB_PAYLOAD_INVALID', retryable: false });
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
