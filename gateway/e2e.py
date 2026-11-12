@@ -7,6 +7,8 @@ import hmac
 import urllib.request
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
+from email.message import EmailMessage
+from email.policy import SMTP
 import imaplib
 import os
 from pathlib import Path
@@ -207,7 +209,7 @@ def real_services():
             tap=run(['node','--import','tsx','--test','--test-reporter=tap','--test-name-pattern=^mail gateway:|agent inbox contracts and storage budgets','api.acceptance.test.ts'],cwd=api,env=env)
             for test in ['folder entries keep independent UIDs and shared flags, not shared state across inboxes','mail gateway: preview migration yields to writers and validates in a separate transaction']:
                 assert re.search(r'^\s*ok \d+ - '+re.escape(test)+r'\s*$',tap,re.M),f'Acceptance test did not run: {test}'
-        yield acceptance
+        yield acceptance, lambda p: delivery(p, env, pepper, log)
         REAL.clear()
 
 
@@ -336,6 +338,50 @@ def mail(p):
             # Pad the epilogue, not the base64 payload.
             raw=prefix+row*count+suffix[:-2]+b' '*extra+b'\r\n';assert len(raw)==size
             c.rcpt('reader@example.invalid');reply=c.data(raw);assert reply[0]==250,reply
+
+
+def delivery(p, env, pepper, log):
+    """A 250 must survive the real dispatch claim, not just create a Sent copy."""
+    dest = 'sink@example.invalid'
+    data = bytes(range(256)) * 8192  # 2 MiB, including non-text octets
+    attachment = EmailMessage(policy=SMTP)
+    attachment['From'], attachment['To'], attachment['Subject'] = ALIAS, dest, 'delivery-file'
+    attachment.set_content('See attachment.')
+    attachment.add_attachment(data, maintype='application', subtype='octet-stream', filename='bytes.bin')
+    def text(subject, body):
+        return f'From: {ALIAS}\r\nSubject: {subject}\r\n\r\n'.encode() + body
+    with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=30) as c:
+        c.login(ALIAS, PASS)
+        for raw in [text('delivery-plain', b'Hello\r\n'), attachment.as_bytes(),
+                    text('delivery-text', (b'x'*766 + b'\r\n')*8192)]:
+            assert not c.sendmail(ALIAS, [dest], raw)
+
+    # Revoke a second password after 250 but before the runner can claim it.
+    password = secrets.token_hex(16)
+    digest = hmac.new(pepper, password.encode(), 'sha256').hexdigest()
+    sql(f"INSERT INTO inbox_app_passwords VALUES('app_delivery','mbx_fixture','fixture','{digest}',ARRAY['smtp']); UPDATE inbox_state SET protocol_passwords=protocol_passwords+1 WHERE inbox_id='mbx_fixture'")
+    with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=10) as c:
+        c.login(ALIAS, password)
+        assert not c.sendmail(ALIAS, [dest], text('delivery-revoked', b'Do not send\r\n'))
+    sql("SELECT inbox_revoke_password('default','mbx_fixture','app_delivery')")
+
+    # Start the simulated runner only for this gate: the later query-count tests
+    # require an idle database. No live SES or credentials are inherited.
+    proc = sp.Popen(['node','--import','tsx','src/runner.ts'], cwd=ROOT.parent/'api',
+                    env={**env, 'AWS_EC2_METADATA_DISABLED':'true'}, stdout=log, stderr=log)
+    try:
+        end = time.monotonic() + 30
+        expected = ['delivery-file:delivered','delivery-plain:delivered','delivery-revoked:canceled','delivery-text:delivered']
+        while True:
+            states = sql("SELECT subject||':'||status FROM sending_emails WHERE workspace_id='default' AND subject LIKE 'delivery-%' AND simulated ORDER BY subject").splitlines()
+            if states == expected: break
+            assert proc.poll() is None and time.monotonic() < end, states
+            time.sleep(.1)
+        assert sql("SELECT error_code FROM sending_emails WHERE actor_key_id='app_delivery' AND attempt_started_at IS NULL") == 'ORIGIN_KEY_REVOKED'
+        assert sql("SELECT a.checksum FROM sending_emails e JOIN sending_attachments a ON a.id=e.snapshot->'attachments'->>0 WHERE e.subject='delivery-file'") == hashlib.sha256(data).hexdigest()
+        assert sql("SELECT length(replace(replace(snapshot->>'text',chr(13),''),chr(10),'')) FROM sending_emails WHERE subject='delivery-text'") == str(766*8192)
+    finally:
+        proc.terminate(); proc.wait(timeout=15)
 
 
 def client_flow(port):
@@ -986,6 +1032,9 @@ def quotas(tmp):
                     ok(c.append('Quota',None,None,RAW))
                 before=ok(c.search(None,'ALL'))
                 assert c.append('Quota',None,None,RAW)[0]=='NO'
+                with smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=10) as smtp:
+                    smtp.login(ALIAS,PASS); smtp.mail(ALIAS); smtp.rcpt('sink@example.invalid')
+                    assert smtp.data(RAW) == (552,b'5.2.2 Inbox storage quota exceeded')
                 assert ok(c.search(None,'ALL'))==before
                 sql(f"UPDATE mailboxes SET {column}=NULL WHERE id='mbx_fixture'")
         finally:
@@ -1001,7 +1050,7 @@ def main():
     run(["cargo", "build", "--locked", "--bins", "--examples"], timeout=300)
     success = []
     failed = []
-    with real_services() as acceptance, tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
+    with real_services() as services, tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
         tmp = Path(d).resolve()
         run(
             [
@@ -1029,8 +1078,9 @@ def main():
         with gateway(tmp) as (p, _):
             for name, fn in [
                 ("TLS/STARTTLS", lambda: tls(p)),
-                *([('API acceptance',acceptance)] if acceptance else []),
+                *([('API acceptance',services[0])] if services else []),
                 ("submission", lambda: mail(p)),
+                *([('SMTP delivery',lambda: services[1](p))] if services else []),
                 ("admission", lambda: admission(tmp)),
                 ('shutdown',lambda:shutdown(tmp)),
                 ("differential", lambda: client_flow(p["IMAPS"]) == reference(tmp)),

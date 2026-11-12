@@ -62,6 +62,8 @@ struct Snapshot {
     more: Option<u32>,
 }
 type WakeCache = HashMap<(String, Option<String>, u64), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
+/// Credentials tracked at once: every open session's, and those seen in the last minute.
+const GATES: usize = 8192;
 struct Gate {
     lanes: crate::admission::Lanes,
     bytes: Arc<Mutex<crate::admission::Bucket>>,
@@ -403,11 +405,15 @@ impl Store {
             .load(std::sync::atomic::Ordering::Relaxed);
         let (lanes, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
-            gates.retain(|_, v| {
-                Arc::strong_count(&v.lanes.0[0]) > 1 || v.last.elapsed() < Duration::from_secs(60)
-            });
+            let open = |v: &Gate| Arc::strong_count(&v.lanes.0[0]) > 1;
+            gates.retain(|_, v| open(v) || v.last.elapsed() < Duration::from_secs(60));
+            if gates.len() >= GATES && !gates.contains_key(&p.kid) {
+                // Open sessions are bounded by the task's connections. A credential without
+                // one holds only its rate state, which gives way to the next login.
+                gates.retain(|_, v| open(v));
+            }
             ensure!(
-                gates.len() < 8192 || gates.contains_key(&p.kid),
+                gates.len() < GATES || gates.contains_key(&p.kid),
                 "credential admission full"
             );
             let account_share = gates
@@ -1085,7 +1091,13 @@ fn batch_ticket(t: &Value, i: usize) -> Value {
 }
 impl Submitter for Store {
     fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
-        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|s|match s{429|402=>SubmitError::Cap,400..500=>SubmitError::Rejected,_=>SubmitError::Unavailable})
+        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|status| match status {
+            413 => SubmitError::TooLarge,
+            507 => SubmitError::InboxFull,
+            429 | 402 => SubmitError::Cap,
+            400..500 => SubmitError::Rejected,
+            _ => SubmitError::Unavailable,
+        })
     }
 }
 pub struct Offline;
@@ -1146,6 +1158,44 @@ pub async fn listen(
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    /// A credential keeps its rate state for a minute after its last session. When the
+    /// table is full that state gives way to the next login; a credential with an open
+    /// session keeps its place and its lanes.
+    #[test]
+    fn a_full_credential_table_admits_the_next_login_and_keeps_open_sessions() {
+        let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
+        let login = |n: usize| {
+            Store::new(
+                api.clone(),
+                Principal {
+                    workspace: "w".into(),
+                    account: "owner".into(),
+                    inbox: "inbox".into(),
+                    kid: format!("app{n}"),
+                    addresses: vec![],
+                    folders: vec![],
+                    started: None,
+                    cached: false,
+                },
+            )
+        };
+        let tracked = || api.gates.lock().unwrap().len();
+        let open: Vec<_> = (0..3).map(|n| login(n).unwrap()).collect();
+        for n in 3..GATES {
+            drop(login(n).unwrap());
+        }
+        assert_eq!(tracked(), GATES);
+        let returning = login(GATES - 1).unwrap();
+        assert_eq!(tracked(), GATES);
+        let next = login(GATES).unwrap();
+        assert_eq!(tracked(), 5);
+        let gates = api.gates.lock().unwrap();
+        for session in open.iter().chain([&returning, &next]) {
+            let gate = &gates[&session.principal.kid];
+            assert!(Arc::ptr_eq(&gate.lanes.0[0], &session.lanes.0[0]));
+            assert!(Arc::ptr_eq(&gate.lanes.0[2], &open[0].lanes.0[2]));
+        }
+    }
     #[tokio::test]
     async fn account_and_workspace_capacity_is_shared_and_waiters_are_fifo() {
         use crate::admission::{Reservation, Shares};
