@@ -129,6 +129,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   </Dialog>
 }
 
+const factTerms = ['Status', 'Expires', 'Erased after', 'Delivered', 'Stored', 'Replies', 'Name']
 export function AgentInboxPage() {
   const { id = '' } = useParams()
   return <InboxDetail key={id} id={id} />
@@ -148,12 +149,18 @@ function InboxDetail({ id }: { id: string }) {
   const b: Inbox | undefined = inbox.data
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
   const next = messages.data?.hasMore ? messages.data.cursor : null
+  // The empty state depends on the inbox, and a single page drops the pagination: the messages stay in their loading
+  // shape until both are known, and the keys section only joins below them once they have, so nothing moves.
+  const settled = Boolean(b) && !messages.isPending
   return <div className="stack inbound-stack">
     <PageHeader title={b ? <PrivateAddress value={b.address} /> : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
       {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
       {canAdminister && b.status==='active' && <ConnectAgent id={id}/>}
       {canAdminister && b.status !== 'deleting' && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
     </>} />
+    {/* The facts hold their place while the inbox loads, so the sections below never move. Name always shows, keeping
+        the grid at three rows whatever the inbox. */}
+    {!b && <dl className="settings-facts" aria-hidden="true">{factTerms.map(term => <div key={term}><dt>{term}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl>}
     {b && <>
       <dl className="settings-facts">
         <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} /></dd></div>
@@ -162,7 +169,7 @@ function InboxDetail({ id }: { id: string }) {
         <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
         <div><dt>Stored</dt><dd>{size(b.usage.bytes)} of {size(b.limits.bytes)}</dd></div>
         <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never' : b.send.enabled ? `To senders only, ${number(b.send.perDay)} a day` : 'Off'}</dd></div>
-        {b.name && <div><dt>Name</dt><dd className="settings-break">{b.name}</dd></div>}
+        <div><dt>Name</dt><dd className="settings-break">{b.name || <span className="muted">—</span>}</dd></div>
         {b.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}
       </dl>
       {b.status === 'deleting' && <Alert tone="info">This inbox was deleted. Its address no longer receives mail, and its messages are erased within the hour.</Alert>}
@@ -173,7 +180,7 @@ function InboxDetail({ id }: { id: string }) {
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} />
       {folders.error ? <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/> : <Field label="Folder" htmlFor="inbox-folder"><Select id="inbox-folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/></Field>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
-        <DataTable loading={messages.isPending} skeletonRows={3} minRows={1} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
+        <DataTable loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
           empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? 'Mail sent to this inbox shows up here within seconds.' : undefined} />}
           columns={[
             { key: 'from', label: 'From', width: '24%', render: row => <span className="receiving-clip"><Sender value={row.from} /></span> },
@@ -182,10 +189,10 @@ function InboxDetail({ id }: { id: string }) {
             { key: 'state', label: 'Status', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
             { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
           ]} />
-        {messages.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
+        {!settled ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
       </>}
     </section>
-    {canAdminister && <section className="section stack" aria-labelledby="agent-inbox-keys">
+    {canAdminister && settled && <section className="section stack" aria-labelledby="agent-inbox-keys">
       <SectionHeader title={<span id="agent-inbox-keys">Keys for this inbox</span>} />
       {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={1} rows={keys.data ?? []} rowKey={key => key.id}
         empty={<EmptyState title="No keys" description="Keys created with the inbox show here. They stop working when it is deleted." />}

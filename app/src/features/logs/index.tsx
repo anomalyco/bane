@@ -53,6 +53,8 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const received = direction === 'received'
   const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search, status: received || status === 'all' ? undefined : status, stream: received || stream === 'all' ? undefined : stream, page, pageSize }
   const query = useApiDef(queries.logs(params), { interval: 30_000, enabled: measured, keepPrevious: true })
+  // The previous filter's rows stay on screen while the next loads, keyed apart from the result that replaces them: a
+  // row in both lists (received mail under All and Received) is swapped in place, not moved down the table.
   const filtered = Boolean(search || campaignId || (!received && (status !== 'all' || stream !== 'all')))
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
@@ -61,7 +63,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
       <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logColumns}
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logColumns}
         empty={filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />
           : <EmptyState title={received ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} description="Every email you send or receive appears here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/docs">Send your first email</Link>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
