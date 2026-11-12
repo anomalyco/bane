@@ -105,7 +105,7 @@ impl Gateway {
     }
     #[tracing::instrument(skip_all,fields(imap=port.protocol==Protocol::Imap,implicit_tls=port.implicit))]
     async fn serve(&self, tcp: TcpStream, port: Port, ip: IpAddr, slot: Slot) -> Result<()> {
-        let start = Instant::now();
+        let start = slot.accepted;
         let auth_deadline = start + self.preauth;
         const PREAUTH_IDLE: Duration = Duration::from_secs(4);
         let greeting_deadline = auth_deadline.min(start + PREAUTH_IDLE);
@@ -139,6 +139,7 @@ impl Gateway {
         }
         let mut commands = admission::Bucket::new(start, 200, 50);
         let identity = self.api.as_ref().map(|api| remote::Login {
+            deadline: auth_deadline.into_std(),
             api: api.clone(),
             principal: Mutex::new(None),
             unavailable: false.into(),
@@ -286,11 +287,15 @@ impl Gateway {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
                 }
+                if login.is_none() && Instant::now() >= auth_deadline {
+                    return Ok(());
+                }
                 let verb = bytes
                     .split(|b| b.is_ascii_whitespace())
                     .nth(1)
                     .unwrap_or_default();
-                let _response = if matches!(core, Core::Imap(_))
+                let _response = if login.is_some()
+                    && matches!(core, Core::Imap(_))
                     && [b"FETCH".as_slice(), b"UID", b"SEARCH"]
                         .iter()
                         .any(|v| verb.eq_ignore_ascii_case(v))
@@ -355,6 +360,9 @@ impl Gateway {
                     }
                 } else {
                     drop(data_permit.take())
+                }
+                if login.is_none() && Instant::now() >= auth_deadline {
+                    return Ok(());
                 }
                 if r.action == Action::Login {
                     let slots = if let Some(auth) = &identity {
@@ -428,7 +436,11 @@ impl Gateway {
                     )
                     .await;
                 }
-                write(&mut stream, &r.bytes).await?;
+                if login.is_none() {
+                    timeout_at(auth_deadline, write(&mut stream, &r.bytes)).await??;
+                } else {
+                    write(&mut stream, &r.bytes).await?;
+                }
                 if failures >= 3 || r.action == Action::Close {
                     timeout(IO, stream.shutdown()).await??;
                     return Ok(());
@@ -551,7 +563,7 @@ async fn main() -> Result<()> {
         changed: watch::channel(0).0,
         slots: Arc::new(Semaphore::new(setting("MAILGW_LOGIN_LIMIT", 10)?)),
         limits: Arc::default(),
-        preauth: Duration::from_secs(setting("MAILGW_AUTH_SECONDS", 30)?),
+        preauth: Duration::from_secs(setting("MAILGW_AUTH_SECONDS", 15u64)?.min(20)),
     });
     let mut listeners = JoinSet::new();
     if let Some(api) = api {

@@ -418,6 +418,12 @@ def deadline(p):
             assert s.recv(2048).startswith(greeting)
             if proto=='IMAP': s.sendall(b'a CAP')
             assert not s.recv(1), 'idle or unfinished pre-auth command survived deadline'
+    # The fixture allows five seconds total, four seconds idle. A successful
+    # command three seconds in must not buy another four idle seconds.
+    with socket.create_connection(('localhost',p['IMAP']),timeout=4) as s:
+        assert s.recv(2048).startswith(b'* OK');time.sleep(3)
+        s.sendall(b'a NOOP\r\n');assert s.recv(2048).startswith(b'a OK')
+        s.settimeout(3);assert not s.recv(1), 'NOOP renewed the authentication deadline'
 
 
 def admission(tmp):

@@ -161,7 +161,10 @@ impl Bucket {
         true
     }
 }
+const ANONYMOUS: u32 = 128;
+const PER_SUBNET: u32 = 16; // Six busy networks still leave a quarter of the task available.
 pub struct Slot {
+    pub accepted: Instant,
     pub after: Instant,
     pub tls: Arc<tokio::sync::Semaphore>,
     ip: IpAddr,
@@ -179,7 +182,7 @@ impl Slot {
                 return None;
             }
         }
-        if l.anonymous >= 128 || l.blocks.get(&block).copied().unwrap_or(0) >= 24 {
+        if l.anonymous >= ANONYMOUS || l.blocks.get(&block).copied().unwrap_or(0) >= PER_SUBNET {
             return None;
         }
         let (count, tls) = l
@@ -211,6 +214,7 @@ impl Slot {
             ip,
             limits,
             after,
+            accepted: now,
             tls,
         })
     }
@@ -263,7 +267,7 @@ mod tests {
             let limits = Arc::new(Mutex::new(Limits::default()));
             let take = |ip: &str| Slot::take(limits.clone(), ip.parse().unwrap(), Instant::now());
             let mut held = Vec::new();
-            for ip in &peers[..3] {
+            for ip in &peers[..2] {
                 for _ in 0..8 {
                     held.push(take(ip).unwrap());
                 }

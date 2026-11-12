@@ -180,6 +180,7 @@ impl Fixture {
             Back::Remote { apis, hints, .. } => {
                 let api = apis[instance].clone();
                 let login = Login {
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(15),
                     api: api.clone(),
                     principal: Mutex::new(None),
                     unavailable: false.into(),

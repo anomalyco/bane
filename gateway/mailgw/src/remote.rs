@@ -131,6 +131,9 @@ impl Api {
         })
     }
     fn call(&self, p: Value) -> Result<Vec<u8>, u16> {
+        self.call_before(p, None)
+    }
+    fn call_before(&self, p: Value, deadline: Option<Instant>) -> Result<Vec<u8>, u16> {
         let mut inbox_work = None;
         if let Some(kid) = p.get("kid").and_then(Value::as_str) {
             let start = Instant::now();
@@ -188,6 +191,15 @@ impl Api {
             .header("x-bane-timestamp", ts)
             .header("x-bane-signature", hex::encode(mac.finalize().into_bytes()))
             .body(b);
+        let req = if let Some(deadline) = deadline {
+            req.timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(503u16)?,
+            )
+        } else {
+            req
+        };
         tokio::runtime::Handle::current().block_on(async {
             let mut r = req.send().await.map_err(|_| 503u16)?;
             if !r.status().is_success() {
@@ -245,7 +257,13 @@ impl Api {
             c.retain(|_, (_, p)| inbox.is_some_and(|i| p.inbox != i));
         }
     }
-    fn login(&self, user: &str, password: &str, proto: Protocol) -> Result<Principal, u16> {
+    fn login(
+        &self,
+        user: &str,
+        password: &str,
+        proto: Protocol,
+        deadline: Instant,
+    ) -> Result<Principal, u16> {
         let started = Some(Instant::now());
         if !self.online.load(std::sync::atomic::Ordering::Acquire) {
             return Err(503);
@@ -273,9 +291,10 @@ impl Api {
             cached.cached = true;
             return Ok(cached);
         }
-        let mut principal: Principal = serde_json::from_slice(
-            &self.call(json!({"op":"login","protocol":p,"user":user,"password":password}))?,
-        )
+        let mut principal: Principal = serde_json::from_slice(&self.call_before(
+            json!({"op":"login","protocol":p,"user":user,"password":password}),
+            Some(deadline),
+        )?)
         .map_err(|_| 503u16)?;
         let mut c = self.cache.lock().map_err(|_| 503u16)?;
         principal.started = started;
@@ -292,6 +311,7 @@ impl Api {
     }
 }
 pub struct Login {
+    pub deadline: Instant,
     pub unavailable: std::sync::atomic::AtomicBool,
     pub limits: Arc<Mutex<crate::admission::Limits>>,
     pub ip: std::net::IpAddr,
@@ -317,7 +337,7 @@ impl Identity for Login {
         if self.limits.lock().is_ok_and(|l| l.blocked(self.ip, k, now)) {
             return false;
         }
-        let v = match self.api.login(u, pw, p) {
+        let v = match self.api.login(u, pw, p, self.deadline) {
             Ok(v) => v,
             Err(403) => {
                 if let Ok(mut l) = self.limits.lock() {
@@ -1379,8 +1399,24 @@ mod tests {
         let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
         api.online.store(true, Ordering::Release);
         let proto = mailgw_core::session::Protocol::Imap;
-        assert!(!api.login("u@example.invalid", "pw", proto).unwrap().cached);
-        let p = api.login("u@example.invalid", "pw", proto).unwrap();
+        assert!(
+            !api.login(
+                "u@example.invalid",
+                "pw",
+                proto,
+                Instant::now() + Duration::from_secs(5)
+            )
+            .unwrap()
+            .cached
+        );
+        let p = api
+            .login(
+                "u@example.invalid",
+                "pw",
+                proto,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
         assert!(p.cached);
         let mut store = Store::new(api, p).unwrap();
         assert!(store.folder("Archive").is_err());

@@ -536,6 +536,7 @@ impl Fixture {
     fn connect(&mut self, s: usize) {
         let login = match &self.back {
             Back::Remote { api } => Some(Login {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(15),
                 api: api.clone(),
                 principal: Mutex::new(None),
                 unavailable: false.into(),
