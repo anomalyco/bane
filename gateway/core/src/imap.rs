@@ -525,9 +525,10 @@ impl Imap {
                                 Item::Flags | Item::Uid | Item::InternalDate | Item::Rfc822Size
                             )
                         });
+                        let mut next_page = 0;
                         for (at, u) in uids.iter().enumerate() {
-                            if !meta_only && uids.len() > 8 && at % 256 == 0 {
-                                s.prefetch(&p, &uids[at..uids.len().min(at + 256)])?;
+                            if !meta_only && uids.len() > 8 && at == next_page {
+                                next_page += s.prefetch(&p, &uids[at..uids.len().min(at + 256)])?;
                             }
                             if let Ok(i) = sel.view.binary_search_by_key(u, |v| v.0)
                                 && let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
@@ -711,13 +712,14 @@ impl Imap {
                             .map(search::scan_count)
                             .sum::<usize>();
                         let mut bytes_left = 64usize << 20;
+                        let mut next_page = 0;
                         for (i, (u, _)) in sel.view.iter().enumerate() {
-                            if need != search::Need::Meta && sel.view.len() > 8 && i % 256 == 0 {
+                            if need != search::Need::Meta && sel.view.len() > 8 && i == next_page {
                                 let page: Vec<_> = sel.view[i..sel.view.len().min(i + 256)]
                                     .iter()
                                     .map(|x| x.0)
                                     .collect();
-                                s.prefetch(&p, &page)?;
+                                next_page += s.prefetch(&p, &page)?;
                             }
                             if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid) {
                                 s.budget()?;

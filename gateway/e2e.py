@@ -726,6 +726,27 @@ def memory(tmp):
         )
 
 
+def long_headers(tmp):
+    padded=b'X-Trace: '+b'p'*800+b'\r\n'
+    wire=padded*4+RAW
+    with gateway(tmp) as (ports,_),connect(ports['IMAPS']) as c:
+        ok(c.create('Headers'));ok(c.append('Headers',None,None,wire))
+        # Independent messages and UIDs referencing an immutable fixture object.
+        sql("""BEGIN;CREATE TEMP TABLE src AS SELECT e.*,m.workspace_id,m.thread_id,m.size_bytes,m.raw_key,m.raw_bucket FROM inbox_entries e JOIN inbox_folders f USING(inbox_id,role) JOIN mail_messages m ON m.id=e.message_id WHERE f.custom_path='Headers';
+        INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle,size_bytes,raw_bucket,raw_key) SELECT 'header-'||i,workspace_id,thread_id,'inbound','kept',size_bytes,raw_bucket,raw_key FROM src,generate_series(2,1000)i;
+        INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,modseq) SELECT inbox_id,'header-'||i,workspace_id,thread_id,'inbound',true,internal_date,modseq FROM src,generate_series(2,1000)i;
+        INSERT INTO inbox_entries SELECT inbox_id,role,i,'header-'||i,modseq,false,internal_date FROM src,generate_series(2,1000)i;
+        UPDATE inbox_folders SET total=1000,uid_next=1001 WHERE custom_path='Headers';COMMIT;""",'fixture_observer')
+        c.sock.settimeout(30);assert ok(c.select('Headers'))==[b'1000']
+        rows=ok(c.uid('FETCH','1:*','(UID BODY.PEEK[HEADER])'))
+        header=wire[:wire.index(b'\r\n\r\n')+4];assert sum(isinstance(r,tuple) and r[1]==header for r in rows)==1000
+        assert sql("SELECT count(*) FROM mailgw_previews WHERE mid LIKE 'header-%'",'fixture_observer')=='999'
+        for keys in [('FROM','alias'),('OR','FROM','alias','SUBJECT','absent'),('TEXT','dot'),('BODY','dot')]:
+            assert len(ok(c.uid('SEARCH',None,*keys))[0].split())==1000
+        # Cold header with no MIME index or cached prefix; exact bytes beyond 64 KiB.
+        big=padded*100+RAW;ok(c.append('Headers',None,None,big));assert ok(c.select('Headers'))==[b'1001'];assert ok(c.uid('FETCH','1001','BODY.PEEK[HEADER]'))[0][1]==big[:big.index(b'\r\n\r\n')+4]
+
+
 def large_folder(tmp):
     # Ordinary indexed mailbox workload in the disposable database only. Distinct
     # memberships and raw keys; no saved PoC traffic or external addresses.
@@ -927,7 +948,7 @@ def main():
                 ("imaptest scripts", lambda: imaptest(tmp, p)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
-                *([('quotas',lambda:quotas(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
+                *([('quotas',lambda:quotas(tmp)),('long headers',lambda:long_headers(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
             ]:
                 if len(sys.argv) > 1 and name not in sys.argv[1:]:
                     continue

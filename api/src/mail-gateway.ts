@@ -8,7 +8,8 @@ import { ApiError, type App, type Runtime } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import { passwordDigest } from './inbox-passwords.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
-import { readMailBytes, withMailObjects } from './mail-objects.js';
+import { withMailObjects } from './mail-objects.js';
+import {objectProjection} from './protocol-preview.js';
 
 const bad = () => new ApiError(403, 'PROTOCOL_DENIED', 'Protocol access denied.');
 const name = z.string().max(255),
@@ -131,21 +132,14 @@ export function registerMailGateway(app: App) {
         );
         if (!found.rowCount) throw bad();
       }
-      const length = Math.min(v.size, v.header ?? 65536);
-      if (p.headers && length > 65536) throw new ApiError(413, 'HEADER_LIMIT', 'Header too large.');
-      if (p.headers && !length) return new Response(null);
+      if(p.headers){
+        const {bytes,end}=await objectProjection(runtime,v.w,v);
+        return new Response(bytes.subarray(0,end),{headers:{'content-type':'application/octet-stream'}});
+      }
       const stream = await withMailObjects(runtime, v.w, v.region, v.bucket, (o) =>
-        o.get(v.key, p.headers ? { offset: 0, length } : undefined),
+        o.get(v.key),
       );
       if (!stream) throw new ApiError(404, 'MISSING_BODY', 'Body unavailable.');
-      if (p.headers && v.header === null) {
-        const bytes = Buffer.from(await readMailBytes(stream, length, 65536));
-        const end = bytes.indexOf('\r\n\r\n');
-        if (end < 0 && v.size > length && !bytes.subarray(0, 2).equals(Buffer.from('\r\n')))
-          throw new ApiError(413, 'HEADER_LIMIT', 'Header too large.');
-        const n = bytes.subarray(0, 2).equals(Buffer.from('\r\n')) ? 2 : end < 0 ? length : end + 4;
-        return new Response(bytes.subarray(0, n), { headers: { 'content-type': 'application/octet-stream' } });
-      }
       return new Response(stream, { headers: { 'content-type': 'application/octet-stream' } });
     }
     if (p.op === 'submit') {

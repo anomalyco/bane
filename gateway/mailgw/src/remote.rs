@@ -191,7 +191,7 @@ impl Api {
             let mut out = vec![];
             while let Some(chunk) = r.chunk().await.map_err(|_| 503u16)? {
                 let cap = if p["headers"].as_bool() == Some(true) {
-                    65536
+                    40 << 20
                 } else {
                     48 << 20
                 };
@@ -624,7 +624,7 @@ impl Store {
     }
 }
 impl MailStore for Store {
-    fn prefetch(&self, p: &str, uids: &[u32]) -> Result<(), store::Error> {
+    fn prefetch(&self, p: &str, uids: &[u32]) -> Result<usize, store::Error> {
         #[derive(Deserialize)]
         struct Row {
             uid: u32,
@@ -632,10 +632,30 @@ impl MailStore for Store {
             complete: bool,
         }
         self.budget()?;
+        let entries = &self.folder(p)?.entries;
+        let mut bytes = 0usize;
+        let mut n = 0;
+        for uid in uids {
+            let size = entries
+                .binary_search_by_key(uid, |e| e.uid)
+                .ok()
+                .map_or(0, |i| entries[i].size);
+            if bytes.saturating_add(size) > 4 << 20 && n > 0 {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            n += 1;
+        }
+        let uids = &uids[..n];
+        self.page.borrow_mut().clear();
+        // Use a signed binary read instead of base64 JSON for a single very large object.
+        if n == 1 && bytes > 4 << 20 {
+            return Ok(n);
+        }
         let start = Instant::now();
         let rows:Vec<Row>=self.api.json(json!({"op":"projections","kid":self.principal.kid,"folder":self.keys.get(p).ok_or(store::Error::Missing)?,"uids":uids}))?;
         self.page_wait
-            .set((self.page_wait.get() + start.elapsed()).min(Duration::from_secs(15)));
+            .set((self.page_wait.get() + start.elapsed()).min(Duration::from_secs(180)));
         let mut page = self.page.borrow_mut();
         page.clear();
         for r in rows {
@@ -650,7 +670,7 @@ impl MailStore for Store {
                 ),
             );
         }
-        Ok(())
+        Ok(n)
     }
     fn subject(&self, p: &str, term: &str) -> Result<Option<Vec<u32>>, store::Error> {
         if term.len() > 1024 {

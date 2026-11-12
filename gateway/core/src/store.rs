@@ -74,8 +74,8 @@ pub struct Applied {
 }
 
 pub trait MailStore {
-    fn prefetch(&self, _path: &str, _uids: &[u32]) -> Result<(), Error> {
-        Ok(())
+    fn prefetch(&self, _path: &str, uids: &[u32]) -> Result<usize, Error> {
+        Ok(uids.len())
     }
     fn subject(&self, _path: &str, _term: &str) -> Result<Option<Vec<u32>>, Error> {
         Ok(None)
