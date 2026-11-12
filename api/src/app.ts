@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, logError, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -75,6 +75,29 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
 
+// The route template that answered (`/v1/emails/:id`), never the raw path: paths carry IDs, addresses and capability
+// tokens. Middleware is registered before handlers, so the last method-specific match is the handler.
+function routeOf(c: Ctx) {
+  const routes = c.req.matchedRoutes.filter(route => route.method !== 'ALL');
+  return (routes.findLast(route => !route.path.endsWith('*')) ?? routes.at(-1))?.path ?? 'unmatched';
+}
+function principalOf(c: Ctx, route: string) {
+  const actor = c.get('actor') as Ctx['var']['actor'] | undefined;
+  if (route === '/internal/v1/mail') return 'gateway';
+  return actor?.credential ?? (actor ? 'internal' : c.get('mailboxAccess') ? 'inboxKey' : 'anonymous');
+}
+// One line per request: what the nightly report (scripts/nightly-report.ts) counts. Successes are sampled (core.log).
+function logRequest(c: Ctx, durationMs: number) {
+  const status = c.res.status, route = routeOf(c), failure = c.get('failure');
+  const timings = c.get('serverTimings');
+  log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
+    event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs,
+    code: failure?.code, field: failure?.field, databaseCode: failure?.databaseCode,
+    workspace: (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId, principal: principalOf(c, route),
+    timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
+  });
+}
+
 // Names the first invalid field and why, so a person can fix it. Zod messages carry types, limits and schema
 // options, never submitted values; unknown keys are quoted as field names, truncated.
 type Issue = { code: string; path: PropertyKey[]; message: string; keys?: string[] };
@@ -118,7 +141,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
-    if (!(c.req.path==='/v1/events/ses' && [400,429].includes(c.res.status))) log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
+    if (!(c.req.path==='/v1/events/ses' && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
@@ -216,15 +239,14 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     }
     // Messages and even record-key validation paths can contain caller-supplied addresses.
     const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
-    const unexpected = !known && responseError.status >= 500;
-    if (!invalidJson) log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
-      errorType: unexpected ? error.name : undefined, databaseCode: databaseCodeOf(error),
-      stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
+    // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
+    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
+    if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
     else if (transient) c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
+  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND' }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
@@ -294,7 +316,7 @@ export function createApp(options: { fallback?: MiddlewareHandler<AppEnv> } = {}
         if (!(error instanceof ModuleLoadError)) throw error;
         const requestId = id('req');
         // Log the route group, never the path: paths can carry bearer tokens (e.g. /unsubscribe/{token}).
-        log('error', { requestId, operation: `route-group:${group}`, code: error.code, status: 503, message: error.message });
+        logError(error.cause ?? error, { event: 'request', requestId, route: `group:${group}`, method: request.method, status: 503, code: error.code });
         return secureResponse(Response.json(
           { error: { code: error.code, message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId, retryable: true } },
           { status: 503, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } },

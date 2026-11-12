@@ -64,6 +64,8 @@ else
   fi
 fi
 args+=(--secrets-file "$secrets_file")
+# Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table.
+if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA"); fi
 if [[ -n ${AUTH_ALLOWED_EMAILS:-} ]]; then args+=(--var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"); fi
 if [[ -n ${AUTH_ALLOWED_DOMAINS:-} ]]; then args+=(--var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"); fi
 WRANGLER_LOG=error "$wrangler" "${args[@]}"

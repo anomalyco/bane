@@ -7187,6 +7187,50 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(!logs.some(line => line.includes(email)));
     });
   });
+  // The nightly report (scripts/nightly-report.ts) counts these lines; the Worker writes them to Workers Logs.
+  test('request logs: one line per request with its route template, code, workspace and principal, and no addresses, tokens or bodies', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request }) => {
+      const lines: string[] = [];
+      for (const level of ['error', 'info', 'warn'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+      t.mock.method(Math, 'random', () => 0); // Keep every sampled success.
+      const wid = runtime.config.workspaceId, email = `${unique('log-subject')}@private.example`, body = unique('Confidential body text');
+      const forged = `bane_${'5e'.repeat(32)}`;
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Log reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
+      const execute = runtime.db.execute.bind(runtime.db);
+      let fault: unknown = null;
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault; fault = null; throw thrown; } return execute(...args); }) as typeof execute);
+      const seen = async (reply: Reply, expected: Json) => {
+        const requestId = reply.headers.get('x-request-id'), entries = lines.map(line => JSON.parse(line) as Json).filter(entry => entry.requestId === requestId && entry.event === 'request');
+        assert.equal(entries.length, 1, `one request line for ${requestId}`);
+        const [entry] = entries;
+        assert.equal(typeof entry.durationMs, 'number'); assert.equal(entry.status, reply.status);
+        for (const [key, value] of Object.entries(expected)) assert.deepEqual(entry[key], value, `${key} of ${requestId}`);
+        return entry;
+      };
+      await seen(await request('GET', '/v1/emails?limit=1', reader.secret), { route: '/v1/emails', method: 'GET', code: undefined, workspace: wid, principal: 'apiKey', sampleRate: 0.1, level: 'info' });
+      const lookup = await request('GET', `/v1/emails/${encodeURIComponent(email)}`, reader.secret);
+      assert.ok(lookup.status >= 400 && lookup.status < 500, diagnostic(lookup));
+      await seen(lookup, { route: '/v1/emails/:id', code: lookup.body.error.code, workspace: wid, principal: 'apiKey', level: 'warn' });
+      const anonymous = await request('GET', '/v1/emails', forged);
+      await seen(anonymous, { route: '/v1/emails', status: 401, code: anonymous.body.error.code, workspace: undefined, principal: 'anonymous' });
+      const sent = await local('POST', '/v1/emails/send', { from: email, to: [email], subject: body, html: `<p>${body}</p>`, unsupported: body });
+      assert.ok(sent.status >= 400 && sent.status < 500, diagnostic(sent));
+      await seen(sent, { route: '/v1/emails/send', method: 'POST', code: sent.body.error.code, principal: 'dashboard', workspace: wid });
+      await seen(await request('GET', `/v1/no-such-route/${encodeURIComponent(email)}`, reader.secret), { route: 'unmatched', status: 404, code: 'NOT_FOUND' });
+      // An unexpected failure: the request line plus one error line with the stack, never the error's own message.
+      fault = new Error(`insert failed for ${email} using ${forged}: ${body}`);
+      const broken = await request('GET', '/v1/emails', reader.secret);
+      await seen(broken, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR', level: 'error' });
+      const failure = lines.map(line => JSON.parse(line) as Json).find(entry => entry.requestId === broken.headers.get('x-request-id') && entry.event !== 'request');
+      assert.ok(failure?.stack && failure.errorType === 'Error' && failure.code === 'INTERNAL_ERROR' && failure.route === '/v1/emails', JSON.stringify(failure));
+      // A caller that does pass caller data still cannot log an address or a credential.
+      const { log } = await import('./src/core.js');
+      log('warn', { code: 'LOG_SCRUB_FIXTURE', note: `to ${email} with ${forged}` });
+      assert.match(lines.at(-1)!, /"note":"to \[email\] with \[redacted\]"/);
+      const leaked = [email, encodeURIComponent(email), body, forged, reader.secret, manager!.cookie.split('=').slice(1).join('=')].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
+      assert.deepEqual(leaked, [], 'no address, body, token or session cookie reaches a log line');
+    });
+  });
 
   test('MX Worker placement uses bounded public edge HEAD probes, not raw TLS',async t=>{
     const {publicSignals}=await import('./src/placement-probes.js'),tls=(await import('node:tls')).default;

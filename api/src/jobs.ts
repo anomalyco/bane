@@ -1,7 +1,7 @@
 import {ActionRetry,actionDelay} from './ritual-retry.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, databaseCodeOf, databaseUnavailable, id, log, ModuleLoadError, transientDatabaseError } from './core.js';
+import { ApiError, databaseUnavailable, id, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
@@ -127,7 +127,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
     // A job row that is requeued under the same id (campaign runs) carries a fresh payload.run token; fencing on it keeps
     // a worker that still holds the retired run from completing or requeueing the row the new run now owns.
     const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), sql`${jobs.leaseUntil}=${job.lease_fence}::timestamptz`, typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
-    const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
+    const context = { event: 'job', jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     let records: SQL | undefined, settling = false;
     const settle = (update: SQLWrapper) => {
       settling = true;
@@ -174,7 +174,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const retry = failure instanceof ApiError && failure.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || failure.code === 'JOB_FINALIZATION_FAILED');
       const delay=error instanceof ActionRetry?actionDelay(job.attempts,error.afterMs):Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
       await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
-      log('error', { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, databaseCode: databaseCodeOf(error), message: failure instanceof ApiError ? failure.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
+      logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: failure instanceof ApiError ? failure.message : 'Unexpected background failure; inspect stack frames.' });
     } finally {
       activeJobs--;
     }

@@ -115,7 +115,9 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+  /** The error code and field a failed request answered with, for its request log line. */
+  failure?: { code: string; field?: string; databaseCode?: string } } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
@@ -297,12 +299,52 @@ export function transientDatabaseError(error: unknown) {
 }
 /** What callers see when the database is briefly unreachable: retry, nothing was committed by this request. */
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
+// Structured logs: one JSON object per line. The Worker's lines go to Workers Logs, the Node API and runner's to
+// stdout (CloudWatch on Fargate); the mail gateway writes the same fields. Every request writes one `event: 'request'`
+// line (app.ts) and every unexpected failure one `logError` line with its stack. docs/ci.md describes the fields and the
+// nightly report that reads them.
+const logContext: { service?: string; deploy?: string } = {};
+/** Which process is logging and the commit it runs, stamped on every line. */
+export function setLogContext(context: { service: string; deploy?: unknown }) {
+  logContext.service = context.service;
+  logContext.deploy = typeof context.deploy === 'string' && /^[0-9a-f]{7,40}$/.test(context.deploy) ? context.deploy.slice(0, 12) : undefined;
+}
+const ROUTINE_CODES = new Set(['JOB_COMPLETED', 'QUEUE_WAKE', 'QUEUE_WAKE_COALESCED', 'JOB_DEFERRED']);
+// Sample routine successes at the source, NOT whole invocations: a sampled-out request still logs every failure, and
+// a kept line carries its `sampleRate` so counts are estimated as 1/sampleRate lines each.
+function sampleRate(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
+  if (level !== 'info') return 1;
+  if (ROUTINE_CODES.has(String(fields.code))) return 0.01;
+  return typeof fields.status === 'number' && fields.status < 400 ? 0.1 : 1;
+}
+// Defense in depth: callers log operations, IDs and codes, never bodies, headers, addresses or tokens. A string that
+// slips through anyway loses addresses and long credential-like runs: secrets are a prefix and 64 hex digits, while
+// IDs carry 32 and error codes are upper case (some are 40 characters long).
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+const CREDENTIAL = /[A-Za-z0-9_]{40,}/g;
+const credentialLike = (run: string) => /[a-z]/.test(run) && /[0-9]/.test(run) ? '[redacted]' : run;
+function scrub(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return value.replace(EMAIL, '[email]').replace(CREDENTIAL, credentialLike).slice(0, 2000);
+  if (depth > 2 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.slice(0, 50).map(item => scrub(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrub(item, depth + 1)]));
+}
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
-  // Sample routine successes at the source, NOT whole invocations. A sampled-out
-  // request can still emit every error and the minute and batch metrics stay exact.
-  if(level==='info' && (fields.status===200 || fields.status===202 || ['JOB_COMPLETED','QUEUE_WAKE','QUEUE_WAKE_COALESCED','JOB_DEFERRED'].includes(String(fields.code))) && Math.random()>=0.01)return;
-  // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
-  console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
+  const rate = sampleRate(level, fields);
+  if (rate < 1 && Math.random() >= rate) return;
+  console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), service: logContext.service, deploy: logContext.deploy, ...(scrub(fields) as Record<string, unknown>), ...(rate < 1 ? { sampleRate: rate } : {}) }));
+}
+/** Stack frames only: an error's message can quote SQL parameters, addresses or provider text. */
+export function stackFrames(error: unknown, limit = 12) {
+  return error instanceof Error ? error.stack?.split('\n').filter(line => /^\s+at /.test(line)).slice(0, limit).map(line => line.trim()).join('\n') || undefined : undefined;
+}
+/**
+ * One line for an unexpected failure: its code, error class, SQLSTATE and stack frames, never the error's own message.
+ * `fields.message` is for Bane's own text (an ApiError's message), which never contains caller data.
+ */
+export function logError(error: unknown, fields: Record<string, unknown> & { code: string }, level: 'error' | 'warn' = 'error') {
+  const known = error instanceof ApiError;
+  log(level, { ...fields, errorType: known ? undefined : error instanceof Error ? error.name : typeof error, databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) });
 }
 export const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",

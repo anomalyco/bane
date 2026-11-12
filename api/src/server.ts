@@ -7,7 +7,7 @@ import { createApp } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
-import { admissionDenied, admissionPeer, ApiError, digest, log, guardPublicRequest } from './core.js';
+import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 
@@ -52,6 +52,7 @@ async function encode(request: Request, path: string, response: Response, header
   return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { status: 200, headers });
 }
 
+setLogContext({ service: 'api', deploy: process.env.DEPLOY_SHA });
 try {
   const { runtime, close } = nodeRuntime(process.env);
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
@@ -103,6 +104,6 @@ try {
     server.close(() => { void close().then(() => process.exit(0)); });
   });
 } catch (error) {
-  log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'API startup failed; check deployment configuration.' });
+  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'API startup failed; check deployment configuration.' });
   process.exitCode = 1;
 }
