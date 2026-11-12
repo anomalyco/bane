@@ -40,13 +40,16 @@ export function traceInput(choice: EmailChoice, to?: string): { messageId?: stri
 
 type Received = { id: string; from: { name: string | null; address: string }; subject: string; at: string; to: string[]; addresses?: { id: string; address: string }[] | null }
 const arrivedAt = (m: Received) => m.addresses?.[0]?.address ?? m.to[0] ?? ''
+/** The last few received messages, shared by the picker and the pages that wait for it before showing the picker. */
+export const useRecentMail = () => useApiQuery(['trace-recent'], (_api, signal) => request<{ data: Received[] }>('/v1/logs?direction=received&limit=6', { signal }).then(r => r.data))
+/** The email a picker starts on, from settled data: the newest received message, or the sample when there is none.
+ * Chosen while rendering, not in an effect, so the picker never paints one mode and then switches. */
+export const defaultChoice = (recent: Received[] | undefined, to: string): EmailChoice =>
+  recent?.[0] ? { mode: 'recent', messageId: recent[0].id, to: arrivedAt(recent[0]) } : { mode: 'sample', to }
 /** Recent received mail to trace, or a sample email, or a pasted message. With no mail yet, the sample is the default. */
 export function EmailPicker({ value, onChange, addresses, preferredTo }: { value: EmailChoice; onChange: (next: EmailChoice) => void; addresses: string[]; preferredTo?: string }) {
-  const recent = useApiQuery(['trace-recent'], (_api, signal) => request<{ data: Received[] }>('/v1/logs?direction=received&limit=6', { signal }).then(r => r.data))
+  const recent = useRecentMail()
   const none = recent.data !== undefined && !recent.data.length
-  useEffect(() => {
-    if (value.mode === 'recent' && recent.data && !value.messageId) onChange(recent.data[0] ? { mode: 'recent', messageId: recent.data[0].id, to: arrivedAt(recent.data[0]) } : { mode: 'sample', to: preferredTo ?? addresses[0] ?? '' })
-  }, [recent.data]) // eslint-disable-line react-hooks/exhaustive-deps
   return <div className="trace-picker">
     <Tabs label="Email" value={value.mode} onValueChange={mode => onChange(mode === 'recent' ? { mode, messageId: recent.data?.[0]?.id ?? null, to: recent.data?.[0] ? arrivedAt(recent.data[0]) : undefined } : mode === 'sample' ? { mode, to: preferredTo ?? addresses[0] ?? '' } : { mode: 'paste', mime: '' })}
       items={[{ value: 'recent', label: 'Recent mail' }, { value: 'sample', label: 'Sample email' }, { value: 'paste', label: 'Paste a message' }]} />
@@ -209,7 +212,11 @@ export function TracePage() {
   const overview = useOverview({ limit: 100 })
   const saved = useApiQuery(['ritual-config'], (_api, signal) => request<{ config: { rituals: { key: string; source: string }[] } }>('/v1/rituals', { signal }))
   const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)
-  const [choice, setChoice] = useState<EmailChoice>({ mode: 'recent', messageId: null })
+  const recent = useRecentMail()
+  const [picked, setChoice] = useState<EmailChoice | null>(null)
+  const choice = picked ?? defaultChoice(recent.data, preferred ?? addresses[0] ?? '')
+  // The form shows once recent mail and the routes are known, so its first paint is its final layout.
+  const ready = (recent.data !== undefined || !!recent.error) && (overview.data !== undefined || !!overview.error)
   const [to, setTo] = useState(preferred ?? '')
   const dry = useDryRun()
   const view = useRef<HTMLDivElement>(null)
@@ -225,6 +232,7 @@ export function TracePage() {
   return <div className="stack inbound-stack">
     <PageHeader title={concepts.trace.title} backTo="/receiving" />
     <ConceptLine line={concepts.trace.line} />
+    {ready && <>
     <form className="trace-form" onSubmit={submit}>
       <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={addresses} preferredTo={preferred} />
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
@@ -237,5 +245,6 @@ export function TracePage() {
         : dry.result ? <TraceView result={dry.result} sources={sources} overview={overview.data} inboxes={new Map((options.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />
         : <EmptyState title="Pick an email and trace it" description="You’ll see which route it takes, each ritual’s conditions light up true or false, and where it ends up." action={<Link to="/receiving?tab=rituals">Rituals</Link>} />}
     </div>
+    </>}
   </div>
 }

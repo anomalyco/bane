@@ -17,7 +17,7 @@ import { ritualTemplates } from '../../../../api/src/ritual-schema'
 import { concepts } from './concepts'
 import { useOverview } from './overview'
 import { ConceptLine } from './parts'
-import { EmailPicker, TraceView, traceInput, useDryRun, type EmailChoice } from './trace'
+import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
 
@@ -106,7 +106,8 @@ export function RitualsPage() {
   const [problems, setProblems] = useState<Problem[]>([])
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null)
   const [pending, setPending] = useState(false)
-  const [choice, setChoice] = useState<EmailChoice>({ mode: 'recent', messageId: null })
+  const recent = useRecentMail()
+  const [picked, setChoice] = useState<EmailChoice | null>(null)
   const [as, setAs] = useState('')
   const [answers, setAnswers] = useState<Record<string, number>>({})
   const dry = useDryRun()
@@ -161,6 +162,7 @@ export function RitualsPage() {
     } finally { setPending(false) }
   }
   // Try runs only this ritual, unsaved, as if it were attached to the address the email was sent to.
+  const choice = picked ?? defaultChoice(recent.data, (addresses.data ?? []).find(a => !a.expiresAt)?.address ?? '')
   const recipient = (choice.mode === 'sample' ? choice.to : as || (choice.mode === 'recent' ? choice.to ?? '' : (choice.mime.match(/^to:\s*(?:.*<)?([^\s<>,]+@[^\s<>,]+)/im)?.[1] ?? ''))).trim().toLowerCase()
   const omens = check?.omens ?? []
   async function tryIt() {
@@ -217,8 +219,8 @@ export function RitualsPage() {
         ? <>No problems{check.calls.length ? <> · calls <code>{check.calls.join(', ')}</code></> : null}{check.omens.length ? <> · omens <code>{check.omens.join(', ')}</code></> : null}</>
         : (p => <>Line {p.line}, column {p.column}: {p.message}{p.hint ? ` ${p.hint}` : ''}{check.diagnostics.length > 1 ? ` (+${check.diagnostics.length - 1} more)` : ''}</>)(check.diagnostics[0]!)}</p>
 
-      {/* The sections below appear with the first check (it names the omens to answer), so nothing shifts in later. */}
-      {check !== null && <>
+      {/* The sections below appear with the first check (it names the omens to answer) and recent mail, so nothing shifts in later. */}
+      {check !== null && (recent.data !== undefined || !!recent.error) && <>
       <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
         <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
         <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Jev isn’t asked.`} />
