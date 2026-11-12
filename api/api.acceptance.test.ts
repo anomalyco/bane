@@ -8806,6 +8806,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(await count(),101);
     });
   });
+  // tear witness (5 steps): U1 upload, expire, sweep, purge, U1 ok -> the object outlived its reservation with no deletion queued.
+  test('attachment upload: a put that outlasts its swept reservation still queues the object for deletion',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js');
+      const wid=runtime.config.workspaceId;let stored='';
+      t.mock.method(runtime.storage,'put',async(key:string)=>{
+        stored=key;
+        // While the put is in flight the hourly sweeper expires the reservation and its deletion job runs.
+        const gone=await db.query("DELETE FROM sending_upload_reservations WHERE storage_key=$1 RETURNING id",[key]);
+        assert.equal(gone.rowCount,1,'the reservation commits before the put');
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status) VALUES($1,'maintenance.deleteAttachment',$2,$3,'completed')",['upload-cleanup:'+gone.rows[0].id,wid,JSON.stringify({key})]);
+      });
+      await assert.rejects(storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'slow.txt',contentType:'text/plain'},Buffer.from('slow')),{code:'UPLOAD_EXPIRED'});
+      assert.equal((await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status='pending' AND payload->>'key'=$2",[wid,stored])).rowCount,1);
+      assert.equal((await db.query('SELECT FROM sending_attachments WHERE workspace_id=$1',[wid])).rowCount,0);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');

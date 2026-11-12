@@ -953,7 +953,7 @@ async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInpu
 }
 function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:ReturnType<typeof validateAttachment>,bytes:Uint8Array,checksum:string,uploadedBy?:string){
   const attachmentId=id('attachment'),storageKey=`${a.workspaceId}/attachments/${attachmentId}`;
-  let reserved=false;
+  let reserved=false,published=false;
   const take=(db:DbExecutor)=>db.execute(sql`DELETE FROM sending_upload_reservations WHERE workspace_id=${a.workspaceId} AND id=${attachmentId} RETURNING 1`);
   return {
     async put(){
@@ -968,13 +968,17 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
     },
     async finish(db:DbExecutor){
       if(!(await take(db)).rowCount) throw new ApiError(503,'UPLOAD_EXPIRED','Upload reservation expired; retry the upload.',undefined,true);
+      // From here the attachment row may commit (even if the response is lost): keep the object.
+      published=true;
       const [row]=await db.insert(attachments).values({id:attachmentId,workspaceId:a.workspaceId,uploadedBy,...input,storageKey,checksum,size:bytes.length}).returning();return row!;
     },
     async refund(){
       if(!reserved)return;
-      // If final COMMIT succeeded (even if its response was lost), take returns no row:
-      // never delete a published object. The sweeper recovers crashes and DB outages.
-      await runtime.db.transaction(async db=>{if((await take(db)).rowCount) await enqueue(db,{workspaceId:a.workspaceId,type:'maintenance.deleteAttachment',payload:{key:storageKey}});}).catch(()=>log('warn',{code:'UPLOAD_RESERVATION_CLEANUP_DEFERRED'}));
+      // Never delete a published object: once finish took the reservation, the attachment row
+      // may have committed even if its response was lost. Any other ending deletes the object,
+      // also when the sweeper already took an expired reservation: its deletion can run before
+      // a slow put lands. The sweeper recovers crashes and DB outages.
+      await runtime.db.transaction(async db=>{if((await take(db)).rowCount || !published) await enqueue(db,{workspaceId:a.workspaceId,type:'maintenance.deleteAttachment',payload:{key:storageKey}});}).catch(()=>log('warn',{code:'UPLOAD_RESERVATION_CLEANUP_DEFERRED'}));
     },
   };
 }
