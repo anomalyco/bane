@@ -219,8 +219,10 @@ export function RitualsPage() {
         ? <>No problems{check.calls.length ? <> · calls <code>{check.calls.join(', ')}</code></> : null}{check.omens.length ? <> · omens <code>{check.omens.join(', ')}</code></> : null}</>
         : (p => <>Line {p.line}, column {p.column}: {p.message}{p.hint ? ` ${p.hint}` : ''}{check.diagnostics.length > 1 ? ` (+${check.diagnostics.length - 1} more)` : ''}</>)(check.diagnostics[0]!)}</p>
 
-      {/* The sections below appear with the first check (it names the omens to answer) and recent mail, so nothing shifts in later. */}
-      {check !== null && (recent.data !== undefined || !!recent.error) && <>
+      {/* The sections below appear with the first check (it names the omens to answer) and recent mail, so nothing shifts in later.
+          Gated on recent mail's first answer (isFetched), not data or error: the picker retries a failed read when it mounts, which
+          clears the error, so a gate on the error unmounted it and remounted it in a loop of requests. */}
+      {check !== null && recent.isFetched && <>
       <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
         <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
         <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Jev isn’t asked.`} />
