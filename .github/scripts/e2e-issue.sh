@@ -23,7 +23,7 @@ body=$(mktemp)
   fi
   echo
   if [[ -f $logs ]] && jq -e '.available' "$logs" >/dev/null; then
-    echo "<details><summary>Worker log lines for these requests ($(jq '.lines | length' "$logs"))</summary>"
+    echo "<details><summary>Worker log lines for these requests ($(jq '.lines | length' "$logs") of $(jq '.events // "?"' "$logs") tailed events)</summary>"
     echo
     echo '```json'
     jq -c '.lines[]' "$logs"
