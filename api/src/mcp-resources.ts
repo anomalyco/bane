@@ -77,7 +77,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   } },
   usage: { label: 'Sending and engagement metrics', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore' } },
   settings: { label: 'Workspace settings', actions: {
-    identity: 'getCurrentIdentity', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
+    identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },
   connections: { label: 'MCP connections', actions: {
     list: 'listMcpConnections', revoke: 'revokeMcpConnection', createInbox: 'createInboxConnection',

@@ -17,6 +17,7 @@ import { when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -148,7 +149,7 @@ function PatternsField({ address, inputRef }: { address: InboundAddress; inputRe
 function RecentMail({ address, threads }: { address: InboundAddress; threads: ReturnType<typeof useAddressThreads> }) {
   if (threads.error) return <ErrorState error={threads.error} onRetry={() => void threads.refetch()} />
   if (!threads.data) return <div aria-hidden="true"><SkeletonText width="60%" /></div>
-  if (!threads.data.length) return <p className="muted">No mail yet. Mail sent to {address.address} shows up here and in the Inbox within seconds.</p>
+  if (!threads.data.length) return <p className="muted">No mail yet. Mail sent to <PrivateAddress value={address.address} /> shows up here and in the Inbox within seconds.</p>
   return <ul className="addr-recent">{threads.data.slice(0, 5).map(t => <li key={t.id}><Link to={`/receiving/inbox?address=${address.id}&thread=${t.id}`}><span>{t.subject || '(no subject)'}</span><span className="muted">{t.snippet}</span><time>{when(t.lastMessageAt)}</time></Link></li>)}</ul>
 }
 
@@ -187,7 +188,7 @@ export function InboundAddressDetailPage() {
   }
   const focus = (target: () => HTMLElement | null) => { const el = target(); el?.scrollIntoView({ block: 'center' }); el?.focus() }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? current.address : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current && <>
+    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current && <>
       {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/trace?to=${encodeURIComponent(current.address)}`}>Trace</Link>}
       <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in Inbox</Link>
       {canAdminister && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
@@ -195,7 +196,7 @@ export function InboundAddressDetailPage() {
     {!ready ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : current && <div className="stack inbound-stack addr-page">
       <dl className="settings-facts">
         <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
-        <div><dt>Sends as</dt><dd className="settings-break">{current.publicAddress ?? current.address}</dd></div>
+        <div><dt>Sends as</dt><dd className="settings-break"><PrivateAddress value={current.publicAddress ?? current.address} /></dd></div>
         <div><dt>Created</dt><dd>{current.origin === 'auto' ? 'By the catch-all, ' : ''}{date(current.createdAt)}</dd></div>
         <div><dt>Threads</dt><dd>{number(current.stats.threads)}{current.stats.unreadThreads > 0 && <span className="muted"> · {number(current.stats.unreadThreads)} unread</span>}</dd></div>
         <div><dt>Last message</dt><dd>{current.stats.lastMessageAt ? date(current.stats.lastMessageAt) : 'None yet'}</dd></div>

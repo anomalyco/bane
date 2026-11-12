@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Contact, ContactInput, ContactStatus, ConsentInput } from '../../data/types'
-import { SearchField, Alert, Button, Checkbox, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
+import type { Contact, ContactInput, ConsentInput } from '../../data/types'
+import { SearchField, Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { activityColumns, AudienceRouteSkeleton } from './skeletons'
-import { ContactTable, date, fieldError, MutationError, pageSize, statusOptions, useAudienceLists } from './shared'
+import { ContactTable, date, fieldError, MutationError, statusOptions, useAudienceLists } from './shared'
 import { ImportContactsDialog } from './import'
 import { AudienceHeader } from './header'
 import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 export function ContactsPage() {
   const { pageSize, tableRef } = useAdaptivePageSize(5, 20, 'contacts')
@@ -74,8 +75,8 @@ function ContactDetails({ contact }: { contact: Contact }) {
     try { await status.mutateAsync(consentInput); setConfirm(false) } catch { /* Shown in the consent dialog. */ }
   }
   return <div className="audience-page">
-    <PageHeader title={contact.name || contact.email} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} onClick={() => {status.reset(); setConsentInput({status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', confirmResubscribe: false}); setConfirm(true)}}>{contact.status === 'subscribed' ? 'Unsubscribe' : contact.status === 'unsubscribed' ? 'Resubscribe' : 'Subscribe'}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
-    <div className="audience-summary cluster"><span>{contact.email}</span><StatusBadge status={contact.status} /></div>
+    <PageHeader title={contact.name || <PrivateAddress value={contact.email} />} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} onClick={() => {status.reset(); setConsentInput({status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', confirmResubscribe: false}); setConfirm(true)}}>{contact.status === 'subscribed' ? 'Unsubscribe' : contact.status === 'unsubscribed' ? 'Resubscribe' : 'Subscribe'}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
+    <div className="audience-summary cluster"><PrivateAddress value={contact.email} /><StatusBadge status={contact.status} /></div>
     <MutationError error={status.error} />
     {contact.status === 'suppressed' && <Alert tone="warning">Delivery is suppressed. Resubscription unavailable.</Alert>}
     <div className="section form-grid audience-properties"><section><SectionHeader title="Properties" /><dl><dt>Full name</dt><dd>{contact.name || '—'}</dd><dt>Country</dt><dd>{contact.country || '—'}</dd><dt>Created</dt><dd>{date(contact.createdAt)}</dd><dt>Last opened</dt><dd>{date(contact.lastOpenedAt)}</dd></dl></section><section><SectionHeader title="Marketing consent" /><dl>{contact.consent.source && <><dt>Consent source</dt><dd>{contact.consent.source}</dd><dt>Confirmed</dt><dd>{contact.consent.at ? date(contact.consent.at) : 'Not recorded'}</dd></>}<dt>Suppression</dt><dd>{contact.suppressionReason || 'None'}</dd></dl></section></div>

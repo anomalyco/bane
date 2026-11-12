@@ -9,6 +9,7 @@ import { RegionSetup } from './region-setup'
 import { HostedSettings } from './hosted'
 import { useWebhooks, WebhooksSection } from './webhooks'
 import { roleLabel } from '../../data/workspaces'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 function WorkspaceForm({workspace, ruled}: {workspace: Workspace; ruled: boolean}) {
   const [name, setName] = useState(workspace.name)
@@ -20,7 +21,7 @@ function SignedInSection() {
   const session = useSession()
   const access = useWorkspaceAccess()
   if (!session?.identity) return null
-  return <section className="section stack settings-group settings-rule"><SectionHeader title="Signed in" actions={<Button onClick={() => session.logout()}>Sign out</Button>} /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>{access.multiTenant ? 'Role' : 'Access'}</dt><dd>{access.role ? roleLabel[access.role] : session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl></section>
+  return <section className="section stack settings-group settings-rule"><SectionHeader title="Signed in" actions={<Button onClick={() => session.logout()}>Sign out</Button>} /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</dd></div><div><dt>{access.multiTenant ? 'Role' : 'Access'}</dt><dd>{access.role ? roleLabel[access.role] : session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl></section>
 }
 // Hosted workspaces get the grouped settings (./hosted.tsx). Self-hosted keeps one page: SES regions, webhooks and the
 // workspace; old tab links arrive as #webhooks or #workspace.

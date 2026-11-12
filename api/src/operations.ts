@@ -75,7 +75,8 @@ const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).
 const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
 const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQuery');
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
-function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
+export const DomainPage = listSchema(domainSchema, 'DomainPage');
+export function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
 async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
   const sesv2 = await loadOperationsSesv2();
@@ -746,6 +747,43 @@ async function account(runtime: Runtime, wid: string, requested?: string) {
   const a = await sesCall(async ({ GetAccountCommand }) => (await getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'}))).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
 
+/** listDomains' own checks (the notMember path guard runs first): read permission and, self-hosted, a configured region with live SES. */
+export function domainReader(c: Ctx, requested?: string) {
+  const a = actor(c);
+  if (!c.env.config.multiTenant) { region(c.env, requested ?? c.env.config.regions[0]!); assertSesConfigured(c.env); }
+  return a;
+}
+type DomainQuery = { limit: number; region?: string; refresh: 'true' | 'false'; cursor?: string };
+/** One page of domains as listDomains returns it. Hosted: one statement. Self-hosted: two with refresh=false, otherwise one plus an SES read per domain. */
+export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.infer<typeof DomainPage>> {
+  const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
+  const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
+  if (c.env.config.multiTenant) {
+    const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
+      .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
+      .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
+      .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
+    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null};
+  }
+  const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
+  if (q.refresh === 'false') {
+    const reports = await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
+    const data = rows.slice(0, q.limit).map(({row,mx,status}) => {
+      const cached = reports.find(report => report.region === row.region)?.report?.domains.find(domain => domain.name === row.name);
+      const ready = cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true, verified = cached?.sendingEnabled === true;
+      return { ...readiness(row,{},undefined,mx),verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready,sending:state(ready),receiving:state(status==='active' && mx?.state==='active' && verified),dnsUnavailableReason: 'Open the domain to refresh DNS details.' };
+    });
+    return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
+  }
+  const data: z.infer<typeof domainSchema>[] = [];
+  for (const {row,mx,status} of rows.slice(0, q.limit)) {
+    if (data.length) await new Promise(resolve => setTimeout(resolve, 1000));
+    const identity=await sesCall(async ({ GetEmailIdentityCommand })=>(await getSes(c.env,row.region)).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
+    const report=readiness(row,identity,undefined,mx,undefined,await localDmarc(row.name,identity.MailFromAttributes?.MailFromDomain));if(status!=='active')report.receiving='pending';data.push(report);
+  }
+  return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
+}
+
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c); const [row] = c.env.config.multiTenant
@@ -761,34 +799,9 @@ export function registerOperations(app: App) {
     return c.json({ name }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query'); if (!c.env.config.multiTenant) { region(c.env, q.region ?? c.env.config.regions[0]!); assertSesConfigured(c.env); }
-    const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
-    const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
-    if (c.env.config.multiTenant) {
-      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
-        .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
-        .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
-        .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
-      return c.json({data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null},200);
-    }
-    const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
-    if (q.refresh === 'false') {
-      const reports = await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
-      const data = rows.slice(0, q.limit).map(({row,mx,status}) => {
-        const cached = reports.find(report => report.region === row.region)?.report?.domains.find(domain => domain.name === row.name);
-        const ready = cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true, verified = cached?.sendingEnabled === true;
-        return { ...readiness(row,{},undefined,mx),verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready,sending:state(ready),receiving:state(status==='active' && mx?.state==='active' && verified),dnsUnavailableReason: 'Open the domain to refresh DNS details.' };
-      });
-      return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
-    }
-    const data: z.infer<typeof domainSchema>[] = [];
-    for (const {row,mx,status} of rows.slice(0, q.limit)) {
-      if (data.length) await new Promise(resolve => setTimeout(resolve, 1000));
-      const identity=await sesCall(async ({ GetEmailIdentityCommand })=>(await getSes(c.env,row.region)).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
-      const report=readiness(row,identity,undefined,mx,undefined,await localDmarc(row.name,identity.MailFromAttributes?.MailFromDomain));if(status!=='active')report.receiving='pending';data.push(report);
-    }
-    return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(DomainPage), ...errors } }), async c => {
+    const q = c.req.valid('query');
+    return c.json(await domainPage(c, domainReader(c, q.region), q), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Regional BYO defaults to the first enabled region, otherwise Ohio.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema),202:response(RegionalAccepted), ...errors } }), async c => {
     const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name);

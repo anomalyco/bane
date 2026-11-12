@@ -6,7 +6,7 @@ import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { campaignEditable, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
 import {
-  Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState,
+  Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState,
   Field, Input, PageHeader, SectionHeader, Select, SkeletonText,
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
@@ -25,6 +25,7 @@ import { CampaignSenderInput } from './CampaignSenderInput'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
+import { AddressList, NamedAddress } from '../../components/PrivateAddress'
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -443,7 +444,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       </section>
       <section className="campaign-fields">
         <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
-        <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd>{campaign.replyTo.join(', ')}</dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
+        <dl className="campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} />
       </section>
     </div>

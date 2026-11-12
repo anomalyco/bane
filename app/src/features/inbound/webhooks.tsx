@@ -10,6 +10,7 @@ import { fieldError, MutationError, SecretDialog } from '../settings/shared'
 import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
 import './inbound.css'
+import { AddressList } from '../../components/PrivateAddress'
 
 const eventInfo: Partial<Record<MailboxEventType, string>> = {
   'message.junk': 'Received mail whose spam verdict isn’t PASS, when junk delivery is on',
@@ -36,7 +37,7 @@ function validate(input: Draft, editing = false) {
   if (input.addressIds && !input.addressIds.length) errors.addressIds = 'Choose at least one address, or send events for every address.'
   return errors
 }
-const scopeText = (webhook: InboundWebhook, addresses?: InboundAddress[]) => !webhook.eventTypes.length ? 'Routed mail only' : webhook.addressIds ? webhook.addressIds.map(id => addresses?.find(item => item.id === id)?.address ?? id).join(', ') : 'All addresses'
+const scopeText = (webhook: InboundWebhook, addresses?: InboundAddress[]) => !webhook.eventTypes.length ? 'Routed mail only' : webhook.addressIds ? <AddressList values={webhook.addressIds.map(id => addresses?.find(item => item.id === id)?.address ?? id)} /> : 'All addresses'
 
 function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, disabled, headers }: { input: Draft; urlHint?: string; onChange: (input: Draft) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   return <div className="stack">

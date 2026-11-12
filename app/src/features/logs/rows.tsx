@@ -6,7 +6,7 @@ import { useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
 import { date, label } from '../../lib/format'
-import { receivedTo } from '../../lib/received-to'
+import { receivedTo } from '../../lib/private-address'
 
 // One log row, shared by Logs and Overview's latest emails: the same columns, masking and click-through in both.
 export const logColumnDefs: SkeletonColumn[] = [
@@ -26,12 +26,10 @@ export function useLogRowIntent() {
   return (row: Pick<LogEntry, 'id'>) => { void routeChunks['/logs']?.().catch(() => {}); void warm([isReceivedId(row.id) ? queries.receivedEmail(row.id, canAdminister) : queries.email(row.id)]) }
 }
 
-// The receiving address mail arrived at is ours and shows in full; the header To may name other people, so it is masked.
+// Who received mail was for (lib/private-address.ts), masked like every address.
 function ReceivedTo({ row }: { row: LogEntry }) {
   const to = receivedTo(row)
-  const title = row.addresses?.length ? `Delivered to ${row.addresses.map(a => a.address).join(', ')}` : row.addresses ? 'Unrouted' : undefined
-  if (to?.own) return <span title={title}>{to.address}</span>
-  return to ? <PrivateAddress value={to.address} /> : <span className="muted">—</span>
+  return to ? <PrivateAddress value={to} /> : <span className="muted">—</span>
 }
 function SentTo({ to }: { to: string[] }) {
   if (!to.length) return <span className="muted">—</span>
@@ -42,8 +40,7 @@ export const logColumns: Column<LogEntry>[] = [
   { ...logColumnDefs[0]!, render: row => <span className="muted" title={row.at}>{logTimestamp(row.at)}</span> },
   { ...logColumnDefs[1]!, render: row => <span className="log-direction" data-direction={row.direction} title={row.direction === 'sent' ? 'Sent' : 'Received'}>{row.direction === 'sent' ? 'Out' : 'In'}</span> },
   { ...logColumnDefs[2]!, render: row => row.direction === 'sent' ? <StatusBadge status={row.status} /> : row.status === 'spam' ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
-  // Sent: our From in full. Received: the sender is someone else, so it is masked.
-  { ...logColumnDefs[3]!, render: row => row.direction === 'sent' ? <span title={row.from.name ? `${row.from.name} <${row.from.address}>` : row.from.address}>{row.from.address}</span> : <PrivateAddress value={row.from.address} /> },
+  { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} /> },
   { ...logColumnDefs[4]!, render: row => row.direction === 'sent' ? <SentTo to={row.to} /> : <ReceivedTo row={row} /> },
   { ...logColumnDefs[5]!, render: row => <span className="log-subject" title={row.subject}>{(row.attachmentCount ?? 0) > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}<span className={row.subject ? undefined : 'muted'}>{row.subject || '(no subject)'}</span></span> },
   { ...logColumnDefs[6]!, render: row => <span className="muted">{row.stream ? label(row.stream) : '—'}</span> },

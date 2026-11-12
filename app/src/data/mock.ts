@@ -637,6 +637,8 @@ export function createMockApi(): BaneApi {
         })
         return { periodStart: new Date(start).toISOString(), periodEnd: new Date(end).toISOString(), sent: emails.length, delivered: count('delivered'), bounced: count('bounced'), complaints: count('complaint'), deferred: count('deferred'), previousSent: all.filter(e => Date.parse(e.sentAt) >= start - duration && Date.parse(e.sentAt) < start).length, points, streams: (['transactional', 'marketing'] as const).map(name => ({ name, sent: emails.filter(e => e.stream === name).length })), recentCampaigns: s.campaigns.filter(c => c.regionId === input.regionId && c.archivedAt == null).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 4).map(c => campaignTotals(s, c)) }
       }),
+      // Demo sessions administer a self-hosted installation: no invitations.
+      setup: signal => run(signal, false, s => ({ domains: s.domains.slice(0, 10), apiKeys: { active: s.keys.filter(key => !key.revokedAt).length }, emails: { any: s.emails.length > 0 }, webhooks: { total: s.webhooks.length }, invitations: null })),
     },
     // Demo logs follow GET /v1/logs: sent and received together, newest first; sent-only filters leave received mail out.
     logs: {

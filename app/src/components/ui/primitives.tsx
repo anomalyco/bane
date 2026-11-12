@@ -5,7 +5,7 @@ import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu';
 import * as CheckboxPrimitive from '@radix-ui/react-checkbox';
 import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
-import { Link } from 'react-router';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
 import { SkeletonText, PaginationSkeleton } from './skeleton';
 
@@ -94,14 +94,21 @@ export function DropdownMenu({ items, label = 'More actions', trigger }: { items
 export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right'; skeleton?: ReactNode };
 export type SkeletonColumn = Pick<Column<never>, 'key' | 'label' | 'width' | 'align' | 'skeleton'>;
 // onRowIntent: a pointer resting on a row (not crossing it) or focus on it, before the click: warm what the row opens.
-export function DataTable<T>({ columns, rows, rowKey, onRowClick, onRowIntent, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string }) {
+// rowHref: rows that open a page are real links. The first cell's content is an <a href> (keyboard, middle-click,
+// "open in new tab"); a click anywhere else on the row follows it too, opening a new tab with a modifier or the middle
+// button, while links and buttons inside the row keep their own action. Rows without an href use onRowClick (for
+// example, opening a dialog).
+export function DataTable<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; rowHref?: (row: T) => string | null | undefined; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string }) {
   const intent = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(intent.current), [])
   const rest = (row: T) => { window.clearTimeout(intent.current); intent.current = window.setTimeout(() => onRowIntent?.(row), 80) }
+  const navigate = useNavigate()
+  const own = (event: { target: EventTarget }) => Boolean((event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]'))
+  const follow = (href: string, event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; button: number }) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) window.open(href, '_blank', 'noopener'); else navigate(href) }
   return <div ref={tableRef} className={cx('ui-table-scroll', className)} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading table</span>}
     <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
-      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row); return <tr key={id} data-selected={selectedId === id || undefined} className={onRowClick ? 'ui-table__clickable' : undefined} tabIndex={onRowClick ? 0 : undefined} onClick={event => { if (onRowClick && !(event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]')) onRowClick(row); }} onKeyDown={event => { if (onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))}>{columns.map(column => <td key={column.key} style={{ textAlign: column.align }}>{column.render(row)}</td>)}</tr>; })}
+      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row), href = rowHref?.(row) || undefined, clickable = Boolean(href || onRowClick); return <tr key={id} data-selected={selectedId === id || undefined} className={href ? 'ui-table__clickable ui-table__linked' : onRowClick ? 'ui-table__clickable' : undefined} tabIndex={!href && onRowClick ? 0 : undefined} onClick={event => { if (own(event)) return; if (href) follow(href, event); else onRowClick?.(row); }} onAuxClick={event => { if (href && event.button === 1 && !own(event)) follow(href, event); }} onKeyDown={event => { if (!href && onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))} data-clickable={clickable || undefined}>{columns.map((column, index) => <td key={column.key} style={{ textAlign: column.align }}>{href && index === 0 ? <Link className="ui-row-link" to={href}>{column.render(row)}</Link> : column.render(row)}</td>)}</tr>; })}
         {!loading && rows.length > 0 && rows.length < minRows && <tr className="ui-table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: `calc(${minRows - rows.length} * var(--table-row-height))` }} /></tr>}
       </tbody></table>
     {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
@@ -123,8 +130,18 @@ function NumberedPagination({ page, pageSize, total, onPageChange }: { page: num
   if (pages === 1) return null;
   return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{total === 0 ? '0 results' : `${((page - 1) * pageSize + 1).toLocaleString()}–${Math.min(page * pageSize, total).toLocaleString()} of ${total.toLocaleString()}`}</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">{page} / {pages}</span><IconButton variant="secondary" label="Next page" disabled={page >= pages} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
 }
+// The back arrow returns to where you came from, like the browser's Back, when you got here inside the dashboard: the
+// previous page comes back with its tab, filters and scroll. Opened directly (a pasted or new-tab link), it goes up to
+// backTo instead. It is a real link to backTo either way, so it still opens in a new tab.
+function BackLink({ to }: { to: string }) {
+  const navigate = useNavigate(), location = useLocation()
+  return <Link className="ui-button ui-button--secondary ui-icon-button" to={to} aria-label="Go back" onClick={event => {
+    if (location.key === 'default' || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault(); navigate(-1)
+  }}><ArrowLeft size={16} /></Link>
+}
 export function PageHeader({ title, actions, backTo }: { title: ReactNode; actions?: ReactNode; backTo?: string }) {
-  return <header className="ui-page-header"><div className="cluster">{backTo && <Link className="ui-button ui-button--secondary ui-icon-button" to={backTo} aria-label="Go back"><ArrowLeft size={16} /></Link>}<h1>{title}</h1></div>{actions && <div className="cluster">{actions}</div>}</header>;
+  return <header className="ui-page-header"><div className="cluster">{backTo && <BackLink to={backTo} />}<h1>{title}</h1></div>{actions && <div className="cluster">{actions}</div>}</header>;
 }
 export function SectionHeader({ title, actions }: { title: ReactNode; actions?: ReactNode }) {
   return <div className="ui-section-header"><h2>{title}</h2>{actions && <div className="cluster">{actions}</div>}</div>;

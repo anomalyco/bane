@@ -5,7 +5,7 @@ import { Button, ConfirmDialog, CopyButton, Input, SectionHeader, Skeleton, Stat
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
-import { roleLabel, workspaceApi } from '../../data/workspaces'
+import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
 import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
 import { limitSummary, useSendingLimit } from '../overview/setup'
@@ -13,6 +13,7 @@ import { MutationError } from './shared'
 import { WebhooksSection } from './webhooks'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -55,17 +56,18 @@ function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; ch
 function WorkspaceRows() {
   const session = useSession()
   const { canAdminister } = useWorkspaceAccess()
-  const workspaces = useApiDef(queries.workspaces())
-  const current = workspaces.data?.find(workspace => workspace.id === session?.identity?.workspaceId)
+  // The name comes with the session's memberships (GET /v1/me): no request of its own, so it is there on the first frame.
   const id = session?.identity?.workspaceId
+  const current = session?.identity?.workspaces?.find(workspace => workspace.id === id)
   return <div className="settings-rows">
-    <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : workspaces.isError ? <span className="cluster settings-inline"><span className="text-danger">Couldn’t load the name.</span><Button variant="ghost" size="sm" onClick={() => void workspaces.refetch()}>Try again</Button></span> : <Input aria-label="Workspace name" className="settings-name-input" disabled placeholder="Loading…" />}</Row>
+    <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <span className="muted">—</span>}</Row>
     <Row title="Workspace ID"><span className="cluster settings-inline"><code>{id}</code>{id && <CopyButton value={id} label="Copy workspace ID" />}</span></Row>
   </div>
 }
 function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
   const [name, setName] = useState(initial)
-  const save = useApiMutation((_api, value: string) => workspaceApi.rename(value), 'Saved')
+  const memberships = useMembershipCache()
+  const save = useApiMutation(async (_api, value: string) => { const renamed = await workspaceApi.rename(value); memberships.renamed(renamed); return renamed }, 'Saved')
   async function submit(event: FormEvent) { event.preventDefault(); try { await save.mutateAsync(name.trim()) } catch { /* inline */ } }
   const changed = name.trim() !== initial && name.trim() !== ''
   // Save keeps its place whether or not it is shown, so typing never moves the field.
@@ -112,7 +114,7 @@ function AccountRows() {
   const access = useWorkspaceAccess()
   if (!session?.identity) return null
   return <div className="settings-rows">
-    <Row title="Email">{session.identity.email || '—'}</Row>
+    <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
   </div>
