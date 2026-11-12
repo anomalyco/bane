@@ -44,6 +44,8 @@
     "WORK_QUEUE_NAME": "bane-prod-work",
     "WEBHOOK_QUEUE_NAME": "bane-prod-webhooks",
     "FEEDBACK_QUEUE_NAME": "bane-prod-feedback-v2",
+    "FEEDBACK_DLQ_NAME": "bane-prod-feedback-v2-dlq",
+    "LEGACY_FEEDBACK_DLQ_NAME": "bane-prod-feedback-dlq",
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
     "LEGACY_FEEDBACK_QUEUE_NAME": "bane-prod-feedback",
     // Set once to the recorded UTC cutover after fencing old producers. Empty quarantines every unsigned item.
@@ -73,7 +75,10 @@
       { "queue": "bane-prod-webhooks", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 12 },
       { "queue": "bane-prod-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-v2-dlq" },
       // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
-      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" }
+      { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" },
+      // Both DLQs archive to PostgreSQL/R2, never ingest. Cross-redrive keeps storage outages recoverable.
+      { "queue": "bane-prod-feedback-v2-dlq", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 100, "retry_delay": 300, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" },
+      { "queue": "bane-prod-feedback-dlq", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 100, "retry_delay": 300, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-v2-dlq" }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

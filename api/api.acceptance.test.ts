@@ -110,41 +110,34 @@ test('feedback queue: only platform-dated pre-cutover legacy items drain unsigne
   assert.equal(feedbackVerdict(secrets,'tagged',item,{timestamp:old,cutover}),'refused');
   assert.equal(feedbackVerdict(secrets,'legacy',wrapper,{timestamp:old,cutover}),'refused');
   assert.equal(feedbackVerdict(secrets,'legacy',{...queued,mac:'bad'},{timestamp:old,cutover}),'refused');
-  // The consumer: one batch, every verdict per message. Only the valid item reaches ingestion; each refused item
-  // is wrapped, dead-lettered on its own and acknowledged, so a poison message neither fails the batch nor retries.
+  // Every refused body goes to the quarantine writer with platform provenance, not an unconsumed DLQ.
   type Settled={id:string;attempts:number;timestamp:Date;ack:()=>void;retry:()=>void;body:unknown;acked:number;retried:number};
   const message=(body:unknown,timestamp=freshDate):Settled=>{const m:Settled={id:randomUUID(),attempts:1,timestamp,body,acked:0,retried:0,ack(){m.acked++;},retry(){m.retried++;}};return m;};
   const poisoned={...queued,mac:'é'.repeat(43)},tampered={...queued,message:{...queued.message,bounce:{bounceType:'Transient'}}},bigint={...queued,message:{n:1n}};
-  const deadLetters:unknown[]=[],quarantined:unknown[]=[],promoted:import('./src/adapters/feedback-queue.js').LegacyFeedbackRecovery[]=[];let ingested:Item[]=[];
-  const run=(lane:'tagged'|'legacy',messages:Settled[],options:{failDeadLetter?:(body:unknown)=>boolean;quarantineFull?:boolean;failPromotion?:boolean;transient?:boolean}={})=>settleFeedbackBatch({secrets,lane,sourceQueue:'fixture-'+lane,messages,legacyCutover:cutover,
+  const quarantined:{source:import('./src/adapters/feedback-archive.js').FeedbackSource;body:unknown;error:string}[]=[],promoted:import('./src/adapters/feedback-queue.js').LegacyFeedbackRecovery[]=[];let ingested:Item[]=[];
+  const run=(lane:import('./src/adapters/feedback-queue.js').FeedbackLane,messages:Settled[],options:{failArchive?:(body:unknown)=>boolean;failPromotion?:boolean;transient?:boolean}={})=>{ingested=[];return settleFeedbackBatch({secrets,lane,sourceQueue:'fixture-'+lane,messages,legacyCutover:cutover,
     ingest:async items=>{ingested=items;return items.map(()=>options.transient?{ok:false,error:'FEEDBACK_PERSIST_FAILED'}:{ok:true});},
     promoteLegacy:async item=>{if(options.failPromotion)throw Error('storage unavailable');promoted.push(item);},completeLegacy:async()=>{},
-    quarantine:async body=>{if(options.quarantineFull)return false;quarantined.push(body);return true;},
-    deadLetter:async entry=>{assert.equal(entry.refused,'FEEDBACK_UNAUTHENTICATED');assert.equal(entry.lane,lane);if(options.failDeadLetter?.(entry.body))throw new Error('queue unavailable');deadLetters.push(entry.body);}});
+    archive:async(source,body,error)=>{if(options.failArchive?.(body))throw Error('all recovery stores unavailable');quarantined.push({source,body,error});}});};
   const tagged=[message(queued),message(poisoned),message(fresh),message(tampered),message(bigint),message('text')];
   const settled=await run('tagged',tagged);
   assert.deepEqual(ingested,[queued]);
-  assert.deepEqual([settled.unauthenticated,settled.untagged,settled.deadLettered,settled.quarantined,settled.held,settled.failed,settled.retiredUnmatched],[5,0,5,0,0,0,0]);
+  assert.deepEqual([settled.unauthenticated,settled.untagged,settled.deadLettered,settled.quarantined,settled.held,settled.failed,settled.retiredUnmatched],[5,0,0,5,0,0,0]);
   assert.deepEqual(tagged.map(m=>[m.acked,m.retried]),[[1,0],[1,0],[1,0],[1,0],[1,0],[1,0]]);
-  assert.deepEqual(deadLetters,[poisoned,fresh,tampered,bigint,'text']);
-  assert.deepEqual(quarantined,[]);
+  assert.deepEqual(quarantined.map(q=>q.body),[poisoned,fresh,tampered,bigint,'text']);
+  assert.deepEqual(quarantined[0]!.source,{queue:'fixture-tagged',id:tagged[1]!.id,enqueuedAt:freshDate.toISOString(),attempts:1});
   assert.deepEqual(settled.outcomes.map(o=>o.ok),[true,false,false,false,false,false]);
-  // A dead-letter send that fails keeps that message for a later attempt and settles the rest normally.
+  // If both durable stores fail, only that message retries.
   const held=[message(queued),message(poisoned)];
-  const partial=await run('tagged',held,{failDeadLetter:body=>body===poisoned});
+  const partial=await run('tagged',held,{failArchive:body=>body===poisoned});
   assert.deepEqual([partial.deadLettered,partial.held,held[0]!.acked,held[1]!.acked,held[1]!.retried],[0,1,1,0,1]);
-  // The legacy lane: a newly forged unsigned bounce is set aside exactly like the previous version's items, never
-  // ingested; tagged items are verified; a tagged item that fails is dead-lettered; a full quarantine dead-letters.
-  deadLetters.length=0;ingested=[];
+  quarantined.length=0;ingested=[];
   const legacy=[message(fresh),message(queued),message(tampered),message(poisoned)];
   const drained=await run('legacy',legacy);
   assert.deepEqual(ingested,[queued]);
-  assert.deepEqual([drained.untagged,drained.unauthenticated,drained.quarantined,drained.deadLettered],[1,2,1,2]);
-  assert.deepEqual([quarantined,deadLetters],[[fresh],[tampered,poisoned]]);
+  assert.deepEqual([drained.untagged,drained.unauthenticated,drained.quarantined,drained.deadLettered],[1,2,3,0]);
+  assert.deepEqual(quarantined.map(q=>q.body),[fresh,tampered,poisoned]);
   assert.deepEqual(legacy.map(m=>[m.acked,m.retried]),[[1,0],[1,0],[1,0],[1,0]]);
-  const full=[message(fresh)];
-  const overflow=await run('legacy',full,{quarantineFull:true});
-  assert.deepEqual([overflow.untagged,overflow.quarantined,overflow.deadLettered,full[0]!.acked],[1,0,1,1]);
   const historical=[message(item,old)];
   const beforeCutover=await run('legacy',historical);
   assert.deepEqual(ingested,[],'unsigned items are durably promoted before ingestion');
@@ -159,14 +152,15 @@ test('feedback queue: only platform-dated pre-cutover legacy items drain unsigne
   assert.equal(failedAttempt[0]!.retried,1);
   // The platform DLQ retains the envelope; a new enqueue timestamp does not erase signed provenance.
   await run('tagged',[message(structuredClone(recovery),new Date())]);assert.deepEqual(ingested,[item]);
-  const unavailable=[message(item,old)];
-  assert.equal((await run('legacy',unavailable,{failPromotion:true})).held,1);
-  assert.deepEqual([unavailable[0]!.acked,unavailable[0]!.retried],[0,1]);
+  const unavailable=[message(item,old)];unavailable[0]!.attempts=6;
+  assert.equal((await run('legacy',unavailable,{failPromotion:true})).quarantined,1);
+  assert.deepEqual([unavailable[0]!.acked,unavailable[0]!.retried],[1,0]);
+  assert.equal(authenticLegacyRecovery(secrets,quarantined.at(-1)!.body),true,'exhaustion archives the signed envelope, never the unsigned original');
   // Replay routes: a dead letter replayed into either lane is refused again, and a quarantined body replayed into
   // the legacy lane is quarantined again. Nothing without a valid tag ever reaches ingestion.
   const dead=structuredClone({refused:'FEEDBACK_UNAUTHENTICATED',lane:'tagged',body:fresh});
   for(const lane of ['tagged','legacy'] as const){
-    ingested=[];deadLetters.length=0;quarantined.length=0;
+    ingested=[];quarantined.length=0;
     const replayed=[message(dead),message(structuredClone(fresh))];
     const again=await run(lane,replayed);
     assert.deepEqual(ingested,[]);
@@ -177,6 +171,14 @@ test('feedback queue: only platform-dated pre-cutover legacy items drain unsigne
   const transient=[message(queued)];
   const result=await run('tagged',transient,{transient:true});
   assert.deepEqual([result.failed,transient[0]!.acked,transient[0]!.retried],[1,0,1]);
+  transient[0]!.attempts=5;
+  assert.equal((await run('tagged',transient,{transient:true})).quarantined,1,'retry exhaustion archives signed input');
+  for(const lane of ['tagged-dlq','legacy-dlq'] as const){
+    const messages=[message(recovery),message(fresh),message(bigint)];
+    assert.equal((await run(lane,messages)).quarantined,3);
+    assert.deepEqual(ingested,[],'DLQ consumers only archive');
+    assert.ok(messages.every(m=>m.acked===1&&m.retried===0));
+  }
   let acked=0,retried=0;
   settleFeedbackMessage({attempts:1,ack:()=>{acked++;},retry:()=>{retried++;},body:item},{ok:true});
   assert.deepEqual([acked,retried],[1,0]);
@@ -187,6 +189,11 @@ test('feedback queue: only platform-dated pre-cutover legacy items drain unsigne
     assert.notEqual(dlq('FEEDBACK_DLQ'),dlq('LEGACY_FEEDBACK_DLQ'));
     assert.equal(c.queues.consumers.find((q:{queue:string})=>q.queue===c.vars.FEEDBACK_QUEUE_NAME).dead_letter_queue,dlq('FEEDBACK_DLQ'));
     assert.equal(c.queues.consumers.find((q:{queue:string})=>q.queue===c.vars.LEGACY_FEEDBACK_QUEUE_NAME).dead_letter_queue,dlq('LEGACY_FEEDBACK_DLQ'));
+    for(const name of [c.vars.FEEDBACK_DLQ_NAME,c.vars.LEGACY_FEEDBACK_DLQ_NAME]){
+      const consumer=c.queues.consumers.find((q:{queue:string})=>q.queue===name);
+      assert.ok(consumer,'each native feedback DLQ has an archive consumer');
+      assert.ok(c.queues.consumers.some((q:{queue:string})=>q.queue===consumer.dead_letter_queue),'its failure destination is also drained');
+    }
     assert.equal(legacyFeedbackCutover(c.vars.LEGACY_FEEDBACK_CUTOVER),undefined,'checked-in cutover stays closed until the operator records it');
   }
 });
@@ -8299,8 +8306,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('MX: legacy feedback cutover quarantines fresh forgeries, ingests the old backlog, and replay rechecks authentication', async t => {
     await simulatedSesFixture(t, async ({runtime,db}) => {
-      const {quarantineUntaggedFeedback,readFeedbackQuarantine,replayQuarantinedFeedback,retainLegacyFeedback,completeLegacyFeedback,ingestFeedbackBatch}=await import('./src/operations.js');
+      const {quarantineUntaggedFeedback,archiveQueueFeedback,readFeedbackQuarantine,replayQuarantinedFeedback,retainLegacyFeedback,completeLegacyFeedback,ingestFeedbackBatch}=await import('./src/operations.js');
       const {settleFeedbackBatch,feedbackMac}=await import('./src/adapters/feedback-queue.js');
+      const {authenticFeedbackArchive,feedbackArchiveBody}=await import('./src/adapters/feedback-archive.js');
       const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:feedback`, providerId=unique('provider');
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
@@ -8311,12 +8319,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const delivery={region:REGION,topicArn,messageId:unique('sns'),message:{eventType:'Delivery',mail:{messageId:providerId,sendingAccountId:account},delivery:{timestamp:new Date().toISOString()}}};
       // The legacy consumer sets the item aside: stored as text under a content digest, with its reason, deduplicated.
       const cutover=Date.now()-1000;
-      let acked=0,retried=0;const dead:unknown[]=[],redriven:import('./src/adapters/feedback-queue.js').LegacyFeedbackRecovery[]=[];
+      let acked=0,retried=0,archived=0;const redriven:import('./src/adapters/feedback-queue.js').LegacyFeedbackRecovery[]=[];
       const consume=(body:unknown,timestamp:Date,lane:'legacy'|'tagged'='legacy')=>settleFeedbackBatch({secrets:runtime.config,lane,sourceQueue:'fixture-'+lane,legacyCutover:cutover,
         messages:[{id:unique('queue-message'),body,timestamp,attempts:1,ack(){acked++},retry(){retried++}}],ingest:items=>ingestFeedbackBatch(runtime,items),
         promoteLegacy:async body=>{await retainLegacyFeedback(runtime,body);redriven.push(body);},completeLegacy:body=>completeLegacyFeedback(runtime,body),
-        quarantine:body=>quarantineUntaggedFeedback(runtime,lane,body),deadLetter:async body=>{dead.push(body)}});
+        archive:async(source,body,error)=>{await archiveQueueFeedback(runtime,source,body,error);archived++;}});
       assert.equal((await consume(delivery,new Date(cutover+1))).quarantined,1);
+      const freshArchive=JSON.parse((await readFeedbackQuarantine(runtime)).find(r=>r.reason==='FEEDBACK_QUEUE_RECOVERY')!.payload);
+      assert.equal(authenticFeedbackArchive(runtime.config,freshArchive),true);
+      assert.deepEqual(feedbackArchiveBody(freshArchive),delivery);
+      assert.deepEqual([freshArchive.source.queue,freshArchive.source.enqueuedAt],['fixture-legacy',new Date(cutover+1).toISOString()]);
       assert.equal(await quarantineUntaggedFeedback(runtime,'legacy',delivery),true,'a duplicate is still kept, not dead-lettered');
       const rows=(await db.query(`SELECT id,reason,topic_arn,workspace_id,payload FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND topic_arn=$1`,[topicArn])).rows;
       assert.equal(rows.length,1); assert.match(rows[0].id,/^untagged:[0-9a-f]{64}$/); assert.equal(rows[0].workspace_id,null,'never attributed from the payload'); assert.deepEqual(JSON.parse(rows[0].payload),delivery);
@@ -8328,9 +8340,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(await quarantineUntaggedFeedback(runtime,'legacy',other),true);
       assert.equal(await quarantineUntaggedFeedback(runtime,'legacy',{n:1n,topicArn:'t'.repeat(600)}),false,'unrepresentable input stays on the recoverable queue, never a preview');
       for(const body of [{n:new Map([['key','value']])},{n:undefined},{n:NaN},{n:new Date()},[1,,2]])assert.equal(await quarantineUntaggedFeedback(runtime,'legacy',body),false,'JSON must not silently lose structured-clone data');
-      assert.equal(await quarantineUntaggedFeedback(runtime,'legacy',{pad:'x'.repeat(1024*1024+1)}),false,'storage limit never truncates');
       assert.equal(await quarantineUntaggedFeedback(runtime,'legacy','text'),true);
-      const stored=(await readFeedbackQuarantine(runtime)).filter(r=>r.id!==rows[0].id);
+      const stored=(await readFeedbackQuarantine(runtime)).filter(r=>r.reason==='FEEDBACK_UNTAGGED'&&r.id!==rows[0].id);
       assert.equal(stored.length,3);
       const chunked=stored.filter(r=>r.payload_chunk_count>0);
       assert.deepEqual(chunked.map(r=>JSON.parse(r.payload)).sort((a,b)=>a.message.tail.localeCompare(b.message.tail)),[big,other]);
@@ -8343,7 +8354,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await replayQuarantinedFeedback(runtime,['untagged:'+'0'.repeat(64)]),[]);
       const replayed=await replayQuarantinedFeedback(runtime,[rows[0].id,...stored.map(()=>'untagged:'+'f'.repeat(64))]);
       assert.deepEqual(replayed,[{id:rows[0].id,ok:false,error:'FEEDBACK_UNAUTHENTICATED'}]);
-      assert.equal((await consume({refused:'FEEDBACK_UNAUTHENTICATED',lane:'tagged',body:delivery},new Date(cutover-1),'tagged')).deadLettered,1);
+      assert.equal((await consume({refused:'FEEDBACK_UNAUTHENTICATED',lane:'tagged',body:delivery},new Date(cutover-1),'tagged')).quarantined,1);
       assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE provider_id=$1',[providerId])).rows,[{status:'accepted'}]);
       // A platform-dated pre-cutover item, not a timestamp inside its body, drains through real ingestion.
       assert.equal((await consume({...delivery,messageId:unique('historical')},new Date(cutover-1))).promoted,1);
@@ -8364,10 +8375,59 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(largeArchive.payload_chunk_count>0);
       assert.deepEqual(await replayQuarantinedFeedback(runtime,[largeArchive.id]),[{id:largeArchive.id,ok:true}]);
       assert.equal((await db.query(`SELECT 1 FROM operation_feedback_failure_chunks WHERE failure_id=$1`,[largeArchive.id])).rowCount,0,'resolved chunks cascade away');
-      assert.deepEqual([acked,retried,dead.length],[5,0,1]);
+      assert.deepEqual([acked,retried,archived],[5,0,2]);
       const junk=(await db.query(`SELECT id FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND payload='"text"'`)).rows[0].id;
       assert.deepEqual(await replayQuarantinedFeedback(runtime,[junk]),[{id:junk,ok:false,error:'FEEDBACK_INVALID'}]);
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM operation_feedback_failures WHERE id=$1`,[junk])).rows[0].n,1,'an unparsable row stays for the operator');
+    });
+  });
+  test('MX: feedback recovery survives quarantine exhaustion and database outage without an unsigned dead-letter escape',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {settleFeedbackBatch,authenticLegacyRecovery}=await import('./src/adapters/feedback-queue.js');
+      const {archiveQueueFeedback,retainLegacyFeedback,completeLegacyFeedback,drainFeedbackRecovery,readFeedbackQuarantine,replayQuarantinedFeedback}=await import('./src/operations.js');
+      const {authenticFeedbackArchive,feedbackArchiveBody}=await import('./src/adapters/feedback-archive.js');
+      const prefix=unique('full-quarantine');
+      await db.query(`INSERT INTO operation_feedback_failures(id,payload,reason) SELECT $1||i,'{}','FEEDBACK_UNTAGGED' FROM generate_series(1,10000) i`,[prefix]);
+      const firstPage=await readFeedbackQuarantine(runtime),secondPage=await readFeedbackQuarantine(runtime,undefined,firstPage.at(-1)!.id);
+      assert.deepEqual([firstPage.length,secondPage.length],[500,500]);assert.ok(secondPage.every(row=>!firstPage.some(first=>first.id===row.id)),'manual review can page past the old cap');
+      const objects=new Map<string,{body:Uint8Array;contentType:string}>();
+      const storage:import('./src/core.js').Storage={put:async(key,body,contentType)=>{objects.set(key,{body:new Uint8Array(body),contentType})},get:async key=>objects.get(key)??null,delete:async key=>{objects.delete(key)},list:async(prefix,after)=>({objects:[...objects.keys()].filter(k=>k.startsWith(prefix)&&(!after||k>after)).sort().map(key=>({key,uploaded:new Date()}))})};
+      const up={...runtime,storage},down={...up,db:Object.assign(Object.create(runtime.db),{transaction:async()=>{throw Error('database unavailable')}})};
+      const cutoff=Date.now()-1000,sourceQueue='fixture-feedback',sourceId=unique('cloudflare-id');
+      const base={region:REGION,topicArn:`arn:aws:sns:${REGION}:111122223333:bane-feedback`,messageId:unique('historical'),message:{eventType:'Delivery',mail:{messageId:'fixture',sendingAccountId:'111122223333'},pad:''}};
+      const body={...base,message:{...base.message,pad:'x'.repeat(127800-Buffer.byteLength(JSON.stringify(base)))}};
+      assert.ok(Buffer.byteLength(JSON.stringify(body))<128000);
+      let acked=0,retried=0,ingested=0;const promoted:import('./src/adapters/feedback-queue.js').LegacyFeedbackRecovery[]=[];
+      const consume=(target:import('./src/core.js').Runtime,id:string,lane:import('./src/adapters/feedback-queue.js').FeedbackLane='legacy',payload:unknown=body)=>settleFeedbackBatch({secrets:runtime.config,lane,sourceQueue:lane.endsWith('-dlq')?'fixture-feedback-dlq':sourceQueue,legacyCutover:cutoff,
+        messages:[{id,body:payload,timestamp:new Date(cutoff-1),attempts:6,ack(){acked++},retry(){retried++}}],ingest:async items=>{ingested+=items.length;return items.map(()=>({ok:true}))},
+        promoteLegacy:async value=>{await retainLegacyFeedback(target,value);promoted.push(value)},completeLegacy:value=>completeLegacyFeedback(target,value),archive:(source,value,error)=>archiveQueueFeedback(target,source,value,error)});
+      assert.equal((await consume(up,sourceId)).promoted,1,'10,000 untrusted rows cannot exhaust authenticated recovery');
+      assert.deepEqual([acked,retried,ingested],[1,0,0]);
+      const first=promoted[0]!,idOf=(lane:string,value:unknown,kind:string)=>`${kind}:${createHash('sha256').update(lane+'\n'+JSON.stringify(value)).digest('hex')}`;
+      assert.deepEqual(JSON.parse((await readFeedbackQuarantine(up,[idOf(sourceQueue,first,'legacy')]))[0]!.payload),first);
+      assert.equal((await consume(down,sourceId+'-outage')).promoted,1,'database failure spills before acknowledging');
+      assert.deepEqual([acked,retried,objects.size],[2,0,1]);
+      const pending=JSON.parse(Buffer.from([...objects.values()][0]!.body).toString('utf8'));
+      assert.equal(authenticLegacyRecovery(runtime.config,pending),true);
+      assert.deepEqual(pending.source,{queue:sourceQueue,id:sourceId+'-outage',enqueuedAt:new Date(cutoff-1).toISOString(),cutover:new Date(cutoff).toISOString()});
+      assert.ok(Buffer.byteLength(JSON.stringify(pending))>128000,'fallback does not require fitting the envelope in a queue');
+      assert.equal(await drainFeedbackRecovery(up),1);
+      const restored=(await readFeedbackQuarantine(up,[idOf(sourceQueue,pending,'legacy')]))[0]!;
+      assert.deepEqual(JSON.parse(restored.payload),pending);assert.ok(restored.payload_chunk_count>0);assert.equal(objects.size,0);
+      // The native DLQs are actively drained into the same table, preserving their observed source.
+      assert.equal((await consume(up,sourceId+'-dlq','legacy-dlq',pending)).quarantined,1);
+      assert.equal(ingested,0,'a DLQ never invokes ingestion');
+      const raw:{[key:string]:unknown}={...base,n:1n,values:new Map([['x',new Set([1,2])]]),bytes:new Uint8Array([0,255]),when:new Date(cutoff)};raw.self=raw;
+      const source={queue:'fixture-feedback-v2-dlq',id:sourceId+'-structured',enqueuedAt:new Date(cutoff).toISOString(),attempts:6};
+      await archiveQueueFeedback(down,source,raw,'FEEDBACK_DEAD_LETTER');
+      const encoded=JSON.parse(Buffer.from([...objects.values()][0]!.body).toString('utf8'));
+      assert.equal(authenticFeedbackArchive(runtime.config,encoded),true);assert.deepEqual(feedbackArchiveBody(encoded),raw);
+      assert.equal(authenticFeedbackArchive(runtime.config,{...encoded,source:{...source,id:'changed'}}),false);
+      assert.equal(await drainFeedbackRecovery(up),1);
+      const record=(await readFeedbackQuarantine(up,[idOf(source.queue,encoded,'queue')]))[0]!;
+      assert.deepEqual(feedbackArchiveBody(JSON.parse(record.payload)),raw);
+      assert.deepEqual(await replayQuarantinedFeedback(up,[record.id]),[{id:record.id,ok:false,error:'FEEDBACK_UNAUTHENTICATED'}]);
+      assert.deepEqual([acked,retried,objects.size],[3,0,0]);
     });
   });
   test('MX: migration 060 preserves a mature ready workspace’s tier without provisioning-job history', async t => {

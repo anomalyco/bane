@@ -71,7 +71,7 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
@@ -195,9 +195,11 @@ export default {
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
-      : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy' : undefined;
+      : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy'
+      : batch.queue === queueName(env, 'FEEDBACK_DLQ_NAME', '') ? 'tagged-dlq'
+      : batch.queue === queueName(env, 'LEGACY_FEEDBACK_DLQ_NAME', '') ? 'legacy-dlq' : undefined;
     if (feedbackLane) {
-      const { ingestFeedbackBatch, quarantineUntaggedFeedback, retainLegacyFeedback, completeLegacyFeedback } = await core.wrapModuleLoad(() => import('./operations.js'));
+      const { ingestFeedbackBatch, archiveQueueFeedback, retainLegacyFeedback, completeLegacyFeedback } = await core.wrapModuleLoad(() => import('./operations.js'));
       // Each message is one verified callback; acknowledge and retry individually so one bad
       // payload never blocks a batch of routine deliveries. Only items this installation tagged at
       // /v1/events/ses are ingested. Only platform-dated, pre-cutover legacy items may drain unsigned;
@@ -206,13 +208,13 @@ export default {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
         const settled = await settleFeedbackBatch({ secrets: runtime.config, lane: feedbackLane, sourceQueue: batch.queue, messages,
           legacyCutover: legacyFeedbackCutover('LEGACY_FEEDBACK_CUTOVER' in env ? env.LEGACY_FEEDBACK_CUTOVER : undefined),
-          ingest: items => ingestFeedbackBatch(runtime, items), quarantine: body => quarantineUntaggedFeedback(runtime, feedbackLane, body),
+          ingest: items => ingestFeedbackBatch(runtime, items),
           promoteLegacy: async item => {
-            await retainLegacyFeedback(runtime, item);
+            if (await retainLegacyFeedback(runtime, item) === 'storage') return;
             try { await env.FEEDBACK_QUEUE.send(item); }
             catch { core.log('warn', { code: 'FEEDBACK_LEGACY_RECOVERY_PENDING', sourceQueue: item.source.queue, sourceId: item.source.id }); }
           }, completeLegacy: item => completeLegacyFeedback(runtime, item),
-          deadLetter: async item => { await (feedbackLane === 'tagged' ? env.FEEDBACK_DLQ : env.LEGACY_FEEDBACK_DLQ).send(item, { contentType: 'v8' }); } });
+          archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
       });
@@ -262,6 +264,8 @@ export default {
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
+      try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
+      catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));

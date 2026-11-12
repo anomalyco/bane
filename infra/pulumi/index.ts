@@ -48,8 +48,8 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
     ...adopt(`${cloudflareAccountId}/${queueId}`, cloudflare), ignoreChanges: ["settings"],
   });
 }
-// Queue settings (including retention) use installation defaults. Never auto-drain the
-// feedback DLQ: an operator replays only after the ingestion fault has been repaired.
+// Queue settings (including retention) use installation defaults. Both feedback DLQs have
+// archive-only Worker consumers; operators replay only from the authenticated quarantine records.
 // feedback-v2 is the tagged feedback lane the Worker writes to; the original feedback queue
 // stays as the legacy lane until drained (api/wrangler.<stage>.jsonc).
 for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-v2-dlq']) {
