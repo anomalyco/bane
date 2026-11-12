@@ -1,3 +1,4 @@
+import { gatewayLane } from './protocol-admission.js';
 /** Private protocol RPC. No OpenAPI/MCP registration. Caller cannot select a workspace,
  * inbox or bucket: the active protocol credential or API-signed object grant supplies it. */
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
@@ -18,7 +19,13 @@ const login = z.object({
   password: z.string().min(1).max(256),
   protocol: z.enum(['imap', 'smtp']),
 });
-const read = z.object({ op: z.literal('snapshot'), kid: token, path: name.nullable() });
+const read = z.object({
+  op: z.literal('snapshot'),
+  kid: token,
+  path: name.nullable(),
+  since: z.number().int().nonnegative().default(0),
+  after: z.number().int().nonnegative().default(0),
+});
 const edit = z.object({
   op: z.literal('edit'),
   kid: token,
@@ -37,14 +44,17 @@ const mutate = z.object({
   flags: z.array(z.string().max(64)).max(64),
   mode: z.enum(['add', 'remove', 'replace']),
 });
-const body = z.object({ op: z.literal('body'), handle: z.string().max(8192) });
-const append = z.object({
-  op: z.literal('append'),
+const body = z.object({
+  op: z.literal('body'),
+  kid: token,
+  handle: z.string().max(8192),
+  headers: z.boolean().optional(),
+});
+const subjectSearch = z.object({
+  op: z.literal('subject'),
   kid: token,
   folder: name,
-  date: z.iso.datetime({ offset: true }),
-  flags: z.array(z.string().max(64)).max(64),
-  content: z.string().max(55924056),
+  term: z.string().min(1).max(1024),
 });
 const submit = z.object({
   op: z.literal('submit'),
@@ -53,7 +63,7 @@ const submit = z.object({
   to: z.array(z.email()).min(1).max(50),
   content: z.string().max(22369624),
 });
-const rpc = z.discriminatedUnion('op', [login, read, edit, mutate, body, append, submit]);
+const rpc = z.discriminatedUnion('op', [login, read, edit, mutate, body, subjectSearch, submit]);
 const mac = (key: string, value: string) => createHmac('sha256', key).update(value).digest('hex');
 function equal(a: string, b: string) {
   return /^[a-f0-9]{64}$/.test(a) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -63,7 +73,17 @@ export const principal = (runtime: Runtime, protocol: 'imap' | 'smtp', identity:
 const folders = sql`(SELECT jsonb_agg(jsonb_build_object('key',f.role,'path',inbox_folder_path(f),'next',f.uid_next,'validity',f.uid_validity,'highest',f.highest_modseq,'subscribed',f.subscribed,'total',f.total,'unseen',f.unseen) ORDER BY role) FROM inbox_folders f WHERE f.inbox_id=a.b)`;
 const fields = ['flagged', 'answered', 'draft', 'forwarded', 'junk', 'notJunk', 'mdnSent'] as const;
 const names = ['\\Flagged', '\\Answered', '\\Draft', '$Forwarded', '$Junk', '$NotJunk', '$MDNSent'] as const;
-type ObjectRef = { w: string; key: string; bucket: string; region: string; exp: number };
+type ObjectRef = {
+  w: string;
+  kid: string;
+  mid: string;
+  key: string;
+  bucket: string;
+  region: string;
+  header: number | null;
+  size: number;
+  exp: number;
+};
 function handle(runtime: Runtime, data: ObjectRef) {
   const d = Buffer.from(JSON.stringify(data)).toString('base64url');
   return d + '.' + mac(runtime.config.authSecret, 'mailgw-body:' + d);
@@ -71,19 +91,14 @@ function handle(runtime: Runtime, data: ObjectRef) {
 export function registerMailGateway(app: App) {
   app.post('/internal/v1/mail', async (c) => {
     const runtime = c.env,
-      key = runtime.config.mailGatewayToken,
-      ts = c.req.header('x-bane-timestamp') ?? '',
-      hash = c.req.header('x-bane-content') ?? '',
-      signature = c.req.header('x-bane-signature') ?? '';
-    if (
-      !key ||
-      !/^\d{10}$/.test(ts) ||
-      Math.abs(Date.now() / 1000 - Number(ts)) > 60 ||
-      !/^\w{64}$/.test(hash) ||
-      !equal(signature, mac(key, `POST\n/internal/v1/mail\n${ts}\n${hash}`))
-    )
-      throw bad();
-    await boundRequestBody(c, 56 * 1024 * 1024);
+      hash = c.req.header('x-bane-content') ?? '';
+    if (!gatewayLane(c.req.method, c.req.path, c.req.raw.headers, runtime.config.mailGatewayToken)) throw bad();
+    const meta = c.req.header('x-bane-append');
+    if (meta !== undefined) {
+      const { streamedAppend } = await import('./protocol-append.js');
+      return c.json(await streamedAppend(c, meta, hash));
+    }
+    await boundRequestBody(c, 23 * 1024 * 1024);
     const raw = await c.req.text();
     if (createHash('sha256').update(raw).digest('hex') !== hash) throw bad();
     const q = rpc.safeParse(JSON.parse(raw));
@@ -101,16 +116,39 @@ export function registerMailGateway(app: App) {
       const [d, s] = p.handle.split('.');
       if (!d || !s || !equal(s, mac(runtime.config.authSecret, 'mailgw-body:' + d))) throw bad();
       const v = JSON.parse(Buffer.from(d, 'base64url').toString()) as ObjectRef;
-      if (v.exp < Date.now()) throw bad();
-      const stream = await withMailObjects(runtime, v.w, v.region, v.bucket, (o) => o.get(v.key));
+      if (v.kid !== p.kid) throw bad();
+      if (v.exp < Date.now()) {
+        // Recheck only this immutable object. Do not rebuild a large folder just to renew a grant.
+        const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
+        const found = await runtime.db.execute(
+          sql`WITH a AS (${auth}) SELECT FROM a JOIN mailbox_messages l ON l.mailbox_id=a.b AND l.workspace_id=a.w JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE l.held_reason IS NULL AND m.id=${v.mid} AND m.raw_key=${v.key} AND m.raw_bucket=${v.bucket}`,
+        );
+        if (!found.rowCount) throw bad();
+      }
+      const length = Math.min(v.size, v.header ?? 65536);
+      if (p.headers && length > 65536) throw new ApiError(413, 'HEADER_LIMIT', 'Header too large.');
+      if (p.headers && !length) return new Response(null);
+      const stream = await withMailObjects(runtime, v.w, v.region, v.bucket, (o) =>
+        o.get(v.key, p.headers ? { offset: 0, length } : undefined),
+      );
       if (!stream) throw new ApiError(404, 'MISSING_BODY', 'Body unavailable.');
       return new Response(stream, { headers: { 'content-type': 'application/octet-stream' } });
     }
-    if (p.op === 'append' || p.op === 'submit') {
+    if (p.op === 'submit') {
       const { contentWrite } = await import('./protocol-content.js');
       return c.json(await contentWrite(c, p));
     }
     const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
+    if (p.op === 'subject') {
+      const row = (
+        await runtime.db.execute<{ uids: number[] }>(
+          sql`WITH a AS (${auth}) SELECT ARRAY(SELECT e.uid::float8 FROM inbox_entries e JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND l.held_reason IS NULL AND e.role=${p.folder} AND strpos(lower(m.subject),lower(${p.term}))>0 ORDER BY uid LIMIT 100001) uids FROM a`,
+        )
+      ).rows[0];
+      if (!row) throw bad();
+      if (row.uids.length > 100000) throw new ApiError(413, 'SEARCH_LIMIT', 'Narrow the search.');
+      return c.json(row.uids);
+    }
     if (p.op === 'snapshot') {
       type E = {
         uid: number;
@@ -125,32 +163,54 @@ export function registerMailGateway(app: App) {
         bucket: string | null;
         region: string;
         mid: string;
+        header: number | null;
       };
       const r = (
-        await runtime.db.execute<{ w: string; folders: unknown; entries: E[] }>(
-          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL ORDER BY uid LIMIT 50001)x),'[]') AS entries FROM a`,
+        await runtime.db.execute<{ w: string; folders: unknown; entries: E[]; gone: { uid: number }[]; floor: string }>(
+          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=a.b) floor,coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v JOIN inbox_folders f USING(inbox_id,role) WHERE ${p.since}::bigint>0 AND v.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY uid LIMIT 2049)x),'[]') AS gone,coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL AND e.uid>${p.after} AND e.modseq>${p.since} ORDER BY uid LIMIT 2049)x),'[]') AS entries FROM a`,
         )
       ).rows[0];
       if (!r) throw bad();
-      if (r.entries.length > 50000) throw new ApiError(413, 'FOLDER_LIMIT', 'Folder exceeds snapshot limit.');
+      const next = Math.min(
+        r.entries.length > 2048 ? r.entries[2047]!.uid : Infinity,
+        r.gone.length > 2048 ? r.gone[2047]!.uid : Infinity,
+      );
+      const gone = r.gone.filter((v) => v.uid <= next).map((v) => v.uid);
       return c.json({
         folders: r.folders,
-        entries: r.entries.map((e) => ({
-          uid: e.uid,
-          modseq: e.modseq,
-          date: e.date,
-          size: e.size,
-          flags: [
-            ...e.labels.filter((l) => /^[A-Za-z0-9_$-]{1,64}$/.test(l)),
-            ...names.filter((_, i) => e.bits & (1 << i)),
-            ...(e.seen ? ['\\Seen'] : []),
-            ...(e.deleted ? ['\\Deleted'] : []),
-          ],
-          handle:
-            e.key && e.bucket
-              ? handle(runtime, { w: r.w, key: e.key, bucket: e.bucket, region: e.region, exp: Date.now() + 300000 })
-              : null,
-        })),
+        floor: Number(r.floor),
+        gone,
+        more: Number.isFinite(next) ? next : null,
+        entries: r.entries
+          .filter((e) => e.uid <= next)
+          .map((e) => ({
+            uid: e.uid,
+            modseq: e.modseq,
+            date: e.date,
+            size: e.size,
+            flags: [
+              ...e.labels.filter(
+                (l) => /^[A-Za-z0-9_$-]{1,64}$/.test(l) && !['unverified', 'spam', 'guard-allowed'].includes(l),
+              ),
+              ...names.filter((_, i) => e.bits & (1 << i)),
+              ...(e.seen ? ['\\Seen'] : []),
+              ...(e.deleted ? ['\\Deleted'] : []),
+            ],
+            handle:
+              e.key && e.bucket
+                ? handle(runtime, {
+                    w: r.w,
+                    kid: p.kid,
+                    mid: e.mid,
+                    key: e.key,
+                    bucket: e.bucket,
+                    region: e.region,
+                    header: e.header,
+                    size: e.size,
+                    exp: Date.now() + 300000,
+                  })
+                : null,
+          })),
       });
     }
     if (p.op === 'edit') {

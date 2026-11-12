@@ -157,11 +157,13 @@ async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
     FROM mail_messages WHERE sender_mailbox_id = ${message.mailbox.id} AND direction = 'outbound' AND created_at > now() - interval '1 day'`);
   const { hour, day } = counts.rows[0]!;
   if (hour >= limits.perHour) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perHour} messages per hour.`, undefined, true);
-  if (day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
+  if (!message.protocolArchive && day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
   const recipients = [...message.to, ...message.cc, ...message.bcc];
   const { recent,thread }=counts.rows[0]!;
+  if (message.protocolArchive && recent.reduce((n,row)=>n+row.length,0)+recipients.length>limits.perHour)
+    throw new ApiError(429,'MAILBOX_SEND_LIMIT','This mailbox reached its hourly recipient limit.',undefined,true);
   for (const recipient of recipients) {
-    const sent = recent.filter(row=>row.includes(recipient)).length;
+    const sent = recent.filter(row=>row.some(address=>address.toLowerCase()===recipient.toLowerCase())).length;
     if (sent >= limits.perRecipientPerHour) throw new ApiError(429, 'RECIPIENT_SEND_LIMIT', `This mailbox already sent ${sent} messages to ${recipient} in the last hour. This guards against reply loops.`, undefined, true);
   }
   if (message.threadId) {
@@ -193,7 +195,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
     if(!recipients.every(r=>locked.replyAuthors?.includes(r.toLowerCase())))throw new ApiError(403,'RECIPIENT_NOT_ALLOWED','Replies may go only to authors in this inbox and thread.');
   }
-  if(!message.protocolArchive)await enforceLimits(tx, message);
+  await enforceLimits(tx, message);
   // Shared-pool archives follow the hosted mail store; inbox archives use R2 whenever it is bound.
   const lifecycle=current.kind!=='inbox'?'default':current.expiresAt?'ephemeral':'kept';
   const hostedSentBucket=hostedMailBucket(runtime,lifecycle);

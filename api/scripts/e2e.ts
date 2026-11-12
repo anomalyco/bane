@@ -233,6 +233,11 @@ async function workspaceReads() {
   await expectDenial(() => api('discoverRegion', { path: { region } }), 409, 'CONNECTION_MANAGED_REGION');
 }
 async function devBoundaries() {
+  // Gateway operations are private, not SDK operations. A public runner must never have its signer.
+  for (const op of ['subject','snapshot','body','append']) {
+    const response=await fetch(new URL('/internal/v1/mail',base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(12000),body:JSON.stringify({op})});
+    check(response.status===403,`unsigned protocol ${op} must be denied`);
+  }
   // Exercise the deployed routes without enabling billing or modifying a shared inbox.
   const missingInbox={id:'mbx_'+randomUUID().replaceAll('-','')},missingFolder={...missingInbox,folder:'drafts'};
   await expectDenial(()=>api('createInboxFolder',{path:missingInbox,body:{path:'Check'}}),404,'NOT_FOUND');
