@@ -53,7 +53,7 @@
 //!       `os_agent_` tokens) are honored and revoked exactly like current ones.
 //!
 //! MCP listing versus REST authorization (sampled operations, see `SAMPLE`)
-//! - M1  Code Mode listing equals REST authorization per actor: owner grant, owner grant with
+//! - M1  Code Mode listing equals REST authorization per actor (16 sampled operations): owner grant, owner grant with
 //!       receiving consent, member-capped grant, admin grant, provisioning and bound inbox keys.
 //! - M2  plain (resource tool) listing equals the same set.
 //! - M3  a tool call from a grant has the REST status (getCurrentIdentity); non-MCP
@@ -80,9 +80,10 @@ pub const TOKEN_TTL: i64 = 60_000;
 pub const ACCESS_TTL_S: i64 = 300;
 
 /// Sampled operations for the MCP-versus-REST check, in the host's reporting order.
-pub const SAMPLE: [&str; 12] = [
+pub const SAMPLE: [&str; 16] = [
     "getCurrentIdentity", "listContactLists", "createContactList", "createApiKey", "createAgentToken", "listInboxes",
     "createInbox", "getRouting", "listInboundKeys", "sendEmail", "deleteInbox", "replyToInboundThread",
+    "listApiKeys", "listMcpConnections", "listDomains", "sendCampaign",
 ];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,9 +217,12 @@ impl Model {
                         "getCurrentIdentity" | "listContactLists" | "sendEmail" => true,
                         "createContactList" | "createApiKey" | "listInboxes" | "createInbox" | "deleteInbox"
                         | "replyToInboundThread" => manage,
-                        "createAgentToken" => !member,
+                        "createAgentToken" | "listDomains" | "sendCampaign" => !member,
                         "getRouting" => receiving && !member,
                         "listInboundKeys" => receiving && manage,
+                        "listApiKeys" => manage,
+                        // Dashboard sessions only.
+                        "listMcpConnections" => false,
                         _ => false,
                     }
                 }

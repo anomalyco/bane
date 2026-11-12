@@ -2607,6 +2607,33 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // tear witnesses (2 steps): mint grant2; probe grant2 code -> a member's read+send grant listed createContactList, createApiKey,
+  // createAgentToken and listApiKeys; mint grant; probe grant code -> listMcpConnections. REST refuses all of them.
+  test('MCP listings offer only what REST authorizes: permission, member role and dashboard-only administration',async t=>{
+    await simulatedSesFixture(t,async({db,request,runtime})=>{
+      const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
+      runtime.config.multiTenant=true;
+      try{
+        const {token,consentId}=await oauthGrant(t,db,'bane:read bane:send offline_access',request);
+        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
+          return new Set(codemode?tools.map(x=>x.name as string):tools.flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`)!).filter(Boolean)));};
+        for(const codemode of [true,false]){
+          const ops=await listed(codemode);
+          for(const name of ['getCurrentIdentity','sendEmail','sendCampaign','createAgentToken','listDomains'])assert.ok(ops.has(name),`${name} codemode=${codemode}`);
+          for(const name of ['createContactList','createApiKey','listApiKeys','listMcpConnections','revokeMcpConnection'])assert.ok(!ops.has(name),`${name} codemode=${codemode}`);
+        }
+        const hidden=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'hidden',permissions:['read']}}}},rpcHeaders)).result;
+        assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
+        // As a workspace member the same approval also loses the owner and admin areas.
+        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[runtime.config.workspaceId,consentId]);
+        for(const codemode of [true,false]){
+          const ops=await listed(codemode);assert.ok(ops.has('sendEmail')&&ops.has('getCurrentIdentity'),`codemode=${codemode}`);
+          for(const name of ['sendCampaign','createAgentToken','listDomains','createContactList'])assert.ok(!ops.has(name),`member ${name} codemode=${codemode}`);
+        }
+      }finally{runtime.config.multiTenant=false;}
+    });
+  });
+
   // tear witness (7 steps): mint grant; A begin apikey grant k1; A step; A step; revoke grant; A step; A step -> 500 INTERNAL_ERROR.
   test('a grant-derived key create racing the approval revoke is refused as unauthorized, not a 500',async t=>{
     await simulatedSesFixture(t,async({db,request})=>{
@@ -2999,9 +3026,8 @@ describe('Hosted MCP OAuth and tools', () => {
     await t.test('L1: read-only descriptions omit contact writes, credential creation and inbound keys', () => {
       assert.match(contacts.description, /list contacts/i);
       assert.doesNotMatch(contacts.description, /manage|create|update|delete/i);
-      const keys = plainTools.find((tool:Json)=>tool.name==='keys');
-      assert.match(keys.description, /list agent tokens/i);
-      assert.doesNotMatch(keys.description, /manage|create|revoke|secret|inbound/i);
+      // Every keys action needs manage in REST (listing agent tokens included), so a read-only grant has no keys tool.
+      assert.ok(!plainTools.some((tool:Json)=>tool.name==='keys'), 'keys tool listed to a read-only grant');
     });
     const mergedDenied = await rpc(token, 'tools/call', { name:'contacts', arguments:{ action:'create', confirm:true, body:{ email:address() } } }, '/mcp');
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);

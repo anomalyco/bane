@@ -165,7 +165,7 @@ type User = { id: string; cookie: string; memberId: string };
 type Cred = { id: string; secret: string };
 type Grant = { access: string; refresh: string; clientId: string; consentId: string; keyId: string };
 let fx: Fixture | null = null;
-const SAMPLE_REST = ['getCurrentIdentity', 'listContactLists', 'createContactList', 'createApiKey', 'createAgentToken', 'listInboxes', 'createInbox', 'getRouting', 'listInboundKeys', 'sendEmail', 'deleteInbox', 'replyToInboundThread'];
+const SAMPLE_REST = ['getCurrentIdentity', 'listContactLists', 'createContactList', 'createApiKey', 'createAgentToken', 'listInboxes', 'createInbox', 'getRouting', 'listInboundKeys', 'sendEmail', 'deleteInbox', 'replyToInboundThread', 'listApiKeys', 'listMcpConnections', 'listDomains', 'sendCampaign'];
 
 async function seedUser(w: string, role: 'owner' | 'member'): Promise<User> {
   const id = `tear-user-${randomUUID()}`, token = `tear-token-${randomUUID()}`, memberId = randomUUID();

@@ -84,7 +84,10 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Ac
   const allowInbound='domains' in principal && principal.permissions.includes('manage') && !principal.domains.length;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  const operations = new Map([...catalog].filter(([, op]) => op.receiving ? (inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : 'receivingConsent' in principal && !!principal.receivingConsent && (!op.write || principal.permissions.includes('manage'))) : inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.inbound || allowInbound) && (allowWrites || !op.write)));
+  // A workspace grant sees only operations REST would authorize for it: the permission, the
+  // member role and dashboard-only administration, on top of the receiving and write gates.
+  const authorized = (op: McpOperation) => 'domains' in principal && !op.dashboardOnly && !(op.ownerOnly && principal.role === 'member') && (principal.permissions.includes('manage') || principal.permissions.includes(op.permission));
+  const operations = new Map([...catalog].filter(([, op]) => op.receiving ? (inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : 'receivingConsent' in principal && !!principal.receivingConsent && (!op.write || principal.permissions.includes('manage')) && authorized(op)) : inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.inbound || allowInbound) && (allowWrites || !op.write) && authorized(op)));
   const params = new URL(request.url).searchParams;
   const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());
   const codeMode = params.get('codemode') === 'true' || (params.get('codemode') !== 'false' && requested.includes('all'));

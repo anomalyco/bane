@@ -22,6 +22,12 @@ export interface McpOperation {
   readonly inbox?: 'read' | 'create' | 'modify' | 'send';
   readonly untrustedContent?: boolean;
   readonly toolset: Toolset;
+  /** The permission REST requires of a workspace credential (manage implies every permission). */
+  readonly permission: 'read' | 'send' | 'manage';
+  /** REST refuses workspace members (owner/admin areas and receiving administration). */
+  readonly ownerOnly: boolean;
+  /** Only a signed-in dashboard session may call it; never listed to an MCP connection. */
+  readonly dashboardOnly: boolean;
 }
 // Provider-signed notifications are never agent calls; everything else with bearer auth becomes a tool.
 const EXCLUDED = new Set(['receiveSesSnsEvent']);
@@ -35,6 +41,15 @@ const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign',
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
+// Listings must not offer what REST refuses. These mirror the handlers' permission checks where
+// they differ from the method default (reads need read, writes need manage): actor(c, 'send')
+// for email, attachment and campaign work, read-level POSTs, and manageKeys() reads.
+const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
+const READ_LEVEL_WRITES = new Set(['createAgentToken', 'queryAudience', 'previewSegment']);
+const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens']);
+const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection']);
+// app.ts notMember(): workspace members cannot use these areas whatever their scopes.
+const OWNER_AREAS = /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/settings\/ses$|^\/v1\/regions\/|^\/v1\/campaigns\/\{id\}\/(?:send|schedule|pause|resume|pacing|cancel)$/;
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -289,7 +304,9 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const receiving = ['routing', 'rituals', 'endpoints'].includes(toolset) || (toolset === 'admin' && tag.startsWith('Inbound ')) || tag === 'Inbound addresses' || name === 'createInboxConnection';
       const tool: Tool = { name, description: descriptionFor(name, operation), inputSchema: input, outputSchema, annotations: { readOnlyHint: !write, destructiveHint: write && (method === 'delete' || /^(?:delete|remove|revoke|cancel|disable|rotate|restore|apply|release)/.test(name)), idempotentHint: !write || method === 'put', openWorldHint: true } };
       freeze(tool);
-      operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), validate: validator(input), validateOutput }));
+      const permission = SEND_LEVEL.has(name) ? 'send' : READ_LEVEL_WRITES.has(name) ? 'read' : MANAGE_LEVEL_READS.has(name) ? 'manage' : write ? 'manage' : 'read';
+      const ownerOnly = receiving || OWNER_AREAS.test(path) || (path === '/v1/regions' && method !== 'get');
+      operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, dashboardOnly: DASHBOARD_ONLY.has(name), validate: validator(input), validateOutput }));
     }
   }
   // The sole non-REST primitive is a constrained long poll of the inbox message operation.
