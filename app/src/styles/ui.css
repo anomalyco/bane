@@ -261,7 +261,11 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
   .ui-alert .ui-icon-button { position: relative; }
   .ui-alert .ui-icon-button::after { content: ''; position: absolute; inset: -12px; }
   .ui-toasts { left: max(var(--space-12), env(safe-area-inset-left)); right: max(var(--space-12), env(safe-area-inset-right)); bottom: calc(var(--toast-offset, 0px) + var(--space-12) + env(safe-area-inset-bottom)); width: auto; }
+  /* While a bottom sheet is open its own buttons own the bottom edge: notices drop in from the top instead. */
+  body:has(.ui-sheet, .ui-dialog--sheet) .ui-toasts { top: max(var(--space-12), env(safe-area-inset-top)); bottom: auto; flex-direction: column-reverse; }
+  body:has(.ui-sheet, .ui-dialog--sheet) .ui-toasts .ui-alert { animation-name: toast-in-top; }
 }
+@keyframes toast-in-top { from { opacity: 0; transform: translateY(-8px) scale(.98); } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }

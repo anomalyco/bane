@@ -1,4 +1,4 @@
-import { Link, useNavigate, useSearchParams } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { useNavigate, useParams } from 'react-router'
 import { useApiMutation, useApiQuery } from '../../data/context'
 import { SearchField, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs } from '../../components/ui'
 import { listColumns, ListDetailBodySkeleton } from './skeletons'

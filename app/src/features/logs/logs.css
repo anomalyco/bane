@@ -27,7 +27,7 @@
   .logs-table [data-col='stream'] { display: none; }
   .logs-page .logs-table .ui-table { min-width: 720px; }
 }
-@media (max-width: 899px) {
+@media (max-width: 1100px) {
   .logs-page > .data-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: var(--space-8); }
   .logs-page > .data-toolbar > .cluster { display: contents; }
   .logs-page > .data-toolbar .cluster > .ui-button { grid-column: 1 / -1; justify-self: start; }

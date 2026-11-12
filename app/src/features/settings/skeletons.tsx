@@ -41,27 +41,30 @@ export const settingsColumns = {
     {key: 'destination', label: 'Destination', width: '14%'},
     {key: 'wired', label: 'Connection', width: '12%'},
   ],
+  // A webhook's card: its name and status, its URL, then how many events it gets.
   webhooks: [
-    { key: 'name', label: 'Name / Endpoint URL', width: '38%', skeleton: twoLines },
-    { key: 'scope', label: 'Region scope', width: '18%' },
-    { key: 'events', label: 'Events', width: '10%' },
-    { key: 'headers', label: 'Headers', width: '18%' },
-    { key: 'status', label: 'Status' },
+    { key: 'name', label: 'Name / Endpoint URL', width: '38%', skeleton: twoLines, card: 'title' },
+    { key: 'url', label: 'URL', table: false, card: 'line' },
+    { key: 'scope', label: 'Region scope', width: '18%', card: 'hide' },
+    { key: 'events', label: 'Events', width: '10%', card: 'line' },
+    { key: 'headers', label: 'Headers', width: '18%', card: 'hide' },
+    { key: 'status', label: 'Status', card: 'aside' },
   ],
+  // A delivery's card: when and its status, the event and response, then Retry and Inspect.
   deliveries: [
-    { key: 'time', label: 'Time · UTC', width: '16%', skeleton: twoLines },
-    { key: 'region', label: 'Region', width: '14%' },
-    { key: 'event', label: 'Event', width: '16%' },
-    { key: 'status', label: 'Response / Status', width: '22%', skeleton: twoLines },
-    { key: 'attempts', label: 'Attempts' },
-    { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} /> },
+    { key: 'time', label: 'Time · UTC', width: '16%', skeleton: twoLines, card: 'title' },
+    { key: 'region', label: 'Region', width: '14%', card: 'hide' },
+    { key: 'event', label: 'Event', width: '16%', card: 'line' },
+    { key: 'status', label: 'Response / Status', width: '22%', skeleton: twoLines, card: 'aside' },
+    { key: 'attempts', label: 'Attempts', card: 'inline' },
+    { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} />, card: 'end' },
   ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
 const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
 export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => [{ ...domainName, width: multiTenant ? '30%' : '26%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '24%' }, domainReceiving, domainAddresses, ...multiTenant ? [] : [domainRegion]]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
-const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '56%' }, ...settingsColumns.webhooks.slice(2)]
+const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '56%' }, settingsColumns.webhooks[1], ...settingsColumns.webhooks.slice(3)]
 const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]
 export const webhookColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant ? hostedWebhookColumns : settingsColumns.webhooks
 export const deliveryColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant ? hostedDeliveryColumns : settingsColumns.deliveries

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowUpRight, Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiDef, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
@@ -41,13 +41,23 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const campaign = useApiQuery(['campaign', campaignId ?? null], (api, signal) => campaignId ? api.campaigns.get(campaignId, signal) : Promise.resolve(null))
   const clearCampaign = () => { const next = new URLSearchParams(searchParams); next.delete('campaign'); setSearchParams(next) }
   const direction = logDirection(searchParams.get('view'), campaignId)
-  const [search, setSearch] = useState('')
-  const [status, setStatus] = useState('all')
-  const [stream, setStream] = useState('all')
-  const [page, setPage] = useState(1)
+  // Search, filters and page live in the URL (replaced, not pushed), so Back from an email returns to the same list.
+  const search = searchParams.get('q') ?? ''
+  const status = statuses.some(option => option.value === searchParams.get('status')) ? searchParams.get('status')! : 'all'
+  const stream = streams.some(option => option.value === searchParams.get('stream')) ? searchParams.get('stream')! : 'all'
+  const page = Math.max(1, Number(searchParams.get('page')) || 1)
+  const update = (patch: Record<string, string | null>) => setSearchParams(previous => {
+    const next = new URLSearchParams(previous)
+    for (const [key, value] of Object.entries({ page: null, ...patch })) { if (value === null || value === '' || value === 'all' || (key === 'page' && value === '1')) next.delete(key); else next.set(key, value) }
+    return next
+  }, { replace: true })
+  const setSearch = (value: string) => update({ q: value }), setStatus = (value: string) => update({ status: value }), setStream = (value: string) => update({ stream: value })
+  const setPage = (value: number) => update({ page: String(value) })
   const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
-  useEffect(() => setPage(1), [pageSize])
-  const setDirection = (value: LogDirection) => { const next = new URLSearchParams(searchParams); if (value === 'all') next.delete('view'); else next.set('view', value); setSearchParams(next, { replace: true }); setPage(1) }
+  // A new page size (the window resized) starts from the first page; the size settling on mount keeps the URL's page.
+  const fitted = useRef<number | null>(null)
+  useEffect(() => { if (!measured) return; if (fitted.current !== null && fitted.current !== pageSize) setPage(1); fitted.current = pageSize }, [pageSize, measured]) // eslint-disable-line react-hooks/exhaustive-deps
+  const setDirection = (value: LogDirection) => update({ view: value })
   const { multiTenant } = useWorkspaceAccess()
   // Status and stream describe sent mail; with Received selected they stay in place, disabled.
   const received = direction === 'received'
@@ -57,14 +67,14 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   // row in both lists (received mail under All and Received) is swapped in place, not moved down the table.
   const filtered = Boolean(search || campaignId || (!received && (status !== 'all' || stream !== 'all')))
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
-    <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
-      <Select aria-label="Email status" value={received ? 'all' : status} disabled={received} onValueChange={value => { setStatus(value); setPage(1) }} options={statuses} />
-      <Select aria-label="Email stream filter" value={received ? 'all' : stream} disabled={received} onValueChange={value => { setStream(value); setPage(1) }} options={streams} /></div>
+    <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" value={search} onChange={event => setSearch(event.target.value)} /></div>
+      <Select aria-label="Email status" value={received ? 'all' : status} disabled={received} onValueChange={setStatus} options={statuses} />
+      <Select aria-label="Email stream filter" value={received ? 'all' : stream} disabled={received} onValueChange={setStream} options={streams} /></div>
       <Button className="logs-export" aria-label="Export page" disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export page</span></Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logColumns}
-        empty={filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />
+        empty={filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => { update({ q: null, status: null, stream: null, ...campaignId ? { campaign: null } : { view: null } }) }}>Clear filters</Button>} />
           : <EmptyState title={received ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} description="Every email you send or receive appears here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/docs">Send your first email</Link>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}

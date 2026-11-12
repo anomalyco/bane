@@ -104,7 +104,7 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .trace-view { display: grid; gap: var(--space-16); }
 .trace-view__bar { display: flex; align-items: center; justify-content: space-between; min-height: var(--control-height); font-size: var(--text-sm); }
 .trace-recipient { display: grid; gap: var(--space-12); }
-.trace-recipient__head { display: flex; align-items: baseline; gap: var(--space-8); font-size: var(--text-sm); }
+.trace-recipient__head { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; font-size: var(--text-sm); }
 .trace-ritual { border: 1px solid var(--color-border-muted); border-radius: var(--radius-lg); overflow: hidden; }
 .trace-ritual h3 { display: flex; align-items: center; gap: var(--space-8); margin: 0; padding: var(--space-8) var(--space-12); border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); font-weight: var(--font-weight-regular); }
 .trace-ritual h3 code { font-family: var(--font-mono); }
@@ -184,3 +184,15 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .rcv-card-to .rcv-targets { flex-wrap: nowrap; }
 .rcv-unread { color: var(--color-text); font-weight: var(--font-weight-bold); }
 .ui-card .rcv-cell > .rcv-icon { align-self: center; margin-top: 0; }
+@media (max-width: 640px) {
+  .rcv-match { overflow: hidden; }
+  .rcv-match__host { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+/* Phone: a recent message in Trace reads as two lines, subject and time, then from and to. */
+@media (max-width: 640px) {
+  .trace-recent__row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'subject time' 'from to'; gap: 2px var(--space-12); min-height: 56px; padding-block: var(--space-8); }
+  .trace-recent__subject { grid-area: subject; }
+  .trace-recent__time { grid-area: time; }
+  .trace-recent__from { grid-area: from; color: var(--color-muted); }
+  .trace-recent__to { grid-area: to; max-width: 160px; justify-self: end; }
+}

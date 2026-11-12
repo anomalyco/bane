@@ -215,7 +215,7 @@ export function InboundAddressDetailPage() {
           <MutationError error={save.error} />
           <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
           <AliasEditor id="inbound-address-aliases" address={current.address} temporary={!!current.expiresAt} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
-          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
+          <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
         <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
       </section>}
