@@ -202,14 +202,14 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
     // An MCP approval revoked while its request ran: the object it would own has no grant left.
     const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
-    // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
-    const transient = !known && !invalidJson && transientDatabaseError(error);
     // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
     const conflict = !known && !invalidJson && databaseConflict(error);
+    // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
+    const transient = !known && !invalidJson && transientDatabaseError(error);
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
       : transient ? databaseUnavailable()
-      : conflict ? new ApiError(503, 'DATABASE_CONFLICT', 'The request conflicted with a concurrent change and was rolled back. Retry it.', undefined, true)
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
+      : conflict ? new ApiError(503, 'DATABASE_CONFLICT', 'The request conflicted with a concurrent change and was rolled back. Retry it.', undefined, true)
       : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
