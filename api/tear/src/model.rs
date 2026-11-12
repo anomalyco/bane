@@ -52,15 +52,20 @@
 //! - R13 deploy overlap: credentials minted by an older release (`os_live_` keys, v3
 //!       `os_agent_` tokens) are honored and revoked exactly like current ones.
 //!
-//! MCP listing versus REST authorization (sampled operations, see `SAMPLE`)
-//! - M1  Code Mode listing equals REST authorization per actor (16 sampled operations): owner grant, owner grant with
+//! MCP listing versus REST authorization (every catalog operation, see `rest.rs`)
+//! - M1  Code Mode listing equals REST authorization per actor, for every catalog operation: owner grant, owner grant with
 //!       receiving consent, member-capped grant, admin grant, provisioning and bound inbox keys.
 //! - M2  plain (resource tool) listing equals the same set.
+//!       Actors include grants with receiving consent but without manage (read, read+send), whose
+//!       listing must leave out mailbox administration (actorMailAccess needs manage).
 //! - M3  a tool call from a grant has the REST status (getCurrentIdentity); non-MCP
 //!       credentials (API keys, agent tokens) are refused by /mcp.
 //! - M4  read-level operations a `bane:read` grant may use in REST (AudienceQL query, segment
 //!       preview, read-only agent-token delegation) are listed and callable, and only state
 //!       changes need confirm=true.
+//! - M5  the REST table itself: every GET in the catalog, called through REST as each actor
+//!       (a grant dispatched as its MCP actor, an inbox key over plain REST), is refused exactly
+//!       when `rest.rs` says so.
 //!
 //! Out of model (reported with the reason by `coverage`)
 //! - X1  Worker/DB clock skew: the host stamps reservations with the Worker clock, so both agree.
@@ -76,18 +81,12 @@
 //!       are validated by schemas outside this area.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use crate::rest;
 use std::collections::BTreeMap;
 
 pub const WINDOW: i64 = 600_000;
 pub const TOKEN_TTL: i64 = 60_000;
 pub const ACCESS_TTL_S: i64 = 300;
-
-/// Sampled operations for the MCP-versus-REST check, in the host's reporting order.
-pub const SAMPLE: [&str; 18] = [
-    "getCurrentIdentity", "listContactLists", "createContactList", "createApiKey", "createAgentToken", "listInboxes",
-    "createInbox", "getRouting", "listInboundKeys", "sendEmail", "deleteInbox", "replyToInboundThread",
-    "listApiKeys", "listMcpConnections", "listDomains", "sendCampaign", "queryAudience", "previewSegment",
-];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Cred {
@@ -106,6 +105,8 @@ pub struct Grant {
     /// The approval was re-consented (receiving added): refresh tokens issued for the previous
     /// reference no longer refresh. A reference never follows a user elsewhere.
     pub replaced: bool,
+    /// The approval includes receiving consent.
+    pub receiving: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,39 +210,51 @@ impl Model {
         (t.div_euclid(1000) + ACCESS_TTL_S) * 1000
     }
 
-    /// REST authorization of the sampled operations for an actor, in `SAMPLE` order.
-    fn visible(&self, who: &str) -> Vec<&'static str> {
-        let allow = |op: &str| -> bool {
-            match who {
-                "ikey" | "gikey" => matches!(op, "listInboxes" | "createInbox"),
-                "bkey" => op == "listInboxes",
-                _ => {
-                    let g = &self.grants[who];
-                    // Scopes: grant read+send+manage, grant2 read+send, grant3 read.
-                    let manage = who == "grant";
-                    let send = who != "grant3";
-                    let receiving = who == "grant" && self.receiving;
-                    let member = g.role == "member";
-                    match op {
-                        // Read-level operations, including the two read-only POSTs.
-                        "getCurrentIdentity" | "listContactLists" | "queryAudience" | "previewSegment" => true,
-                        "sendEmail" => send,
-                        "sendCampaign" => send && !member,
-                        "createContactList" | "createApiKey" | "listInboxes" | "createInbox" | "deleteInbox"
-                        | "replyToInboundThread" => manage,
-                        // Read-only delegation: a read grant may mint a read token.
-                        "createAgentToken" | "listDomains" => !member,
-                        "getRouting" => receiving && !member,
-                        "listInboundKeys" => receiving && manage,
-                        "listApiKeys" => manage,
-                        // Dashboard sessions only.
-                        "listMcpConnections" => false,
-                        _ => false,
-                    }
-                }
-            }
+    /// The operations an actor's MCP listing must show: exactly those REST authorizes for it
+    /// (`rest.rs`), and for inbox connections only the agent-inbox tools (MCP policy).
+    pub fn visible(&self, who: &str) -> BTreeMap<String, bool> {
+        let inbox: Option<&[&str]> = match who {
+            "ikey" | "gikey" => Some(&["read", "create"]),
+            "bkey" => Some(&["read"]),
+            _ => None,
         };
-        SAMPLE.into_iter().filter(|op| allow(op)).collect()
+        let grant = inbox.is_none().then(|| {
+            let g = &self.grants[who];
+            // Scopes: grant read+send+manage, grant2 read+send, grant3 read.
+            rest::Grant { read: true, send: who != "grant3", manage: who == "grant", member: g.role == "member", receiving: g.receiving }
+        });
+        rest::OPS
+            .iter()
+            .filter(|(name, method, path, check)| match (inbox, &grant) {
+                (Some(perms), _) => rest::offered_to_inbox(name, path) && rest::inbox_key_allows(perms, path, *check),
+                (None, Some(g)) => rest::grant_allows(g, method, path, *check),
+                _ => false,
+            })
+            .map(|(name, ..)| (name.to_string(), true))
+            .collect()
+    }
+
+    /// REST's own decision for every GET operation, as the actor (the audit cross-checks `rest.rs`).
+    fn rest_gets(&self, who: &str) -> BTreeMap<String, bool> {
+        let inbox: Option<&[&str]> = match who {
+            "ikey" | "gikey" => Some(&["read", "create"]),
+            "bkey" => Some(&["read"]),
+            _ => None,
+        };
+        rest::OPS
+            .iter()
+            .filter(|(_, method, ..)| *method == "get")
+            .map(|(name, method, path, check)| {
+                let allowed = match inbox {
+                    Some(perms) => rest::inbox_key_allows(perms, path, *check),
+                    None => {
+                        let g = &self.grants[who];
+                        rest::grant_allows(&rest::Grant { read: true, send: who != "grant3", manage: who == "grant", member: g.role == "member", receiving: g.receiving }, method, path, *check)
+                    }
+                };
+                (name.to_string(), allowed)
+            })
+            .collect()
     }
 
     // ---------- alphabet ----------
@@ -355,6 +368,25 @@ impl Model {
             push("refresh grant3".into());
             for how in ["code", "plain", "call", "delegate", "query"] {
                 push(format!("probe grant3 {how}"));
+            }
+        }
+        // Receiving consent on the read+send and read-only grants too (owner/admin reads, never manage).
+        for g in ["grant2", "grant3"] {
+            if self.grants.get(g).is_some_and(|x| !x.receiving) {
+                push(format!("receiving {g}"));
+            }
+        }
+        // REST audit of every GET as the actor (about 90 requests): random walks only.
+        if full {
+            for g in ["grant", "grant2", "grant3"] {
+                if self.grants.contains_key(g) {
+                    push(format!("probe {g} audit"));
+                }
+            }
+            for c in ["ikey", "gikey", "bkey"] {
+                if self.minted(c) {
+                    push(format!("probe {c} audit"));
+                }
             }
         }
         if self.minted("key") {
@@ -492,8 +524,13 @@ impl Model {
                 json!({"status": status})
             }
             "receiving" => {
-                self.receiving = true;
-                self.grants.get_mut("grant").unwrap().replaced = true;
+                // Re-consent with receiving: the approval's reference changes, old refresh tokens stop.
+                if w[1] == "grant" {
+                    self.receiving = true;
+                }
+                let g = self.grants.get_mut(w[1]).unwrap();
+                g.receiving = true;
+                g.replaced = true;
                 json!({})
             }
             "refresh" => {
@@ -579,7 +616,7 @@ impl Model {
             }
             "grant" | "grant2" | "grant3" => {
                 let role = if c == "grant2" { self.member.clone() } else { "owner".to_string() };
-                self.grants.insert(c.into(), Grant { revoked: false, at: Self::access_exp(t), role, replaced: false });
+                self.grants.insert(c.into(), Grant { revoked: false, at: Self::access_exp(t), role, replaced: false, receiving: false });
                 json!({"status": "ok"})
             }
             "token" => {
@@ -659,16 +696,22 @@ impl Model {
                 let (op, status) = match how { "call" => ("getCurrentIdentity", 200), "delegate" => ("createAgentToken", 201), _ => ("queryAudience", 200) };
                 if !self.access_ok(who) {
                     json!({"status": 401, "code": null})
-                } else if self.visible(who).contains(&op) {
+                } else if self.visible(who).contains_key(op) {
                     json!({"status": status, "code": null})
                 } else {
                     json!({"status": null, "code": "TOOL_UNAVAILABLE"})
                 }
             }
+            ("grant" | "grant2" | "grant3", "audit") => {
+                if self.grant_live(who) { json!({"status": 200, "rest": self.rest_gets(who)}) } else { json!({"status": 401}) }
+            }
             ("grant" | "grant2" | "grant3", _) => {
                 if self.access_ok(who) { json!({"status": 200, "visible": self.visible(who)}) } else { json!({"status": 401}) }
             }
             (_, "mcp") if REST_CREDS.contains(&who) => json!({"status": 401}),
+            (_, "audit") => {
+                if self.cred_live(who) { json!({"status": 200, "rest": self.rest_gets(who)}) } else { json!({"status": 401}) }
+            }
             (_, "mcp") => {
                 if self.cred_live(who) { json!({"status": 200, "visible": self.visible(who)}) } else { json!({"status": 401}) }
             }
@@ -943,17 +986,20 @@ impl Model {
             ("refresh", _, _) => t.push("R12"),
             _ => {}
         }
-        if w[0] == "probe" && matches!(w[2], "code" | "mcp") && observed["visible"].is_array() {
+        if w[0] == "probe" && matches!(w[2], "code" | "mcp") && observed["visible"].is_object() {
             t.push("M1");
         }
-        if w[0] == "probe" && w[2] == "plain" && observed["visible"].is_array() {
+        if w[0] == "probe" && w[2] == "plain" && observed["visible"].is_object() {
             t.push("M2");
         }
         if w[0] == "probe" && w[2] == "call" {
             t.push("M3");
         }
-        if w[0] == "probe" && (matches!(w[2], "delegate" | "query") || (w[1] == "grant3" && observed["visible"].is_array())) {
+        if w[0] == "probe" && (matches!(w[2], "delegate" | "query") || (w[1] == "grant3" && observed["visible"].is_object())) {
             t.push("M4");
+        }
+        if w[0] == "probe" && w[2] == "audit" && observed["rest"].is_object() {
+            t.push("M5");
         }
         if w[0] == "tick" {
             let n: i64 = w[1].parse().unwrap_or_default();
@@ -970,7 +1016,7 @@ fn with_at(mut v: Value) -> Value {
     v
 }
 
-pub const CHECKLIST: [(&str, &str); 38] = [
+pub const CHECKLIST: [(&str, &str); 39] = [
     ("I1", "same key, same body replays the original"), ("I2", "same key, different body: 409 conflict"),
     ("I3", "secret-bearing create replay withheld; no secret replayed"), ("I4", "key length 200/201, empty, non-printable"),
     ("I5", "a failed create releases its key"), ("I6", "keys are scoped per credential"),
@@ -989,6 +1035,7 @@ pub const CHECKLIST: [(&str, &str); 38] = [
     ("R13", "deploy overlap: os_live_ keys and v3 tokens"), ("M1", "Code Mode listing equals REST authorization"),
     ("M2", "plain listing equals the same set"), ("M3", "tool call status; non-MCP credentials refused by /mcp"),
     ("M4", "read grant: query, preview and read-only delegation listed and callable"),
+    ("M5", "REST audit: every GET as each actor matches the REST table"),
     ("X1", "out of model: Worker/DB clock skew (host pins both clocks; NTP-bounded in production)"),
     ("X2", "out of model: SES/R2/webhook failures (these creates make no external call)"),
     ("X3", "out of model: interleavings inside one SQL statement (statement-granular checkpoints)"),

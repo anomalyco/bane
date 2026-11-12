@@ -50,10 +50,13 @@ const env: Record<string, string> = {
 const pg = (await import('pg')).default;
 const { drizzle } = await import('drizzle-orm/node-postgres');
 const { makeSignature } = await import('better-auth/crypto');
-const { createApp } = await import('../src/app.js');
+const { createApp, createOpenApiApp } = await import('../src/app.js');
 const { loadConfig } = await import('../src/config.js');
 const { s3Storage } = await import('../src/adapters/storage.js');
 const { resourceInventory } = await import('../src/mcp-resources.js');
+const { buildMcpCatalog } = await import('../src/mcp-catalog.js');
+const { dispatchAsActor } = await import('../src/auth.js');
+const { getMcpGrantActor } = await import('../src/mcp-auth.js');
 
 // ---------- gated pool ----------
 type Label = 'auth' | 'claim' | 'lookup' | 'handler' | 'record' | 'release';
@@ -169,6 +172,14 @@ const bucket = {
 const runtime: any = { db: drizzle(pool), storage: s3Storage(env), config, mailR2: { bucket, name: 'tear-mail', write: true }, webhookFetch: async () => { throw new Error('tear: no network'); } };
 const app = createApp();
 const INVENTORY = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
+// Every GET in the catalog, with dummy path parameters that pass validation, for the REST audit.
+const GETS = [...buildMcpCatalog(await createOpenApiApp()).entries()].filter(([, op]) => op.method === 'get').map(([name, op]) => {
+  const params = (op.tool.inputSchema.properties ?? {}) as Record<string, { enum?: string[]; format?: string; type?: string | string[]; pattern?: string }>;
+  const value = (field: string) => { const p = params[field] ?? {}; return p.enum?.[0] ?? (p.format === 'email' ? 'tear@example.com' : [p.type].flat().includes('integer') ? '1' : p.pattern?.includes('-\\d') ? 'us-east-1' : 'tear-missing'); };
+  const aliases: Record<string, string> = { connectionId: 'id', tokenId: 'id', keyId: 'id', contactId: 'id', listId: 'id', segmentId: 'id', importId: 'id', templateId: 'id', assetId: 'id', emailId: 'id', attachmentId: 'id', campaignId: 'id', domainId: 'id', webhookId: 'id', routeId: 'id', inboxId: 'id', version: 'v' };
+  const path = op.path.replace(/\{([^}]+)\}/g, (_, field: string) => { const mcp = Object.entries(aliases).find(([m, api]) => api === field && params[m])?.[0] ?? field; return encodeURIComponent(value(mcp)); });
+  return { name, path: op.path === '/v1/inboxes/{id}/changes' ? `${path}?since=0` : path };
+});
 
 // ---------- fixture ----------
 type Fixture = {
@@ -179,7 +190,6 @@ type User = { id: string; cookie: string; memberId: string };
 type Cred = { id: string; secret: string };
 type Grant = { access: string; refresh: string; clientId: string; consentId: string; keyId: string };
 let fx: Fixture | null = null;
-const SAMPLE_REST = ['getCurrentIdentity', 'listContactLists', 'createContactList', 'createApiKey', 'createAgentToken', 'listInboxes', 'createInbox', 'getRouting', 'listInboundKeys', 'sendEmail', 'deleteInbox', 'replyToInboundThread', 'listApiKeys', 'listMcpConnections', 'listDomains', 'sendCampaign', 'queryAudience', 'previewSegment'];
 
 async function seedUser(w: string, role: 'owner' | 'member'): Promise<User> {
   const id = `tear-user-${randomUUID()}`, token = `tear-token-${randomUUID()}`, memberId = randomUUID();
@@ -339,7 +349,26 @@ async function listing(bearerToken: string, codemode: boolean) {
     if (codemode) ops.add(t.name);
     else for (const action of t.inputSchema?.properties?.action?.enum ?? []) { const op = INVENTORY.get(`${t.name}.${action}`); if (op) ops.add(op); }
   }
-  return { status: 200, visible: SAMPLE_REST.filter(op => ops.has(op)) };
+  return { status: 200, visible: Object.fromEntries([...ops].sort().map(op => [op, true])) };
+}
+
+// REST's own decision for every GET, as the actor: an MCP grant dispatched with its MCP actor,
+// an inbox key over plain REST. 401/403 is a refusal; anything else passed authorization.
+async function audit(who: string) {
+  const f = fx!;
+  let call: (path: string) => Promise<number>;
+  if (f.grants.has(who)) {
+    const actor = await getMcpGrantActor(runtime, f.grants.get(who)!.keyId);
+    if (!actor) return { status: 401 };
+    call = async path => (await dispatchAsActor(app, new Request(PUBLIC + path, { headers: { accept: 'application/json' } }), runtime, actor)).status;
+  } else {
+    const secret = bearer(who);
+    if ((await send(null, 'GET', '/v1/inboxes', { bearer: secret })).status === 401) return { status: 401 };
+    call = async path => (await send(null, 'GET', path, { bearer: secret })).status;
+  }
+  const rest: Record<string, boolean> = {};
+  for (const { name, path } of GETS) { const status = await call(path); rest[name] = status !== 401 && status !== 403; }
+  return { status: 200, rest };
 }
 
 // ---------- actions ----------
@@ -395,12 +424,13 @@ async function act(action: string): Promise<Obs> {
       case 'ikey': case 'gikey': return { status: (await send(null, 'POST', `/v1/inbound/keys/${f.creds.get(a1)!.id}/revoke`, owner())).status };
     } break;
     case 'delete': return { status: (await send(null, 'DELETE', `/v1/inboxes/${f.box}`, owner())).status };
-    case 'receiving': await admin.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [f.grants.get('grant')!.consentId]); return {};
+    case 'receiving': await admin.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [f.grants.get(a1 ?? 'grant')!.consentId]); return {};
     case 'refresh': return refreshGrant(a1!);
     case 'remove': return { status: (await send(null, 'DELETE', `/v1/workspaces/current/members/${f.member.memberId}`, owner())).status };
     case 'promote': return { status: (await send(null, 'PATCH', `/v1/workspaces/current/members/${f.member.memberId}`, owner(), { role: 'admin' })).status };
     case 'probe': {
       const [, who, how] = w;
+      if (how === 'audit') return audit(who!);
       if (who === 'grant' || who === 'grant2' || who === 'grant3') {
         const g = f.grants.get(who)!;
         if (how === 'call') { const o = await callTool(who, 'getCurrentIdentity', {}); return { status: o.status, code: o.code }; }

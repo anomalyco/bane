@@ -12,6 +12,7 @@
 //! mismatch is reduced with tear's `minimizeTrace`. `--budget SECS` stops starting new traces.
 //! Workers (`-j`) each own a Bun host process; traces are independent fixtures (workspaces).
 mod model;
+mod rest;
 
 use model::{Alphabet, CHECKLIST, Model};
 use serde_json::{Value, json};
@@ -45,6 +46,15 @@ const WITNESSES: &[&[&str]] = &[
     &["mint grant", "probe grant code", "probe grant plain"],
     // A read-only grant was not offered (or allowed) REST's read-level operations (review of #51).
     &["mint grant3", "probe grant3 code", "probe grant3 plain", "probe grant3 delegate", "probe grant3 query"],
+    // Receiving consent without manage listed mailbox administration REST refuses (recheck of #51).
+    &["mint grant3", "receiving grant3", "probe grant3 code", "probe grant3 plain"],
+    &["promote member", "mint grant2", "receiving grant2", "probe grant2 code", "probe grant2 plain"],
+    // The REST table checked against real REST, for every GET, once per actor type.
+    &["mint grant", "probe grant audit", "receiving grant", "probe grant audit"],
+    &["mint grant3", "probe grant3 audit", "receiving grant3", "probe grant3 audit"],
+    &["mint grant2", "probe grant2 audit", "promote member", "receiving grant2", "probe grant2 audit"],
+    &["promote member", "mint grant2", "receiving grant2", "probe grant2 audit"],
+    &["mint key", "mint ikey", "probe ikey audit", "mint box", "probe bkey audit"],
     // Checklist items the bounded graphs do not reach: C1 (8 steps), R6, R7, I7.
     &["mint key", "A begin list key k1 b1", "A step", "A step", "B begin list key k1 b1", "B step", "B step", "B step"],
     &["mint key", "mint box", "delete box", "probe bkey rest", "probe bkey mcp"],
