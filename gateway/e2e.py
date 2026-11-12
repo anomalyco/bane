@@ -302,6 +302,19 @@ def mail(p):
         assert ok(c.uid("SEARCH", None, "ALL")) == before, (
             "client APPEND duplicated the submitted Sent copy"
         )
+    # Exactly-sized RFC messages, including the terminating message CRLF but not DATA's dot.
+    with smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=20) as c:
+        c.ehlo();limit=int(c.esmtp_features['size']);assert limit==8<<20
+        c.login(ALIAS,PASS)
+        prefix=(f'From: {ALIAS}\r\nTo: reader@example.invalid\r\nContent-Type: multipart/mixed; boundary=fixture\r\n\r\n'
+                '--fixture\r\nContent-Type: application/octet-stream; name="fixture.bin"\r\nContent-Disposition: attachment; filename="fixture.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\n').encode()
+        for size in (limit-1,limit,limit+1):
+            status=c.mail(ALIAS,[f'SIZE={size}'])[0];assert status==(552 if size>limit else 250)
+            if size>limit:continue
+            suffix=b'\r\n--fixture--\r\n';row=b'YQBh'*19+b'\r\n';count,extra=divmod(size-len(prefix)-len(suffix),len(row))
+            # Pad the epilogue, not the base64 payload.
+            raw=prefix+row*count+suffix[:-2]+b' '*extra+b'\r\n';assert len(raw)==size
+            c.rcpt('reader@example.invalid');reply=c.data(raw);assert reply[0]==250,reply
 
 
 def client_flow(port):

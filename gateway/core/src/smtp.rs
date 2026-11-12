@@ -7,7 +7,7 @@ use mail_parser::{HeaderName, MessageParser};
 use smtp_proto::{AUTH_LOGIN, AUTH_PLAIN, MAIL_BODY_7BIT, MAIL_BODY_8BITMIME, Request as C};
 use zeroize::Zeroizing;
 
-pub const MAX_SIZE: usize = 16 << 20;
+pub const MAX_SIZE: usize = 8 << 20;
 #[derive(Debug, thiserror::Error)]
 pub enum SubmitError {
     #[error("451 4.7.1 Inbox send cap reached")]
@@ -229,14 +229,10 @@ impl Smtp {
                 self.ehlo = true;
                 self.reset();
                 let mut r = Reply::default();
-                for s in [
-                    "250-smtp.bane.mx",
-                    "250-PIPELINING",
-                    "250-SIZE 16777216",
-                    "250-8BITMIME",
-                ] {
-                    r.line(s)
-                }
+                r.line("250-smtp.bane.mx");
+                r.line("250-PIPELINING");
+                r.line(format!("250-SIZE {MAX_SIZE}"));
+                r.line("250-8BITMIME");
                 r.line(if !self.tls {
                     "250 STARTTLS"
                 } else if !self.authenticated {

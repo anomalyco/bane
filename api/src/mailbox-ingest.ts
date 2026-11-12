@@ -252,13 +252,13 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 const HEADER_LINES = 256, MIME_DEPTH = 12, MIME_PARSE_MS = 1000;
-function withinMimeLimits(raw: Uint8Array) {
+function withinMimeLimits(raw: Uint8Array,lineLimit=PARSE_LINE_LIMIT) {
   let lines = 0, start = 0, headers = true, headerBytes = 0, headerLines = 0;
   const boundaries: string[] = [];
   const declared = new Set<string>();
   while (start < raw.length) {
     const lf = raw.indexOf(10, start), end = lf < 0 ? raw.length : lf;
-    if (++lines > PARSE_LINE_LIMIT) return false;
+    if (++lines > lineLimit) return false;
     const length = end-start-(end>start && raw[end-1] === 13 ? 1 : 0);
     // Conservative preflight of possible RFC 2046 delimiters, without decoding
     // headers or bodies. Parser-side limits below remain authoritative for
@@ -323,7 +323,7 @@ function countHeaderEscaped(msg: Email, count: number) {
 }
 type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
 type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
-const mimeBudget = () => ({ count: 0, headerLines: 0, lines: 0, deadline: performance.now() + MIME_PARSE_MS });
+const mimeBudget = (ms=MIME_PARSE_MS) => ({ count: 0, headerLines: 0, lines: 0, deadline: performance.now() + ms });
 const escapeBudgetStore = new AsyncLocalStorage<ReturnType<typeof mimeBudget>>();
 const postalProto = PostalMime.prototype as unknown as {
   parse?: (this: unknown, buf: unknown) => Promise<Email>;
@@ -381,9 +381,10 @@ const escapeGuardInstalled = (() => {
 })();
 if (!escapeGuardInstalled) warnMissingEscapeGuard();
 export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
-export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
-  const budget = mimeBudget();
-  if (raw.byteLength > PARSE_LIMIT || !withinMimeLimits(raw)) return null;
+export const SMTP_WIRE_LIMIT=8*1024*1024;
+export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submission'='receipt'): Promise<Email | null> {
+  const submission=mode==='submission',budget=mimeBudget(submission?5000:MIME_PARSE_MS);
+  if (raw.byteLength > (submission?SMTP_WIRE_LIMIT:PARSE_LIMIT) || !withinMimeLimits(raw,submission?150_000:PARSE_LINE_LIMIT)) return null;
   if (!isPostalMimeEscapeGuardInstalled()) {
     warnMissingEscapeGuard();
     if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;
@@ -393,9 +394,10 @@ export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
       attachmentEncoding: 'arraybuffer', maxHeadersSize: HEADER_LIMIT, maxNestingDepth: MIME_DEPTH,
       maxRfc822NestingDepth: 4, maxPartCount: 200, maxForwardedAddresses: 256,
     }));
-    return performance.now() < budget.deadline && !mail.attachments.some(a=>a.rfc822DepthExceeded) ? mail : null;
+    if(performance.now()>=budget.deadline)throw new RangeError('MIME parse deadline');
+    return !mail.attachments.some(a=>a.rfc822DepthExceeded) ? mail : null;
   }
-  catch { return null; }
+  catch { if(submission && performance.now()>=budget.deadline)throw new ApiError(503,'MIME_BUSY','Submission parser timed out.',undefined,true);return null; }
 }
 
 const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void) => {

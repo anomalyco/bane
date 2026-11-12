@@ -1,5 +1,5 @@
 import { sql, eq, and } from 'drizzle-orm';
-import { parseInboundMime } from './mailbox-ingest.js';
+import { parseInboundMime,SMTP_WIRE_LIMIT } from './mailbox-ingest.js';
 import { ApiError, id, type Actor, type Ctx } from './core.js';
 import { mailboxes } from './db/mailbox.js';
 import { principal } from './mail-gateway.js';
@@ -36,8 +36,8 @@ export async function contentWrite(c: Ctx, p: Content) {
   if (!who) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
   const input = Buffer.from(p.content, 'base64'),
     raw = scrub(input);
-  if (raw.length > 16 * 1024 * 1024) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
-  const m = await parseInboundMime(raw);
+  if (input.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
+  const m = await parseInboundMime(raw,'submission');
   if (!m) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
   const mid = id('msg'),
     bucket = boundMailBucket(rt) ?? (!rt.config.multiTenant ? 'local:' : null);
