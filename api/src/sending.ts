@@ -11,7 +11,7 @@ import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, SuppressionEventData } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
@@ -269,7 +269,12 @@ export function senderDomainWhere(column: AnyPgColumn | SQL, allowed: readonly s
 // Tests are transactional for dispatch and have no campaign_id. Require an explicit JSON null:
 // a missing key (SQL NULL) is an old snapshot that might have been a campaign test.
 const directDelivery = sql`sending_emails.campaign_id IS NULL AND sending_emails.snapshot->'testCampaignId' = 'null'::jsonb`;
-export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'domains'>, emailId?: string) => and(scope(emails, a), emailId === undefined ? undefined : eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains), a.domains.length ? directDelivery : undefined);
+// Mail sent from a receiving address or inbox is conversation mail: a reply can quote the message it answers and a
+// forward carries it whole. The sending log lists and reads it only for credentials the receiving API lets read
+// mailboxes (actorMailAccess). Rows queued before snapshots recorded their origin are known by their mailbox message.
+const mailboxMail = sql`(sending_emails.snapshot @> '{"mailbox":true}'::jsonb OR EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=sending_emails.workspace_id AND m.sending_email_id=sending_emails.id))`;
+export const mailWhere = (a: Actor, emailId?: string) => and(scope(emails, a), emailId === undefined ? undefined : eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains), a.domains.length ? directDelivery : undefined,
+  actorMailAccess(a) ? undefined : sql`NOT ${mailboxMail}`);
 
 // The same asset can legitimately be reused: allow the uploader or a link to an independently
 // readable delivery. A link only to a test, a campaign, or ambiguous legacy mail proves nothing.
@@ -277,9 +282,23 @@ function domainAttachmentAccess(uploader: SQL, domains: readonly string[] | SQL)
   return sql`(sending_attachments.uploaded_by = ${uploader} OR EXISTS (
     SELECT FROM sending_attachment_links l JOIN sending_emails ON sending_emails.workspace_id=l.workspace_id AND sending_emails.id=l.owner_id
     WHERE l.workspace_id=sending_attachments.workspace_id AND l.attachment_id=sending_attachments.id AND l.owner_type='email'
-    AND ${directDelivery} AND ${senderDomainWhere(sql`sending_emails.from_address`, domains)}))`;
+    AND ${directDelivery} AND NOT ${mailboxMail} AND ${senderDomainWhere(sql`sending_emails.from_address`, domains)}))`;
 }
-const scopedAttachment = (a: Actor) => a.domains.length ? domainAttachmentAccess(sql`${a.tokenId ?? a.keyId}`, a.domains) : undefined;
+// An upload belongs to the workspace, so any sender may attach it. One that has gone out only in conversation mail is
+// conversation content: a credential without mailbox access reads or reuses it when it uploaded it, or when it is also
+// attached to something that credential can read (ordinary mail, a campaign or a review).
+function sharedAttachmentAccess(uploader: SQL) {
+  const links = sql`sending_attachment_links l WHERE l.workspace_id=sending_attachments.workspace_id AND l.attachment_id=sending_attachments.id`;
+  const email = (mailbox: boolean) => sql`(l.owner_type='email' AND EXISTS (SELECT FROM sending_emails WHERE sending_emails.workspace_id=l.workspace_id AND sending_emails.id=l.owner_id AND ${mailbox ? mailboxMail : sql`NOT ${mailboxMail}`}))`;
+  return sql`(sending_attachments.uploaded_by = ${uploader}
+    OR NOT EXISTS (SELECT FROM ${links} AND (l.owner_type='mailbox' OR ${email(true)}))
+    OR EXISTS (SELECT FROM ${links} AND (l.owner_type IN ('campaign','review') OR ${email(false)})))`;
+}
+// `conversation`: the mail is sent from a mailbox, whose own rules admitted the sender and its attachments.
+function scopedAttachment(a: Actor, conversation = false) {
+  const uploader = sql`${a.tokenId ?? a.keyId}`;
+  return a.domains.length ? domainAttachmentAccess(uploader, a.domains) : conversation || actorMailAccess(a) ? undefined : sharedAttachmentAccess(uploader);
+}
 export const campaignWhere = (a: Actor, campaignId?: string) => and(scope(campaigns, a), campaignId === undefined ? undefined : eq(campaigns.id, campaignId), senderDomainWhere(sql`${campaigns.draft}->>'from'`, a.domains),
   a.domains.length ? and(eq(campaigns.state, 'draft'), isNull(campaigns.reviewId), sql`${campaigns.draft}->'audience' = '{}'::jsonb`) : undefined);
 function keySender(a: Actor, from: string) {
@@ -463,16 +482,16 @@ function validateAttachmentRows(ids: string[], rows: AttachmentSize[]) {
   const cid = rows.flatMap(r => r.contentId ? [r.contentId] : []);
   if (new Set(cid).size !== cid.length) throw new ApiError(422, 'DUPLICATE_CONTENT_ID', 'Inline content IDs must be unique.');
 }
-export async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false) {
+export async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false, conversation = false) {
   if (!ids.length) return [];
-  const query = db.select().from(attachments).where(and(scope(attachments, a), scopedAttachment(a), inArray(attachments.id, distinctAttachmentIds(ids)))).orderBy(asc(attachments.id));
+  const query = db.select().from(attachments).where(and(scope(attachments, a), scopedAttachment(a, conversation), inArray(attachments.id, distinctAttachmentIds(ids)))).orderBy(asc(attachments.id));
   const rows = await (lock ? query.for('update') : query);
   validateAttachmentRows(ids, rows);
   return rows;
 }
-async function linkAttachments(db: DbExecutor, a: Actor, ids: string[], ownerType: 'email' | 'campaign' | 'review', ownerId: string, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
+async function linkAttachments(db: DbExecutor, a: Actor, ids: string[], ownerType: 'email' | 'campaign' | 'review', ownerId: string, lockedAttachments?: (typeof attachments.$inferSelect)[], conversation = false) {
   // A campaign may reuse metadata already ownership-checked and locked in this same transaction.
-  if (!lockedAttachments) await attachmentRows(db, a, ids, true);
+  if (!lockedAttachments) await attachmentRows(db, a, ids, true, conversation);
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, attachmentId, ownerType, ownerId }))).onConflictDoNothing();
 }
 function escaped(value: string) { return value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!); }
@@ -699,7 +718,7 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
 function structuredSnapshot(input:SendRequest & {region:string}):EmailSnapshot {
   return { testCampaignId: null, untrustedContent: !!input.headers?.some(h => h.name.toLowerCase() === 'in-reply-to'), from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
 }
-async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection,bulkVolume=false): Promise<EmailSnapshot> {
+async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection,bulkVolume=false,conversation=false): Promise<EmailSnapshot> {
   const route = sharedValidated ? {region:request.region!} : runtime.config.multiTenant ? await sendingRegion(runtime,db,a,request.from,request.region,bulkVolume || request.kind==='marketing') : {region:await assertRegionEnabled(db,a.workspaceId,request.region)};
   const input = { ...request, region:route.region };
   if (!sharedValidated) {
@@ -707,7 +726,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     if (!runtime.config.multiTenant) keySender(a, input.from);
   }
   const snapshot=structuredSnapshot(input);
-  const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
+  const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true, conversation);
   sesHeaders(snapshot.headers.length + (input.kind==='marketing' ? 2 : 0));
   for (const row of rows) sesAttachment(row);
   if (route.binding) snapshot.binding=route.binding;
@@ -746,7 +765,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
 async function queueEmail(runtime: Runtime, db: DbExecutor, a: Actor, snapshot: EmailSnapshot, campaignId?: string, availableAt?: string, requestId?: string, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   const emailId = id('email');
   await db.insert(emails).values({ id: emailId, workspaceId: a.workspaceId, actorKeyId: a.keyId, region: snapshot.region, campaignId: campaignId ?? null, from: snapshot.from, to: snapshot.to, cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, snapshot, simulated: isSimulatedSes(runtime), scheduledAt: availableAt ?? null });
-  await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments);
+  await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments, snapshot.mailbox === true);
   // The row itself is the dispatch queue entry; the request's response path nudges that region's dispatcher.
   void requestId;
   noteDispatch(a, snapshot);
@@ -828,9 +847,12 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   const assetIds=[...new Set(mails.flatMap(m=>m.attachments))],cfg=c.env.config,caps=cfg.hostedSendCaps;
   const requestedAssets = sql`${JSON.stringify(assetIds)}::jsonb`;
   // The decision compares each message's original IDs to the locked metadata for these visible IDs.
-  const admissibleAssets = assetIds.length ? sql`CASE WHEN k.domains='[]'::jsonb THEN ${requestedAssets} ELSE (
+  // The same rule as scopedAttachment: every upload for a sender with mailbox access, otherwise the reader rule for its kind.
+  const uploader = 'actor' in identity ? sql`${identity.actor.tokenId ?? identity.actor.keyId}` : sql`k.id`;
+  const mailboxAccess = 'actor' in identity ? sql`${actorMailAccess(identity.actor) !== null}::boolean` : sql`k.permissions ? 'manage'`;
+  const admissibleAssets = assetIds.length ? sql`CASE WHEN k.domains='[]'::jsonb AND ${mailboxAccess} THEN ${requestedAssets} ELSE (
     SELECT coalesce(jsonb_agg(id),'[]'::jsonb) FROM sending_attachments WHERE workspace_id=k.workspace_id AND id IN (SELECT jsonb_array_elements_text(${requestedAssets}))
-    AND ${domainAttachmentAccess('actor' in identity ? sql`${identity.actor.tokenId ?? identity.actor.keyId}` : sql`k.id`, sql`k.domains`)}
+    AND CASE WHEN k.domains='[]'::jsonb THEN ${sharedAttachmentAccess(uploader)} ELSE ${domainAttachmentAccess(uploader, sql`k.domains`)} END
   ) END` : requestedAssets;
   type State=AdmissionState & {allowed:boolean;invalidMime?:boolean;bulk?:BulkFacts};
   const principal='credential' in identity?sql`SELECT k.*,b.used FROM credential k,budget b`:sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
@@ -907,7 +929,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
         AND d.report->'resources'->wanted.kind->'sendingEnabled' = 'true'::jsonb)` : sql`ARRAY[]::text[]`;
     const assets = attachmentIds.length ? sql`(SELECT jsonb_agg(asset) FROM (
       SELECT id, size, content_id AS "contentId",content_type AS "contentType" FROM sending_attachments
-      WHERE workspace_id = (SELECT workspace_id FROM settings) AND ${inArray(attachments.id, attachmentIds)} ${a.domains.length ? sql`AND ${scopedAttachment(a)}` : sql``}
+      WHERE workspace_id = (SELECT workspace_id FROM settings) AND ${inArray(attachments.id, attachmentIds)} ${scopedAttachment(a) ? sql`AND ${scopedAttachment(a)}` : sql``}
       ORDER BY id FOR UPDATE) asset)` : sql`NULL`;
     const verified = mx && !regional ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
@@ -1013,12 +1035,15 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
   const bulk=await checkPending(runtime, db, a, hostedCost(request.to, request.cc, request.bcc));
-  const snapshot = await prepare(runtime, db, a, parsed.data,false,undefined,false,false,undefined,undefined,bulk);
+  // The mailbox rules admitted this sender and these attachments; the sending log's reader rule is for other callers.
+  // prepare and queueEmail look the attachments up where every send does, after the region's settings and claim.
+  const snapshot = await prepare(runtime, db, a, parsed.data,false,undefined,false,false,undefined,undefined,bulk,true);
   if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;}
   snapshot.headers = [...snapshot.headers, ...request.headers];
   snapshot.untrustedContent = replyAuthors !== null || snapshot.headers.some(h => h.Name.toLowerCase() === 'in-reply-to');
   if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;
   if (request.sealed) snapshot.sealed = true;
+  snapshot.mailbox = true;
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }

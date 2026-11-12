@@ -156,6 +156,37 @@ test('ritual compile limits: maximum-size comments remain valid; identifiers, to
   assert.equal(compileRitual(source('/*'+' '.repeat(65536-prefix.length-5)+'*/')).v,1);
   for(const body of ['const '+'a'.repeat(65)+'=0;', ';'.repeat(8193), 'email'+'.a'.repeat(65)]) assert.throws(()=>compileRitual(source(body)),RitualError);
 });
+test('ritual regex tests run on a bounded matcher: its state is charged as steps and a pattern that needs too much is a ritual error',async t=>{
+  const {compileRitual,runRitual,REGEX_STATE_BYTES,RUN_STEPS,MESSAGE_STEPS}=await import('./src/ritual-engine.js'),{RE2JS}=await import('re2js');
+  assert.equal(JSON.parse(await readFile(new URL('./package.json',import.meta.url),'utf8')).dependencies.re2js,'2.10.0','re2js must stay on the version whose matcher limits were checked.');
+  const source=(tests:[string,string][])=>`export default function route(email,ctx){\n${tests.map(([p,f],i)=>`if (/${p}/${f}.test(email.text)) label("m${i}");`).join('\n')}\n}`;
+  const run=(tests:[string,string][],text:string,limit=RUN_STEPS)=>runRitual(compileRitual(source(tests)),{text},{},{},{},limit);
+  let seed=12345;const noise=Array.from({length:65536},()=>{seed=(seed*1103515245+12345)&0x7fffffff;return 'ab'[(seed>>16)&1]}).join('');
+  // Patterns whose matcher needs a new state for almost every character of this text.
+  const wide:[string,string][]=Array.from({length:22},(_,i)=>['a'+'.'.repeat(200+i)+'[XY]','s']);
+  const scan=Math.ceil(65537/32),rss=process.resourceUsage().maxRSS,started=performance.now(),refused=run(wide,noise),ms=performance.now()-started;
+  assert.match(refused.error??'',/^Line 2: Regex needs too many matcher states for this text$/);assert.deepEqual(refused.intents,[]);
+  assert.ok(refused.steps>scan+REGEX_STATE_BYTES/64*0.9&&refused.steps<=scan+REGEX_STATE_BYTES/64+8,`a refused test is charged its whole allowance: ${refused.steps} steps`);
+  assert.ok(ms<1500,`one refused test took ${ms.toFixed(0)} ms`);
+  // A whole message of them: every run stops at its first test, and the message budget ends the rest.
+  let steps=0,runs=0;const all=performance.now();
+  while(steps<MESSAGE_STEPS){steps+=run(wide,noise,MESSAGE_STEPS-steps).steps;runs++;}
+  assert.ok(runs<=Math.ceil(MESSAGE_STEPS/(scan+REGEX_STATE_BYTES/64*0.9)),`${runs} runs`);assert.ok(performance.now()-all<3000,'a message of refused tests');
+  assert.ok((process.resourceUsage().maxRSS-rss)/1024<128,'matcher state is released after every test');
+  // On a short text the same patterns stay inside the allowance, so the state they build is what a run can afford.
+  const short=run(wide,noise.slice(0,300));
+  assert.match(short.error??'',/Step budget exceeded/);assert.ok(short.steps>RUN_STEPS);
+  t.diagnostic(`Refused regex test: ${ms.toFixed(1)} ms, ${refused.steps} steps; ${runs} runs fill a message; 300 characters: ${short.error}`);
+  // Ordinary patterns answer exactly as re2js does, and cost little more than reading the text.
+  const english=('Dear Sir,\nplease RESET your password now. The invoice of $1,299.00 is overdue: wire it to john.doe@example.co.uk\r\n').repeat(580).slice(0,65536);
+  const ordinary:[string,string][]=[['viagra|casino','i'],['\\bpassword\\b','i'],['^dear','im'],['reset.*now',''],['reset.*overdue.*wire','is'],['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z][a-z]+','i'],['\\$\\s?[0-9][0-9,]*(?:\\.[0-9][0-9])?',''],['^.*(?:urgent|immediately).*(?:wire|transfer|payment).*$','im'],['(?:refund|chargeback|dispute)\\W+(?:\\w+\\W+)?(?:\\w+\\W+)?(?:request|claim|now)','i'],['x+x+x+y',''],['\\Bass','']];
+  const bits=(f:string)=>(f.includes('i')?RE2JS.CASE_INSENSITIVE:0)|(f.includes('m')?RE2JS.MULTILINE:0)|(f.includes('s')?RE2JS.DOTALL:0);
+  for(const text of ['',english.slice(0,300),english,noise,'x'.repeat(65536)])for(const [p,f] of ordinary){
+    const r=run([[p,f]],text);
+    assert.equal(r.error,null,`${p} on ${text.length} characters`);assert.equal(r.intents.length===1,RE2JS.compile(p,bits(f)).test(text),`${p} on ${text.length} characters`);
+    assert.ok(r.steps<=Math.ceil((text.length+1)/32)+2500,`${p} on ${text.length} characters: ${r.steps} steps`);
+  }
+});
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
@@ -2433,6 +2464,45 @@ describe('Hosted MCP OAuth and tools', () => {
     return output;
   }
 
+  test('an MCP client name is shown as one short line of the characters that are drawn', async t => {
+    await simulatedSesFixture(t, async ({ db, local, request }) => {
+      // Register a client under this name, open its approval page, approve it, and read it back from the connections list.
+      async function shown(registered: string) {
+        const client = ok(await registerClient(t, db, { client_name: registered }, request), 201);
+        const redirectUri = 'http://127.0.0.1/callback', verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
+        secrets.add(verifier);
+        const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri, scope: writableScope, state: unique('acceptance-mcp-state'),
+          resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
+        const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
+        const oauthQuery = new URL(authorization.url, PUBLIC_ORIGIN).search.slice(1);
+        secrets.add(oauthQuery);
+        const consent = await request('GET', `/mcp/consent?${oauthQuery}`, MANAGER, undefined, { accept: 'text/html' });
+        assert.equal(consent.status, 200);
+        ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
+        const listed = ok(await local('GET', '/v1/mcp-connections')).data.find((row: Json) => row.clientId === client.client_id);
+        return { html: String(consent.body), listed: listed.name as string | null };
+      }
+      // Reordering marks, an invisible character, a line break and a control character inside an over-long name.
+      const long = await shown(`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`), label = `Desk helper notes ${'x'.repeat(142)}`;
+      assert.equal(label.length, 160);
+      assert.ok(long.html.includes(`<h1>Allow ${label} to access Bane?</h1>`), 'The heading names the client on one line.');
+      assert.ok(long.html.includes(`has not verified "${label}".`));
+      assert.doesNotMatch(long.html, /[\u0007\u200B\u202A-\u202E\u2066-\u2069]|x{143}/u);
+      assert.equal(long.listed, label, 'Connections list the same name the approval page showed.');
+      // Joiners and a variation selector that shape what is drawn stay; a soft hyphen, a grapheme joiner and stray joiners go.
+      const shaped = await shown('\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D');
+      assert.equal(shaped.listed, '👩\u200D💻 ❤\uFE0F می\u200Cخواهم Support');
+      assert.ok(shaped.html.includes(`<h1>Allow ${shaped.listed} to access Bane?</h1>`));
+      // Names with nothing to draw get the default label and no name in the list.
+      for (const blank of ['\u034F\u00AD\u206A', '\u2800 \u3164\u{E0041}\uFEFF', '\u0301\u200D\uFE0F']) {
+        const none = await shown(blank);
+        assert.ok(none.html.includes('<h1>Allow This MCP client to access Bane?</h1>'), JSON.stringify(blank));
+        assert.ok(none.html.includes('has not verified "This MCP client".'));
+        assert.equal(none.listed, null);
+      }
+    });
+  });
+
   test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
     await simulatedSesFixture(t, async ({ db, request }) => {
       const {token, consentId}=await oauthGrant(t,db,'opensend:read offline_access',request);
@@ -2723,6 +2793,19 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST','/v1/inboxes',managed.token,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
+    await t.test('a temporary manage token reads sending webhooks but does not set them up, change them or read their secrets', async () => {
+      const path = '/v1/webhooks', body = { url: 'https://example.com/synthetic-events', description: 'Agent token fixture', eventTypes: ['email.delivered'], paused: true };
+      error(await http('POST', path, managed.token, body), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+      const owned = ok(await http('POST', path, MANAGER, body), 201);
+      try {
+        for (const [method, suffix, input] of [['PATCH', '', { url: 'https://example.org/synthetic-events' }], ['PATCH', '', { paused: false }], ['GET', '/secret', undefined], ['POST', '/rotate-secret', undefined], ['DELETE', '', undefined]] as const)
+          error(await http(method, `${path}/${owned.id}${suffix}`, managed.token, input), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+        const read = ok(await http('GET', `${path}/${owned.id}`, managed.token));
+        assert.equal(read.url, '••••' + body.url.slice(-4)); assert.equal(read.paused, true);
+        ok(await http('GET', `${path}/${owned.id}/deliveries`, managed.token));
+        assert.equal(typeof ok(await http('GET', `${path}/${owned.id}/secret`, MANAGER)).secret, 'string');
+      } finally { ok(await http('DELETE', `${path}/${owned.id}`, MANAGER)); }
+    });
     await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
       const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
       for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
@@ -2769,6 +2852,9 @@ describe('Hosted MCP OAuth and tools', () => {
       }
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
+      // A mail client password outlives the token that asks for it, so a temporary token cannot issue one. It can still list them.
+      error(await http('POST','/v1/inboxes/fixture/app-passwords',managed.token,{name:'fixture',protocols:['imap']}),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
+      ok(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token));
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
@@ -2789,6 +2875,11 @@ describe('Hosted MCP OAuth and tools', () => {
       const child=ok(await http('POST','/v1/api-keys',parent.secret,{name:'read fixture',permissions:['read']}),201);
       secrets.add(child.secret);grantKeys.push(child.id);
       error(await http('POST','/v1/rituals/test',child.secret,{messageId:'msg_fixture'}),403,'PERMISSION_DENIED');
+      // Routing with read permission: lists and the dry run work, and every change needs manage.
+      ok(await http('GET','/v1/routing/routes',child.secret)); error(await http('POST','/v1/routing/test',child.secret,{}),422,'MISSING_RECIPIENTS');
+      for(const [method,path,body] of [['PUT','/v1/routing',{routes:[]}],['POST','/v1/routing/routes',{match:'fixture@example.com',to:[]}],['PATCH','/v1/routing/routes/billing',{to:[]}],
+        ['DELETE','/v1/routing/routes/billing',undefined],['DELETE','/v1/routing/routes/test',undefined],['POST','/v1/routing/versions/1/restore',undefined]] as const)
+        error(await http(method,path,child.secret,body,{'if-match':'1'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
       await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
       assert.equal(await live(),false);
@@ -2967,6 +3058,159 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('an endpoint held when its approval is removed resumes only with its URL', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { token, consentId } = await oauthGrant(t, db, writableScope, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [consentId]);
+      const toolAs = async (bearer: string, name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); };
+      const tool = (name: string, args: Json) => toolAs(token, name, args);
+      const slack = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/fixturefixturefixture';
+      // A person creates each kind of URL endpoint and a forward to an address on a domain of theirs; the approval
+      // then changes all but one of them.
+      const wid = runtime.config.workspaceId, domain = unique('held').replaceAll('_', '-') + '.example';
+      await db.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$3,$4)', [unique('dom'), domain, wid, REGION]);
+      for (const body of [{ type: 'webhook', name: 'helpdesk', url: 'https://example.com/hooks/helpdesk' }, { type: 'slack', name: 'alerts', url: slack }, { type: 'webhook', name: 'untouched', url: 'https://example.com/hooks/untouched' }, { type: 'forward', name: 'escalate', address: `ops@${domain}`, preverify: true }])
+        ok(await local('POST', '/v1/endpoints', body), 201);
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/events' }), 201);
+      await tool('updateEndpoint', { name: 'helpdesk', body: { url: 'https://example.net/hooks/helpdesk' } });
+      await tool('updateEndpoint', { name: 'alerts', body: { perMinute: 30 } });
+      await tool('updateEndpoint', { name: 'escalate', body: { perMinute: 30 } });
+      await tool('updateInboundWebhook', { webhookId: hook.id, body: { description: 'Events' } });
+      const endpoint = async (name: string) => ok(await local('GET', `/v1/endpoints/${name}`));
+      assert.deepEqual([(await endpoint('helpdesk')).status, (await endpoint('alerts')).status, (await endpoint('escalate')).status], ['ready', 'ready', 'ready']);
+
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke'));
+      const held = await endpoint('helpdesk');
+      assert.equal(held.status, 'paused');
+      assert.match(held.nextStep, /sending its URL again/);
+      assert.equal((await endpoint('untouched')).status, 'ready', 'An endpoint the approval never changed keeps delivering.');
+      // A forward has no URL to send again: it is paused without the mark and resumes as any paused endpoint does.
+      const forward = await endpoint('escalate');
+      assert.equal(forward.status, 'paused'); assert.match(forward.nextStep, /^Deliveries are held\. Resume with updateEndpoint \{ "paused": false \}\./);
+      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND name='forward:escalate'", [wid])).rows, [{ paused: true, reconfirm: false }]);
+      error(await local('PATCH', '/v1/endpoints/escalate', { url: 'https://example.com/hooks/escalate', paused: false }), 422, 'FORWARD_ADDRESS_FIXED');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/escalate', { paused: false })).status, 'ready');
+      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND name='forward:escalate'", [wid])).rows, [{ paused: false, reconfirm: false }]);
+      for (const path of ['/v1/endpoints/helpdesk', '/v1/endpoints/alerts', `/v1/inbound/webhooks/${hook.id}`]) {
+        assert.equal(error(await local('PATCH', path, { paused: false }), 409, 'ENDPOINT_URL_REQUIRED').field, 'url');
+        // Nothing is posted to a held endpoint, a test included.
+        error(await local('POST', `${path}/test`, path.includes('/inbound/') ? {} : undefined), 409, 'ENDPOINT_URL_REQUIRED');
+      }
+      assert.deepEqual((await db.query("SELECT bool_and(paused) AS paused,count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1) AND reconfirm", [hook.id])).rows[0], { paused: true, n: 3 });
+      // Other changes to a held endpoint still work; only resuming waits for the URL.
+      ok(await local('PATCH', '/v1/endpoints/helpdesk', { perMinute: 20, paused: true }));
+
+      // The URL and the resume together, or the URL first and the resume after it.
+      const resumed = ok(await local('PATCH', '/v1/endpoints/helpdesk', { url: 'https://example.com/hooks/helpdesk', paused: false }));
+      assert.equal(resumed.status, 'ready'); assert.match(resumed.nextStep, /^Call it from a ritual/);
+      assert.equal((await db.query("SELECT url FROM mailbox_webhooks WHERE key='helpdesk' AND id<>$1 AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0].url, 'https://example.com/hooks/helpdesk');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/alerts', { url: slack })).status, 'paused');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/alerts', { paused: false })).status, 'ready');
+      assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { url: 'https://example.com/hooks/events', paused: false })).paused, false);
+      // A pause a person sets resumes by itself, as before.
+      ok(await local('PATCH', '/v1/endpoints/helpdesk', { paused: true }));
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/helpdesk', { paused: false })).status, 'ready');
+      ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: true }));
+      assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: false })).paused, false);
+
+      // A resume decides on the endpoint as it is when the update runs. Here a second approval that changed the
+      // endpoint is removed after the resume has read the endpoint and before it writes.
+      const second = await oauthGrant(t, db, writableScope, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [second.consentId]);
+      await toolAs(second.token, 'updateEndpoint', { name: 'untouched', body: { perMinute: 30 } });
+      ok(await local('PATCH', '/v1/endpoints/untouched', { paused: true }));
+      const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>; let removed = false;
+      const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        if (this !== db || removed || !/FROM mail_endpoints d JOIN mailbox_webhooks h/.test(text)) return query.apply(this, args);
+        removed = true;
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]); return rows; });
+      } as typeof pg.Client.prototype.query);
+      try { error(await local('PATCH', '/v1/endpoints/untouched', { paused: false }), 409, 'ENDPOINT_URL_REQUIRED'); } finally { wire.mock.restore(); }
+      assert.equal(removed, true);
+      const marked = async () => (await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE key='untouched' AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0];
+      // The refused request rolled back with everything on its connection, the removal included: the endpoint is still paused.
+      assert.equal((await marked()).paused, true);
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + second.consentId + '/revoke'));
+      assert.deepEqual(await marked(), { paused: true, reconfirm: true });
+      // The database holds the same rule for any writer: a marked endpoint stays paused.
+      await db.query('SAVEPOINT marked_endpoint');
+      await assert.rejects(db.query("UPDATE mailbox_webhooks SET paused=false WHERE key='untouched' AND reconfirm"), /mailbox_webhook_reconfirm_paused/);
+      await db.query('ROLLBACK TO SAVEPOINT marked_endpoint');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/untouched', { url: 'https://example.com/hooks/untouched', paused: false })).status, 'ready');
+      assert.deepEqual(await marked(), { paused: false, reconfirm: false });
+
+      // A write by a key an approval created reads the approval again inside its transaction, not only when the request
+      // was authenticated. Here the approval is removed between the two reads: the write is refused and nothing changes.
+      const third = await oauthGrant(t, db, writableScope, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [third.consentId]);
+      const key = ok(await request('POST', '/mcp?codemode=true', third.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'held fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
+      secrets.add(key);
+      ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { description: 'Events, again' }));
+      let reads = 0;
+      const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        // The first read of the approval authenticates the key; the second is the write's own.
+        if (this !== db || !/from "oauth_consent"/.test(text) || ++reads !== 2) return query.apply(this, args);
+        return query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [third.consentId]).then(() => query.apply(this, args));
+      } as typeof pg.Client.prototype.query);
+      try { error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
+      assert.equal(reads, 2);
+      assert.equal(ok(await local('GET', `/v1/inbound/webhooks/${hook.id}`)).url, '\u2022\u2022\u2022\u2022ents');
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + third.consentId + '/revoke'));
+      assert.deepEqual((await db.query('SELECT paused,reconfirm FROM mailbox_webhooks WHERE id=$1', [hook.id])).rows, [{ paused: true, reconfirm: true }]);
+      assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { url: 'https://example.com/hooks/events', paused: false })).paused, false);
+    });
+  });
+
+  test('a removal waits for a receiving write under way, then holds what the write changed', async t => {
+    // Two connections: the write pauses inside its transaction after it has recorded its approval and before it locks
+    // the webhook, and the owner removes the approval meanwhile. The removal waits for the write, then holds the webhook.
+    const db = await fixtureDatabase(t);
+    const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const app = createApp(), runtime = instance.runtime, live = { 'x-bane-environment': 'live' };
+    const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
+    const { token, consentId } = await oauthGrant(t, db, writableScope, request);
+    await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [consentId]);
+    const key = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'race fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
+    secrets.add(key);
+    const hook = ok(await request('POST', '/v1/inbound/webhooks', MANAGER, { url: 'https://example.com/hooks/race-events', eventTypes: ['message.received'] }, live), 201);
+    cleanup(t, async () => { ok(await request('DELETE', `/v1/inbound/webhooks/${hook.id}`, MANAGER, undefined, live)); });
+    ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { description: 'changed by the approval' }, live));
+    const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>;
+    let writer: pg.Client | null = null, release = () => {}, paused = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; }), pausedAt = new Promise<void>(resolve => { paused = resolve; });
+    const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+      const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+      const values = Array.isArray(args[1]) ? args[1] : (args[0] as { values?: unknown[] })?.values ?? [];
+      if (writer === null && /INSERT INTO mail_grant_objects/.test(text) && values.includes(hook.id)) { writer = this; return query.apply(this, args); }
+      if (this !== writer) return query.apply(this, args);
+      writer = null; paused();
+      return gate.then(() => query.apply(this, args));
+    } as typeof pg.Client.prototype.query);
+    try {
+      const write = request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }, live);
+      await pausedAt;
+      let settled = false;
+      const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%oauth_consent%'")).rows[0].n > 0;
+      for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(await waiting(), true, 'The removal waits for the approval the write holds.');
+      assert.equal(settled, false);
+      release();
+      ok(await write);
+      ok(await removal);
+    } finally { wire.mock.restore(); release(); }
+    // The write landed first; the removal then held the webhook, so its URL delivers nothing until the owner states where mail goes.
+    assert.deepEqual((await db.query('SELECT paused,reconfirm FROM mailbox_webhooks WHERE id=$1', [hook.id])).rows, [{ paused: true, reconfirm: true }]);
+    error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, MANAGER, { paused: false }, live), 409, 'ENDPOINT_URL_REQUIRED');
+    const resumed = ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, MANAGER, { url: 'https://example.com/hooks/race-events', paused: false }, live));
+    assert.deepEqual([resumed.paused, resumed.url], [false, '\u2022\u2022\u2022\u2022ents']);
+  });
+
   test('R2: disabled OAuth client cancels queued sends from descendant keys, not independent keys',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,request,run})=>{
       const {originAllowed}=await import('./src/sending.js');
@@ -2990,6 +3234,13 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(await allowed(mbk.id,box.address),true);
       const thread=ok(await request('POST','/v1/inbound/threads',mbk.secret,{addressId:box.id,to:['recipient@example.net'],subject:'R2 fixture',text:'Synthetic message'}),202);
       const mailboxEmail=(await db.query('SELECT sending_email_id FROM mail_messages WHERE workspace_id=$1 AND id=$2',[wid,thread.id])).rows[0].sending_email_id;
+      // A key an approval created reads mail on the approval's terms: without delivery details, the raw message or part links.
+      const dashboardKey=ok(await local('POST','/v1/api-keys',{name:'R2 dashboard manage',permissions:['manage']}),201);secrets.add(dashboardKey.secret);
+      const detail=`/v1/inbound/messages/${thread.id}`;
+      assert.equal(ok(await request('GET',detail,parent.secret)).id,thread.id);
+      for(const path of [`${detail}?includeDelivery=true`,'/v1/inbound/messages?includeDelivery=true',`${detail}/raw`,`${detail}/parts/fixture`])error(await request('GET',path,parent.secret),403,'ADMIN_REQUIRED');
+      assert.deepEqual(ok(await request('GET',`${detail}?includeDelivery=true`,dashboardKey.secret)).envelopeTo,['recipient@example.net']);
+      error(await request('GET',`${detail}/parts/fixture`,dashboardKey.secret),404);
       await db.query('UPDATE oauth_client SET disabled=true WHERE client_id=$1',[clientId]);
       for(const [id,from] of [[child.id,'sender@example.com'],[mbk.id,box.address]])assert.equal(await allowed(id,from),false);
       await run('email.dispatch');
@@ -3004,6 +3255,156 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(await allowed(child.id),false);assert.equal(await allowed(mbk.id,box.address),false);
       await run('email.dispatch');assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[afterDemotion])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
     });
+  });
+
+  test('a sending webhook an approval sets up, changes or reads the secret of follows the approval', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const tools = (bearer: string) => async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
+      const { token, consentId, clientId } = await oauthGrant(t, db, writableScope, request), tool = tools(token);
+      const hook = (name: string) => ({ url: `https://example.com/hooks/${name}`, description: name, eventTypes: ['email.delivered'] });
+      // One the approval sets up, one a key it created sets up, one a person set up and the approval changes, one
+      // whose signing secret it reads, and one it never touches.
+      const made = await tool('createWebhook', { confirm: true, body: hook('made') });
+      const key = (await tool('createApiKey', { confirm: true, body: { name: 'webhook fixture', permissions: ['manage'] } })).secret as string; secrets.add(key);
+      const byKey = ok(await request('POST', '/v1/webhooks', key, hook('by-key')), 201);
+      const [changed, read, untouched] = [ok(await local('POST', '/v1/webhooks', hook('changed')), 201), ok(await local('POST', '/v1/webhooks', hook('read')), 201), ok(await local('POST', '/v1/webhooks', hook('untouched')), 201)];
+      await tool('updateWebhook', { confirm: true, webhookId: changed.id, body: { description: 'changed' } });
+      const known = (await tool('revealWebhookSecret', { webhookId: read.id })).secret as string; secrets.add(known);
+      const held = [made.id, byKey.id, changed.id, read.id] as string[];
+      const state = async (id: string) => (await db.query('SELECT paused,reconfirm FROM operation_webhooks WHERE id=$1', [id])).rows[0];
+      for (const id of [...held, untouched.id]) assert.deepEqual(await state(id), { paused: false, reconfirm: false });
+      const posted: string[] = [], transport = runtime.webhookFetch, test = async (id: string) => ok(await local('POST', `/v1/webhooks/${id}/test`), 202).id as string;
+      const delivery = async (id: string) => (await db.query('SELECT status,last_error FROM operation_deliveries WHERE id=$1', [id])).rows[0];
+      runtime.webhookFetch = async url => { posted.push(url); return { status: 204 }; };
+      t.after(() => { runtime.webhookFetch = transport; });
+      // While the approval is not active (its client is switched off here), nothing is posted to a webhook tied to it.
+      // The delivery fails unsent, and can be retried by hand once the approval is active again.
+      await db.query('UPDATE oauth_client SET disabled=true WHERE client_id=$1', [clientId]);
+      const [idle, free] = [await test(made.id), await test(untouched.id)];
+      await run('operation.webhook');
+      assert.deepEqual(posted, [hook('untouched').url]);
+      assert.deepEqual([await delivery(idle), await delivery(free)], [{ status: 'failed', last_error: 'APPROVAL_INACTIVE' }, { status: 'delivered', last_error: null }]);
+      await db.query('UPDATE oauth_client SET disabled=false WHERE client_id=$1', [clientId]);
+      ok(await local('POST', `/v1/webhooks/${made.id}/deliveries/${idle}/retry`), 202);
+      await run('operation.webhook');
+      assert.deepEqual(posted.splice(0), [hook('untouched').url, hook('made').url]);
+      const queued = await test(made.id);
+
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke'));
+      for (const id of held) {
+        assert.deepEqual(await state(id), { paused: true, reconfirm: true });
+        const view = ok(await local('GET', `/v1/webhooks/${id}`));
+        assert.equal(view.paused, true); assert.equal('reconfirm' in view, false, 'The webhook schema is unchanged.');
+        assert.equal(error(await local('PATCH', `/v1/webhooks/${id}`, { paused: false }), 409, 'WEBHOOK_URL_REQUIRED').field, 'url');
+        error(await local('POST', `/v1/webhooks/${id}/test`), 409, 'WEBHOOK_URL_REQUIRED');
+      }
+      assert.deepEqual(await state(untouched.id), { paused: false, reconfirm: false }, 'A webhook the approval never touched keeps delivering.');
+      // The database holds the same rule for any writer: a marked webhook stays paused.
+      await db.query('SAVEPOINT marked_webhook');
+      await assert.rejects(db.query('UPDATE operation_webhooks SET paused=false WHERE id=$1', [made.id]), /operation_webhook_reconfirm_paused/);
+      await db.query('ROLLBACK TO SAVEPOINT marked_webhook');
+      // Nothing is posted to a held webhook, a test included: the one queued before the hold waits, and goes to the
+      // URL that takes the webhook over.
+      await run('operation.webhook');
+      assert.deepEqual(posted, []);
+      assert.deepEqual(await delivery(queued), { status: 'paused', last_error: 'ENDPOINT_PAUSED' });
+      // Other changes to a held webhook still work. The URL takes it over, with the resume or before it, and brings a new secret.
+      assert.equal(ok(await local('PATCH', `/v1/webhooks/${made.id}`, { description: 'still held' })).paused, true);
+      assert.equal(ok(await local('PATCH', `/v1/webhooks/${made.id}`, { url: hook('restated').url, paused: false })).paused, false);
+      await run('operation.webhook');
+      assert.deepEqual(posted, [hook('restated').url]);
+      assert.equal(ok(await local('PATCH', `/v1/webhooks/${read.id}`, { url: hook('read').url, paused: false })).paused, false);
+      assert.deepEqual(await state(read.id), { paused: false, reconfirm: false });
+      const secret = ok(await local('GET', `/v1/webhooks/${read.id}/secret`)).secret as string; secrets.add(secret);
+      assert.notEqual(secret, known);
+      assert.equal(ok(await local('PATCH', `/v1/webhooks/${changed.id}`, { url: hook('changed').url })).paused, true);
+      assert.equal(ok(await local('PATCH', `/v1/webhooks/${changed.id}`, { paused: false })).paused, false);
+      // A pause a person sets resumes by itself, as before.
+      ok(await local('PATCH', `/v1/webhooks/${untouched.id}`, { paused: true }));
+      assert.equal(ok(await local('PATCH', `/v1/webhooks/${untouched.id}`, { paused: false })).paused, false);
+
+      // A resume decides on the webhook as it is when the update runs. Here a second approval that changed the
+      // webhook is removed after the resume has read the webhook and before it writes.
+      const second = await oauthGrant(t, db, writableScope, request);
+      await tools(second.token)('updateWebhook', { confirm: true, webhookId: untouched.id, body: { description: 'changed again' } });
+      // Reading or rotating the secret reads the approval again inside its transaction, not only when the request was
+      // authenticated. Here the approval is removed between the two reads: the request is refused and the secret stays.
+      const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>;
+      const secondKey = (await tools(second.token)('createApiKey', { confirm: true, body: { name: 'rotation fixture', permissions: ['manage'] } })).secret as string; secrets.add(secondKey);
+      const before = ok(await local('GET', `/v1/webhooks/${untouched.id}/secret`)).secret as string;
+      for (const [method, suffix] of [['POST', '/rotate-secret'], ['GET', '/secret']] as const) {
+        let reads = 0;
+        const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+          const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+          if (this !== db || !/from "oauth_consent"/.test(text) || ++reads !== 2) return query.apply(this, args);
+          return query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]).then(() => query.apply(this, args));
+        } as typeof pg.Client.prototype.query);
+        try { error(await request(method, `/v1/webhooks/${untouched.id}${suffix}`, secondKey), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
+        assert.equal(reads, 2);
+      }
+      assert.equal(ok(await local('GET', `/v1/webhooks/${untouched.id}/secret`)).secret, before);
+      assert.deepEqual(await state(untouched.id), { paused: false, reconfirm: false });
+      ok(await local('PATCH', `/v1/webhooks/${untouched.id}`, { paused: true }));
+      let removed = false;
+      const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        if (this !== db || removed || !/from "operation_webhooks"/.test(text)) return query.apply(this, args);
+        removed = true;
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]); return rows; });
+      } as typeof pg.Client.prototype.query);
+      try { error(await local('PATCH', `/v1/webhooks/${untouched.id}`, { paused: false }), 409, 'WEBHOOK_URL_REQUIRED'); } finally { wire.mock.restore(); }
+      assert.equal(removed, true);
+      assert.deepEqual(await state(untouched.id), { paused: true, reconfirm: true });
+    });
+  });
+
+  test('a removal waits for a secret rotation under way, and the URL that resumes the webhook replaces that secret', async t => {
+    // Two connections: the rotation pauses inside its transaction after it has recorded its approval and before it
+    // locks the webhook, and the owner removes the approval meanwhile. The removal waits for the rotation, then holds
+    // the webhook; the owner's URL resumes it with a secret the rotation never saw.
+    const db = await fixtureDatabase(t);
+    const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const app = createApp(), runtime = instance.runtime;
+    const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
+    const { token, consentId } = await oauthGrant(t, db, writableScope, request);
+    const key = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'rotation race fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
+    secrets.add(key);
+    const hook = ok(await request('POST', '/v1/webhooks', key, { url: 'https://example.com/hooks/rotation-race', description: 'rotation race', eventTypes: ['email.delivered'] }), 201);
+    cleanup(t, async () => { ok(await request('DELETE', `/v1/webhooks/${hook.id}`, MANAGER)); });
+    const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>;
+    let writer: pg.Client | null = null, release = () => {}, paused = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; }), pausedAt = new Promise<void>(resolve => { paused = resolve; });
+    const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+      const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+      const values = Array.isArray(args[1]) ? args[1] : (args[0] as { values?: unknown[] })?.values ?? [];
+      if (writer === null && /INSERT INTO mail_grant_objects/.test(text) && values.includes(hook.id)) { writer = this; return query.apply(this, args); }
+      if (this !== writer) return query.apply(this, args);
+      writer = null; paused();
+      return gate.then(() => query.apply(this, args));
+    } as typeof pg.Client.prototype.query);
+    let rotated: string;
+    try {
+      const rotation = request('POST', `/v1/webhooks/${hook.id}/rotate-secret`, key);
+      await pausedAt;
+      let settled = false;
+      const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%oauth_consent%'")).rows[0].n > 0;
+      for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(await waiting(), true, 'The removal waits for the approval the rotation holds.');
+      assert.equal(settled, false);
+      release();
+      rotated = ok(await rotation).secret; secrets.add(rotated);
+      ok(await removal);
+    } finally { wire.mock.restore(); release(); }
+    // The rotation landed first; the removal then held the webhook. Resuming takes the URL, which brings a new secret.
+    assert.deepEqual((await db.query('SELECT paused,reconfirm FROM operation_webhooks WHERE id=$1', [hook.id])).rows, [{ paused: true, reconfirm: true }]);
+    error(await request('PATCH', `/v1/webhooks/${hook.id}`, MANAGER, { paused: false }), 409, 'WEBHOOK_URL_REQUIRED');
+    assert.equal(ok(await request('PATCH', `/v1/webhooks/${hook.id}`, MANAGER, { url: 'https://example.com/hooks/rotation-race', paused: false })).paused, false);
+    const current = ok(await request('GET', `/v1/webhooks/${hook.id}/secret`, MANAGER)).secret as string; secrets.add(current);
+    assert.notEqual(current, rotated);
   });
 
   test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
@@ -4986,6 +5387,9 @@ describe('Dashboard API capabilities', () => {
       for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
       // Jobs: a refusal is retried with backoff (attempt charged); a real bug still fails the job.
       const { processJobs } = await import('./src/jobs.js');
+      // processJobs claims the next due job of any workspace: under the full suite another test's committed job could be
+      // claimed instead (CI flake: attempts 0). Shadow the queue in this rolled-back fixture, as the campaign.run tests do.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       const job = async (id: string, failure: unknown) => {
         await db.query("INSERT INTO jobs(id, workspace_id, type, payload, available_at) VALUES ($1, $2, 'campaign.run', '{}'::jsonb, now() - interval '1 second')", [id, wid]);
         assert.equal(await processJobs(runtime, { 'campaign.run': async () => { throw failure; } }, 1, 1), 1);
@@ -5093,6 +5497,15 @@ describe('Campaign authorization and dispatch credentials', () => {
       const meter = await queryBudget(t, db);
       await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
+      // The statement applies the mailbox rule too: an upload that has gone out only in conversation mail is attached by
+      // a key that can read mailboxes, and any key attaches an upload that is not conversation content.
+      const [sender, managing] = [ok(await local('POST', '/v1/api-keys', { name: 'Sender', permissions: ['read', 'send'] }), 201), ok(await local('POST', '/v1/api-keys', { name: 'Managing', permissions: ['manage'] }), 201)];
+      for (const key of [sender, managing]) { secrets.add(key.secret); ok(await request('GET', '/v1/me', key.secret)); }
+      const conversationFile = ok(await local('POST', '/v1/attachments', file), 201);
+      await db.query("INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) VALUES($1,$2,'mailbox','matt_fixture')", [wid, conversationFile.id]);
+      await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('conversation-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', managing.secret, { ...direct, attachments: [conversationFile.id] }), 202), 1);
+      await meter('shared-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [privateFile.id] }), 202), 1);
     });
   });
   test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
@@ -7968,19 +8381,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('dev E2E: finite operator override releases a held simulator campaign without exempting it', async t => {
+  test('dev E2E: the deploy sets a finite, audited fixture override that releases a held campaign without exempting it', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
-      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333';
+      const {applyDevE2eFixture,DEV_E2E_SEND_CAP}=await import('./scripts/dev-e2e-fixture.js');
+      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333', domainId='dom_'+randomUUID().replaceAll('-','');
+      const dev={STAGE:'dev',PUBLIC_URL:'https://dev.bane.mx',BANE_E2E_DOMAIN_ID:domainId};
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`UPDATE workspaces SET name='E2E' WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO operation_domains(id,name,workspace_id,region) VALUES ($1,$2,$3,$4)`,[domainId,domain,wid,REGION]);
       const claim=(host:string)=>db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[host,wid]);
       await claim(domain);
-      const script=await readFile(new URL('./scripts/set-dev-e2e-send-cap.sql',import.meta.url),'utf8');
-      const apply=()=>db.query(script.replace(":'workspace_id'",'$1'),[wid]);
-      assert.equal((await apply()).rowCount,0,'A Hosted workspace without both verified fixture domains is unchanged');
+      const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-dev-e2e-send-cap'`,[wid])).rows.map(r=>r.details);
+      // Never production, never another workspace: a fixture without both verified claims is refused and unchanged.
+      await assert.rejects(applyDevE2eFixture(db,{...dev,STAGE:'production',PUBLIC_URL:'https://bane.mx'}),/only to dev/);
+      await assert.rejects(applyDevE2eFixture(db,{...dev,BANE_E2E_DOMAIN_ID:undefined}),/BANE_E2E_DOMAIN_ID/);
+      await assert.rejects(applyDevE2eFixture(db,dev),/No unique E2E fixture/);
       await claim('e2e-va.bane.mx');
-      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),91)`,[wid]);
+      // A day of E2E volume at the old 500 override: the campaign is held.
+      await db.query(`UPDATE workspaces SET send_cap_override=500 WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),469)`,[wid]);
       const list=ok(await local('POST','/v1/lists',{name:'E2E fixture'}),201);
       await db.query(`WITH contact AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ('e2e-cap-fixture',$1,'success@simulator.amazonses.com','subscribed') RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM contact`,[wid,list.id]);
@@ -7988,10 +8409,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const path=`/v1/campaigns/${c.id}`, delivery=async()=>ok(await local('GET',path)).delivery;
       ok(await local('POST',path+'/send',{revision:c.revision}),202);await run('campaign.run');
       const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
-      assert.equal((await apply()).rows[0].details.new,500);assert.equal((await apply()).rowCount,0);
+      // The deploy raises it once, audited; the next deploys change and audit nothing.
+      assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:true});
+      assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:false});
+      assert.deepEqual((await audits()).map(d=>[d.old,d.new]),[[500,DEV_E2E_SEND_CAP]]);
       await run('campaign.run');assert.equal((await delivery()).expanded,1);
-      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
-        [{used:'92',marketing:'450',burst:50,pending_cap_override:null,exempt_hosted_quotas:false}]);
+      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a) CROSS JOIN workspaces w WHERE w.id=$1`,[wid])).rows,
+        [{used:'470',marketing:'90000',burst:70,pending_cap_override:null,exempt_hosted_quotas:false}]);
+      // A larger operator override and an exemption are left alone.
+      await db.query(`UPDATE workspaces SET send_cap_override=$2 WHERE id=$1`,[wid,DEV_E2E_SEND_CAP*2]);
+      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
+      await db.query(`UPDATE workspaces SET send_cap_override=NULL,exempt_hosted_quotas=true WHERE id=$1`,[wid]);
+      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
+      assert.equal((await audits()).length,1);
     });
   });
 
@@ -10596,6 +11026,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const {rows:[r]}=await db.query('SELECT m.subject,left(m.text,3) AS start,right(m.text,1) AS tail,m.body_truncated,f.filename FROM mail_messages m JOIN mail_attachments f ON f.message_id=m.id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid]);
         assert.deepEqual(r,{subject:'x�y',start:'x�y',tail:'�',body_truncated:true,filename:'a�b'});
       });
+      await t.test('inbound Date and Message-ID headers the store cannot hold are left out, and the message is kept',async()=>{
+        // Varied text: a repeated character would compress into its index row.
+        let seed=7;const wide=(n:number)=>Array.from({length:n},()=>String.fromCharCode(0x4e00+(seed=(seed*1103515245+12345)&0x7fffffff)%20000)).join('')+'@example.net',fits=wide(328);
+        for(const [mid,headers,sent,id] of [
+          ['date-10000','Date: Mon, 01 Jan 10000 00:00:00 +0000\r\nMessage-ID: <a@example.net>',null,'a@example.net'],
+          ['date-275760','Date: +275760-09-12T00:00:00Z',null,null],
+          ['date-0','Date: 0000-06-01T00:00:00Z',null,null],
+          ['date-bce','Date: -000100-01-01T00:00:00Z',null,null],
+          ['date-1','Date: 0001-01-01T00:00:00Z','0001-01-01T00:00:00.000Z',null],
+          ['date-9999','Date: Fri, 31 Dec 9999 23:59:59 +0000','9999-12-31T23:59:59.000Z',null],
+          ['id-2862-bytes',`Message-ID: <${wide(950)}>`,null,null],
+          ['id-996-bytes',`Message-ID: <${fits}>`,null,fits],
+        ] as const){
+          raw.set(mid,Buffer.from(`From: a@example.net\r\nSubject: ${mid}\r\n${headers}\r\n\r\nbody`));
+          assert.equal(await submit(mid,['a@receive.example']),1);await run('mailbox.ingest',{sesMessageId:mid});
+          const {rows:[r]}=await db.query('SELECT status,sent_at,message_id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);
+          assert.deepEqual({...r,sent_at:r.sent_at?.toISOString()??null},{status:'received',sent_at:sent,message_id:id},mid);
+        }
+        const {normalizeMessageId}=await import('./src/mailbox-store.js');
+        assert.equal(normalizeMessageId(`<${'a'.repeat(998)}>`),'a'.repeat(998));assert.equal(normalizeMessageId(`<${'a'.repeat(999)}>`),null);
+        assert.equal(normalizeMessageId(`<${'\0'.repeat(333)}>`),null,'counted as stored: NUL becomes a three-byte replacement');
+      });
       await t.test('large inbound mail stays downloadable using a pinned copy or multipart Bcc scrub',async()=>{
         for(const mid of ['large','scrub']){await submit(mid,['a@receive.example']);
           if(mid==='scrub'){interruptCopy=true;await assert.rejects(run('mailbox.ingest',{sesMessageId:mid}),{code:'MAILBOX_RAW_UNAVAILABLE'});assert.ok(parts.pop()?.aborted);parts.pop();largeReads.splice(3);interruptCopy=false;}
@@ -11746,6 +12198,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
       await dispatchDue(runtime, REGION);
+      // Mail sent from an address is conversation mail (a reply can quote what it answers): the sending log lists and
+      // reads it only for credentials that can read the mailbox. Ordinary sends stay visible to every reader.
+      const quoted = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Quoted answer',quote:true },{ ...agent,'Idempotency-Key':'answer-quoted' }),202);
+      const direct = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Direct notice',text:'Direct notice' }),202);
+      const conversation = [reply.emailId,quoted.emailId,tracked.id];
+      const sendingKey = async (permissions:string[],domains:string[]=[]) => { const secret=ok(await post('/v1/api-keys',{ name:unique('log-reader'),permissions,domains }),201).secret; secrets.add(secret); return { authorization:`Bearer ${secret}` }; };
+      const logReader = await sendingKey(['read']), domainReader = await sendingKey(['read'],['example.com']), manageKey = await sendingKey(['manage']);
+      const listed = async (path:string,key?:Record<string,string>) => ok(await get(path,key)).data.map((row:Json)=>row.id);
+      for (const key of [undefined,manageKey]) {
+        for (const id of conversation) assert.ok((await listed('/v1/emails?limit=100',key)).includes(id));
+        assert.match(ok(await get(`/v1/emails/${quoted.emailId}/content`,key)).text,/Quoted answer[\s\S]*second zebra/);
+      }
+      for (const key of [logReader,domainReader]) {
+        for (const path of ['/v1/emails?limit=100','/v1/logs?direction=sent&limit=100']) {
+          const ids = await listed(path,key);
+          assert.ok(ids.includes(direct.id)); assert.deepEqual(conversation.filter(id=>ids.includes(id)),[]);
+        }
+        for (const id of conversation) for (const suffix of ['','/content','/detail','/events']) error(await get(`/v1/emails/${id}${suffix}`,key),404);
+        assert.equal(ok(await get(`/v1/emails/${direct.id}/content`,key)).text,'Direct notice');
+      }
+      // A reply queued before snapshots recorded their origin is still known by its mailbox message.
+      await db.query("UPDATE sending_emails SET snapshot=snapshot-'mailbox' WHERE id=$1",[quoted.emailId]);
+      error(await get(`/v1/emails/${quoted.emailId}/content`,logReader),404); ok(await get(`/v1/emails/${quoted.emailId}/content`,manageKey));
+      // An upload that has gone out only in conversation mail is conversation content as well. A reader without mailbox
+      // access keeps its own uploads, and gets any upload once it is also attached to mail that reader can read.
+      const uploads = new Map<string,{body:Uint8Array;contentType:string}>(), objectStore = runtime.storage;
+      runtime.storage = { async put(k,body,contentType) { uploads.set(k,{body,contentType}); }, async get(k) { return uploads.get(k) ?? null; }, async delete(k) { uploads.delete(k); } };
+      try {
+        const upload = async (filename:string,key?:Record<string,string>) => ok(await post('/v1/attachments',{ filename,content:Buffer.from(filename).toString('base64') },key),201).id as string;
+        const content = async (id:string,key?:Record<string,string>) => Buffer.from(ok(await get(`/v1/attachments/${id}/content`,key)).content,'base64').toString();
+        const sender = await sendingKey(['read','send']);
+        const shared = await upload('shared.txt'), own = await upload('own.txt',sender), legacy = await upload('legacy.txt');
+        const withFiles = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Your files',text:'Attached',replyMailboxId:box.id,attachments:[shared,own] }),202);
+        const older = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'An older file',text:'Attached',replyMailboxId:box.id,attachments:[legacy] }),202);
+        await db.query("UPDATE sending_emails SET snapshot=snapshot-'mailbox' WHERE id=$1",[older.id]);
+        assert.ok(withFiles.id && older.id);
+        for (const key of [undefined,manageKey]) for (const id of [shared,own,legacy]) { ok(await get(`/v1/attachments/${id}`,key)); assert.match(await content(id,key),/\.txt$/); }
+        for (const key of [logReader,domainReader,sender]) for (const id of [shared,legacy]) for (const suffix of ['','/content']) error(await get(`/v1/attachments/${id}${suffix}`,key),404,'ATTACHMENT_NOT_FOUND');
+        for (const key of [logReader,domainReader]) error(await get(`/v1/attachments/${own}/content`,key),404,'ATTACHMENT_NOT_FOUND');
+        assert.equal(await content(own,sender),'own.txt');
+        // Attaching an upload to new mail follows the same rule as reading it.
+        const notice = (attachments:string[]) => ({ from:publicAddress,to:'customer@example.net',subject:'Notice',text:'Notice',attachments });
+        error(await post('/v1/emails/send',notice([shared]),sender),404,'ATTACHMENT_NOT_FOUND');
+        ok(await post('/v1/emails/send',notice([own]),sender),202);
+        ok(await post('/v1/emails/send',notice([shared]),manageKey),202);
+        for (const key of [logReader,sender]) assert.equal(await content(shared,key),'shared.txt');
+        assert.equal(await content(own,logReader),'own.txt');
+        error(await get(`/v1/attachments/${legacy}/content`,logReader),404,'ATTACHMENT_NOT_FOUND');
+        // A mailbox sender attaches again what its mailbox already sent.
+        ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Again',text:'Attached again',replyMailboxId:box.id,attachments:[legacy] }),202);
+      } finally { runtime.storage = objectStore; }
       assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
       const wire = outgoing.get(reply.emailId); assert.equal(wire.FromEmailAddress,publicAddress); assert.equal(reply.threadId,detail.threadId);
       assert.deepEqual(wire.Destination,{ ToAddresses:['case-owner@example.net'],CcAddresses:['colleague@example.net'],BccAddresses:[] });
@@ -14432,6 +14935,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.operation_events (LIKE public.operation_events INCLUDING ALL);
           CREATE TABLE \${schema}.operation_webhooks (LIKE public.operation_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.operation_deliveries (LIKE public.operation_deliveries INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_grant_objects (LIKE public.mail_grant_objects INCLUDING ALL);
           CREATE TABLE \${schema}.provider_connections (LIKE public.provider_connections INCLUDING ALL);
           CREATE TABLE \${schema}.provider_connection_regions (LIKE public.provider_connection_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailboxes (LIKE public.mailboxes INCLUDING ALL);
