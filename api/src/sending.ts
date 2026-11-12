@@ -1482,7 +1482,9 @@ export async function verifiedAttachment(runtime: Runtime, row: typeof attachmen
 // recipient before sending, so it is not a delivery bounce (AWS excludes it from Reputation.BounceRate). The email becomes
 // suppressed rather than bounced, and its public email.bounced event carries no bounced outcome (migration 034).
 // It drops one recipient, so it ranks below any outcome SES reports for a recipient it did send to: on a multi-recipient
-// email a delivery, hard bounce or complaint wins in either arrival order, and clears the suppression's error code.
+// email a delivery, hard bounce or complaint wins in either arrival order. Migration 153 enforces this ranking and the
+// EMAIL_VALIDATION_SUPPRESSED error code (kept only while suppressed, never over an earlier error) in the database, so a
+// Worker still running an older rank table during a deploy cannot restore 'suppressed' or skip a delivery either.
 export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', non_permanent_bounce: 'delayed', validation_suppressed: 'suppressed', complaint: 'complained', complaint_feedback: 'accepted', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 // Publish email.sent from the SendEmail response; a later SES Send is status feedback only.
 export const publicEventType: Record<string, string> = { accepted: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', non_permanent_bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', acceptance_unknown: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
@@ -1613,7 +1615,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       SELECT DISTINCT ON (email_id) *,bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
       FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
     ), updated AS (
-      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation AND w.next_status='suppressed' THEN coalesce(e.error_code,'EMAIL_VALIDATION_SUPPRESSED') WHEN e.error_code='EMAIL_VALIDATION_SUPPRESSED' THEN NULL ELSE e.error_code END, suppression_reason=CASE WHEN w.next_status='suppressed' AND w.validation THEN 'email_validation' END, updated_at = clock_timestamp()
+      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, suppression_reason=CASE WHEN w.next_status='suppressed' AND w.validation THEN 'email_validation' END, updated_at = clock_timestamp()
        FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
@@ -1655,10 +1657,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated, ${input.createdAt ?? now()}::timestamptz, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
-    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id),
-      -- A validation suppression keeps an earlier error and is cleared by the outcome that supersedes it.
-      error_code = CASE WHEN ${input.errorCode ?? null}::text = 'EMAIL_VALIDATION_SUPPRESSED' THEN coalesce(e.error_code, ${input.errorCode ?? null}::text)
-        WHEN e.error_code = 'EMAIL_VALIDATION_SUPPRESSED' THEN ${input.errorCode ?? null}::text ELSE coalesce(${input.errorCode ?? null}::text, e.error_code) END, suppression_reason=${input.type==='validation_suppressed'?'email_validation':null}, updated_at = clock_timestamp()
+    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), suppression_reason=${input.type==='validation_suppressed'?'email_validation':null}, updated_at = clock_timestamp()
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId}
       AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
   ), published AS (
