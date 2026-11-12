@@ -8625,6 +8625,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
+  test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
+    const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'fence.invalid',$3,'active','store')",[bid,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,quota_messages) VALUES($1,$2,$1,'fence@fence.invalid','inbox','forever',1)",[bid,w]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);
+    for(const [i,id] of ids.entries()){
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','kept')",[id,w,tid]);
+      await db.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read,held_reason) VALUES($1,$2,$3,$4,'inbound',now(),false,$5)",[w,bid,id,tid,i?'quota':null]);
+    }
+    await db.query('INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at) VALUES($1,$2,$3,1,1,now())',[bid,tid,w]);
+    const summary=()=>db.query('SELECT message_count,unread_count FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]).then(r=>r.rows[0]);
+    // The old patchThread left read unchanged, then recounted unread inbound mail, held mail included.
+    await assert.rejects(db.query("UPDATE mailbox_threads SET unread_count=(SELECT count(*) FROM mailbox_messages WHERE mailbox_id=$1 AND thread_id=$2 AND NOT read AND direction='inbound') WHERE mailbox_id=$1 AND thread_id=$2",[bid,tid]),{code:'40001'});
+    assert.deepEqual(await summary(),{message_count:1,unread_count:1});
+    // A delivery still updates the summary: it changes the message count with the unread count.
+    await db.query('UPDATE mailbox_threads SET message_count=message_count+1,unread_count=unread_count+1 WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]);
+    assert.deepEqual(await summary(),{message_count:2,unread_count:2});
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
