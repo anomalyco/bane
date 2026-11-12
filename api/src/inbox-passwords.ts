@@ -15,10 +15,13 @@ const base = '/v1/inboxes/{id}/app-passwords',
   params = z.object({ id: z.string().min(1).max(120) }),
   meta = { tags: ['Agent inboxes'], security };
 export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAccess) {
-  const manager = (c: Ctx) => {
+  const manager = (c: Ctx, issue = false) => {
     const v = access(c);
     if (!v.admin || v.mailboxIds || c.get('actor')?.role === 'member')
       throw new ApiError(403, 'ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.');
+    // A password outlives the token that asks for it, like an API key or an inbound key.
+    if (issue && c.get('actor')?.credential === 'agentToken')
+      throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create mail client passwords.');
     return v.workspaceId;
   };
   app.openapi(
@@ -45,7 +48,7 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       responses: { 201: response(item.extend({ password: z.string() })), ...errors },
     }),
     async (c) => {
-      const wid = manager(c),
+      const wid = manager(c, true),
         bid = c.req.valid('param').id,
         q = c.req.valid('json'),
         kid = id('app'),

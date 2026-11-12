@@ -51,7 +51,24 @@ export function ritualAdmin(c: Ctx, write = false) {
     );
   return a;
 }
-export async function ownReceiving(tx:DbExecutor,c:Ctx,kind:'endpoint'|'rituals'|'key'|'route',resource:string){const a=c.get('actor');if(!a.grantId)return;if(!a.receivingConsent||!a.permissions.includes('manage'))throw new ApiError(403,'ADMIN_REQUIRED','Explicit manage and receiving consent required.');await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${a.grantId},${a.workspaceId},${kind},${resource}) ON CONFLICT DO NOTHING`)}
+/** A receiving write by an approval, or by a key it created, holds the approval (shared lock) for the rest of the
+ * transaction. It is read again here, not only when the request was authenticated: a removal under way finishes first
+ * and the write is refused, and one that starts later waits for the transaction and then disables what it recorded.
+ * Take it before any row a removal disables (endpoints, routes, keys), the order a removal takes them in. */
+export async function holdReceiving(tx:DbExecutor,c:Ctx){
+  const a=c.get('actor');if(!a.grantId)return;
+  if(!a.receivingConsent||!a.permissions.includes('manage'))throw new ApiError(403,'ADMIN_REQUIRED','Explicit manage and receiving consent required.');
+  const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+a.grantId,tx);
+  if(grant?.workspaceId!==a.workspaceId||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The MCP approval behind this request was revoked while it ran. Nothing was changed.');
+}
+export async function ownReceiving(tx:DbExecutor,c:Ctx,kind:'endpoint'|'rituals'|'key'|'route',resource:string|string[]){
+  const a=c.get('actor');if(!a.grantId)return;
+  await holdReceiving(tx,c);
+  for(const r of Array.isArray(resource)?resource:[resource])await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${a.grantId},${a.workspaceId},${kind},${r}) ON CONFLICT DO NOTHING`);
+}
+/** Removing an approval holds the endpoints it created or changed. An endpoint URL is write-only, so nothing is posted
+ * to a held endpoint, a test included, until its URL is sent again. */
+export const resumeNeedsUrl = () => new ApiError(409, 'ENDPOINT_URL_REQUIRED', 'Deliveries were held when the approval that created or changed this endpoint was removed, and its URL is write-only. Send the URL again to resume.', 'url');
 async function current(tx: DbExecutor, w: string) {
   const r = (
     await tx.execute<{ version: number; config: Config | null }>(

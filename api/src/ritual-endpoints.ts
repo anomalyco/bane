@@ -3,7 +3,7 @@ import { sql, and, eq } from 'drizzle-orm';
 import { ApiError, digest, errors, id, json, randomSecret, response, security, webhookUrlHint, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type Runtime } from './core.js';
 import { claimSends } from './states.js';
 import { mailboxes, mailMessages, mailboxWebhooks, retainedMail } from './db/mailbox.js';
-import { ritualAdmin, ownReceiving } from './rituals.js';
+import { ritualAdmin, ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, WebhookHeaders, webhookSecret, webhookUrl } from './operations.js';
 import { webhookSecretBinding } from './mailbox-events.js';
@@ -76,7 +76,7 @@ export function renderChat(type: string, body: unknown) {
 
 export type EndpointRow = {
   name: string; type: EndpointType; hook_id: string; verified: boolean; expires_at: string | Date | null; declined_at: string | Date | null;
-  created_at: string | Date; paused: boolean; encrypted_value: string | null; url: string | null;
+  created_at: string | Date; paused: boolean; reconfirm: boolean; encrypted_value: string | null; url: string | null;
   per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null;
 };
 const iso = (v: string | Date | null) => (v === null ? null : new Date(v).toISOString());
@@ -84,10 +84,10 @@ const iso = (v: string | Date | null) => (v === null ? null : new Date(v).toISOS
 /** Every endpoint row (named Slack, Discord, webhook and forward endpoints, and keyed webhooks) with its policy, as a
  * FROM-able subquery. listEndpoints and the Receiving overview read endpoints through this one definition. */
 export const endpointSource = (w: string) => sql`(SELECT e.*,p.per_minute,p.retry_on_timeout,p.idempotent FROM (
-      SELECT split_part(d.ref,':',2) AS name,split_part(d.ref,':',1) AS type,d.hook_id,d.verified,d.expires_at,d.declined_at,d.created_at,h.paused,d.encrypted_value,NULL::text AS url
+      SELECT split_part(d.ref,':',2) AS name,split_part(d.ref,':',1) AS type,d.hook_id,d.verified,d.expires_at,d.declined_at,d.created_at,h.paused,h.reconfirm,d.encrypted_value,NULL::text AS url
       FROM mail_endpoints d JOIN mailbox_webhooks h ON h.workspace_id=d.workspace_id AND h.id=d.hook_id WHERE d.workspace_id=${w}
       UNION ALL
-      SELECT h.key,'webhook',h.id,true,NULL,NULL,h.created_at,h.paused,NULL,h.url FROM mailbox_webhooks h
+      SELECT h.key,'webhook',h.id,true,NULL,NULL,h.created_at,h.paused,h.reconfirm,NULL,h.url FROM mailbox_webhooks h
       WHERE h.workspace_id=${w} AND h.key IS NOT NULL AND NOT starts_with(h.id,'con_')) e
     LEFT JOIN mail_action_policies p ON p.workspace_id=${w} AND p.hook_id=e.hook_id)`;
 export async function endpointRows(db: DbExecutor, w: string, q: { name?: string; cursor?: string; type?: string; limit?: number } = {}) {
@@ -95,6 +95,8 @@ export async function endpointRows(db: DbExecutor, w: string, q: { name?: string
     WHERE (${q.name ?? null}::text IS NULL OR e.name=${q.name ?? null}) AND (${q.cursor ?? null}::text IS NULL OR e.name>${q.cursor ?? null}) AND (${q.type ?? null}::text IS NULL OR e.type=${q.type ?? null})
     ORDER BY e.name LIMIT ${(q.limit ?? 500) + 1}`)).rows;
 }
+/** Held when the approval that created or changed it was removed. Its URL is write-only, so resuming takes the URL again; a forward shows its address. */
+const needsUrl = (r: Pick<EndpointRow, 'paused' | 'reconfirm' | 'type'>) => r.paused && r.reconfirm && r.type !== 'forward';
 export async function endpointView(runtime: Runtime, w: string, r: EndpointRow): Promise<z.infer<typeof Endpoint>> {
   const policy = endpointPolicy(r.type, r), call = endpointCall(r.name);
   const value = r.encrypted_value ? await decrypt(runtime, r.encrypted_value, w + ':endpoint:' + r.hook_id) : null;
@@ -107,13 +109,14 @@ export async function endpointView(runtime: Runtime, w: string, r: EndpointRow):
     pending: `Waiting for ${target} to open the confirmation link (expires ${iso(r.expires_at)}). Only the recipient can confirm. Resend with sendEndpointVerification if it was lost.`,
     expired: `The confirmation link expired. Send a new one with sendEndpointVerification.`,
     declined: `${target} declined or stopped forwards. A new request is possible 30 days after ${iso(r.declined_at)}.`,
-    paused: `Deliveries are held. Resume with updateEndpoint { "paused": false }.`,
+    paused: needsUrl(r) ? `Deliveries were held when the approval that created or changed this endpoint was removed. Resume by sending its URL again: updateEndpoint { "url": "…", "paused": false }.` : `Deliveries are held. Resume with updateEndpoint { "paused": false }.`,
   }[status];
   return { name: r.name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, nextStep, createdAt: iso(r.created_at)! };
 }
+const missingEndpoint = (name: string) => new ApiError(404, 'NOT_FOUND', `No endpoint named ${name}. List them with listEndpoints.`);
 async function findEndpoint(db: DbExecutor, w: string, name: string) {
   const row = (await endpointRows(db, w, { name, limit: 1 }))[0];
-  if (!row) throw new ApiError(404, 'NOT_FOUND', `No endpoint named ${name}. List them with listEndpoints.`);
+  if (!row) throw missingEndpoint(name);
   return row;
 }
 /** Endpoint names are one name space across chat, forward and keyed webhook endpoints. Caller holds the address lane. */
@@ -224,23 +227,31 @@ export function registerEndpoints(app: App) {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
-      const row = await findEndpoint(tx, w, name);
+      const found = await findEndpoint(tx, w, name);
+      // Removing an approval pauses and marks its endpoints as it commits. Hold and record this approval first (the
+      // order a removal takes the rows in), then lock the endpoint row and decide on what it holds now. A removal
+      // that lands after this waits for the update and holds the endpoint again.
+      await ownReceiving(tx, c, 'endpoint', found.hook_id);
+      const [held] = await tx.select({ paused: mailboxWebhooks.paused, reconfirm: mailboxWebhooks.reconfirm }).from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, found.hook_id))).for('update');
+      if (!held) throw missingEndpoint(name);
+      const row = { ...found, ...held };
       if (q.idempotent && row.type !== 'webhook') throw new ApiError(422, 'UNSUPPORTED_IDEMPOTENCY', 'Only webhook endpoints can declare that they deduplicate by Idempotency-Key.', 'idempotent');
+      if (q.paused === false && q.url === undefined && needsUrl(row)) throw resumeNeedsUrl();
       if (q.url !== undefined) {
         if (row.type === 'forward') throw new ApiError(422, 'FORWARD_ADDRESS_FIXED', 'A forward address cannot change. Create a new forward endpoint so its recipient can confirm.', 'url');
         if (row.type === 'webhook') await tx.update(mailboxWebhooks).set({ url: webhookUrl(c.env, q.url), encryptedHeaders: await encryptWebhookHeaders(c.env, [], webhookSecretBinding(w, row.hook_id)), updatedAt: new Date().toISOString() }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
         else await tx.execute(sql`UPDATE mail_endpoints SET encrypted_value=${await encrypt(c.env, pinnedUrl(row.type, q.url), w + ':endpoint:' + row.hook_id)} WHERE workspace_id=${w} AND hook_id=${row.hook_id}`);
       }
-      if (q.paused !== undefined) {
-        await tx.update(mailboxWebhooks).set({ paused: q.paused }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
-        if (row.paused && !q.paused) { await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${w},jsonb_build_object('hook',${row.hook_id}::text))`); c.get('actor').wakeJobs = 1; }
+      if (q.paused !== undefined || q.url !== undefined) {
+        // A forward has no URL to send again (its address is shown and fixed), so a mark on it means nothing: resuming clears it.
+        await tx.update(mailboxWebhooks).set({ paused: q.paused, ...(q.url !== undefined || row.type === 'forward' ? { reconfirm: false } : {}) }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
+        if (row.paused && q.paused === false) { await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${w},jsonb_build_object('hook',${row.hook_id}::text))`); c.get('actor').wakeJobs = 1; }
       }
       if (q.perMinute !== undefined || q.retryOnTimeout !== undefined || q.idempotent !== undefined) {
         const next = { ...endpointPolicy(row.type, row), ...Object.fromEntries(Object.entries({ perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent }).filter(([, v]) => v !== undefined)) };
         await tx.execute(sql`INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES(${w},${row.hook_id},${next.perMinute},${next.retryOnTimeout},${next.idempotent})
           ON CONFLICT(workspace_id,hook_id) DO UPDATE SET per_minute=excluded.per_minute,retry_on_timeout=excluded.retry_on_timeout,idempotent=excluded.idempotent`);
       }
-      await ownReceiving(tx, c, 'endpoint', row.hook_id);
       await recordAudit(tx, c, { action: 'endpoint.update', workspaceId: w, target: { type: 'endpoint', id: row.hook_id }, details: { fields: Object.keys(q) },
         after: { name, type: row.type, paused: q.paused, perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent } });
     });
@@ -276,6 +287,7 @@ export function registerEndpoints(app: App) {
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Post a fixed test message to a Slack, Discord or webhook endpoint now', description: 'Bypasses rituals and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRituals for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, row = await findEndpoint(c.env.db, w, name);
     if (row.type === 'forward') throw new ApiError(422, 'FORWARD_TEST_UNAVAILABLE', 'Forwards send real mail. Dry-run the ritual with testRituals instead.');
+    if (needsUrl(row)) throw resumeNeedsUrl(); // Nothing is posted to a held endpoint, a test included.
     await debit(c.env.db, w, 'endpoint-test:' + row.hook_id, 10, 'hour', 'At most 10 endpoint tests per hour.');
     try {
       const result = row.type === 'webhook'
