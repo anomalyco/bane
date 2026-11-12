@@ -163,12 +163,15 @@ async function settle(c: Conn): Promise<unknown> {
   const start = Date.now();
   for (;;) {
     if (c.settled) { const s = c.settled; c.pending = c.settled = undefined; return s.ok ? s.value : errOf(s.value); }
-    const w = (await checker.client.query("SELECT wait_event_type='Lock' AND cardinality(pg_blocking_pids($1))>0 AS blocked,pg_blocking_pids($1) AS by FROM pg_stat_activity WHERE pid=$1", [c.pid])).rows[0];
+    // Only a lock one of this host's transactions holds counts; autovacuum's brief truncation
+    // lock (after the bulk deletes between traces) is waited out.
+    const own = [...Object.values(conns).map(x => x.pid), auto.pid];
+    const w = (await checker.client.query("SELECT wait_event_type='Lock' AND pg_blocking_pids($1) && $2::int[] AS blocked,pg_blocking_pids($1) AS by FROM pg_stat_activity WHERE pid=$1", [c.pid, own])).rows[0];
     if (w?.blocked && !c.settled) {
       if (process.env.TEAR_TRACE) process.stderr.write(`TEAR_BLOCKED ${c.name} by ${w.by.map((p: number) => Object.values(conns).find(x => x.pid === p)?.name ?? p).join(',')}\n`);
       return 'blocked';
     }
-    if (Date.now() - start > 3000) return 'stuck';
+    if (Date.now() - start > 10_000) return 'stuck';
   }
 }
 async function run(c: Conn, fn: () => Promise<unknown>) {
