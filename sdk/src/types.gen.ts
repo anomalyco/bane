@@ -2829,6 +2829,10 @@ export type InboundMessageDetail = InboundMessage & {
         [key: string]: string | boolean;
     };
     html: string | null;
+    /**
+     * With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.
+     */
+    htmlTooComplex: boolean;
     attachments: Array<{
         id: string;
         filename: string;

@@ -141,7 +141,8 @@ export interface InboundMessage {
   read?: boolean
 }
 export interface InboundAttachment { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }
-export interface InboundMessageDetail extends InboundMessage { html: string | null; attachments: InboundAttachment[] }
+// htmlTooComplex: the HTML is past the API's parsing budget; show the text instead of rendering it.
+export interface InboundMessageDetail extends InboundMessage { html: string | null; htmlTooComplex?: boolean; attachments: InboundAttachment[] }
 export interface InboundAddressState { addressId: string; unreadCount: number; archived: boolean; starred: boolean; trashed: boolean; spam: boolean; labels: string[] }
 export interface InboundThreadPatch { addressId?: string; read?: boolean; starred?: boolean; archived?: boolean; trashed?: boolean; spam?: boolean; addLabels?: string[]; removeLabels?: string[] }
 export interface InboundRecipients { to: string[]; cc: string[]; bcc: string[] }
@@ -179,7 +180,7 @@ export interface ReceivedEmail {
 }
 export interface ReceivedEmailDetail extends ReceivedEmail {
   sentAt: ISODate | null; cc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
-  text: string; replyText: string; html: string | null; bodyTruncated: boolean; headers?: { name: string; value: string }[]
+  text: string; replyText: string; html: string | null; htmlTooComplex?: boolean; bodyTruncated: boolean; headers?: { name: string; value: string }[]
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
   sizeBytes?: number | null; rawUrl?: string | null

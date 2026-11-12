@@ -8449,8 +8449,44 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         t.diagnostic(`Bounded HTML: ${size} bytes refused in ${ms.toFixed(1)} ms`);
         if (BENCH) assert.ok(ms<50,`HTML validation took ${ms} ms`);
       }
+      // Mail is read without scripting, so <noscript> content is markup: its links and its depth count like the rest.
+      error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html:'<noscript><a href="javascript:void(0)">Notes</a></noscript>'}),422,'UNSAFE_HTML_URL');
+      error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html:`<noscript>${nested}</noscript>`}),422,'CONTENT_TOO_LARGE_TO_SCREEN');
       assert.equal(query.mock.callCount(),0); query.mock.restore();
     });
+  });
+
+  test('received HTML past the parsing budget is flagged for readers, and the dashboard scans HTML in one pass',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const wid=runtime.config.workspaceId,thread=unique('thr'),id=unique('msg'),small='<p>Hello <b>there</b></p>';
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,subject,text,html) VALUES($1,$2,'inbound',$3,'Budget','Plain body',$4)",[id,wid,thread,small]);
+      const read=async(html:string,query='includeHtml=true')=>{await db.query('UPDATE mail_messages SET html=$1 WHERE id=$2',[html,id]);return ok(await local('GET',`/v1/inbound/messages/${id}?${query}`));};
+      assert.deepEqual([(await read(small)).html,(await read(small)).htmlTooComplex],[small,false]);
+      assert.deepEqual([(await read(small,'')).html,(await read(small,'')).htmlTooComplex],[null,false],'Without includeHtml there is no HTML to judge.');
+      // 300 formatting elements left open, then a paragraph: nested deeper than the 256 levels any reader of stored HTML parses.
+      const open=Array.from({length:300},(_,i)=>`<font size="${i}">`).join(''),deep=`<p>${open}<p>Text`;
+      for(const html of [deep,`<noscript>${deep}</noscript>`,'<div>'.repeat(257)]) for(const query of ['includeHtml=true','includeHtml=true&includeDelivery=true']) {
+        const message=await read(html,query);
+        assert.equal(message.htmlTooComplex,true,`${html.slice(0,24)} with ${query}`);assert.equal(message.html,html,'The body is returned as stored.');assert.equal(message.text,'Plain body');
+      }
+      assert.equal((await read(`<noscript>${small}</noscript>`)).htmlTooComplex,false);
+      assert.equal((await read('<table>'+'<tr><td><b>Cell</b></td></tr>'.repeat(2000)+'</table>')).htmlTooComplex,false,'A large ordinary table is within the budget.');
+    });
+    // The dashboard reads these straight from the sender's HTML before sanitizing it (app/src/lib/html-scan.ts).
+    const {mentionsRemoteImage,withoutFontStyles,imageTags}=await import('../app/src/lib/html-scan.js');
+    for(const [html,remote] of [['<img src="https://images.example/a.png">',true],["<img alt=x\n src = 'http://images.example/a.png'>",true],['<p style="background:url(https://images.example/a.png)">',true],['<td background="https://images.example/a.png">',true],
+      ['<p style="background:url( \'//images.example/a.png\')">',true],['<img src="cid:logo">',false],['<img src="data:image/png;base64,AAAA">',false],['<video src="https://media.example/a.mp4"></video><img alt="">',false],['<p>src = https: is only text here</p>',false],['<p>Plain</p>',false]] as const) assert.equal(mentionsRemoteImage(html),remote,html);
+    assert.equal(withoutFontStyles('a<style data-bane-fonts>@font-face{font-style:italic}</style>b<style data-opensend-fonts>i</style>c'),'abc');
+    assert.equal(withoutFontStyles('a<style data-bane-fonts>italic'),'a<style data-bane-fonts>italic','An unclosed block is left alone.');
+    assert.deepEqual(imageTags('<p><img src="cid:a"><IMG alt="x" src=cid:b>text<img src="cid:unclosed"'),['<img src="cid:a">','<IMG alt="x" src=cid:b>'],'Inline images are looked up in complete tags only.');
+    // One pass each over a megabyte of the shapes that make a backtracking pattern start over: well under a second in all.
+    const started=performance.now(),run=1_000_000;
+    for(const html of ['<img '.repeat(run/5),'<img src='+' '.repeat(run),'url('+' '.repeat(run),'<p background='+' '.repeat(run),' src'+' '.repeat(run),'<style data-bane-fonts>'.repeat(run/23)]) {
+      assert.equal(mentionsRemoteImage(html),false);assert.equal(withoutFontStyles(html),html);assert.deepEqual(imageTags(html),[]);
+    }
+    const elapsed=performance.now()-started;t.diagnostic(`HTML scans: 6 MB of adversarial input in ${elapsed.toFixed(0)} ms`);
+    assert.ok(elapsed<1000,`Scanning took ${elapsed.toFixed(0)} ms`);
   });
 
   test('hosted screen covers independent parts, hidden copy and link targets with a bounded request and a full-content cache key',async t=>{

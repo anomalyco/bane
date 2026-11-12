@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AttachmentApi } from '../data/types';
 import { useApi } from '../data/context';
 import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
+import { mentionsRemoteImage, withoutFontStyles } from '../lib/html-scan';
 import DOMPurify from 'dompurify';
 import { Alert, Button } from './ui';
 
@@ -30,16 +31,19 @@ export function isTrackingPixel(image: Element): boolean {
   return /(?:^|;)(?:display:none|visibility:hidden|opacity:0(?:;|$)|max-height:0)/.test(style);
 }
 
-// Rough check for the "Load images" prompt only; the sanitizer and the frame's CSP decide what loads.
-const REMOTE_IMAGE = /<img\b[^>]*\ssrc\s*=\s*["']?\s*https?:|url\(\s*["']?\s*(?:https?:)?\/\/|\sbackground\s*=\s*["']?\s*https?:/i;
 /**
  * Received mail: remote images (and CSS backgrounds) stay blocked until the reader asks, so a
  * sender can't learn when, or from which address, a message was opened (L14).
+ * tooComplex is the API's htmlTooComplex: markup past the API's parsing budget is not parsed here either, and the
+ * message's text stays readable.
  */
-export function ReceivedEmailPreview(props: Omit<EmailPreviewProps, 'remoteImages'>) {
+export function ReceivedEmailPreview({ tooComplex, ...props }: Omit<EmailPreviewProps, 'remoteImages'> & { tooComplex?: boolean }) {
+  return tooComplex ? <Alert tone="info">This message’s formatting is too complex to show. Read it as plain text.</Alert> : <ReceivedHtml {...props} />;
+}
+function ReceivedHtml(props: Omit<EmailPreviewProps, 'remoteImages'>) {
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const load = loadedFor === props.html;
-  const remote = useMemo(() => REMOTE_IMAGE.test(props.html), [props.html]);
+  const remote = useMemo(() => mentionsRemoteImage(props.html), [props.html]);
   return <>{remote && !load && <Alert tone="info">Remote images are hidden so the sender can’t tell when you open this message. <Button variant="ghost" size="sm" onClick={() => setLoadedFor(props.html)}>Load images</Button></Alert>}<EmailPreview {...props} remoteImages={load} /></>;
 }
 
@@ -75,7 +79,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: AttachmentApi | undefined; sources: Map<string, string>} | null>(null);
   const [error, setError] = useState('');
   const [fontFaces, setFontFaces] = useState('');
-  const italic = ITALIC.test(html.replace(/<style data-(?:bane|opensend)-fonts>[\s\S]*?<\/style>/g, '')), otherScripts = OTHER_SCRIPTS.test(html);
+  const italic = ITALIC.test(withoutFontStyles(html)), otherScripts = OTHER_SCRIPTS.test(html);
   useEffect(() => {
     let live = true;
     const faces = (italic ? [['normal', 'inter'], ['italic', 'inter-italic']] : [['normal', 'inter']]).flatMap(([style, file]) => [[style, `/fonts/${file}-latin.woff2`, LATIN_RANGE], ...(otherScripts ? [[style, `/fonts/${file}-ext.woff2`, EXT_RANGE]] : [])]);

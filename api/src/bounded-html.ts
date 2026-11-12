@@ -45,7 +45,10 @@ export function boundedHtmlFragment(html: string, mode: 'fragment' | 'document' 
   try {
     // Direct sends may be full documents. Fragment mode alone would discard
     // attributes on html/body and silently skip their URL validation.
-    const parser = mode === 'document' ? new Parser({ treeAdapter }) : Parser.getFragmentParser(null, { treeAdapter });
+    // Mail is read without scripting (so is the dashboard's preview): <noscript> content is markup like
+    // any other, not text, and is counted, validated and projected with the rest of the tree.
+    const options = { treeAdapter, scriptingEnabled: false };
+    const parser = mode === 'document' ? new Parser(options) : Parser.getFragmentParser(null, options);
     const tokenizer = new BoundedTokenizer(parser.options, parser);
     tokenizer.state = parser.tokenizer.state;
     tokenizer.inForeignNode = parser.tokenizer.inForeignNode;
