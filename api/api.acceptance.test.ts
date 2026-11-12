@@ -10475,6 +10475,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   // Recheck 2 of #57 (tear witness, 3 steps: foreign, day, purge -> reconciliation took a workspace named
   // `attachments`'s kept mail, k/attachments/msg_*.eml, for an upload of workspace `k` and deleted it).
+  test('retention retires every aged, unused upload in one run, not 50 an hour', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { cleanup } = await import('./src/maintenance.js'), wid = runtime.config.workspaceId, n = 130;
+      await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at)
+        SELECT 'attachment_aged'||i,$1,'old.txt','text/plain',10,'attachment',$1||'/attachments/attachment_aged'||i,'x',now()-interval '31 days' FROM generate_series(1,$2) i`, [wid, n]);
+      // One still linked to a draft, and one recent: both stay.
+      await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at) VALUES
+        ('attachment_agedlinked',$1,'kept.txt','text/plain',10,'attachment',$1||'/attachments/attachment_agedlinked','x',now()-interval '31 days'),
+        ('attachment_recent',$1,'new.txt','text/plain',10,'attachment',$1||'/attachments/attachment_recent','x',now())`, [wid]);
+      await db.query("INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) VALUES($1,'attachment_agedlinked','email','email_draft_fixture')", [wid]);
+      await cleanup(runtime);
+      assert.deepEqual((await db.query("SELECT id FROM sending_attachments WHERE workspace_id=$1 ORDER BY id", [wid])).rows.map(row => row.id), ['attachment_agedlinked', 'attachment_recent']);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND payload->>'key' LIKE '%attachment_aged%' AND status='pending'", [wid])).rows[0].n, n);
+    });
+  });
   test('attachment upload: reconciliation and deletion never touch another key family or a referenced key',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const {storeAttachmentBytes}=await import('./src/sending.js'),{reconcileUploads}=await import('./src/maintenance.js'),dispatch=await import('./src/dispatch.js');
