@@ -21,7 +21,7 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
     'Set up Bane email in this project.',
     '',
     `- API base URL: ${origin}`,
-    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (full API reference).`,
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index; each tag links its full Markdown reference).`,
     `- Install the TypeScript SDK: npm i @banemx/sdk. Create the client with createClient from '@banemx/sdk/client' (baseUrl ${origin}) and call it from server code only.`,
     '- Auth: bearer API key from the BANE_API_KEY environment variable. Never hardcode it or ship it to a browser.',
   ]

@@ -150,7 +150,7 @@ export default {
       let origin: string | undefined; try { origin = new URL(String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL)).origin; if (origin === 'null') origin = undefined; } catch { origin = undefined; }
       return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
-    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
+    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
     if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));

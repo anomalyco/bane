@@ -92,7 +92,7 @@ function invalidFields(issues: readonly Issue[]) {
   return { message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
 }
 
-function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
+function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null; createTagMarkdownDocs: (doc: Record<string, any>, slug: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
     if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field); }
   } });
@@ -113,7 +113,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
     // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set; everything else is no-store.
-    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
     c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
@@ -242,12 +242,13 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.get('/llms.txt', async c => { const { doc, createLlmsText } = await loadDocs(); return markdown(c, createLlmsText(doc)); });
   app.get('/docs.md', async c => { const { doc, createMarkdownDocs } = await loadDocs(); return markdown(c, createMarkdownDocs(doc)!); });
   app.get('/docs/operations/*', async c => { const { doc, createMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/operations/'.length); const operation = /^[A-Za-z][A-Za-z0-9_]{0,63}\.md$/.test(file) ? file.slice(0, -3) : ''; const value = operation ? createMarkdownDocs(doc, operation) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented operation not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.get('/docs/tags/*', async c => { const { doc, createTagMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/tags/'.length); const value = /^[a-z0-9-]{1,64}\.md$/.test(file) ? createTagMarkdownDocs(doc, file.slice(0, -3)) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented tag not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   return app;
 }
 
 export async function createOpenApiApp(): Promise<App> {
-  const full = createShell(lazyModule(() => import('./openapi-docs.js').then(({ createOpenApiDocument, createLlmsText, createMarkdownDocs }) => ({
-    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
+  const full = createShell(lazyModule(() => import('./openapi-docs.js').then(({ createOpenApiDocument, createLlmsText, createMarkdownDocs, createTagMarkdownDocs }) => ({
+    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   }))), true);
   const [
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
@@ -268,8 +269,8 @@ export type HttpApp = Pick<App, 'fetch'>;
 
 export function createApp(options: { fallback?: MiddlewareHandler<AppEnv> } = {}): HttpApp {
   const getFullApp = lazyModule(() => createOpenApiApp());
-  const loadDocs = lazyModule(() => Promise.all([getFullApp(), import('./openapi-docs.js')]).then(([full, { createOpenApiDocument, createLlmsText, createMarkdownDocs }]) => ({
-    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
+  const loadDocs = lazyModule(() => Promise.all([getFullApp(), import('./openapi-docs.js')]).then(([full, { createOpenApiDocument, createLlmsText, createMarkdownDocs, createTagMarkdownDocs }]) => ({
+    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   })));
   let base: App | undefined;
   const getBase = () => {
