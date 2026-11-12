@@ -12,6 +12,10 @@ pub const MAX_SIZE: usize = 8 << 20;
 pub enum SubmitError {
     #[error("451 4.7.1 Inbox send cap reached")]
     Cap,
+    /// Hosted billing: the workspace's prepaid balance is empty (the API answered 402). A temporary failure, so mail
+    /// clients keep the message and retry after a top-up.
+    #[error("451 4.7.1 Bane balance is empty; add credit in Settings > Billing")]
+    Balance,
     #[error("451 4.3.0 Submission unavailable")]
     Unavailable,
     #[error("550 5.7.1 Rejected")]

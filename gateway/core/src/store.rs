@@ -40,6 +40,9 @@ pub enum Error {
     Denied,
     #[error("[LIMIT] Inbox limit exceeded")]
     Limit,
+    /// The inbox's fair-use download allowance (per UTC day or month) is spent.
+    #[error("[LIMIT] Daily download limit reached")]
+    DownloadLimit,
     /// A batched change stopped after some batches committed. The command reports what is
     /// now true for its targets, then fails.
     #[error("[UNAVAILABLE] Interrupted after part of the command was applied")]

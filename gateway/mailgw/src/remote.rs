@@ -860,7 +860,8 @@ impl MailStore for Store {
         let raw = self
             .api
             .call(json!({"op":"body","handle":h,"kid":self.principal.kid}))
-            .map_err(|_| store::Error::Unavailable)?;
+            // 509: the API's fair-use download cap for this inbox (migration 246).
+            .map_err(|s| if s == 509 { store::Error::DownloadLimit } else { store::Error::Unavailable })?;
         if raw.len() != e.size {
             return Err(store::Error::Unavailable);
         }
@@ -1075,7 +1076,7 @@ fn batch_ticket(t: &Value, i: usize) -> Value {
 }
 impl Submitter for Store {
     fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
-        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|s|match s{429|402=>SubmitError::Cap,400..500=>SubmitError::Rejected,_=>SubmitError::Unavailable})
+        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|s|match s{402=>SubmitError::Balance,429=>SubmitError::Cap,400..500=>SubmitError::Rejected,_=>SubmitError::Unavailable})
     }
 }
 pub struct Offline;
