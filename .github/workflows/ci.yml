@@ -3,6 +3,10 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+  # The merge queue on dev tests each pull request merged onto the latest dev and the entries ahead of it, and merges
+  # only if the required checks (build, acceptance) pass there (docs/ci.md).
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [dev]
 
@@ -73,6 +77,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           ALLOWED: ${{ contains(github.event.pull_request.labels.*.name, 'api-breaking') }}
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node api/scripts/check-api-contract.mjs --self-test
@@ -81,6 +86,12 @@ jobs:
             # HEAD in the build checkout is GitHub's synthetic merge. Compare
             # the actual PR head against its merge-base, not the updated dev.
             head=$PR_HEAD; BASE=$(git merge-base "$head" "$BASE")
+          elif [[ $GITHUB_EVENT_NAME == merge_group ]]; then
+            # The queue's commit merges one pull request onto dev and the entries ahead of it (its first parent), so
+            # compare just that step. Its ref names the pull request: refs/heads/gh-readonly-queue/dev/pr-<n>-<sha>.
+            BASE=$(git rev-parse HEAD^1); ALLOWED=false
+            pr=$(sed -nE 's#^refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]+$#\1#p' <<< "$QUEUE_REF")
+            if [[ -n $pr ]] && gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.labels[].name' | grep -qx api-breaking; then ALLOWED=true; fi
           else
             repo="repos/$GITHUB_REPOSITORY"
             prs=$(gh api --paginate --slurp "$repo/commits/$head/pulls?per_page=100")
@@ -234,12 +245,12 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
-      # Pull requests run it when they touch the dashboard, the API or this workflow; every dev push runs it.
-      # HEAD^1 of a pull request's merge checkout is the base branch.
+      # Pull requests and merge queue entries run it when they touch the dashboard, the API or this workflow; every dev
+      # push runs it. HEAD^1 of a pull request's merge checkout is the base branch; of a queue entry, the entries ahead.
       - name: Check for dashboard or API changes
         id: changes
         run: |
-          if [[ $GITHUB_EVENT_NAME != pull_request ]] || ! git diff --quiet HEAD^1 HEAD -- app api .github/workflows/ci.yml; then
+          if [[ $GITHUB_EVENT_NAME == push ]] || ! git diff --quiet HEAD^1 HEAD -- app api .github/workflows/ci.yml; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           else
             echo 'No app/, api/ or CI changes: nothing to measure.' >> "$GITHUB_STEP_SUMMARY"
