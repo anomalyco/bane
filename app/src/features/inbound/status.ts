@@ -7,4 +7,4 @@ export const receivingStatus: Record<MailboxDomainStatus, { label: string; tone:
 }
 
 export const mxTone = (state: NonNullable<MailboxDomain['mx']>['state']): Tone => state === 'active' ? 'success' : state === 'missing' || state === 'error' ? 'info' : 'warning'
-export const catchAllLabel: Record<MailboxDomain['catchAll'], string> = { create_address: 'Create an address', store: 'Store as unrouted' }
+export const catchAllLabel: Record<MailboxDomain['catchAll'], string> = { create_address: 'Create an address', store: 'Store it, no inbox' }

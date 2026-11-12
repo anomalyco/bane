@@ -6,6 +6,7 @@ import { useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
 import { date, label } from '../../lib/format'
+import { receivedTo } from '../../lib/received-to'
 
 // One log row, shared by Logs and Overview's latest emails: the same columns, masking and click-through in both.
 export const logColumnDefs: SkeletonColumn[] = [
@@ -27,10 +28,10 @@ export function useLogRowIntent() {
 
 // The receiving address mail arrived at is ours and shows in full; the header To may name other people, so it is masked.
 function ReceivedTo({ row }: { row: LogEntry }) {
-  const own = row.addresses?.[0]?.address ?? row.envelopeTo?.[0]
+  const to = receivedTo(row)
   const title = row.addresses?.length ? `Delivered to ${row.addresses.map(a => a.address).join(', ')}` : row.addresses ? 'Unrouted' : undefined
-  if (own) return <span title={title}>{own}</span>
-  return row.to[0] ? <PrivateAddress value={row.to[0]} /> : <span className="muted">—</span>
+  if (to?.own) return <span title={title}>{to.address}</span>
+  return to ? <PrivateAddress value={to.address} /> : <span className="muted">—</span>
 }
 function SentTo({ to }: { to: string[] }) {
   if (!to.length) return <span className="muted">—</span>

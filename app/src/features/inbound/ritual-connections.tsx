@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, Select, StatusBadge, Tabs, type Column, type Tone } from '../../components/ui'
+import { useEffect, useState, type FormEvent } from 'react'
+import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, Select, Tabs, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
-import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
 import { idempotencyFor } from './shared'
 import '../settings/settings.css'
@@ -65,7 +65,7 @@ export function ConnectAgent({ id }: { id: string }) {
   </>
 }
 
-function NewEndpointDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (e: Endpoint & { secret?: string }) => void }) {
+export function NewEndpointDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (e: Endpoint & { secret?: string }) => void }) {
   const boxes = useApiDef(queries.inboundAddressOptions(), { enabled: open })
   const [type, setType] = useState<EndpointType>('slack')
   const [name, setName] = useState('')
@@ -105,54 +105,15 @@ function NewEndpointDialog({ open, onOpenChange, onCreated }: { open: boolean; o
   </Dialog>
 }
 
-export function EndpointsPage() {
-  const { canAdminister } = useWorkspaceAccess()
-  const [rows, setRows] = useState<Endpoint[] | null>(null)
-  const [error, setError] = useState<Error | null>(null)
-  const [creating, setCreating] = useState(false)
-  const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
-  const [removing, setRemoving] = useState<Endpoint | null>(null)
-  const [notice, setNotice] = useState<{ tone: Tone; text: string } | null>(null)
-  const load = useCallback((signal?: AbortSignal) => request<{ data: Endpoint[] }>('/v1/endpoints?limit=200', { signal }).then(r => { setRows(r.data); setError(null) }).catch(e => { if (!signal?.aborted) setError(e as Error) }), [])
-  useEffect(() => { if (!canAdminister) return; const ac = new AbortController(); void load(ac.signal); return () => ac.abort() }, [canAdminister, load])
-  async function act(endpoint: Endpoint, path: string, method: string, body?: unknown, done?: string) {
-    try {
-      const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(endpoint.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
-      setNotice(result.ok === false ? { tone: 'danger', text: `${endpoint.call} answered ${result.error ?? 'an error'}.` } : { tone: 'success', text: done ?? 'Done.' })
-      await load()
-    } catch (e) { setNotice({ tone: 'danger', text: errorText(e) }) }
-  }
-  if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title="Endpoints" backTo="/receiving" /><EmptyState title="Only owners and admins can manage endpoints" /></div>
-  const columns: Column<Endpoint>[] = [
-    { key: 'name', label: 'Call', render: e => <code className="endpoint-call">{e.call}{payloadOf[e.type]}</code> },
-    { key: 'type', label: 'Type', width: 110, render: e => typeLabel[e.type] },
-    { key: 'target', label: 'Delivers to', render: e => <div className="settings-cell-stack"><span className="endpoint-target">{e.target}</span>{e.status !== 'ready' && <span className="muted endpoint-hint">{humanStep(e)}</span>}</div> },
-    { key: 'status', label: 'Status', width: 170, render: e => <StatusBadge status={statusLabel[e.status]} tone={statusTone[e.status]} /> },
-    { key: 'rate', label: 'Rate', width: 110, align: 'right', render: e => `${e.policy.perMinute}/min` },
-    { key: 'actions', label: '', width: 52, align: 'right', render: e => <DropdownMenu label={`Actions for ${e.name}`} items={[
-      ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
-      ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
-      { label: e.status === 'paused' ? 'Resume' : 'Pause', onSelect: () => void act(e, '', 'PATCH', { paused: e.status !== 'paused' }, e.status === 'paused' ? 'Resumed.' : 'Paused. Calls wait until you resume.') },
-      { label: e.policy.retryOnTimeout ? 'Stop retrying timeouts' : 'Retry timeouts', disabled: e.type === 'forward', onSelect: () => void act(e, '', 'PATCH', { retryOnTimeout: !e.policy.retryOnTimeout }, 'Retry policy updated.') },
-      { label: 'Delete', destructive: true, onSelect: () => setRemoving(e) },
-    ]} /> },
-  ]
-  return <div className="stack inbound-stack">
-    <PageHeader title="Endpoints" backTo="/receiving" actions={<Button variant="primary" onClick={() => setCreating(true)}>New endpoint</Button>} />
-    <p className="muted">Named places rituals send to. Scripts use the name; URLs and credentials stay here.</p>
-    {notice && <Alert tone={notice.tone} onDismiss={() => setNotice(null)}>{notice.text}</Alert>}
-    {error ? <ErrorState error={error} onRetry={() => void load()} /> :
-      <DataTable columns={columns} rows={rows ?? []} rowKey={e => e.name} loading={rows === null}
-        empty={<EmptyState title="No endpoints yet" description="Add Slack, Discord, a webhook or a forwarding address, then call it from a ritual." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />} />}
-    <NewEndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); void load() }} />
-    <Dialog open={!!created} onOpenChange={next => { if (!next) setCreated(null) }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'} footer={<Button onClick={() => setCreated(null)}>Done</Button>}>
-      {created && <div className="stack">
-        <Field label="Call it from a ritual"><div className="settings-copy-cell"><code>{created.call}{payloadOf[created.type]}</code><CopyButton value={`${created.call}${created.type === 'slack' ? '({ text: `` })' : created.type === 'discord' ? '({ content: `` })' : '()'}`} label="Copy call" /></div></Field>
-        {created.secret && <Field label="Signing secret" hint="Copy it now; it won’t be shown again."><div className="settings-copy-cell"><code>{created.secret}</code><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
-        <p className="muted">{created.nextStep}</p>
-      </div>}
-    </Dialog>
-    <ConfirmDialog open={!!removing} onOpenChange={next => { if (!next) setRemoving(null) }} title={`Delete ${removing?.name ?? ''}?`} description="Rituals that call it must stop calling it first. Queued calls to it are dropped." confirmLabel="Delete" danger
-      onConfirm={async () => { if (removing) await act(removing, '', 'DELETE', undefined, `${removing.name} deleted.`); setRemoving(null) }} />
-  </div>
+/** Shown once after creating an endpoint: how rituals call it, and a webhook's signing secret, which is never shown again. */
+export function CreatedEndpointDialog({ created, onClose }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void }) {
+  return <Dialog open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'} footer={<Button onClick={onClose}>Done</Button>}>
+    {created && <div className="stack">
+      <Field label="Call it from a ritual"><div className="settings-copy-cell"><code>{created.call}{payloadOf[created.type]}</code><CopyButton value={`${created.call}${created.type === 'slack' ? '({ text: `` })' : created.type === 'discord' ? '({ content: `` })' : '()'}`} label="Copy call" /></div></Field>
+      {created.secret && <Field label="Signing secret" hint="Copy it now; it won’t be shown again."><div className="settings-copy-cell"><code>{created.secret}</code><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
+      <p className="muted">{created.nextStep}</p>
+    </div>}
+  </Dialog>
 }
+export const endpointTypeLabel = typeLabel
+export { humanStep, statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }

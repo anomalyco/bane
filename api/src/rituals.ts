@@ -27,6 +27,19 @@ const path = '/v1/rituals',
   meta = { security, tags: ['Rituals'] },
   state = z.object({ version: z.number().int(), config: RitualConfig }),
   ok = { 200: response(state), ...errors };
+const Line = z.number().int().min(1);
+const TimelineStep = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('condition'), line: Line, column: Line, endLine: Line, endColumn: Line, result: z.boolean().describe('What the condition evaluated to.') }),
+  z.object({ kind: z.literal('omens'), line: Line, scores: z.record(z.string(), z.union([z.number(), z.boolean()])).describe('Omen name → the answer the ritual read: the scores passed in, recorded answers or each omen’s onError value.') }),
+  z.object({ kind: z.literal('action'), line: Line, op: z.string().describe('label, junk, block, drop, allow, inbox.deliver or endpoint.'), ref: z.string().optional().describe('endpoint:<name> or inbox:<key>.'), value: z.string().optional() }),
+  z.object({ kind: z.literal('return'), line: Line }),
+]).openapi('RitualTimelineStep');
+const TraceRow = z.object({
+  recipient: z.string(), kind: z.string().describe('What the ritual is attached to: inbox or address.'), key: z.string().describe('Ritual key.'),
+  scores: z.record(z.string(), z.union([z.number(), z.boolean()])), steps: z.number().int(), lines: z.array(z.number().int()).describe('Statement lines run, in order (at most 128).'),
+  error: z.string().nullable(), actions: z.array(z.object({ op: z.string(), ref: z.string().optional(), body: z.unknown().optional(), value: z.string().optional() })),
+  timeline: z.array(TimelineStep).describe('The evaluation in order: each condition and its result, omen answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.'),
+}).openapi('RitualTraceRow');
 export function ritualAdmin(c: Ctx, write = false) {
   const a=actor(c,!write&&c.get('actor')?.receivingConsent?'read':'manage');
   if (a.domains.length || a.role === 'member' || (write && (a.credential==='agentToken'||a.grantId&&!a.receivingConsent)))
@@ -290,7 +303,7 @@ export function registerRituals(app: App) {
           z.object({
             version: z.number(),
             recipients: z.array(z.record(z.string(), z.unknown())),
-            trace: z.array(z.record(z.string(), z.unknown())),
+            trace: z.array(TraceRow),
             steps: z.number(),
           }),
         ),

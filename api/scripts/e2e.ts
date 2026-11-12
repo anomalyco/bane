@@ -655,6 +655,10 @@ async function inboundWebhook(addressId: string, threadId: string) {
   check(item.url === '••••' + webhookUrl.slice(-4) && stored.url === item.url, 'inbound webhook URL is not masked');
   check(stored.paused && stored.addressIds?.length === 1 && stored.addressIds[0] === addressId && stored.eventTypes.join() === 'thread.updated', 'unsafe inbound webhook subscription');
   check(hasId(await api('listInboundWebhooks', {}), path.id), 'inbound webhook not listed');
+  // Paged five at a time, the run-owned hook is reached by following nextCursor; the address and event filters keep it.
+  check((await pages(cursor => api('listInboundWebhooks', { query: { limit: 5, cursor } }))).some(h => h.id === path.id), 'inbound webhook not reached by cursor paging');
+  check(hasId(await api('listInboundWebhooks', { query: { addressId, eventType: 'thread.updated' } }), path.id), 'inbound webhook filters dropped a subscriber');
+  check(!hasId(await api('listInboundWebhooks', { query: { addressId, eventType: 'message.received' } }), path.id), 'inbound webhook event filter kept a non-subscriber');
   const rotated = await api('rotateInboundWebhookSecret', { path });
   check(rotated.secret.startsWith('whsec_') && rotated.secret !== item.secret, 'inbound webhook secret did not rotate');
   const before = await api('listInboundEvents', { query: { addressId, types: 'thread.updated' } });
@@ -697,6 +701,11 @@ async function inbound() {
   await api('updateInboundAddress', { path: { addressId }, body: { displayName: prefix } });
   check((await api('getInboundAddress', { path: { addressId } })).displayName === prefix, 'receiving address edit not persisted');
   check(hasId(await api('listInboundAddresses', { query: { domain, q: prefix } }), addressId), 'receiving address not listed');
+  // The Receiving screen's one read: both run-owned addresses as address routes, searchable, with the inbox they keep.
+  const overview = await api('getInboundOverview', { query: { domain, q: prefix, kind: 'address' } });
+  const listed = overview.routes.data.filter(r => [sender.id, receiver.id].includes(r.address?.id ?? ''));
+  check(overview.manage && listed.length === 2 && listed.every(r => r.kind === 'address' && r.to.some(t => t.type === 'inbox' && t.id === r.address?.id)), 'overview missing the run-owned address routes');
+  check(overview.counts.address >= 2 && overview.domains.some(r => r.id === domainId), 'overview counts or domains wrong');
   if (destructive) {
     const query = {domain,q:prefix,limit:1};
     const a = await api('listInboundAddresses',{query});
@@ -816,15 +825,9 @@ async function sweepStaleObjects() {
     if (staleRun(h.description,h.createdAt) && h.eventTypes.join()==='email.delivered')
       check((await api('deleteWebhook',{path:{id:h.id}})).deleted,'stale webhook not deleted');
   }
-  for (;;) {
-    // This endpoint returns at most 100 hooks and has no cursor. Drain complete
-    // pages only while we make progress; never silently miss a hidden active hook.
-    const {data}=await api('listInboundWebhooks',{});
-    const stale=data.filter(h=>staleRun(h.description,h.createdAt) && h.addressIds?.length===1 && h.eventTypes.join()==='thread.updated');
-    for (const h of stale)
+  for (const h of await pages(cursor=>api('listInboundWebhooks',{query:{limit:100,cursor}}))) {
+    if (staleRun(h.description,h.createdAt) && h.addressIds?.length===1 && h.eventTypes.join()==='thread.updated')
       check((await api('deleteInboundWebhook',{path:{id:h.id}})).ok,'stale inbound webhook not deleted');
-    if (data.length<100) break;
-    check(stale.length,'inbound webhook scan hit API limit of 100 with no stale fixture on this page; inspect E2E workspace');
   }
   // Retire live dispatch before deleting its template or audience. Already-archived
   // dispatch history is immutable; listCampaigns defaults to unarchived rows only.

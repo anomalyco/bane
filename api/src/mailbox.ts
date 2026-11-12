@@ -21,6 +21,7 @@ import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwa
 import { withRegionSettings } from './ses-region-state.js';
 import { mailboxCreates } from './idempotency.js';
 import { registerLogs } from './logs.js';
+import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -84,9 +85,10 @@ const labelName = z.string().trim().toLowerCase().min(1).max(64).regex(/^[a-z0-9
 const MxRecord = z.object({ type: z.literal('MX'), name: z.string(), value: z.string(), priority: z.number() });
 const MxReportSchema = z.object({ state: z.enum(['active', 'missing', 'conflict', 'mixed', 'wrong_region', 'null_mx', 'cname', 'error']), expected: MxRecord, records: z.array(z.object({ priority: z.number(), host: z.string(), provider: z.string().nullable() })), providers: z.array(z.string()), message: z.string(), checkedAt: z.string(), target: z.string().optional().describe('The existing CNAME target when state is cname.'), split: z.boolean().optional().describe('Mail for the name may be split across several MX hosts.') }).openapi('InboundMxReport');
 const InboundCatchAll = z.enum(['create_address', 'store']);
+const InboundDomainStatus = z.enum(['off', 'provisioning', 'waiting_for_mx', 'active', 'disabling', 'disabled', 'failed']);
 const InboundDomainSchema = z.object({
   id: z.string().describe('Bane domain ID.'), name: z.string(), region: z.string(),
-  status: z.enum(['off', 'provisioning', 'waiting_for_mx', 'active', 'disabling', 'disabled', 'failed']),
+  status: InboundDomainStatus,
   catchAll: InboundCatchAll.describe('For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.'),
   dns: z.array(MxRecord).describe('Records to publish for receiving.'), mx: MxReportSchema.nullable(), lastError: z.string().nullable(),
   enabledAt: z.string().nullable(), checkedAt: z.string().nullable(), addressCount: z.number().int(),
@@ -164,7 +166,16 @@ async function subdomainRow(c: Ctx, parent: typeof mailboxDomains.$inferSelect, 
 }
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const Metadata = z.record(z.string(), z.unknown()).refine(value => JSON.stringify(value).length <= 4096, 'Metadata must be at most 4 KB.');
-async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSelect)[]) {
+type MailboxRow = typeof mailboxes.$inferSelect;
+type MailboxStat = { threads: number; unread: number; last: string | null };
+/** One address as the API shows it, from its row, its address rows (aliases, public) and its thread stats. No I/O. */
+export function mailboxView(row: MailboxRow, addresses: { address: string; kind: string }[], stat?: MailboxStat) {
+  return { id: row.id,key:row.key, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
+    publicAddress: addresses.find(item => item.kind === 'public')?.address ?? null,
+    aliases: addresses.filter(item => item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
+    createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc, kind: row.kind };
+}
+async function mailboxViews(runtime: Runtime, rows: MailboxRow[]) {
   if (!rows.length) return [];
   const ids = rows.map(row => row.id);
   const [addresses, stats] = await Promise.all([
@@ -172,13 +183,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
     runtime.db.select({ mailboxId: mailboxThreads.mailboxId, threads: sql<number>`count(*)::int`, unread: sql<number>`count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)::int`, last: sql<string | null>`max(${mailboxThreads.lastMessageAt})::text` })
       .from(mailboxThreads).where(and(inArray(mailboxThreads.mailboxId, ids), isNull(mailboxThreads.trashedAt))).groupBy(mailboxThreads.mailboxId),
   ]);
-  return rows.map(row => {
-    const stat = stats.find(item => item.mailboxId === row.id);
-    return { id: row.id,key:row.key, address: row.address, displayName: row.displayName, domain: row.address.split('@')[1]!,
-      publicAddress: addresses.find(item => item.mailboxId === row.id && item.kind === 'public')?.address ?? null,
-      aliases: addresses.filter(item => item.mailboxId === row.id && item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
-      createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc, kind: row.kind };
-  });
+  return rows.map(row => mailboxView(row, addresses.filter(item => item.mailboxId === row.id), stats.find(item => item.mailboxId === row.id)));
 }
 type MessageRow = typeof mailMessages.$inferSelect;
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
@@ -594,6 +599,7 @@ export function registerMailbox(app: App) {
   }
   registerInboundThreadReads(app, access);
   registerLogs(app, actorMailAccess);
+  registerInboundOverview(app, { access, mailboxView, InboundAddressSchema, InboundDomainStatus, InboundCatchAll, security });
   app.openapi(createRoute({method:'patch',path:'/v1/inbound/threads/{threadId}',operationId:'updateInboundThread',tags:['Inbound threads'],security,summary:'Mark a conversation read, star, archive or label it for one address',request:{params:z.object({threadId:z.string().min(1).max(120)}),body:json(UpdateInboundThread)},responses:{200:response(AddressState),...errors}}),async c=>{
     const v=access(c,'modify'),{threadId}=c.req.valid('param'),{addressId,...changes}=c.req.valid('json');
     const options=await c.env.db.select({id:mailboxThreads.mailboxId}).from(mailboxThreads).where(visibleThreadAddresses(v,threadId,addressId)).limit(2);
@@ -749,10 +755,23 @@ function registerInboundWebhooks(app: App) {
     c.header('Cache-Control', 'no-store');
     return c.json({ ...await webhookView(c, row!), secret, ...await inboundToken(format, secret) }, 201);
   });
-  app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags, responses: { 200: response(z.object({ data: z.array(InboundWebhookSchema) }).openapi('InboundWebhookList')), ...errors } }), async c => {
-    const value = readAccess(c);
-    const rows = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId),sql`NOT starts_with(${mailboxWebhooks.id},'con_')`)).orderBy(desc(mailboxWebhooks.id)).limit(100);
-    return c.json({ data: await Promise.all(rows.map(row => webhookView(c, row))) }, 200);
+  app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags,
+    summary: 'List inbound webhooks a page at a time, in a stable ID order',
+    description: 'Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address\'s events (subscribed to it or to every address); getInboundOverview links a route\'s full list of subscribers this way.',
+    request: { query: z.object({
+      cursor: z.string().max(200).optional().describe('nextCursor from the previous page.'),
+      limit: z.coerce.number().int().min(1).max(100).default(100),
+      addressId: InboundAddressId.optional().describe('Only webhooks that get events for this address: subscribed to it, or to every address.'),
+      eventType: z.enum(inboundEventTypes).optional().describe('Only webhooks subscribed to this event type.'),
+    }) },
+    responses: { 200: response(pageOf(InboundWebhookSchema, 'InboundWebhookList')), ...errors } }), async c => {
+    const value = readAccess(c), q = c.req.valid('query');
+    const rows = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), sql`NOT starts_with(${mailboxWebhooks.id},'con_')`,
+      q.addressId ? sql`(${mailboxWebhooks.mailboxIds} IS NULL OR ${mailboxWebhooks.mailboxIds} ? ${q.addressId})` : undefined,
+      q.eventType ? sql`${mailboxWebhooks.eventTypes} ? ${q.eventType}` : undefined,
+      q.cursor ? lt(mailboxWebhooks.id, q.cursor) : undefined)).orderBy(desc(mailboxWebhooks.id)).limit(q.limit + 1);
+    const page = rows.slice(0, q.limit);
+    return c.json({ data: await Promise.all(page.map(row => webhookView(c, row))), nextCursor: rows.length > q.limit ? page.at(-1)!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(await webhookView(c, (await getWebhook(c, c.req.valid('param').id, readAccess(c))).row), 200));
   app.openapi(createRoute({ method: 'patch', path: `${path}/{id}`, operationId: 'updateInboundWebhook', security, tags, description: 'Only supplied fields change. Changing format resets junk to that format\'s default unless junk is supplied too.', request: { params: IdParam, body: json(patch.openapi('UpdateInboundWebhook')) }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => {

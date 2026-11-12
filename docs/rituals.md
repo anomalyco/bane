@@ -2,7 +2,9 @@
 
 A **ritual** is a short script that runs when mail reaches an inbox or address. It reads the message and decides what happens: deliver it to another inbox, call an endpoint, label it, junk it, block it. An **endpoint** is a named Slack, Discord, webhook or forward target that rituals call by name. An **omen** is a question a ritual asks Jev about the message; the answer comes back as a plain score or boolean.
 
-![The ritual editor: source with live checks, where it runs, sender lists and omen opt-in](images/rituals/editor.png)
+![The ritual editor: source with live checks, Try it on an email, where it runs, sender lists and omen opt-in](images/rituals/editor.png)
+
+In the dashboard, rituals and endpoints are tabs of **Receiving**, next to Routes. [receiving.md](receiving.md) explains how they fit together.
 
 - [Concepts](#concepts) and [the pipeline](#the-pipeline)
 - [Language reference](#language-reference): [entry point](#entry-point), [what you can write](#what-you-can-write), [`email` and `ctx`](#email-and-ctx), [built-ins](#built-ins), [endpoints](#calling-endpoints), [omens](#omens), [sender lists](#sender-lists), [limits](#limits), [errors](#compile-errors)
@@ -43,9 +45,49 @@ flowchart TD
 
 - A ritual error stops evaluation for that recipient. Bane discards pending ritual actions, marks the message as junk with `ritual-error`, and uses the existing junk delivery rules. Ritual text and regex operations inspect at most the first 65,536 characters.
 - Local decisions commit with the message, so nobody sees mail before its final disposition. External calls are queued only after that commit.
-- A dry run (`testRituals`) runs the same pipeline on a stored message or pasted MIME inside a rolled-back transaction. It never delivers, never calls Jev and never saves; pass `scores` (or type answers in the dashboard) to see what an omen answer would do.
+- A dry run (`testRituals`) runs the same pipeline on a stored message or pasted MIME inside a rolled-back transaction. It never delivers, never calls Jev and never saves; pass `scores` (or set answers in the dashboard) to see what an omen answer would do.
 
-![A dry run: each ritual's omen answers and actions, then the outcome per recipient](images/rituals/dry-run.png)
+### Stepping through a dry run
+
+Each trace row has a `timeline`: the evaluation in the order it happened, at most 128 steps. Dry runs record it; delivery never does.
+
+| Step | Fields | Meaning |
+|---|---|---|
+| `condition` | `line`, `column`, `endLine`, `endColumn`, `result` | An `if` or `?:` test, its source span and what it evaluated to. |
+| `omens` | `line`, `scores` | The omen answers the ritual read: the `scores` you passed, recorded answers, or each omen's `onError` value. |
+| `action` | `line`, `op`, `ref?`, `value?` | `label`, `junk`, `block`, `drop`, `allow`, `inbox.deliver` (`ref: inbox:<key>`) or an endpoint call (`ref: endpoint:<name>`). |
+| `return` | `line` | The `return` that ended the ritual. |
+
+For this ritual and a refund request, with the omen answered `0.9`:
+
+```js
+const QUESTIONS = { refund: "Is the sender asking for a refund?" }
+
+export default function route(email, ctx) {
+  if (email.headers.has("list-unsubscribe")) return junk("newsletter")
+  const result = omens(email, QUESTIONS)
+  if (result.refund >= 0.7) {
+    label("refund")
+    inbox.deliver("billing")
+  }
+  endpoints.support({ text: `${email.from.address}: ${email.subject}` })
+}
+```
+
+```json
+[
+  { "kind": "condition", "line": 4, "column": 7, "endLine": 4, "endColumn": 44, "result": false },
+  { "kind": "omens", "line": 5, "scores": { "refund": 0.9 } },
+  { "kind": "condition", "line": 6, "column": 7, "endLine": 6, "endColumn": 27, "result": true },
+  { "kind": "action", "line": 7, "op": "label", "value": "refund" },
+  { "kind": "action", "line": 8, "op": "inbox.deliver", "ref": "inbox:billing" },
+  { "kind": "action", "line": 10, "op": "endpoint", "ref": "endpoint:support" }
+]
+```
+
+The dashboard animates it. **Trace** (Receiving → Trace) runs a recent email, a sample or a pasted message through the saved config. **Try it** in the editor runs only the ritual you're writing, unsaved, as if it were attached to the address the email was sent to, with a slider per omen (default 0.5). Conditions light up true or false in the source one at a time, omen scores fill in, then the actions and where the mail ends up. Reduced motion shows the result at once.
+
+![Try it: the same ritual's conditions evaluated false and true, the omen answer of 0.90, three actions and the result](images/rituals/dry-run.png)
 
 ## Language reference
 
@@ -270,7 +312,7 @@ Both omen calls are answered by the same single Jev request.
 
 ## Endpoints
 
-![Endpoints: names, types, status, the call to use, and the next step](images/rituals/endpoints.png)
+![Endpoints: each endpoint's call and target, its type, the routes and rituals that use it, and its status](images/rituals/endpoints.png)
 
 `createEndpoint` takes a `type` and a `name` (lowercase letters, digits and hyphens, unique across all types):
 
@@ -345,7 +387,7 @@ Backoff starts at 15 seconds and grows ×4 up to 12 hours, with ±25% jitter, ne
 | Read the config | `getRituals`, `getRitual`, `listRitualVersions` |
 | Check a source while editing | `checkRitual` |
 | Save | `saveRitual`, `applyRituals` (whole config), `attachRituals`, `deleteRitual`, `restoreRitualVersion` |
-| Dry run | `testRituals` (`messageId` or `mime`, optional `config`, `scores`) |
+| Dry run | `testRituals` (`messageId` or `mime`, optional `config`, `scores`); each trace row has a step-by-step `timeline` |
 | Typings and templates | `getRitualTypings`, `listRitualTemplates` |
 | Omen opt-in | `setOmenOptIns` |
 | Endpoints | `listEndpoints`, `getEndpoint`, `createEndpoint`, `updateEndpoint`, `deleteEndpoint`, `sendEndpointVerification`, `testEndpoint` |
