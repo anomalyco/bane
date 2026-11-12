@@ -1,6 +1,6 @@
 # CI: what runs where, and how to fix it
 
-Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev E2E passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
+Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev push CI and dev E2E both passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
 
 ## Merging into `dev`: the merge queue (one step from on)
 
@@ -24,12 +24,26 @@ CI and the dev deploy are ready for GitHub's merge queue on `dev`: `ci.yml` runs
 | Every PR, `dev` push | `acceptance` | The API's acceptance suite on Node against an isolated Postgres and S3 fixture, in two shards, plus the **deadlock guard** | ~2–3 min |
 | Every PR, `dev` push | `preview` | The real Worker under `wrangler dev` (workerd) with dev's wrangler config, on a database upgraded from `dev`'s schema; see **Preview stack** | ~2 min |
 | Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift on every dashboard page | ~3 min, in parallel |
-| `dev` push | Deploy dev | Migrate, deploy, health, live dev E2E | ~5 min |
+| `dev` push, alongside CI | Deploy dev | Migrate, deploy, health, live dev E2E | ~2–3 min, plus ~1 min when Pulumi has work |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
-| Push to `production` | Deploy production | Requires the passing dev E2E for the exact SHA | ~4 min |
+| Push to `production` | Deploy production | Requires a passing dev push CI and dev E2E for the exact SHA; no approval (see **Releasing to production**) | ~2 min, plus ~1 min when Pulumi has work |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) | ~2 min, plus the session |
 
 `build` and `acceptance` are required on `dev`.
+
+## Releasing to production
+
+1. **Dev.** A push to `dev` starts CI and `Deploy dev` at the same time. The dev deploy no longer waits for CI: it checks the pusher and that the commit is still the `dev` tip, then deploys and runs the live E2E. A commit whose CI fails can therefore reach `dev.bane.mx`, but never production.
+2. **Production.** Fast-forward `production` to a `dev` commit (`git push bane <sha>:production`). Authorize requires the commit to be reachable from `production` and `dev`, then runs `.github/scripts/dev-proof.sh`. That script requires a successful `deploy.yml` dev job named for exactly this SHA whose `Live dev E2E` step passed, and a successful `ci.yml` push run on `dev` for exactly this SHA. If that CI is still running, it waits up to 25 minutes and fails as soon as CI fails.
+3. **No approval.** The `production` environment has no required reviewers (removed on Nov 12; before that, every production run waited for thdxr or R44VC0RP to approve). The deploy proceeds as soon as Authorize has the proof. These guards remain: the `production` ruleset (fast-forward only, no deletion), its branch protection (only thdxr and R44VC0RP push), the environment's branch policy (`production` only), the actor check, the stage-tip check in every job, and `PROD_DEPLOY_ENABLED`. To put an approval back, add a required-reviewers rule to the environment (Settings → Environments → `production`, or `PUT repos/anomalyco/bane/environments/production` with `reviewers` and the existing `deployment_branch_policy`).
+
+**Pulumi only runs when it has work.** `.github/scripts/pulumi-has-work.sh` compares the commit being deployed with the commit of the stage's newest successful Deploy job (read from the job's name, so a rollback counts as the commit it deployed). Pulumi runs when one of these changed in that range:
+
+- `infra/pulumi/` or `infra/aws-shared/`, except Markdown;
+- `api/src/mail-controls.ts` or `.github/scripts/receiving-rule-set.sh`;
+- the `pulumi` job in `deploy.yml`, compared with `yq` after expanding anchors and dropping its `Require …` guard steps.
+
+An edit elsewhere in `deploy.yml` (the Worker deploy or the E2E) no longer runs Pulumi; on Nov 12 that alone ran it four times. Pulumi also runs when no deployed commit is an ancestor, and on every `workflow_dispatch`.
 
 ## When the dev E2E fails
 
