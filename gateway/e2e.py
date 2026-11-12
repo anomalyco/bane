@@ -817,11 +817,13 @@ def large_folder(tmp):
             print(f'50k mark all read: other tenant SELECT p95 {p95:.1f} ms over {len(other)} samples',flush=True);assert p95<250
         assert ok(c.uid('SEARCH',None,'UNSEEN'))==[b'']
         assert ok(c.select('CopyRetry'))==[b'50002']
+        # Earlier cases may have left messages in Trash: empty all of it.
+        trash=int(sql("SELECT total FROM inbox_folders WHERE inbox_id='mbx_fixture' AND role='trash'",'fixture_observer'))+50002
         batched('MOVE 1:* to Trash',lambda:ok(c.uid('MOVE','1:*','Trash')),51,60)
         assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='0'
-        assert ok(c.select('Trash'))==[b'50002']
-        batched('empty Trash: mark deleted',lambda:ok(c.uid('STORE','1:*','+FLAGS.SILENT','(\\Deleted)')),51,60)
-        batched('empty Trash: EXPUNGE',lambda:ok(c.expunge()),51,60)
+        assert ok(c.select('Trash'))==[str(trash).encode()]
+        batched('empty Trash: mark deleted',lambda:ok(c.uid('STORE','1:*','+FLAGS.SILENT','(\\Deleted)')),-(-trash//1000),60)
+        batched('empty Trash: EXPUNGE',lambda:ok(c.expunge()),-(-trash//1000),60)
         assert sql("SELECT total FROM inbox_folders WHERE inbox_id='mbx_fixture' AND role='trash'",'fixture_observer')=='0'
         assert ok(c.select('Capacity'))==[b'50001']
         c.sock.settimeout(25)
