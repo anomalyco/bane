@@ -6758,6 +6758,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
+  test('webhook delivery and email event pages follow creation time across pages, not random IDs', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const wid = runtime.config.workspaceId, n = 7;
+      // IDs sort opposite to creation time, so an ID-ordered page is visibly wrong. Two rows share an instant (the ID breaks the tie).
+      const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, i === n - 1 ? n - 2 : i)).toISOString().replace('Z', '123+00:00');
+      const idOf = (prefix: string, i: number) => `${prefix}_${String(99 - i).padStart(3, '0')}`;
+      const walk = async (path: string, limit = 3) => {
+        const ids: string[] = []; let cursor: string | null = null;
+        do { const body = ok(await local('GET', `${path}?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)); ids.push(...body.data.map((row: Json) => row.id)); cursor = body.nextCursor; } while (cursor);
+        return ids;
+      };
+      // Expected: created_at descending, ties by ID descending (the last two rows share an instant).
+      const newest = (prefix: string) => Array.from({ length: n }, (_, i) => ({ id: idOf(prefix, i), at: at(i) })).sort((x, y) => y.at.localeCompare(x.at) || y.id.localeCompare(x.id)).map(row => row.id);
+      const hook = ok(await local('POST', '/v1/webhooks', { url: `https://${unique('order')}.example.org/hook`, eventTypes: ['email.delivered'] }), 201);
+      for (let i = 0; i < n; i++) await db.query("INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload,status,created_at) VALUES($1,$2,$3,$4,$5,'delivered',$6)", [idOf('whd', i), wid, hook.id, `evt_order_${i}`, { id: `evt_order_${i}`, type: 'email.delivered', createdAt: at(i), workspaceId: wid, region: null, data: {} }, at(i)]);
+      assert.deepEqual(await walk(`/v1/webhooks/${hook.id}/deliveries`), newest('whd'));
+      const inbound = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('order')}.example.org/inbound`, eventTypes: ['message.received'] }), 201);
+      for (let i = 0; i < n; i++) await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload,status,created_at) VALUES($1,$2,$3,$4,$5,'delivered',$6)", [idOf('mwd', i), wid, inbound.id, 9000 + i, { id: `mev_order_${i}`, type: 'message.received' }, at(i)]);
+      assert.deepEqual(await walk(`/v1/inbound/webhooks/${inbound.id}/deliveries`), newest('mwd'));
+      const email = unique('email');
+      await db.query("INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated) VALUES($1,$2,$3,'fixture','sender@example.org','[]','[]','[]','Order','delivered',$1,$4,true)", [email, wid, REGION, { subject: 'Order', text: 'Order', attachments: [] }]);
+      for (let i = 0; i < n; i++) await db.query("INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at) VALUES($1,$2,$3,'delivered','{}',true,$4)", [idOf('event', i), wid, email, at(i)]);
+      const oldest = newest('event').reverse();
+      assert.deepEqual(await walk(`/v1/emails/${email}/events`), oldest);
+      // An ID from before this change is not a cursor any more: a 422, not a silently different page.
+      error(await local('GET', `/v1/webhooks/${hook.id}/deliveries?cursor=${idOf('whd', 3)}`), 422, 'INVALID_CURSOR');
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];

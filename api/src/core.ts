@@ -159,6 +159,19 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/** A (created_at, id) page cursor, bound to its resource and filters; microseconds survive the round trip. */
+export function readCursor(value: string | undefined, binding: string): { at: string; id: string } | null {
+  if (!value) return null;
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+    const tuple = z.tuple([z.string().datetime({ offset: true }), z.string().min(1).max(120), z.literal(binding)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
+    return { at: tuple[0], id: tuple[1] };
+  } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
+}
+export function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
+  const last = rows[limit - 1];
+  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
+}
 /**
  * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts
  * with a workspace ID or a mail class, and no workspace may be named `uploads` (migration 158).
