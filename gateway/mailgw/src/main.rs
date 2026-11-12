@@ -14,7 +14,7 @@ use mailgw_core::{
 use std::{
     env,
     fs::File,
-    io::BufReader,
+    io::Read,
     net::IpAddr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -26,7 +26,13 @@ use tokio::{
     task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
-use tokio_rustls::{TlsAcceptor, rustls::ServerConfig};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{
+        ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    },
+};
 trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for T {}
 type Stream = Box<dyn Transport>;
@@ -394,7 +400,10 @@ impl Gateway {
                     } else {
                         self.slots.clone()
                     };
-                    let Ok(permit) = slots.try_acquire_owned() else {
+                    let shared = backend
+                        .as_ref()
+                        .map_or_else(|| Some(Vec::new()), |s| s.lanes.session());
+                    let Some(permit) = slots.try_acquire_owned().ok().zip(shared) else {
                         write(
                             &mut stream,
                             match port.protocol {
@@ -487,6 +496,16 @@ fn setting<T: std::str::FromStr>(name: &str, default: T) -> Result<T> {
         Err(e) => Err(e.into()),
     }
 }
+fn tls_materials(
+    cert: impl Read,
+    key: impl Read,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    Ok((
+        CertificateDer::pem_reader_iter(cert).collect::<Result<_, _>>()?,
+        PrivateKeyDer::from_pem_reader(key).context("No TLS private key")?,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -499,8 +518,10 @@ async fn main() -> Result<()> {
         }
         Ok(Box::new(File::open(env::var(file)?)?))
     }
-    let cert = pem("MAILGW_CERT_PEM", "MAILGW_CERT")?;
-    let key = pem("MAILGW_KEY_PEM", "MAILGW_KEY")?;
+    let (cert, key) = tls_materials(
+        pem("MAILGW_CERT_PEM", "MAILGW_CERT")?,
+        pem("MAILGW_KEY_PEM", "MAILGW_KEY")?,
+    )?;
     let api = env::var("MAILGW_API_TOKEN")
         .ok()
         .map(|key| {
@@ -516,10 +537,7 @@ async fn main() -> Result<()> {
         .ok();
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(
-            rustls_pemfile::certs(&mut BufReader::new(cert)).collect::<std::io::Result<_>>()?,
-            rustls_pemfile::private_key(&mut BufReader::new(key))?.context("No TLS private key")?,
-        )?;
+        .with_single_cert(cert, key)?;
     config.send_tls13_tickets = 0;
     let pass = env::var("MAILGW_FIXTURE_PASSWORD").unwrap_or_default();
     anyhow::ensure!(
@@ -532,6 +550,14 @@ async fn main() -> Result<()> {
         "fixture must stay on loopback"
     );
     let limit = setting("MAILGW_LOGIN_LIMIT", 10)?;
+    if let Some(api) = &api {
+        use std::sync::atomic::Ordering::Relaxed;
+        let open = &api.tenant_sessions;
+        open.store(
+            setting("MAILGW_TENANT_SESSIONS", open.load(Relaxed))?,
+            Relaxed,
+        );
+    }
     let gw = Arc::new(Gateway {
         api: api.clone(),
         events: Arc::default(),
@@ -670,6 +696,39 @@ async fn health_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pem_reader_keeps_certificate_order_and_supported_key_formats() {
+        // Small DER stand-ins exercise PEM decoding; the loopback TLS gate validates real keys.
+        let chain = b"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nBAUG\n-----END CERTIFICATE-----\n";
+        for label in ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"] {
+            let pem = format!("-----BEGIN {label}-----\nAQID\n-----END {label}-----\n");
+            let (certs, key) = tls_materials(&chain[..], pem.as_bytes()).unwrap();
+            assert_eq!(certs.len(), 2);
+            assert_eq!(certs[0].as_ref(), &[1, 2, 3]);
+            assert_eq!(certs[1].as_ref(), &[4, 5, 6]);
+            assert_eq!(key.secret_der(), &[1, 2, 3]);
+            assert!(matches!(
+                (label, key),
+                ("PRIVATE KEY", PrivateKeyDer::Pkcs8(_))
+                    | ("RSA PRIVATE KEY", PrivateKeyDer::Pkcs1(_))
+                    | ("EC PRIVATE KEY", PrivateKeyDer::Sec1(_))
+            ));
+        }
+        let key = b"-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n";
+        assert!(tls_materials(&chain[..], b"no key".as_slice()).is_err());
+        assert!(
+            tls_materials(
+                b"-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n".as_slice(),
+                &key[..]
+            )
+            .is_err()
+        );
+        assert!(
+            tls_materials(&chain[..], b"-----BEGIN PRIVATE KEY-----\nAQID".as_slice()).is_err()
+        );
+    }
+
     #[tokio::test]
     async fn health_reflects_listener_state() {
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();

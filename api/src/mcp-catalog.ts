@@ -49,7 +49,7 @@ const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // they differ from the method default (reads need read, writes need manage): actor(c, 'send')
 // for email, attachment and campaign work, read-only delegation (a read grant may mint a read
 // agent token; it still needs confirm=true), and manageKeys() reads.
-const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
+const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
 const READ_LEVEL_WRITES = new Set(['createAgentToken']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'revealWebhookSecret']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
@@ -221,8 +221,9 @@ const DESCRIPTIONS: Record<string, string> = {
   listRitualTemplates: 'Nine working starting points (Slack, Discord, JSON webhook, forward, newsletters, refund omen, block a domain, VIP allow-list, failed DMARC), filled in with this workspace’s endpoints.',
   createEndpoint: 'Create a named endpoint that rituals call as endpoints.<name>(…): type slack or discord (url is a write-only credential), webhook (signed JSON; secret returned once) or forward (address; the recipient confirms by emailed link, so the result is pending with a nextStep). preverify skips the email for addresses on a domain this workspace verified.',
   sendEndpointVerification: 'Email a forward recipient a new single-use confirmation link. Only the recipient can confirm by opening it and choosing Allow; poll getEndpoint for status.',
-  createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
+  createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude Code, Cursor or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
   createApiKey: 'Create a long-lived API key. Created over MCP, it is tied to this approval and revoked with it. The secret is returned once. Prefer createAgentToken for short scripts.',
+  createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP, it is tied to this approval: it delivers while the approval is active and is paused when the approval is removed, resuming only with its URL and a new signing secret.',
 };
 const PATH_IDS: Record<string, string> = {
   'mcp-connections': 'connectionId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',

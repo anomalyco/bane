@@ -9,6 +9,8 @@
 .ui-table-scroll.keys-table--two-line { --table-row-height: 53px; }
 /* Narrow screens scroll the table sideways rather than wrapping cells, so loaded rows keep the skeleton's height. */
 .keys-table .ui-table { min-width: 880px; }
+/* A tablet fits the whole table, Revoke included, by narrowing its columns instead of scrolling it sideways. */
+@media (max-width: 1100px) { .keys-table .ui-table { min-width: 0; } .keys-table [data-col='prefix'] { width: 15% !important; } }
 .keys-cell { min-width: 0; }
 .keys-cell > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -31,3 +33,12 @@
 .keys-advanced-body { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-16); min-width: 0; }
 .keys-advanced-body .settings-key-domains > legend { margin-bottom: var(--space-8); }
 .keys-advanced-body .settings-key-domains > .ui-field__hint { margin: 0; }
+/* Which key do I need: one plain line per credential, in a compact grid. */
+.keys-guide { display: grid; gap: var(--space-12); margin-bottom: var(--space-24); }
+.keys-guide > h2 { display: flex; align-items: baseline; gap: var(--space-12); margin: 0; font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
+.keys-guide > dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; }
+.keys-guide dt { font-size: var(--text-sm); font-weight: 500; }
+.keys-guide dd { margin: 2px 0 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
+@media (max-width: 900px) { .keys-guide > dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .keys-guide > dl { grid-template-columns: minmax(0, 1fr); } }
+.keys-guide__where { color: var(--color-faint); white-space: nowrap; }

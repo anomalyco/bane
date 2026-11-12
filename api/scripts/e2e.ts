@@ -160,8 +160,16 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   }
   // Keep the generated method's input/output tied to its key; no handwritten route or schema.
   const call = sdk[op] as (opts: Input<K>) => ReturnType<typeof sdk[K]>;
+  // A request that never got a response has no request ID: keep the error's name and cause code (never its message,
+  // which can carry the URL) so a transport failure says whether it was a timeout, a reset or a refused connection.
+  let transport: string | undefined;
   const result = await call({ ...input, client: input.client ?? client, signal: AbortSignal.timeout(ms), fetch: async (request: Request) => {
-    const response = await fetch(request);
+    let response: Response;
+    try { response = await fetch(request); } catch (error) {
+      const e = error as { name?: unknown; cause?: { code?: unknown; name?: unknown } };
+      transport = [e.name, e.cause?.code ?? e.cause?.name].filter(v => typeof v === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(v)).join(' ') || 'unknown';
+      throw error;
+    }
     if (state) state.requestId = response.headers.get('x-request-id');
     return response;
   }});
@@ -174,7 +182,7 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
     (result.response.ok ? successResponses : errorResponses).add(op);
   }
   // Never serialize SDK errors: request objects, tokens, and unrelated mail can all be sensitive.
-  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code);
+  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code ?? (transport && `(${transport})`));
   return result.data as Output<K>;
 }
 async function expectDenial(call: () => Promise<unknown>, status: number, code: string) {
@@ -409,8 +417,9 @@ async function audience() {
     const preview = await api('previewContactImport', { body: { csv: `email,name\n${success},${name}\n`, listId: l.id, mapping: { email: 'email', name: 'name' } } });
     const path = { id: preview.id };
     check(preview.status === 'preview' && preview.listId === l.id && preview.rows.length === 1 && preview.rows[0].email === success && !preview.errors.length, 'refusing import of anything but this run’s contact');
-    const committed = await api('commitContactImport', { path });
-    check(committed.status === 'committed' && committed.imported === 1, 'import did not commit exactly one row');
+    // Attested consent marks only contacts with no decision; this run's contact is already subscribed, so nothing changes.
+    const committed = await api('commitContactImport', { path, body: { consent: { status: 'subscribed', evidence: `${prefix} e2e attestation` } } });
+    check(committed.status === 'committed' && committed.imported === 1 && committed.subscribed === 0, 'import did not commit exactly one row without re-recording consent');
     const receipt = await api('getContactImport', { path });
     check(receipt.id === path.id && receipt.listId === l.id && receipt.rows.length === 1 && receipt.rows[0].name === name, 'incorrect stored import');
     // This endpoint exposes summary metadata only and has no server-side listId filter.
@@ -521,6 +530,17 @@ async function scheduledCampaign(audience: Audience) {
   check(paced.delivery?.pacing.perDay === 100 && paced.delivery.pacing.rateShare === 0.25, 'pacing changes missing');
   const resumed = await api('resumeCampaign', { path, body: {} });
   check(resumed.state === 'scheduled' && resumed.scheduledAt && Date.parse(resumed.scheduledAt) === Date.parse(scheduledAt), 'resume lost future schedule');
+  const later = new Date(Date.parse(scheduledAt) + 86_400_000).toISOString();
+  const moved = await api('rescheduleCampaign', { path, body: { scheduledAt: later } });
+  check(moved.state === 'scheduled' && moved.scheduledAt !== null && Date.parse(moved.scheduledAt) === Date.parse(later) && moved.delivery?.expanded === 0, 'reschedule did not move the send time');
+  const unscheduled = await api('unscheduleCampaign', { path, body: {} });
+  check(unscheduled.state === 'draft' && unscheduled.scheduledAt === null && unscheduled.delivery === null && unscheduled.counts.total === 0, 'unschedule did not return an untouched draft');
+  const again = await api('scheduleCampaign', { path, headers: idKey('schedule-again'), body: { revision: unscheduled.revision, scheduledAt } });
+  check(again.queued === 1 && again.scheduledAt === scheduledAt, 'unscheduled draft did not schedule again');
+  await until('campaign scheduled again', () => api('getCampaignState', { path }), row => {
+    check(['preparing', 'scheduled'].includes(row.state), `unexpected pre-schedule state ${row.state}`);
+    return row.state === 'scheduled';
+  }, row => row.state);
   const canceled = await api('cancelCampaign', { path });
   check(canceled.state === 'canceled' && canceled.inFlight === 0 && canceled.canceled === 1, 'cancel did not stop one future recipient');
   const stats = await api('getCampaignStats', { path });

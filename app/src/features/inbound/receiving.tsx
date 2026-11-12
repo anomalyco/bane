@@ -9,8 +9,9 @@ import { ApiError } from '../../data/types'
 import { number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { CreateAddressDialog } from './addresses'
-import { concepts, kindNote, kinds, type KindFilter } from './concepts'
+import { concepts, guides, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
+import { ConnectAgentButton } from '../docs/connect-agent'
 import { ago, expiresIn, receivingDomains, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
 import { Chain, ConceptLine, Match, RitualIcon, RouteIcon, TargetIcon, Targets } from './parts'
 import { CreatedEndpointDialog, endpointStatusLabel, endpointStatusTone, NewEndpointDialog, type Endpoint } from './ritual-connections'
@@ -35,7 +36,7 @@ function note(r: RouteEntry) {
   if (r.kind === 'catch_all') return r.catchAll ? (r.catchAll === 'create_address' ? 'Catch-all · creates an address per recipient' : 'Catch-all · unknown addresses') : 'Catch-all route'
   if (r.kind === 'route') return kindNote.route
   if (r.kind === 'pattern') return a ? <>Pattern of <PrivateAddress value={a.address} /></> : kindNote.pattern
-  if (r.kind === 'inbox') return [a?.displayName, expiresIn(a?.expiresAt)].filter(Boolean).join(' · ') || kindNote.inbox
+  if (r.kind === 'inbox') return [kindNote.inbox, a?.displayName, expiresIn(a?.expiresAt)].filter(Boolean).join(' · ')
   if (a?.origin === 'auto') return kindNote.auto
   const also = a?.aliases.length ? <>also <AddressList values={a.aliases.map(x => x.slice(0, x.indexOf('@') + 1))} /></> : null
   const parts = [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean)
@@ -81,19 +82,23 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
       </div>
     </div>
     <div className="rcv-kindline">
-      <ConceptLine line={kinds[filters.kind].line} example={kinds[filters.kind].example} />
-      {canAdminister && filters.kind === 'inbox' && <Button size="sm" onClick={() => setNewInbox(true)}>New agent inbox</Button>}
+      <ConceptLine line={kinds[filters.kind].line} example={kinds[filters.kind].example} guide={filters.kind === 'inbox' ? guides.inboxes : guides.receiving} />
+      {canAdminister && filters.kind === 'inbox' && <div className="cluster"><ConnectAgentButton size="sm" /><Button size="sm" onClick={() => setNewInbox(true)}>New agent inbox</Button></div>}
       {canAdminister && filters.kind === 'address' && <Button size="sm" disabled={!hosts.length} onClick={onCreate}>New address</Button>}
     </div>
     <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} rowHref={hrefOf} onRowClick={open} loading={false} minRows={Math.min(8, rows.length)}
       empty={<EmptyState title={empty.title} description={empty.description} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={onCreate}>New address</Button> : undefined} />}
       columns={[
-        { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip">{note(r)}</span></div></div> },
-        { key: 'rituals', label: 'Rituals', width: '17%', render: r => <Chain keys={r.rituals} empty={overview.manage && r.address && r.kind !== 'pattern'
+        // A route's card: the address (its link) and its unread count or last mail, what it is, then where its mail goes.
+        { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip">{note(r)}</span></div></div>,
+          cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
+        { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
+        { key: 'rituals', label: 'Rituals', width: '17%', card: 'hide', render: r => <Chain keys={r.rituals} empty={overview.manage && r.address && r.kind !== 'pattern'
           ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}#rituals`} onClick={e => e.stopPropagation()}>No ritual · add</Link> : <span className="muted">—</span>} /> },
-        { key: 'to', label: 'Goes to', width: '32%', render: r => <Targets to={r.to} total={r.toTotal} ownId={r.address?.id} /> },
-        { key: 'unread', label: 'Unread', align: 'right', width: '8%', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
-        { key: 'last', label: 'Last mail', align: 'right', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span> },
+        { key: 'to', label: 'Goes to', width: '32%', card: 'line', render: r => <Targets to={r.to} total={r.toTotal} ownId={r.address?.id} />, cardRender: r => <span className="rcv-card-to">{r.rituals.length > 0 && <><Chain keys={r.rituals} /><span aria-hidden="true">→</span></>}<Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span> },
+        { key: 'unread', label: 'Unread', align: 'right', width: '8%', card: 'hide', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
+        { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span>,
+          cardRender: r => r.address && r.kind !== 'pattern' ? <>{r.address.stats.unreadThreads > 0 && <strong className="rcv-unread">{number(r.address.stats.unreadThreads)} new</strong>}{r.address.stats.lastMessageAt ? ago(r.address.stats.lastMessageAt) : null}</> : null },
       ]} />
     <div className="rcv-foot" data-busy={fetching || undefined}>
       <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'route' : 'routes'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
@@ -106,14 +111,14 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
 function RitualsTab({ overview }: { overview: Overview }) {
   const byName = new Map(overview.endpoints.filter(e => e.source === 'endpoint').map(e => [e.name, e]))
   return <div className="stack rcv-tab">
-    <div className="rcv-kindline"><ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} /><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals?new=1">New ritual</Link></div>
+    <div className="rcv-kindline"><ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} guide={guides.rituals} /><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals?new=1">New ritual</Link></div>
     <DataTable className="rcv-table" rows={overview.rituals} rowKey={r => r.key} rowHref={r => `/receiving/rituals?key=${encodeURIComponent(r.key)}`}
-      empty={<EmptyState title="No rituals yet" description="A ritual is a short script that runs on a route’s mail. For example: if the subject mentions a refund, label it and post it to Slack." action={<Link to="/receiving/rituals?new=1">Write a ritual</Link>} />}
+      empty={<EmptyState title="No rituals yet" description="A ritual is a short script that runs on a route’s mail. For example: if the subject mentions a refund, label it and post it to Slack." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals?new=1">Write a ritual</Link>} />}
       columns={[
         { key: 'key', label: 'Ritual', width: '20%', render: r => <span className="rcv-cell"><RitualIcon /><code>{r.key}</code></span> },
-        { key: 'on', label: 'Runs on', width: '20%', render: r => r.attachedTo.length ? `${number(r.attachedTo.length)} ${r.attachedTo.length === 1 ? 'route' : 'routes'}` : <Link className="rcv-add" to={`/receiving/rituals?key=${encodeURIComponent(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link> },
-        { key: 'calls', label: 'Can send to', width: '34%', render: r => r.calls.length || r.delivers.length ? <span className="rcv-targets">{r.calls.map(c => { const e = byName.get(c); return <span key={c} className="rcv-target"><TargetIcon type={e?.type ?? 'webhook'} size={13} /><span>{c}</span></span> })}{r.delivers.map(k => <span key={k} className="rcv-target"><TargetIcon type="inbox" size={13} /><span>{k} inbox</span></span>)}</span> : <span className="muted">Labels and filters only</span> },
-        { key: 'jev', label: 'Asks Jev', width: '12%', render: r => r.omens.length ? `${r.omens.length} ${r.omens.length === 1 ? 'question' : 'questions'}` : <span className="muted">No</span> },
+        { key: 'on', label: 'Runs on', width: '20%', card: 'line', render: r => r.attachedTo.length ? `${number(r.attachedTo.length)} ${r.attachedTo.length === 1 ? 'route' : 'routes'}` : <Link className="rcv-add" to={`/receiving/rituals?key=${encodeURIComponent(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link> },
+        { key: 'calls', label: 'Can send to', width: '34%', card: 'line', render: r => r.calls.length || r.delivers.length ? <span className="rcv-targets">{r.calls.map(c => { const e = byName.get(c); return <span key={c} className="rcv-target"><TargetIcon type={e?.type ?? 'webhook'} size={13} /><span>{c}</span></span> })}{r.delivers.map(k => <span key={k} className="rcv-target"><TargetIcon type="inbox" size={13} /><span>{k} inbox</span></span>)}</span> : <span className="muted">Labels and filters only</span> },
+        { key: 'omens', label: <span title={concepts.omens.line}>Omens</span>, width: '12%', card: 'hide', render: r => r.omens.length ? <span title={concepts.omens.line}>{`${r.omens.length} AI ${r.omens.length === 1 ? 'question' : 'questions'}`}</span> : <span className="muted">None</span> },
         { key: 'try', label: '', align: 'right', render: r => <Link className="ui-button ui-button--ghost ui-button--sm" to={`/receiving/rituals?key=${encodeURIComponent(r.key)}#try`} onClick={e => e.stopPropagation()}>Try it</Link> },
       ]} />
   </div>
@@ -132,15 +137,17 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
   }
   const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'route' : 'routes'}` : null, e.rituals.length ? `ritual ${e.rituals.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
-    <div className="rcv-kindline"><ConceptLine line={concepts.endpoints.line} example={concepts.endpoints.example} />
+    <div className="rcv-kindline"><ConceptLine line={concepts.endpoints.line} example={concepts.endpoints.example} guide={guides.endpoints} />
       <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/webhooks">Event webhooks</Link><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
     <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
       empty={<EmptyState title="No endpoints yet" description="An endpoint is a named place rituals and routes send mail: Slack, Discord, a webhook or a forward. For example, a ritual calls endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
-        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip">{e.target}</span></div></div> },
-        { key: 'type', label: 'Type', width: '14%', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
-        { key: 'used', label: 'Used by', width: '30%', render: e => used(e) || <span className="muted">Nothing yet</span> },
-        { key: 'status', label: 'Status', width: '16%', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
+        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip">{e.target}</span></div></div>,
+          cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.call ? <code>{e.call}</code> : e.name}</span> },
+        { key: 'target', label: 'Target', table: false, card: 'line', render: e => e.target },
+        { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
+        { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
+        { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
         { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <span /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
           ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
           ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
@@ -172,12 +179,14 @@ export function ReceivingPage() {
   }
   const data = overview.data
   const manage = data?.manage ?? canAdminister
+  const firstAddress = manage && !!data && data.counts.address + data.counts.route === 0
   const counts = data && { routes: kindCount(data.counts, 'all'), rituals: data.rituals.length, endpoints: data.endpoints.length }
   return <div className="stack inbound-stack">
     <PageHeader title="Receiving" actions={<>
       {manage && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>}
-      {manage && <Button disabled={!data || !receivingDomains(data.domains).length} onClick={() => setCreating(true)}>New address</Button>}
-      <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox">Inbox</Link>
+      {/* The first address is the next thing to do until there is one; after that, reading mail is. */}
+      {manage && <Button variant={firstAddress ? 'primary' : 'secondary'} disabled={!data || !receivingDomains(data.domains).length} onClick={() => setCreating(true)}>New address</Button>}
+      <Link className={`ui-button ui-button--${firstAddress ? 'secondary' : 'primary'} ui-button--md`} to="/receiving/inbox">Inbox</Link>
     </>} />
     {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
       <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null })}

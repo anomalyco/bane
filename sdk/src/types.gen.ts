@@ -262,6 +262,27 @@ export type AudienceImport = {
     updatedAt: string;
 };
 
+export type CommittedContactImport = AudienceImport & {
+    /**
+     * Contacts this commit marked subscribed; 0 without consent or when the import was already committed.
+     */
+    subscribed: number;
+};
+
+export type CommitContactImportInput = {
+    /**
+     * Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.
+     */
+    consent?: {
+        status: 'subscribed';
+        /**
+         * How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.
+         */
+        evidence: string;
+        policyVersion?: string;
+    };
+};
+
 export type AudienceQueryResult = {
     columns: Array<string>;
     rows: Array<{
@@ -1141,6 +1162,10 @@ export type CampaignPacingUpdate = {
      * Omit to keep the current setting.
      */
     rateShare?: number;
+};
+
+export type CampaignRescheduleInput = {
+    scheduledAt: string;
 };
 
 export type WorkspaceSettings = {
@@ -2707,6 +2732,13 @@ export type InboundThread = {
     subject: string;
     snippet: string;
     lastMessageAt: string;
+    /**
+     * Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address.
+     */
+    from: {
+        name: string | null;
+        address: string;
+    };
     addressIds: Array<string>;
     /**
      * Distinct messages visible within the requested address scope.
@@ -5954,7 +5986,7 @@ export type GetContactImportResponses = {
 export type GetContactImportResponse = GetContactImportResponses[keyof GetContactImportResponses];
 
 export type CommitContactImportData = {
-    body?: never;
+    body?: CommitContactImportInput;
     path: {
         id: string;
     };
@@ -6011,7 +6043,7 @@ export type CommitContactImportResponses = {
     /**
      * Success
      */
-    200: AudienceImport;
+    200: CommittedContactImport;
 };
 
 export type CommitContactImportResponse = CommitContactImportResponses[keyof CommitContactImportResponses];
@@ -6152,6 +6184,10 @@ export type ApplyAudiencePlanData = {
     body: {
         planId: string;
         confirmResubscribe?: boolean;
+        /**
+         * For a consent change: how these people agreed, for example "Opted in at checkout". Stored with each consent record.
+         */
+        evidence?: string;
     };
     path?: never;
     query?: never;
@@ -9076,6 +9112,134 @@ export type SetCampaignPacingResponses = {
 };
 
 export type SetCampaignPacingResponse = SetCampaignPacingResponses[keyof SetCampaignPacingResponses];
+
+export type UnscheduleCampaignData = {
+    body: {
+        [key: string]: never;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/unschedule';
+};
+
+export type UnscheduleCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UnscheduleCampaignError = UnscheduleCampaignErrors[keyof UnscheduleCampaignErrors];
+
+export type UnscheduleCampaignResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type UnscheduleCampaignResponse = UnscheduleCampaignResponses[keyof UnscheduleCampaignResponses];
+
+export type RescheduleCampaignData = {
+    body: CampaignRescheduleInput;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/reschedule';
+};
+
+export type RescheduleCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RescheduleCampaignError = RescheduleCampaignErrors[keyof RescheduleCampaignErrors];
+
+export type RescheduleCampaignResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type RescheduleCampaignResponse = RescheduleCampaignResponses[keyof RescheduleCampaignResponses];
 
 export type GetWorkspaceSettingsData = {
     body?: never;
@@ -12771,7 +12935,10 @@ export type TestEndpointResponse = TestEndpointResponses[keyof TestEndpointRespo
 export type CreateInboxConnectionData = {
     body: {
         inboxes: Array<string>;
-        client: 'opencode' | 'claude' | 'generic';
+        /**
+         * opencode, claude (Claude Code), cursor, or generic for any other MCP client.
+         */
+        client: 'opencode' | 'claude' | 'cursor' | 'generic';
         auth: 'key' | 'oauth';
         reply?: boolean;
     };

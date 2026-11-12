@@ -46,10 +46,12 @@
   font-display: swap;
   unicode-range: U+0180-02BA, U+02BD-02C5, U+02C7-02D9, U+02DB, U+02DD-02FF, U+0306-0307, U+0309-0328, U+032C-052F, U+0E3F, U+1D00-1FFE, U+2070-209C, U+20DB-20F0, U+2150-2189, U+2423-2468, U+24B6-24EA, U+2600-26A0, U+2756-2788, U+27EF-27FA, U+2913, U+2A38, U+2B06-2B24, U+2C7C-2C7F, U+2DFF-2E18, U+A69F, U+A7FF, U+A92E, U+E000-E163, U+E1C3-E2DC, U+EE01-EEE1, U+F6C3, U+1F12F-1F16B, U+1F850-1F852;
 }
-/* Local fallbacks sized to Inter and OpenTUI Mono, so text keeps its width and lines if a web font swaps in late. */
+/* Local fallbacks sized to Inter and OpenTUI Mono, so text keeps its width and lines if a web font swaps in late.
+   Liberation Sans has Arial's metrics and DejaVu Sans Mono has Menlo's, so Linux (CI, and readers without Arial)
+   gets the same sizes; without them Chrome used plain sans-serif there and text grew 7% when Inter arrived. */
 @font-face {
   font-family: 'Inter Fallback';
-  src: local('Arial'), local('ArialMT'), local('Helvetica');
+  src: local('Arial'), local('ArialMT'), local('Liberation Sans'), local('LiberationSans'), local('Helvetica');
   font-weight: 400;
   size-adjust: 107.2%;
   ascent-override: 90.4%;
@@ -58,7 +60,7 @@
 }
 @font-face {
   font-family: 'Inter Fallback';
-  src: local('Arial Bold'), local('Arial-BoldMT'), local('Helvetica Bold');
+  src: local('Arial Bold'), local('Arial-BoldMT'), local('Liberation Sans Bold'), local('LiberationSans-Bold'), local('Helvetica Bold');
   font-weight: 700;
   size-adjust: 100.3%;
   ascent-override: 96.6%;
@@ -69,7 +71,7 @@
    letters' 107.2%: the digits get their own fallback faces (declared last, so they win for 0–9). */
 @font-face {
   font-family: 'Inter Fallback';
-  src: local('Arial'), local('ArialMT'), local('Helvetica');
+  src: local('Arial'), local('ArialMT'), local('Liberation Sans'), local('LiberationSans'), local('Helvetica');
   font-weight: 400;
   unicode-range: U+0030-0039;
   size-adjust: 115.9%;
@@ -79,7 +81,7 @@
 }
 @font-face {
   font-family: 'Inter Fallback';
-  src: local('Arial Bold'), local('Arial-BoldMT'), local('Helvetica Bold');
+  src: local('Arial Bold'), local('Arial-BoldMT'), local('Liberation Sans Bold'), local('LiberationSans-Bold'), local('Helvetica Bold');
   font-weight: 700;
   unicode-range: U+0030-0039;
   size-adjust: 115.9%;
@@ -89,7 +91,7 @@
 }
 @font-face {
   font-family: 'OpenTUI Mono Fallback';
-  src: local('Menlo'), local('Courier New');
+  src: local('Menlo'), local('DejaVu Sans Mono'), local('DejaVuSansMono'), local('Courier New');
   size-adjust: 100%;
   ascent-override: 96%;
   descent-override: 22%;
@@ -180,6 +182,8 @@
   /* Micro-interactions: strong ease-out for enters and feedback (120–250 ms), ease-in-out for on-screen moves. */
   --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
   --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
+  /* Sheets: the iOS drawer curve. */
+  --ease-drawer: cubic-bezier(.32, .72, 0, 1);
   --shadow-raised: 0 2px 4px rgb(0 0 0 / 4%), 0 1px 2px -1px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
