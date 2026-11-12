@@ -180,6 +180,92 @@ a.ui-tab { text-decoration: none; }
   .ui-dialog { padding: var(--space-20); }
   .ui-table { min-width: 560px; }
 }
+/* Cards: a table on a phone (DataTable). Full-bleed rows split by hairlines, every card of a table the same height. The
+   title is the row's link, stretched over the card; controls in it sit above that link. */
+.ui-cards { margin-inline: calc(-1 * var(--bleed, 0px)); }
+.ui-cards__list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.ui-card { position: relative; display: flex; align-items: center; gap: var(--space-12); height: var(--table-row-height); padding: var(--space-12) var(--bleed, 0px); border-bottom: 1px solid var(--color-border-muted); overflow: hidden; transition: background-color 120ms ease; animation: row-appear 180ms ease-out; }
+.ui-card[data-clickable]:active { background: var(--color-hover); transition-duration: 0ms; }
+.ui-card[data-selected='true'] { background: var(--color-active-bg); }
+.ui-card__main { display: flex; flex: 1; flex-direction: column; gap: var(--space-4); align-self: flex-start; min-width: 0; }
+.ui-card__head, .ui-card__line { display: flex; align-items: center; gap: var(--space-8); height: 20px; min-width: 0; white-space: nowrap; }
+.ui-card__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-md); line-height: 20px; font-weight: var(--font-weight-bold); }
+.ui-card__title > * { vertical-align: top; }
+.ui-card__aside { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); color: var(--color-muted); font-size: var(--text-xs); }
+.ui-card__line { overflow: hidden; color: var(--color-muted); }
+.ui-card__segment { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 20px; }
+.ui-card__segment:last-child { flex-shrink: 1; }
+.ui-card__segment + .ui-card__segment::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
+.ui-card__segment > .ui-status { vertical-align: top; }
+.ui-card__label { margin-right: var(--space-6); color: var(--color-faint); }
+.ui-card__line :is(.settings-cell-stack, .keys-cell) { display: inline; }
+.ui-card__line :is(.settings-cell-stack, .keys-cell) > * + *::before { content: ' · '; }
+.ui-card__end { position: relative; z-index: 1; display: flex; flex: none; align-items: center; gap: var(--space-8); }
+.ui-card__link { display: inline; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: none; outline: none; cursor: pointer; }
+.ui-card__link::after { content: ''; position: absolute; inset: 0; z-index: 0; }
+.ui-card :is(a, button, input, select, label, [role='checkbox'], [role='switch']):not(.ui-card__link) { position: relative; z-index: 1; }
+.ui-card:has(.ui-card__link:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.ui-cards .ui-table-empty { border-top: 1px solid var(--color-border-muted); }
+
+/* Bottom sheets: More, action sheets and every dialog on a phone. They rise from the bottom edge (above the keyboard),
+   keep clear of the home indicator, and a swipe down on their top closes them. */
+.ui-sheet, .ui-dialog.ui-dialog--sheet { position: fixed; inset: auto 0 var(--keyboard-inset, 0px); z-index: 81; display: flex; flex-direction: column; width: auto; max-height: calc(100dvh - var(--keyboard-inset, 0px) - max(24px, env(safe-area-inset-top))); padding: 0 max(var(--space-16), env(safe-area-inset-right)) calc(var(--space-16) + env(safe-area-inset-bottom)) max(var(--space-16), env(safe-area-inset-left)); border-radius: 14px 14px 0 0; background: var(--color-layer-1); box-shadow: var(--shadow-dialog); color: var(--color-text); font-family: var(--font-body); outline: none; transform: none; animation: sheet-in 300ms var(--ease-drawer); transition: transform 300ms var(--ease-drawer); }
+.ui-sheet[data-state='closed'], .ui-dialog.ui-dialog--sheet[data-state='closed'] { animation: sheet-out 200ms var(--ease-out-strong) forwards; }
+.ui-sheet__grab { display: flex; flex: none; justify-content: center; height: 20px; padding-top: 8px; touch-action: none; cursor: grab; }
+.ui-sheet__grab > span { width: 36px; height: 4px; border-radius: 2px; background: var(--color-border-strong); }
+.ui-sheet__title { flex: none; padding: var(--space-4) 0 var(--space-12); font-size: 15px; line-height: var(--leading-sm); font-weight: var(--font-weight-bold); touch-action: none; }
+.ui-sheet__description { margin-top: calc(-1 * var(--space-8)); padding-bottom: var(--space-12); color: var(--color-muted); }
+.ui-sheet__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.ui-sheet-overlay { animation: ui-appear 240ms ease-out; }
+.ui-dialog--sheet .ui-dialog__header { min-height: var(--control-height); margin-right: -10px; touch-action: none; }
+.ui-dialog--sheet .ui-dialog__description { touch-action: none; }
+.ui-dialog--sheet .ui-dialog__body { overscroll-behavior: contain; }
+.ui-dialog--sheet .ui-dialog__footer { flex-wrap: nowrap; padding-top: var(--space-4); }
+.ui-dialog--sheet .ui-dialog__footer > .ui-button { flex: 1 1 0; min-width: 0; }
+/* An action sheet: full-width rows, the destructive one in red, Cancel set apart. */
+.ui-action-sheet__items { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: var(--shadow-button); }
+.ui-action-sheet__item { display: flex; align-items: center; gap: var(--space-12); width: 100%; min-height: 52px; padding: var(--space-8) var(--space-16); border: 0; background: var(--color-surface); color: var(--color-text); font-size: 15px; line-height: var(--leading-sm); text-align: left; transition: background-color 120ms ease; }
+.ui-action-sheet__item + .ui-action-sheet__item { box-shadow: inset 0 1px var(--color-border-muted); }
+.ui-action-sheet__item:active:not(:disabled) { background: var(--color-pressed); transition-duration: 0ms; }
+.ui-action-sheet__item--danger { color: var(--color-danger); }
+.ui-action-sheet__label { display: flex; flex-direction: column; gap: 2px; }
+.ui-action-sheet__hint { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ui-action-sheet__cancel { justify-content: center; margin-top: var(--space-8); border-radius: var(--radius-sm); box-shadow: var(--shadow-button); font-weight: var(--font-weight-bold); }
+@keyframes sheet-in { from { transform: translateY(100%); } }
+@keyframes sheet-out { to { transform: translateY(100%); } }
+
+/* Native selects on touch screens: the trigger's look, the platform's picker. */
+select.ui-native-select { display: block; appearance: none; -webkit-appearance: none; text-align: left; padding-right: 32px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%235C5C5C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 14px, var(--color-surface); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+:root[data-theme='dark'] select.ui-native-select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%23AEAEAE' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); }
+select.ui-native-select[data-placeholder] { color: var(--color-muted); }
+select.ui-native-select:disabled { background-color: var(--color-layer-1); }
+
+/* Touch (and any layout narrow enough to be held in a hand): 44 px controls, 16 px fields so iOS never zooms in on
+   focus, and small buttons with a 44 px hit area. */
+@media (pointer: coarse), (max-width: 899px) {
+  :root { --control-height: 44px; }
+  .ui-input { font-size: 16px; }
+  .ui-button { padding-inline: 14px; font-size: 14px; }
+  .ui-icon-button { padding: 0; }
+  .ui-button--sm { position: relative; height: 36px; padding-inline: 12px; font-size: var(--text-sm); }
+  .ui-button--sm::after { content: ''; position: absolute; inset: -4px 0; }
+  .ui-icon-button.ui-button--sm { width: 36px; }
+  .ui-tabs { min-height: 44px; }
+  .ui-tab { height: 43px; padding-inline: var(--space-8); }
+  .ui-select-item, .ui-menu-item { min-height: 44px; }
+  .ui-check-field { min-height: 44px; }
+  .ui-checkbox { width: 20px; height: 20px; }
+  .ui-switch { width: 44px; height: 26px; border-radius: 13px; padding: 3px; }
+  .ui-switch__thumb { width: 20px; height: 20px; }
+  .ui-switch__thumb[data-state='checked'] { transform: translateX(18px); }
+  .ui-alert .ui-icon-button { position: relative; }
+  .ui-alert .ui-icon-button::after { content: ''; position: absolute; inset: -12px; }
+  .ui-toasts { left: max(var(--space-12), env(safe-area-inset-left)); right: max(var(--space-12), env(safe-area-inset-right)); bottom: calc(var(--toast-offset, 0px) + var(--space-12) + env(safe-area-inset-bottom)); width: auto; }
+  /* While a bottom sheet is open its own buttons own the bottom edge: notices drop in from the top instead. */
+  body:has(.ui-sheet, .ui-dialog--sheet) .ui-toasts { top: max(var(--space-12), env(safe-area-inset-top)); bottom: auto; flex-direction: column-reverse; }
+  body:has(.ui-sheet, .ui-dialog--sheet) .ui-toasts .ui-alert { animation-name: toast-in-top; }
+}
+@keyframes toast-in-top { from { opacity: 0; transform: translateY(-8px) scale(.98); } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
