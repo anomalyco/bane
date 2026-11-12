@@ -24,6 +24,8 @@ const eventInfo: Partial<Record<MailboxEventType, string>> = {
 // routeOnly is form state: a webhook that subscribes to no events and only gets mail a route sends to it.
 type Draft = InboundWebhookInput & { routeOnly: boolean }
 const blank: Draft = { url: '', description: '', eventTypes: ['message.received'], addressIds: null, format: 'bane', routeOnly: false }
+// A webhook a ritual endpoint created has no description: its endpoint name says what it is, not its masked URL.
+const webhookTitle = (webhook: InboundWebhook) => webhook.description || (webhook.name ? `endpoints.${webhook.name}` : webhook.url)
 const draftOf = (webhook: InboundWebhook): Draft => ({ url: '', description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'bane', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
 const payloadOf = ({ routeOnly, ...input }: Draft): InboundWebhookInput => ({ ...input, url: input.url.trim(), description: input.description.trim(), eventTypes: routeOnly ? [] : input.eventTypes })
 // The inbound.new payload describes received mail only.
@@ -102,7 +104,7 @@ function WebhooksList() {
       empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
         // A webhook's card: its name and status, its URL, then the addresses and events it gets.
-        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><span>{row.description || row.url}</span>{row.description && <span className="muted settings-break">{row.url}</span>}</div>, cardRender: row => row.description || row.url },
+        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><span>{webhookTitle(row)}</span>{webhookTitle(row) !== row.url && <span className="muted settings-break">{row.url}</span>}</div>, cardRender: webhookTitle },
         { key: 'url', label: 'URL', table: false, card: 'line', render: row => row.url },
         { key: 'addresses', label: 'Addresses', width: '20%', card: 'line', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
         { key: 'events', label: 'Events', width: '14%', card: 'inline', render: row => <span title={row.eventTypes.join(', ')}>{!row.eventTypes.length ? <span className="muted">None</span> : row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span>, cardRender: row => !row.eventTypes.length ? 'No events' : row.eventTypes.length === 1 ? row.eventTypes[0] : `${row.eventTypes.length} events` },
@@ -148,7 +150,7 @@ function WebhookDetail() {
     try { const saved = await save.mutateAsync({ ...patch, ...(url ? { url } : {}), headers: headerPayload(headers, currentHeaders) }); setInput(draftOf(saved)); setHeaders(null) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? current.description || current.url : <SkeletonText width={220} lineHeight={28} />} backTo="/receiving/webhooks" actions={current && <>
+    <PageHeader title={current ? webhookTitle(current) : <SkeletonText width={220} lineHeight={28} />} backTo="/receiving/webhooks" actions={current && <>
       <Button onClick={() => void save.mutateAsync({ paused: !current.paused }).catch(() => undefined)} loading={save.isPending && !dirty}>{current.paused ? 'Resume' : 'Pause'}</Button>
       <Button onClick={() => setConfirm('rotate')}>Rotate secret</Button>
       <Button variant="danger" onClick={() => setConfirm('delete')}>Delete</Button>

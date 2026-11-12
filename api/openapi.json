@@ -15,8 +15,8 @@
       },
       {
         "title": "Send",
-        "text": "202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). These addresses count against hosted sending limits.",
-        "code": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --header 'Idempotency-Key: first-email' \\\n  --data '{\"from\":\"hello@acme.com\",\"to\":\"you@acme.com\",\"subject\":\"Hello from Bane\",\"text\":\"It works.\"}'"
+        "text": "202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.",
+        "code": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --header \"Idempotency-Key: $(uuidgen)\" \\\n  --data '{\"from\":\"hello@acme.com\",\"to\":\"you@acme.com\",\"subject\":\"Hello from Bane\",\"text\":\"It works.\"}'"
       },
       {
         "title": "Receive (optional)",
@@ -4998,6 +4998,25 @@
           "updatedAt"
         ]
       },
+      "CreatedWebhook": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Webhook"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "secret": {
+                "type": "string",
+                "description": "The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret."
+              }
+            },
+            "required": [
+              "secret"
+            ]
+          }
+        ]
+      },
       "CreateWebhook": {
         "type": "object",
         "properties": {
@@ -5813,17 +5832,18 @@
               "warmup",
               "graded"
             ],
-            "description": "warmup until the workspace has sent its first 100 non-simulated emails."
+            "description": "warmup until the workspace has sent its first 100 real emails: not simulated, and to at least one recipient outside the SES mailbox simulator."
           },
           "emails": {
             "type": "object",
             "properties": {
               "firstEmails": {
                 "type": "integer",
-                "description": "Non-simulated emails ever created, counted up to 100."
+                "description": "Real emails ever created, counted up to 100. Simulated sends and emails only to …@simulator.amazonses.com are left out."
               },
               "last30Days": {
-                "type": "integer"
+                "type": "integer",
+                "description": "Real emails created in the 30 days to today."
               }
             },
             "required": [
@@ -6020,6 +6040,155 @@
           "points",
           "source",
           "basis"
+        ]
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "billing": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "enum": [
+                  false
+                ],
+                "description": "Billing is not on yet: nothing is charged, and the prices below are information only."
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "pricing": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "type": "string",
+                "enum": [
+                  "USD"
+                ]
+              },
+              "perThousand": {
+                "type": "number",
+                "description": "Price per 1,000 messages, sent or received. SES mailbox simulator sends count like any other send."
+              },
+              "freeSent": {
+                "type": "integer",
+                "description": "Sent messages included free each calendar month (UTC)."
+              },
+              "freeReceived": {
+                "type": "integer",
+                "description": "Received messages included free each calendar month (UTC)."
+              }
+            },
+            "required": [
+              "currency",
+              "perThousand",
+              "freeSent",
+              "freeReceived"
+            ]
+          },
+          "month": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Start of the current calendar month, UTC."
+              },
+              "sent": {
+                "type": "integer",
+                "description": "Emails created this month, each counted once however many recipients it has."
+              },
+              "received": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Messages received this month on any address, routed, unrouted or spam. Null unless the credential may read every received message (owners, admins and manage credentials): members and read-only keys never learn about mail they can't open."
+              }
+            },
+            "required": [
+              "from",
+              "sent",
+              "received"
+            ]
+          },
+          "daily": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "cap": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Recipients allowed per rolling 24 hours; null when this workspace has no daily limit."
+              },
+              "used": {
+                "type": "integer",
+                "description": "Recipients charged in the rolling 24 hours, SES mailbox simulator addresses included."
+              },
+              "resetAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time",
+                "description": "When capacity next frees up or the limit changes."
+              },
+              "step": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Index into steps of the step this workspace has reached; null when an operator set a custom limit."
+              }
+            },
+            "required": [
+              "cap",
+              "used",
+              "resetAt",
+              "step"
+            ],
+            "description": "Null until the workspace connects hosted sending."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cap": {
+                  "type": "integer",
+                  "description": "Recipients per rolling 24 hours at this step."
+                },
+                "requires": {
+                  "type": "string",
+                  "description": "What a workspace needs to reach this step, in plain words."
+                }
+              },
+              "required": [
+                "cap",
+                "requires"
+              ]
+            },
+            "description": "How the daily limit grows, for every workspace on this installation. Only real SES acceptances count towards the next step: simulated sends and simulator addresses use the limit but never raise it."
+          },
+          "simulated": {
+            "type": "boolean",
+            "description": "This installation simulates SES: no email leaves it, and simulated sends never count against the daily limit."
+          }
+        },
+        "required": [
+          "billing",
+          "pricing",
+          "month",
+          "daily",
+          "steps",
+          "simulated"
         ]
       },
       "RegionCatalog": {
@@ -29986,6 +30155,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\"> keyed with the base64 bytes after whsec_.",
         "requestBody": {
           "required": true,
           "content": {
@@ -30002,7 +30172,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Webhook"
+                  "$ref": "#/components/schemas/CreatedWebhook"
                 }
               }
             }
@@ -30610,6 +30780,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most 10 reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.",
         "parameters": [
           {
             "schema": {
@@ -30765,6 +30936,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Replace the endpoint's signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.",
         "parameters": [
           {
             "schema": {
@@ -31992,7 +32164,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.",
         "tags": [
           "Metrics"
         ],
@@ -32214,7 +32386,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 non-simulated emails. The score moves at most +2 or −15 a day towards its target. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 real emails: simulated sends and emails only to the SES mailbox simulator (…@simulator.amazonses.com) never count. The score starts at 75 and moves at most +2 or −15 a day towards its target. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
@@ -32337,6 +32509,151 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/sender-score' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "getUsage",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Plan, pricing and sending limits",
+        "description": "Hosted only. Pricing (information only: billing is not on yet), this month's sent and received counts against the free allowance (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Usage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getUsage } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getUsage({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/usage' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
@@ -49184,7 +49501,7 @@
           }
         ],
         "summary": "List sent and received mail together",
-        "description": "Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. status, kind and campaignId filter sent mail and leave received mail out.",
+        "description": "Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out.",
         "parameters": [
           {
             "schema": {
@@ -49249,12 +49566,14 @@
                 "suppressed",
                 "canceled",
                 "acceptance_unknown",
-                "simulated"
+                "simulated",
+                "received",
+                "spam"
               ],
-              "description": "Sent mail only; received mail is left out when set."
+              "description": "A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so dashboard members get none). Either leaves sent mail out, and is refused (403) to credentials that cannot read received mail, like direction=received."
             },
             "required": false,
-            "description": "Sent mail only; received mail is left out when set.",
+            "description": "A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so dashboard members get none). Either leaves sent mail out, and is refused (403) to credentials that cannot read received mail, like direction=received.",
             "name": "status",
             "in": "query"
           },

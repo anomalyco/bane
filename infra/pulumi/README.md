@@ -12,7 +12,7 @@ In addition to existing mail resources identified by the adoption inventory, eac
 
 | Owner | Resources | Import ID |
 |---|---|---|
-| Cloudflare (see the stage's `cloudflareAccountId`) | work and feedback queues; attachments bucket (ENAM; production only) | `<account>/<queue-id>`, `<account>/<bucket>/default` |
+| Cloudflare (see the stage's `cloudflareAccountId`) | work and feedback queues (the webhooks, feedback-dlq and tagged `feedback-v2` queues are created, not adopted); attachments bucket (ENAM; production only) | `<account>/<queue-id>`, `<account>/<bucket>/default` |
 | IAM (us-east-1 provider) | `bane-runtime` user; the `bane-runtime`, `bane-runtime-ohio` and `bane-runtime-trusted` policies and their three attachments | `bane-runtime`, policy ARN, `bane-runtime/<policy-arn>` |
 
 **Not managed: the Hyperdrive config.** Cloudflare never returns `origin.password`, and Pulumi rejects importing it because the read state lacks that required property (`Missing required property 'origin.password'`). The live config stays as created, with caching off and 15 dev / 30 production connections; `api/wrangler.<environment>.jsonc` binds it by ID. Adopt it here once the provider can import write-only required fields.
