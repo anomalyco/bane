@@ -32,17 +32,20 @@ fn model(v: &Value) -> R<Model> {
 
 /// Trace configurations: campaign recipients' provider behaviour, an optional daily cap, and a
 /// pending-cap seed two below the 10,000 floor.
+/// Configuration 7 adds a second owner and two-row runner leases (the owner-cursor wrap).
 /// Configurations 4-6 put a small SES 24-hour quota (2, 3 or 4: one reserved for
 /// transactional mail, leaving 1-3 campaign credits, below the shard count at 2) under two
 /// dispatcher shards and a four-recipient campaign; they are checked as invariants.
 fn configs() -> Vec<Cfg> {
-    let exact = |seed, pace, campaign| Cfg { seed, pace, campaign, recipients: 2, quota: None };
-    let quota = |q| Cfg { seed: 0, pace: None, campaign: P::Ok, recipients: 4, quota: Some(q) };
-    vec![exact(0, None, P::Ok), exact(0, Some(1), P::Ok), exact(0, None, P::Thr), exact(9_998, None, P::Unk), quota(2), quota(3), quota(4)]
+    let exact = |seed, pace, campaign| Cfg { seed, pace, campaign, recipients: 2, quota: None, owners: 1, drain_batch: 24 };
+    let quota = |q| Cfg { seed: 0, pace: None, campaign: P::Ok, recipients: 4, quota: Some(q), owners: 1, drain_batch: 24 };
+    let owners = Cfg { owners: 2, drain_batch: 2, ..exact(0, None, P::Ok) };
+    vec![exact(0, None, P::Ok), exact(0, Some(1), P::Ok), exact(0, None, P::Thr), exact(9_998, None, P::Unk), quota(2), quota(3), quota(4), owners]
 }
 fn cfgs_for(profile: &str) -> Vec<usize> {
     match profile {
         "quota" => vec![4, 5, 6],
+        "owners" => vec![7],
         "admission" => vec![3],
         "dispatch" => vec![0],
         "campaign" => vec![0, 1, 2],
@@ -146,7 +149,8 @@ impl Host for Check {
                 let c = &self.cfg;
                 let recipients: Vec<&str> = (0..c.recipients).map(|_| c.campaign.name()).collect();
                 self.fixture.act(&json!({"reset": {"seed": c.seed, "pace": c.pace, "recipients": recipients,
-                    "quota": c.quota.map_or(-1, i64::from), "shards": c.quota.is_some(), "invariants": c.quota.is_some()}}))?;
+                    "quota": c.quota.map_or(-1, i64::from), "shards": c.quota.is_some(), "invariants": c.quota.is_some(),
+                    "owners": c.owners, "drainBatch": c.drain_batch}}))?;
                 Value::Null
             }
             "act" => {
@@ -271,6 +275,12 @@ const SCENARIOS: &[(usize, &[&str], &str)] = &[
     (3, &["send ok", "send ok", "sendk k1 ok", "drain", "sendk k1 ok", "sendk k1 rej"], "refused admission releases its key"),
     (0, &["dupk k2 ok", "sendk k2 ok", "sendk k2 rej"], "two concurrent sends with one key"),
     (0, &["send thr", "send thr", "send ok", "drain", "wait 4s", "drain"], "throttle brake delays the next send"),
+    // The original owner-cursor bug through the ordinary runner: two owners fill a two-row lease.
+    (7, &["send ok", "send2 ok", "send ok", "drain"], "a run with a lease's worth of owners leases past the last owner"),
+    (7, &["send2 ok", "send ok", "send2 ok", "send ok", "send2 ok", "drain", "send ok", "drain"], "a run with a lease's worth of owners leases past the last owner"),
+    // Review of #52 (P2): one drain is a whole run, not one 24-row page.
+    (0, &["send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok",
+        "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "drain"], "drain leases a second page"),
 ];
 
 /// Group key: the action verb plus the mismatching field, or the first safety violation.
@@ -483,10 +493,11 @@ fn main() -> R<()> {
             let scenarios = scenarios(&mut check)?;
             let random = campaign(&mut check, "ci random 100x24", walks("all", 100, 24), Some(Instant::now() + Duration::from_secs(22)))?;
             let quota = campaign(&mut check, "ci quota 30x24", walks("quota", 30, 24), Some(Instant::now() + Duration::from_secs(8)))?;
+            let owners = campaign(&mut check, "ci owners 30x12", walks("owners", 30, 12), Some(Instant::now() + Duration::from_secs(5)))?;
             let (info, traces) = edges(3, 20_000, alphabet("dispatch"), &cfgs[0])?;
             let mut edge = campaign(&mut check, "ci edges dispatch depth 3", traces.into_iter().map(|t| (0, t)).collect(), Some(Instant::now() + Duration::from_secs(18)))?;
             edge["model"] = info;
-            json!([scenarios, random, quota, edge])
+            json!([scenarios, random, quota, owners, edge])
         }
         _ => {
             let (n, len) = (nums.first().copied().unwrap_or(500), nums.get(1).copied().unwrap_or(30));

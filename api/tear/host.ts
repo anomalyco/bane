@@ -123,10 +123,13 @@ type Persona = 'ok' | 'thr' | 'rej' | 'unk';
 type Mail = { name: string; id: string; persona: Persona; calls: number; accepted: number[] };
 type Pending = { kind: 'lease' | 'claim' | 'ses' | 'record'; ids: string[]; release: () => void };
 type Instance = { gate: GateState; running?: Promise<unknown>; parked: Pending[]; wake?: () => void; done: boolean; error?: string; generation: number; emptyLease?: boolean; shard?: { index: number; count: number } };
-type Config = { quota: number; pace: number | null; seed: number; recipients: Persona[]; shards: boolean; invariants: boolean };
+type Config = { quota: number; pace: number | null; seed: number; recipients: Persona[]; shards: boolean; invariants: boolean; owners: number; drainBatch: number };
 
 let trace = 0, epoch = 0;
-let W = '', R = '', SECRET = '', CAMPAIGN = '', config: Config = { quota: -1, pace: null, seed: 0, recipients: [], shards: false, invariants: false };
+let W = '', R = '', SECRET = '', CAMPAIGN = '', config: Config = { quota: -1, pace: null, seed: 0, recipients: [], shards: false, invariants: false, owners: 1, drainBatch: 24 };
+// Every owner of this trace (a second workspace sends with its own key when `owners` is 2).
+let OWNERS: string[] = [], SECRET2 = '';
+const owned = () => sql`workspace_id = ANY(${sql.param(OWNERS)}::text[])`;
 let mails = new Map<string, Mail>(), byName = new Map<string, Mail>(), names = 0;
 let gates = new Map<string, GateState>();
 let instances = new Map<string, Instance>();
@@ -148,7 +151,7 @@ const regionName = (n: number) => `te-${letters(process.pid)}-${letters(n)}-1`;
 async function reset(cfg: Partial<Config>) {
   await assertDisposable(text => db.execute(sql.raw(text)) as Promise<{ rows: Record<string, unknown>[] }>);
   trace++;
-  config = { quota: cfg.quota ?? -1, pace: cfg.pace ?? null, seed: cfg.seed ?? 0, recipients: cfg.recipients ?? ['ok', 'thr'], shards: cfg.shards ?? false, invariants: cfg.invariants ?? false };
+  config = { quota: cfg.quota ?? -1, pace: cfg.pace ?? null, seed: cfg.seed ?? 0, recipients: cfg.recipients ?? ['ok', 'thr'], shards: cfg.shards ?? false, invariants: cfg.invariants ?? false, owners: cfg.owners ?? 1, drainBatch: cfg.drainBatch ?? 24 };
   // Each trace starts on a fresh hour, after everything the previous trace wrote.
   if (trace === 1) lastVirtual = Math.max(lastVirtual, Number((await q<{ horizon: string }>(sql`SELECT horizon FROM tear_clock.state`))[0]!.horizon));
   epoch = Math.ceil((Math.max(lastVirtual, RealDate.now()) + 3_600_000) / 3_600_000) * 3_600_000;
@@ -162,6 +165,14 @@ async function reset(cfg: Partial<Config>) {
     l AS (INSERT INTO audience_lists(id,workspace_id,name) SELECT ${W + '_list'},id,'tear' FROM w RETURNING id)
     INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT ${W},l.id,c.id FROM l,c`);
   await ensureRegionSettings(db, { workspaceId: W, regions: [R] });
+  OWNERS = [W];
+  if (config.owners > 1) {
+    // A second owner after the first in id order, with its own send key and region settings.
+    const W2 = `${W}_b`; SECRET2 = 'bane_' + createHash('sha256').update(W2).digest('hex'); OWNERS.push(W2);
+    await db.execute(sql`WITH w AS (INSERT INTO workspaces(id,name,slug) VALUES (${W2},${W2},${W2}) RETURNING id)
+      INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT ${W2 + '_key'},id,'tear',${createHash('sha256').update(SECRET2).digest('hex')},${SECRET2.slice(0, 14)},'["read","send","manage"]','[]' FROM w`);
+    await ensureRegionSettings(db, { workspaceId: W2, regions: [R] });
+  }
   if (config.seed) await db.execute(sql`INSERT INTO sending_stream_depth(workspace_id,stripe,marketing,n) VALUES (${W},99,false,${config.seed})`);
   const draft = await api('POST', '/v1/campaigns', { name: 'tear', from: 'sender@example.com', region: R, subject: 'Hello', html: '<p>Hello</p>', audience: { listId: W + '_list' } });
   if (draft.status !== 201) throw new Error(`campaign draft: ${draft.status} ${JSON.stringify(draft.body)}`);
@@ -174,16 +185,16 @@ async function reset(cfg: Partial<Config>) {
 async function end() {
   // Nothing of this trace stays due, running or attempting for a later trace's global sweeps.
   for (const inst of instances.values()) inst.done = true;
-  await db.execute(sql`WITH e AS (UPDATE sending_emails SET status='canceled' WHERE workspace_id=${W} AND status IN ('queued','attempting') RETURNING 1),
-    j AS (UPDATE jobs SET status='completed' WHERE workspace_id=${W} AND status IN ('pending','running') RETURNING 1)
+  await db.execute(sql`WITH e AS (UPDATE sending_emails SET status='canceled' WHERE ${owned()} AND status IN ('queued','attempting') RETURNING 1),
+    j AS (UPDATE jobs SET status='completed' WHERE ${owned()} AND status IN ('pending','running') RETURNING 1)
     UPDATE sending_campaigns SET state='canceled',paused_at=NULL,pause_reason=NULL WHERE workspace_id=${W} AND state IN ('preparing','scheduled','sending','paused','failed')`);
   lastVirtual = vnow();
   await db.execute(sql`UPDATE tear_clock.state SET horizon = greatest(horizon, ${Math.ceil(lastVirtual)})`);
   return null;
 }
 
-async function api(method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
-  const response = await app.fetch(new Request('http://127.0.0.1:9' + path, { method, headers: { authorization: 'Bearer ' + SECRET, 'content-type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) }), runtime);
+async function api(method: string, path: string, body?: unknown, headers: Record<string, string> = {}, secret = SECRET) {
+  const response = await app.fetch(new Request('http://127.0.0.1:9' + path, { method, headers: { authorization: 'Bearer ' + secret, 'content-type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) }), runtime);
   const text = await response.text();
   let parsed: any = null; try { parsed = JSON.parse(text); } catch { parsed = text; }
   return { status: response.status, body: parsed };
@@ -333,7 +344,7 @@ function nameRows(rows: { id: string; campaign_id: string | null; to: string[] }
   }
 }
 async function nameReleased() {
-  nameRows(await q<{ id: string; campaign_id: string | null; to: string[] }>(sql`SELECT id,campaign_id,to_addresses AS "to" FROM sending_emails WHERE workspace_id=${W} ORDER BY created_at,id`));
+  nameRows(await q<{ id: string; campaign_id: string | null; to: string[] }>(sql`SELECT id,campaign_id,to_addresses AS "to" FROM sending_emails WHERE ${owned()} ORDER BY created_at,id`));
 }
 
 // Liveness: let a day pass at a time and run every process to completion, the run job and
@@ -348,10 +359,10 @@ async function settle() {
     await drainJobs(runtime, 20, 1, 15_000, 'work');
     await nameReleased();
     for (const name of ['D1', 'D2']) { await step(name); while (!instances.get(name)!.done) await step(name); }
-    const [left] = await q<{ n: number }>(sql`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=${W} AND status IN ('queued','attempting')`);
+    const [left] = await q<{ n: number }>(sql`SELECT count(*)::int AS n FROM sending_emails WHERE ${owned()} AND status IN ('queued','attempting')`);
     if (!left!.n) return;
   }
-  for (const r of await q<{ id: string; status: string }>(sql`SELECT id,status FROM sending_emails WHERE workspace_id=${W} AND status IN ('queued','attempting')`)) safety.push(`stuck:${nameOf(r.id)}:${r.status}`);
+  for (const r of await q<{ id: string; status: string }>(sql`SELECT id,status FROM sending_emails WHERE ${owned()} AND status IN ('queued','attempting')`)) safety.push(`stuck:${nameOf(r.id)}:${r.status}`);
 }
 
 // ---- actions ---------------------------------------------------------------------------
@@ -360,9 +371,9 @@ function newMail(id: string, persona: Persona, prefix: string) {
   mails.set(id, mail); byName.set(mail.name, mail); return mail;
 }
 const sendBody = (persona: Persona, kind = 'transactional') => ({ from: 'sender@example.com', to: `${persona}-${kind[0]}@example.com`, subject: 'Tear', text: 'Synthetic tear message.', kind });
-async function send(persona: Persona, key?: string, concurrent = false) {
+async function send(persona: Persona, key?: string, concurrent = false, secret = SECRET) {
   const headers: Record<string, string> = key ? { 'idempotency-key': `${W}-${key}` } : {};
-  const one = () => api('POST', '/v1/emails/send', sendBody(persona), headers);
+  const one = () => api('POST', '/v1/emails/send', sendBody(persona), headers, secret);
   const replies = concurrent ? await Promise.all([one(), one()]) : [await one()];
   return replies.map(reply => {
     if (reply.status !== 202) return [reply.status, reply.body?.error?.code ?? null];
@@ -393,13 +404,14 @@ async function act(label: string) {
   if (verb === 'wait') return result;
   switch (verb) {
     case 'send': result = await send(args[0] as Persona); break;
+    case 'send2': result = await send(args[0] as Persona, undefined, false, SECRET2); break;
     case 'sendk': result = await send(args[1] as Persona, args[0]); break;
     case 'dupk': result = await send(args[1] as Persona, args[0], true); break;
     case 'launch': case 'schedule': case 'pause': case 'resume': case 'cancel': result = await campaignAction(verb); break;
     case 'jobs': await drainJobs(runtime, 20, 1, 15_000, 'work'); break;
     case 'drain': {
       const gate = gates.get('runner') ?? initialGate(); gates.set('runner', gate);
-      await ctx.run({}, () => runDispatcher(runtime, { region: R, lanes: 1, gate, schedulePartialFlush: () => () => {} }));
+      await ctx.run({}, () => runDispatcher(runtime, { region: R, lanes: 1, batchSize: config.drainBatch, gate, schedulePartialFlush: () => () => {} }));
       break;
     }
     case 'recover': await dispatchPartitions(runtime, true); break;
@@ -418,10 +430,10 @@ async function act(label: string) {
 async function observe(result: unknown) {
   type Row = { id: string; status: string; campaign_id: string | null; to: string[] };
   const [state] = await q<{ rows: Row[] | null; campaign: [string, number, number, number | null, number | null]; depth: number; queued: number }>(sql`SELECT
-    (SELECT jsonb_agg(jsonb_build_object('id',id,'status',status,'campaign_id',campaign_id,'to',to_addresses) ORDER BY created_at,id) FROM sending_emails WHERE workspace_id=${W}) AS rows,
+    (SELECT jsonb_agg(jsonb_build_object('id',id,'status',status,'campaign_id',campaign_id,'to',to_addresses) ORDER BY created_at,id) FROM sending_emails WHERE ${owned()}) AS rows,
     (SELECT jsonb_build_array(state,expanded,window_expanded,floor(extract(epoch FROM window_started_at)*1000),pace_per_day) FROM sending_campaigns WHERE workspace_id=${W} AND id=${CAMPAIGN}) AS campaign,
-    (SELECT coalesce(sum(n),0)::int FROM sending_stream_depth WHERE workspace_id=${W}) AS depth,
-    (SELECT count(*)::int FROM sending_emails WHERE workspace_id=${W} AND review_id IS NULL AND status IN ('queued','attempting')) AS queued`);
+    (SELECT coalesce(sum(n),0)::int FROM sending_stream_depth WHERE ${owned()}) AS depth,
+    (SELECT count(*)::int FROM sending_emails WHERE ${owned()} AND review_id IS NULL AND status IN ('queued','attempting')) AS queued`);
   const rows = state!.rows ?? [];
   nameRows(rows);
   const mail: Record<string, unknown> = {};
@@ -435,7 +447,7 @@ async function observe(result: unknown) {
   if (config.quota >= 0 && withinDay() > config.quota) safety.push(`quota:${withinDay()}>${config.quota}`);
   // Campaign mail never spends the 10% reserve kept for transactional mail (rounded up).
   // A row is given up as pause-expired only 24 h after its first pause refusal (or later).
-  for (const r of await q<{ id: string }>(sql`SELECT id FROM sending_emails WHERE workspace_id=${W} AND error_code='SES_ACCOUNT_PAUSE_EXPIRED'`)) {
+  for (const r of await q<{ id: string }>(sql`SELECT id FROM sending_emails WHERE ${owned()} AND error_code='SES_ACCOUNT_PAUSE_EXPIRED'`)) {
     const first = pauseRefusedAt.get(nameOf(r.id));
     if (first !== undefined && vnow() < first + 86_400_000) safety.push(`pause-expired-early:${nameOf(r.id)}`);
   }

@@ -12,7 +12,10 @@
 //! - [x] Cancel between a claim and its send (in flight: sent, reported as inFlight).
 //! - [x] Pause with rows queued (they still dispatch) and with rows unreleased (held).
 //! - [x] Two concurrent sends with one Idempotency-Key (dupk: one row, both get its receipt).
-//! - [x] The runner's whole-lease drain interleaved with stepped processes.
+//! - [x] The runner's drain is a whole run: it leases pages until one comes back short (25 sends
+//!       need two pages), and with two owners and two-row leases the owner cursor lands on the
+//!       last owner and the run must wrap (the original owner-cursor bug, caught by the drain
+//!       alone: `send ok`, `send2 ok`, `send ok`, `drain`). Interleaved with stepped processes.
 //! - [~] Statement-level races inside one transaction (e.g. cancelPage's SKIP LOCKED against a
 //!       claim holding the row): actions are whole statements; the interleaving points are
 //!       lease, claim, provider call and record.
@@ -186,6 +189,9 @@ pub struct Mail {
     pub attempt: Option<u32>,
     pub throttles: u8,
     pub interrupted: bool,
+    /// Sent by the second owner.
+    #[serde(default)]
+    pub second: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +269,12 @@ pub struct Cfg {
     /// SES 24-hour quota with two dispatcher shards. These traces are checked as invariants over
     /// the real state (the reserve, no stuck mail, the temporal properties), not predicted.
     pub quota: Option<u8>,
+    /// Workspaces sending into the region, and rows per runner lease. With two owners and
+    /// two-row leases a lease sees exactly a lease's worth of owners, so the owner cursor lands
+    /// on the last owner. Their mail all accepts, so the order across owners (the fair lease)
+    /// is not modeled: only that one run sends every due row.
+    pub owners: u8,
+    pub drain_batch: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,55 +508,85 @@ impl Model {
     }
 
     // ---- the runner process: one whole lease per drain -----------------------------------
+    /// The runner's whole run (`runDispatcher` with its default 24-row lease and 6-send claims,
+    /// no time budget): lease a page, claim and send it six at a time, record each group, and
+    /// lease again while pages come back full. A short page ends the run.
     fn drain(&mut self) {
-        let rows: Vec<usize> = self.due_order().into_iter().take(24).collect();
         if self.d.iter().any(|i| i.ph != Ph::Off) {
             self.cov.push("runner drain interleaved with a stepped process");
         }
-        self.lease_boundaries(&rows);
-        if rows.is_empty() {
-            self.cov.push("empty drain");
-            return;
-        }
-        let prep = self.t;
-        let mut claimed = vec![];
-        for &i in &rows {
-            let ver = self.mails[i].ver;
-            self.mails[i].lease = Some(self.t + LEASE);
-            if self.claim(i, ver) == Some(true) {
-                claimed.push((i, ver));
+        let (mut pages, mut finishing) = (0, false);
+        loop {
+            // A brake that pushes the next slot 5 s out ends the run before it leases.
+            if self.runner_next_send >= self.t + PRE_SEND {
+                break;
             }
-        }
-        // Sends start in lease order; a throttled response holds the next send for 1 s, and a
-        // send that cannot start within 5 s of its claim is deferred without a provider call.
-        let mut outcomes = vec![];
-        let mut first_start = None;
-        for (idx, (i, ver)) in claimed.into_iter().enumerate() {
-            // The first send of a turn starts at its slot; a transactional second one may take
-            // the next slot at once (unless braked), so it is in flight before the first's response.
-            let early = idx == 1 && !self.mails[i].campaign && first_start.is_some_and(|s| self.runner_brake_until <= s);
-            let start = if early { first_start.unwrap() } else { self.t.max(self.runner_next_send) };
-            if idx == 0 {
-                first_start = Some(start);
+            let batch = self.cfg.drain_batch as usize;
+            let rows: Vec<usize> = self.due_order().into_iter().take(batch).collect();
+            self.lease_boundaries(&rows);
+            if rows.is_empty() {
+                if pages == 0 {
+                    self.cov.push("empty drain");
+                }
+                break;
             }
-            if start > self.t {
-                self.cov.push("throttle brake delays the next send");
+            pages += 1;
+            if pages == 2 {
+                self.cov.push(if self.cfg.owners > 1 { "a run with a lease's worth of owners leases past the last owner" } else { "drain leases a second page" });
             }
-            if start >= prep + PRE_SEND {
-                outcomes.push((i, Out::Deferred, ver, start));
-                continue;
+            for &i in &rows {
+                self.mails[i].lease = Some(self.t + LEASE);
             }
-            self.t = self.t.max(start);
-            let out = self.provider(i);
-            if out == Out::Throttled {
-                self.runner_next_send = self.runner_next_send.max(start + 1);
-                self.runner_brake_until = start + 10;
+            for group in rows.chunks(6) {
+                // A group whose first slot is already 5 s away is released unclaimed.
+                if self.runner_next_send >= self.t + PRE_SEND {
+                    for &i in group {
+                        self.mails[i].lease = None;
+                    }
+                    continue;
+                }
+                let prep = self.t;
+                let mut claimed = vec![];
+                for &i in group {
+                    let ver = self.mails[i].ver;
+                    if self.claim(i, ver) == Some(true) {
+                        claimed.push((i, ver));
+                    }
+                }
+                // Sends start in lease order; a throttled response holds the next send for 1 s,
+                // and a send that cannot start within 5 s of its claim is deferred, not sent.
+                let mut outcomes = vec![];
+                let mut first_start = None;
+                for (idx, (i, ver)) in claimed.into_iter().enumerate() {
+                    // The first send of a turn starts at its slot; a transactional second one may
+                    // take the next slot at once (unless braked), in flight before the first's response.
+                    let early = idx == 1 && !self.mails[i].campaign && first_start.is_some_and(|s| self.runner_brake_until <= s);
+                    let start = if early { first_start.unwrap() } else { self.t.max(self.runner_next_send) };
+                    if idx == 0 {
+                        first_start = Some(start);
+                    }
+                    if start > self.t {
+                        self.cov.push("throttle brake delays the next send");
+                    }
+                    if start >= prep + PRE_SEND {
+                        outcomes.push((i, Out::Deferred, ver, start));
+                        continue;
+                    }
+                    self.t = self.t.max(start);
+                    let out = self.provider(i);
+                    if out == Out::Throttled {
+                        self.runner_next_send = self.runner_next_send.max(start + 1);
+                        self.runner_brake_until = start + 10;
+                    }
+                    outcomes.push((i, out, ver, start));
+                }
+                for (i, out, ver, at) in outcomes {
+                    finishing |= self.record(i, out, ver, at);
+                }
             }
-            outcomes.push((i, out, ver, start));
-        }
-        let mut finishing = false;
-        for (i, out, ver, at) in outcomes {
-            finishing |= self.record(i, out, ver, at);
+            if rows.len() < batch {
+                break;
+            }
         }
         if finishing {
             self.finish_campaign();
@@ -647,11 +689,15 @@ impl Model {
     }
 
     // ---- admission ------------------------------------------------------------------------
+    /// The first owner's queued direct mail (the pending cap is per workspace).
     fn pending(&self) -> u32 {
-        self.cfg.seed + self.mails.iter().filter(|m| !m.campaign && matches!(m.st, St::Queued | St::Attempting)).count() as u32
+        self.cfg.seed + self.mails.iter().filter(|m| !m.campaign && !m.second && matches!(m.st, St::Queued | St::Attempting)).count() as u32
     }
     fn admit(&mut self, p: P) -> Value {
-        if self.pending() + 1 > PENDING_CAP {
+        self.admit_as(p, false)
+    }
+    fn admit_as(&mut self, p: P, second: bool) -> Value {
+        if !second && self.pending() + 1 > PENDING_CAP {
             self.cov.push("pending cap +1 refused");
             return json!([429, "PENDING_EMAIL_LIMIT_EXCEEDED"]);
         }
@@ -673,6 +719,7 @@ impl Model {
             attempt: None,
             throttles: 0,
             interrupted: false,
+            second,
         });
         json!([202, name])
     }
@@ -849,6 +896,7 @@ impl Model {
                             attempt: None,
                             throttles: 0,
                             interrupted: false,
+                            second: false,
                         });
                     }
                     self.camp.window = window;
@@ -904,6 +952,7 @@ impl Model {
         match words[0] {
             "wait" => self.t += parse_wait(words[1]),
             "send" => r = json!([self.admit(P::parse(words[1]).unwrap())]),
+            "send2" => r = json!([self.admit_as(P::parse(words[1]).unwrap(), true)]),
             "sendk" => r = json!([self.admit_key(words[1], P::parse(words[2]).unwrap())]),
             "dupk" => {
                 // Two concurrent requests with one key: one admits, the other replays it.
@@ -990,9 +1039,11 @@ pub fn alphabet(profile: &str) -> Vec<String> {
     let dispatch = ["send ok", "send thr", "send rej", "send unk", "D1 step", "D1 crash", "D2 step", "D2 crash", "recover", "drain", "wait 4s", "wait 59s"];
     let campaign = ["launch", "schedule", "pause", "resume", "cancel", "jobs", "drain", "D1 step", "D1 crash", "recover", "wait 59s", "wait 1d"];
     let admission = ["send ok", "sendk k1 ok", "sendk k1 rej", "dupk k2 ok", "drain"];
+    let owners = ["send ok", "send2 ok", "drain", "recover"];
     let quota = ["send ok", "send unk", "launch", "jobs", "D1 step", "D2 step", "D1 crash", "D2 crash", "recover", "wait 1m", "wait 1d", "settle", "ses pause", "ses resume"];
     let pick: Vec<&str> = match profile {
         "quota" => quota.to_vec(),
+        "owners" => owners.to_vec(),
         "dispatch" => dispatch.to_vec(),
         "campaign" => campaign.to_vec(),
         "admission" => admission.to_vec(),
