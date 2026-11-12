@@ -6970,6 +6970,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
+  test('hourly upkeep: a retention statement that keeps failing does not skip the steps after it', async t => {
+    await simulatedSesFixture(t, async ({ runtime }) => {
+      const { hourlyUpkeep } = await import('./src/maintenance.js'), { PgDialect } = await import('drizzle-orm/pg-core');
+      const dialect = new PgDialect(), seen: string[] = [], execute = runtime.db.execute.bind(runtime.db);
+      const failing = /^DELETE FROM sending_attachment_links l USING sending_campaign_reviews/;
+      t.mock.method(globalThis, 'fetch', async () => { throw new Error('Offline fixture: DNS refreshes and alerts fail here.'); });
+      t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        const text = dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql; seen.push(text);
+        if (failing.test(text)) throw new Error('canceling statement due to statement timeout');
+        return execute(query);
+      });
+      // Only the cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
+      assert.equal((await hourlyUpkeep(runtime))[0], 'MAINTENANCE_CLEANUP_FAILED');
+      const failedAt = seen.findIndex(text => failing.test(text));
+      assert.ok(failedAt >= 0, 'the retention statement ran and failed');
+      assert.ok(seen.slice(failedAt + 1).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery still ran after it');
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
