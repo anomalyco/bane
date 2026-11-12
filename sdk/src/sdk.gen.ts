@@ -113,7 +113,7 @@ export const listAgentTokens = <ThrowOnError extends boolean = false>(options?: 
 });
 
 /**
- * Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.
+ * A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.
  */
 export const createAgentToken = <ThrowOnError extends boolean = false>(options: Options<CreateAgentTokenData, ThrowOnError>): RequestResult<CreateAgentTokenResponses, CreateAgentTokenErrors, ThrowOnError> => (options.client ?? client).post<CreateAgentTokenResponses, CreateAgentTokenErrors, ThrowOnError>({
     security: [
@@ -4726,7 +4726,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a OIDC session.
+ * Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.
  *
  * @deprecated
  */
@@ -4745,7 +4745,7 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-Bane-Workspace.
+ * Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Bane-Workspace.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{
@@ -4903,7 +4903,7 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
- * Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.
+ * Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.
  */
 export const getWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<GetWorkspaceInvitationData, ThrowOnError>): RequestResult<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).get<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError>({
     security: [{

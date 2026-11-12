@@ -307,7 +307,7 @@
           "tenant",
           "sendingPause"
         ],
-        "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
+        "description": "The current workspace's hosted sending connection; null when self-hosted."
       },
       "Workspace": {
         "type": "object",
@@ -13917,7 +13917,7 @@
                       "items": {
                         "$ref": "#/components/schemas/Workspace"
                       },
-                      "description": "Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted."
+                      "description": "A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted."
                     }
                   },
                   "required": [
@@ -14071,7 +14071,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.",
+        "description": "A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.",
         "requestBody": {
           "required": true,
           "content": {
@@ -52751,7 +52751,7 @@
           }
         ],
         "deprecated": true,
-        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a OIDC session.",
+        "description": "Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.",
         "responses": {
           "200": {
             "description": "Success",
@@ -52901,7 +52901,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-Bane-Workspace.",
+        "description": "Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Bane-Workspace.",
         "requestBody": {
           "required": true,
           "content": {
@@ -54348,7 +54348,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.",
+        "description": "Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {

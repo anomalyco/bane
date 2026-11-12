@@ -43,7 +43,7 @@ export type McpConnectionBinding = {
 };
 
 /**
- * Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).
+ * The current workspace's hosted sending connection; null when self-hosted.
  */
 export type ConnectionSummary = {
     kind: 'shared' | 'byo';
@@ -4104,7 +4104,7 @@ export type GetCurrentIdentityResponses = {
         host: string;
         connection: ConnectionSummary;
         /**
-         * Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted.
+         * A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
         workspaces: Array<Workspace> | null;
     };
