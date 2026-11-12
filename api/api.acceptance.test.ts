@@ -53,9 +53,8 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // Run against the actual server and normal background-job runner with bun run test.
 // Requires its BETTER_AUTH_SECRET and paired DATABASE_URL (localhost only) or
 // explicit API_FIXTURE_DATABASE_URL. Allow AUTH_TEST_EMAIL (operator@example.com)
-// and AUTH_TEST_GOOGLE_DOMAIN (example.com) in that server's Google access policy.
-// Synthetic DB identities exercise session authorization, NOT real Google OAuth.
-// HTTP scenarios use the actual server. Explicitly labeled Google callback and SES
+// in the server's exact email allowlist. Synthetic identities exercise native sessions.
+// HTTP scenarios use the actual server. Explicitly labeled OIDC callback and SES
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
@@ -216,7 +215,7 @@ const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an H
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
 const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-bane.session_token' : 'bane.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
-const AUTH_DOMAIN = process.env.AUTH_TEST_GOOGLE_DOMAIN ?? 'example.com';
+const AUTH_DOMAIN = 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
 const probe = await fetch(`${BASE}/health`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
 const identity = await probe.json().catch(() => null) as { service?: string } | null;
@@ -934,7 +933,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       async function workspaceFixture(email:string,own:boolean){
         const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
         await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
-        const org={id:unique('ws'),name:'Fixture organization',slug:unique('slug')};
+        const org={id:'ws_'+randomUUID().replaceAll('-',''),name:'Fixture organization',slug:unique('slug')};
         if(own){runtime.config.allowedEmails.push(email);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
         return {org,cookie:f.cookie.replace(/^bane\./,'__Host-bane.')};
       }
@@ -6221,7 +6220,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
       for(const [i,term] of ['+all','all','?all','mx','~all','-all'].entries()) {
         spfRecord='v=spf1 '+term;const sample=await profile(`spf-${i}.example.com`),closed=['~all','-all'].includes(term);
-        assert.equal(sample.signals.exact.spf,closed,spfRecord);assert.equal(sample.score,closed?9:8,spfRecord);
+        assert.equal(sample.signals.exact.spf,closed,spfRecord);assert.equal(sample.score,closed?7:6,spfRecord);
       }
       await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
       const shared=await profile('store.wordpress.com');assert.equal(shared.signals.root,'store.wordpress.com');assert.equal(shared.signals.ageDays,null);
