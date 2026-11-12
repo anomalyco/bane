@@ -409,8 +409,9 @@ async function audience() {
     const preview = await api('previewContactImport', { body: { csv: `email,name\n${success},${name}\n`, listId: l.id, mapping: { email: 'email', name: 'name' } } });
     const path = { id: preview.id };
     check(preview.status === 'preview' && preview.listId === l.id && preview.rows.length === 1 && preview.rows[0].email === success && !preview.errors.length, 'refusing import of anything but this run’s contact');
-    const committed = await api('commitContactImport', { path });
-    check(committed.status === 'committed' && committed.imported === 1, 'import did not commit exactly one row');
+    // Attested consent marks only contacts with no decision; this run's contact is already subscribed, so nothing changes.
+    const committed = await api('commitContactImport', { path, body: { consent: { status: 'subscribed', evidence: `${prefix} e2e attestation` } } });
+    check(committed.status === 'committed' && committed.imported === 1 && committed.subscribed === 0, 'import did not commit exactly one row without re-recording consent');
     const receipt = await api('getContactImport', { path });
     check(receipt.id === path.id && receipt.listId === l.id && receipt.rows.length === 1 && receipt.rows[0].name === name, 'incorrect stored import');
     // This endpoint exposes summary metadata only and has no server-side listId filter.

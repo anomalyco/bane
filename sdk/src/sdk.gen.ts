@@ -314,7 +314,7 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.
+ * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.
  */
 export const updateContactConsent = <ThrowOnError extends boolean = false>(options: Options<UpdateContactConsentData, ThrowOnError>): RequestResult<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError> => (options.client ?? client).post<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError>({
     security: [
@@ -636,7 +636,7 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.
+ * Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.
  */
 export const previewContactImport = <ThrowOnError extends boolean = false>(options: Options<PreviewContactImportData, ThrowOnError>): RequestResult<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError> => (options.client ?? client).post<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError>({
     security: [
@@ -678,6 +678,9 @@ export const getContactImport = <ThrowOnError extends boolean = false>(options: 
     ...options
 });
 
+/**
+ * Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.
+ */
 export const commitContactImport = <ThrowOnError extends boolean = false>(options: Options<CommitContactImportData, ThrowOnError>): RequestResult<CommitContactImportResponses, CommitContactImportErrors, ThrowOnError> => (options.client ?? client).post<CommitContactImportResponses, CommitContactImportErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -693,7 +696,11 @@ export const commitContactImport = <ThrowOnError extends boolean = false>(option
         }
     ],
     url: '/v1/contact-imports/{id}/commit',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**

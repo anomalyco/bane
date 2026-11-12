@@ -1208,6 +1208,59 @@
           "updatedAt"
         ]
       },
+      "CommittedContactImport": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AudienceImport"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "subscribed": {
+                "type": "integer",
+                "description": "Contacts this commit marked subscribed; 0 without consent or when the import was already committed."
+              }
+            },
+            "required": [
+              "subscribed"
+            ]
+          }
+        ]
+      },
+      "CommitContactImportInput": {
+        "type": "object",
+        "properties": {
+          "consent": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "subscribed"
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+                "description": "How these people agreed to marketing email, for example \"Opted in at checkout\". Stored with each consent record."
+              },
+              "policyVersion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "status",
+              "evidence"
+            ],
+            "additionalProperties": false,
+            "description": "Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent."
+          }
+        },
+        "additionalProperties": false
+      },
       "AudienceQueryResult": {
         "type": "object",
         "properties": {
@@ -15647,7 +15700,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.",
+        "description": "Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.",
         "parameters": [
           {
             "schema": {
@@ -18633,7 +18686,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.",
+        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.",
         "requestBody": {
           "required": true,
           "content": {
@@ -19213,6 +19266,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.",
         "parameters": [
           {
             "schema": {
@@ -19225,13 +19279,23 @@
             "in": "path"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitContactImportInput"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AudienceImport"
+                  "$ref": "#/components/schemas/CommittedContactImport"
                 }
               }
             }
@@ -19341,12 +19405,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { commitContactImport } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await commitContactImport({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { commitContactImport } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await commitContactImport({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/contact-imports/resource_123/commit' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/contact-imports/resource_123/commit' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }
@@ -19715,6 +19779,12 @@
                   "confirmResubscribe": {
                     "type": "boolean",
                     "default": false
+                  },
+                  "evidence": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                    "description": "For a consent change: how these people agreed, for example \"Opted in at checkout\". Stored with each consent record."
                   }
                 },
                 "required": [

@@ -262,6 +262,27 @@ export type AudienceImport = {
     updatedAt: string;
 };
 
+export type CommittedContactImport = AudienceImport & {
+    /**
+     * Contacts this commit marked subscribed; 0 without consent or when the import was already committed.
+     */
+    subscribed: number;
+};
+
+export type CommitContactImportInput = {
+    /**
+     * Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.
+     */
+    consent?: {
+        status: 'subscribed';
+        /**
+         * How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.
+         */
+        evidence: string;
+        policyVersion?: string;
+    };
+};
+
 export type AudienceQueryResult = {
     columns: Array<string>;
     rows: Array<{
@@ -5958,7 +5979,7 @@ export type GetContactImportResponses = {
 export type GetContactImportResponse = GetContactImportResponses[keyof GetContactImportResponses];
 
 export type CommitContactImportData = {
-    body?: never;
+    body?: CommitContactImportInput;
     path: {
         id: string;
     };
@@ -6015,7 +6036,7 @@ export type CommitContactImportResponses = {
     /**
      * Success
      */
-    200: AudienceImport;
+    200: CommittedContactImport;
 };
 
 export type CommitContactImportResponse = CommitContactImportResponses[keyof CommitContactImportResponses];
@@ -6156,6 +6177,10 @@ export type ApplyAudiencePlanData = {
     body: {
         planId: string;
         confirmResubscribe?: boolean;
+        /**
+         * For a consent change: how these people agreed, for example "Opted in at checkout". Stored with each consent record.
+         */
+        evidence?: string;
     };
     path?: never;
     query?: never;

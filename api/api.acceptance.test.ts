@@ -3662,6 +3662,48 @@ describe('Lists, compound segments, imports and exports', () => {
     assert.equal(report.status, 'committed');
     assert.deepEqual(report.errors.map((row: Json) => ({ row: row.row, field: row.field })), preview.errors.map((row: Json) => ({ row: row.row, field: row.field })), 'The committed import must retain a downloadable per-row error report.');
   });
+
+  test('an attested import or bulk change records consent only for contacts without a decision', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('consent-import') });
+    const optedOut = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, optedOut.id, 'unsubscribed'));
+    const subscribed = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, subscribed.id, 'subscribed'));
+    const fresh = [address(), address()];
+    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${[optedOut.email, subscribed.email, ...fresh].join('\n')}\n`, listId: list.id, mapping: { email: 'email' } }), 201);
+    const missing = error(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed' } }), 422, 'VALIDATION_FAILED');
+    assert.equal(missing.field, 'consent.evidence');
+    assert.match(missing.message, /consent\.evidence is required/);
+    const extra = error(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed', evidence: 'x', source: 'csv' } }), 422, 'VALIDATION_FAILED');
+    assert.equal(extra.field, 'consent.source');
+    assert.match(extra.message, /consent\.source is not a supported field/);
+    const committed = ok(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed', evidence: 'Opted in at checkout', policyVersion: '2026-11' } }));
+    assert.equal(committed.imported, 4);
+    assert.equal(committed.subscribed, 2, 'Only the two contacts without a decision are subscribed.');
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, { consent: { status: 'subscribed', evidence: 'Again' } })).subscribed, 0, 'A repeated commit changes nothing.');
+    const members = page(await http('GET', `/v1/lists/${list.id}/members`, key.secret));
+    for (const row of members) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${row.id}`, key.secret), [200, 404]); });
+    assert.equal(members.find(row => row.id === optedOut.id)?.marketingConsent, 'unsubscribed', 'An import never overrides an opt-out.');
+    assert.equal(page(await http('GET', `/v1/contacts/${subscribed.id}/consent`, key.secret)).length, 1, 'An existing subscription is not recorded twice.');
+    for (const email of fresh) {
+      const row = members.find(member => member.email === email)!;
+      assert.equal(row.marketingConsent, 'subscribed');
+      const [event] = page(await http('GET', `/v1/contacts/${row.id}/consent`, key.secret));
+      assert.deepEqual({ status: event.status, source: event.source, evidence: event.evidence, policyVersion: event.policyVersion }, { status: 'subscribed', source: 'import', evidence: 'Opted in at checkout', policyVersion: '2026-11' });
+    }
+    // Without an attestation an import leaves new contacts undecided; a bulk change can record consent with evidence later.
+    const later = address();
+    const second = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${later}\n`, listId: list.id, mapping: { email: 'email' } }), 201);
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${second.id}/commit`, key.secret)).subscribed, 0);
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement: `UPDATE contacts SET consent = 'subscribed' WHERE list = '${list.id}' AND consent = 'unknown'` }), 201);
+    assert.equal(plan.matched, 1);
+    assert.equal(ok(await http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id, evidence: 'Signed up at the event' })).affected, 1);
+    const [laterContact] = page(await http('GET', `/v1/contacts?email=${encodeURIComponent(later)}`, key.secret));
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${laterContact.id}`, key.secret), [200, 404]); });
+    const [bulk] = page(await http('GET', `/v1/contacts/${laterContact.id}/consent`, key.secret));
+    assert.deepEqual({ status: bulk.status, source: bulk.source, evidence: bulk.evidence }, { status: 'subscribed', source: 'audienceql', evidence: 'Signed up at the event' });
+  });
 });
 
 describe('Import property boundaries', () => {
