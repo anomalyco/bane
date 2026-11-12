@@ -15,6 +15,8 @@ export type EmailSnapshot = {
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
   deferredCampaign?: boolean;
+  /** Server-side bulk evidence on a message its caller labelled transactional (hosted-sending.ts bulkFlags): held like marketing. */
+  bulk?: true;
   /** Present only on mailbox replies; recipients who actually wrote to this mailbox in this thread. */
   replyAuthors?: string[];
   /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */
@@ -79,7 +81,11 @@ export const campaigns = pgTable('sending_campaigns', {
   pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true), rateShare: doublePrecision('rate_share'),
   windowStartedAt: time('window_started_at'), windowExpanded: integer('window_expanded').notNull().default(0),
   pausedAt: time('paused_at'), pauseReason: jsonb('pause_reason').$type<CampaignFailure>(), healthCheckedAt: time('health_checked_at'),
-  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota'>(), waitingUntil: time('waiting_until'),
+  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe'>(), waitingUntil: time('waiting_until'),
+  // Hosted list probe (migration 231): when release may continue after the probe, when it was cleared, and how many quarantines this launch had.
+  probeWaitUntil: time('probe_wait_until'), probeClearedAt: time('probe_cleared_at'), quarantines: smallint('quarantines').notNull().default(0),
+  // After an owner resumed a failed list probe: the rest is released only to contacts the workspace delivered to before.
+  deliveredOnly: boolean('delivered_only').notNull().default(false),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc())]);
 // The frozen snapshot a launch sends from: the draft and rendered base every recipient is interpolated into, and the

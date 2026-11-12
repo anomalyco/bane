@@ -267,15 +267,17 @@ export const pauseHostedByOperator = (wid: string, reason: string, via: 'script'
   ), audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'pause-hosted-sending',jsonb_build_object('reason',${reason}::text,'via',${via}::text) FROM paused),
   queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})
   SELECT workspace_id FROM paused`;
-export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: { firstWeek: number; secondWeek: number; mature: number } };
+export type HostedCaps = { firstWeek: number; secondWeek: number; mature: number };
+export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: HostedCaps };
 /**
- * An operator resume, in one statement with its audit row. It lifts a pause or a marketing hold and starts a new
- * evidence epoch for the pause check; the limit's history is kept whole. With percent < 100 the limit is
- * min(current limit, percent of the limit before the resume) for 48 hours, an absolute cap that a second resume cannot
- * raise. A pause whose SES tenants were disabled stays held (pause_reason says it is resuming) until the tenant job
- * has enabled them again; otherwise sending restarts at once.
+ * The connection side of a resume, as CTEs ending in `resumed` (workspace_id, pending, ...). It lifts a pause or a
+ * marketing hold and starts a new evidence epoch for the pause check; the limit's history is kept whole. With
+ * percent < 100 the limit is min(current limit, percent of the limit before the resume) for 48 hours, an absolute cap
+ * that a second resume cannot raise. A pause whose SES tenants were disabled stays held (pause_reason says it is
+ * resuming) until the tenant job has enabled them again; otherwise sending restarts at once. Used by the operator
+ * script below and by the standing's applyChange (src/standing.ts), which writes its own audit.
  */
-export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null, caps }: HostedResume) => sql`WITH previous AS MATERIALIZED (
+const resumeConnection = (wid: string, percent: number, caps: HostedCaps) => sql`previous AS MATERIALIZED (
     SELECT pc.id,pc.paused_at,pc.pause_reason,pc.marketing_held_at,pc.marketing_hold_reason,CASE WHEN pc.restore_until>now() THEN pc.restore_cap END AS active_cap,
       hosted_base_cap(${wid},${caps.firstWeek},${caps.secondWeek},${caps.mature}) AS base,
       pc.paused_at IS NOT NULL AND (EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied<>'ENABLED')
@@ -289,12 +291,18 @@ export const resumeHostedSending = (wid: string, { reason, percent = 50, via = '
       tenant_generation=pc.tenant_generation+CASE WHEN p.paused_at IS NOT NULL THEN 1 ELSE 0 END,
       restore_cap=${percent < 100 ? sql`CASE WHEN p.base IS NOT NULL THEN least(p.active_cap,greatest(1,p.base*${percent}/100)) END` : sql`NULL`},
       restore_until=${percent < 100 ? sql`CASE WHEN p.base IS NOT NULL THEN clock_timestamp()+interval '48 hours' END` : sql`NULL`}
-    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,p.marketing_hold_reason,p.paused_at IS NOT NULL AS was_paused,p.base,pc.restore_cap,pc.restore_until,pc.resume_pending_at),
-  audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'resume-hosted-sending',
+    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,p.marketing_hold_reason,p.paused_at IS NOT NULL AS was_paused,p.base,pc.restore_cap,pc.restore_until,
+      pc.resume_pending_at,pc.resume_pending_at IS NOT NULL AS pending),
+  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed WHERE was_paused`)})`;
+/** resumeConnection alone, for a caller that audits the resume itself (the standing's applyChange). */
+export const resumeHostedConnection = (wid: string, percent: 50 | 100, caps: HostedCaps) => sql`WITH ${resumeConnection(wid, percent, caps)}
+  SELECT workspace_id,pending,base,restore_cap FROM resumed`;
+/** An operator script resume, in one statement with its audit row (see resumeConnection). */
+export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null, caps }: HostedResume) => sql`WITH ${resumeConnection(wid, percent, caps)},
+  audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details,via,reason,operator_id) SELECT workspace_id,'resume-hosted-sending',
     jsonb_build_object('reason',${reason}::text,'via',${via}::text,'operator',${operator}::text,'pauseReason',pause_reason,'marketingHoldReason',marketing_hold_reason,
-      'restorePercent',${percent}::int,'limitBefore',base,'restoreCap',restore_cap,'restoreUntil',restore_until,'waitsForTenants',resume_pending_at IS NOT NULL) FROM resumed),
-  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed WHERE was_paused`)})
-  SELECT workspace_id,resume_pending_at IS NOT NULL AS pending FROM resumed`;
+      'restorePercent',${percent}::int,'limitBefore',base,'restoreCap',restore_cap,'restoreUntil',restore_until,'waitsForTenants',pending),${via}::text,${reason}::text,${operator}::text FROM resumed)
+  SELECT workspace_id,pending FROM resumed`;
 
 // Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its
 // delivery. `total`, `prepared` and `expanded` are cursors into the frozen recipient list, `canceled` counts
@@ -346,12 +354,17 @@ export const progressCampaign = (ref: CampaignRef, state: CampaignState, set: SQ
 export type CampaignLaunch = { reviewId: string; resolvedRegion?:string; actorKeyId: string; simulated: boolean; total: number; requestId: string | null; scheduledAt: string | null; pacePerDay: number | null; autoPause: boolean; rateShare: number | null };
 /** draft, or failed with nothing released -> preparing with a fresh snapshot: every cursor and setting starts over; the error of a failed launch is cleared. */
 export const launchCampaign = (ref: CampaignRef, l: CampaignLaunch) => moveCampaign(ref, ['draft', 'failed'], 'preparing', sql`,review_id=${l.reviewId}${l.resolvedRegion ? sql`,draft=jsonb_set(draft,'{region}',to_jsonb(${l.resolvedRegion}::text))` : sql``},actor_key_id=${l.actorKeyId},simulated=${l.simulated},total=${l.total},prepared=0,expanded=0,canceled=0,error=NULL,request_id=${l.requestId},
-  scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL`, editableRow);
+  scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL,probe_wait_until=NULL,probe_cleared_at=NULL,quarantines=0`, editableRow);
 /** A new revision: draft, or failed with nothing released -> draft with no snapshot; a failed launch's counters and error go with it. */
 export const reviseCampaign = (ref: CampaignRef, set: SQL) => sql`UPDATE sending_campaigns SET state='draft',updated_at=now(),review_id=NULL,error=NULL,total=0,prepared=0,expanded=0,canceled=0,scheduled_at=NULL${set} WHERE ${campaignRow(ref)} AND ${editableRow} RETURNING *`;
 type PauseReason = { code: string; message: string };
 const pausedFields = (reason: PauseReason) => sql`,paused_at=now(),pause_reason=${JSON.stringify(reason)}::jsonb,health_checked_at=now()`;
 export const pauseCampaign = (ref: CampaignRef, reason: PauseReason) => moveCampaign(ref, CAMPAIGN_RUNNING, 'paused', sql`${pausedFields(reason)},waiting_reason=NULL,waiting_until=NULL`);
+/** A list-quality pause (a probe or the campaign's own bounce/complaint lines): counted, so a second one needs an operator. */
+export const quarantineCampaign = (ref: CampaignRef, reason: PauseReason) => moveCampaign(ref, CAMPAIGN_RUNNING, 'paused', sql`${pausedFields(reason)},waiting_reason=NULL,waiting_until=NULL,quarantines=quarantines+1`);
+/** The list probe went out clean (or an owner or operator released its quarantine): release the rest. */
+export const clearProbe = (ref: CampaignRef) => sql`UPDATE sending_campaigns SET probe_cleared_at=now(),probe_wait_until=NULL,updated_at=now() WHERE ${campaignRow(ref)} RETURNING id`;
+export const waitProbe = (ref: CampaignRef, until: string) => sql`UPDATE sending_campaigns SET probe_wait_until=${until}::timestamptz,waiting_reason='list_probe',waiting_until=${until}::timestamptz,updated_at=now() WHERE ${campaignRow(ref)} AND state='sending' AND probe_wait_until IS NULL RETURNING id`;
 /** paused, or failed after releasing some recipients, continues from its cursors on the same snapshot; the failure is cleared. */
 export const resumeCampaign = (ref: CampaignRef, to: RunningState) => moveCampaign(ref, ['paused', 'failed'], to, sql`,paused_at=NULL,pause_reason=NULL,error=NULL,health_checked_at=now()`, sql`(state='paused' OR expanded>0)`);
 /** A schedule that released nothing yet (preparing, scheduled, or paused before its send time) -> draft: the frozen
@@ -368,10 +381,13 @@ export const recordPrepared = (ref: CampaignRef, prepared: number, next: Running
  *  after the run read the row leaves it scheduled, and the run reads it again. */
 export const startSending = (ref: CampaignRef, due: { scheduledAt: string | null; reviewId: string | null }) =>
   moveCampaign(ref, ['scheduled'], 'sending', sql``, sql`scheduled_at IS NOT DISTINCT FROM ${due.scheduledAt}::timestamptz AND review_id IS NOT DISTINCT FROM ${due.reviewId}`);
-export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null) {
-  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? 'hosted_daily_quota' : null},waiting_until=${hostedUntil}::timestamptz`);
+/** `skipped`: recipients passed over by a delivered-only release; they count as canceled. */
+export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null, skipped = 0) {
+  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},canceled=canceled+${skipped},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? 'hosted_daily_quota' : null},waiting_until=${hostedUntil}::timestamptz`);
 }
-export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
+/** An owner resumed a failed list probe: release the rest only to contacts delivered before, and check health at once. */
+export const restrictToDelivered = (ref: CampaignRef) => sql`UPDATE sending_campaigns SET delivered_only=true,health_checked_at=NULL,updated_at=now() WHERE ${campaignRow(ref)} RETURNING id`;
+export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
 export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
 export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
 /**

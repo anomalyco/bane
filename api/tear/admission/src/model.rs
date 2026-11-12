@@ -909,20 +909,11 @@ impl Send {
             .iter()
             .any(|(k, t)| k != me && t.locks.iter().any(|l| conflict(l)))
     }
-    /// The workspace the hosted policy sees, with `me`'s own uncommitted operator change.
-    fn tier_cap(&self, w: &Ws) -> i64 {
-        let tier = if w.history >= 100 {
-            if w.history >= 1000 && w.weeks >= 2 {
-                3
-            } else if w.weeks >= 1 {
-                2
-            } else {
-                1
-            }
-        } else {
-            1
-        };
-        self.caps[tier - 1]
+    /// The workspace the hosted policy sees, with `me`'s own uncommitted operator change. The sender
+    /// score sets the limit now (sender_standing); a workspace the standing job has not seen gets the
+    /// first-week cap, and history or age no longer raise it.
+    fn tier_cap(&self, _w: &Ws) -> i64 {
+        self.caps[0]
     }
     fn cap(&self, w: &Ws) -> Option<i64> {
         w.send_cap.or(if w.exempt {
@@ -1071,7 +1062,9 @@ impl Send {
                     let error = if w.paused {
                         Some("409:HOSTED_SENDING_PAUSED")
                     } else if self.cap(w).is_some_and(|cap| {
-                        let mcap = cap - (cap * self.headroom + 99) / 100;
+                        // An override keeps the plain headroom; a score limit reserves max(100, headroom%).
+                        let headroom = (cap * self.headroom + 99) / 100;
+                        let mcap = if w.send_cap.is_some() { cap - headroom } else { (cap - headroom.max(cap.min(100))).max(0) };
                         used + cost > cap || (marketing > 0 && used + marketing > mcap)
                     }) {
                         Some("429:SEND_LIMIT_REACHED")

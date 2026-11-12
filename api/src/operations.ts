@@ -55,8 +55,8 @@ export const WebhookHeaders = z.array(z.object({
 }).describe('Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.');
 export const WebhookHeaderViews = z.array(z.object({ name: z.string(), hint: z.string().optional(), updatedAt: z.string().datetime().optional() })).describe('Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.');
 const webhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
-const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false), headers: WebhookHeaders.optional() }).openapi('CreateWebhook');
-const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
+const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false), headers: WebhookHeaders.optional() }).openapi('CreateWebhook');
+const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
 const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
 const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusCode: z.number().nullable(), error: z.string().nullable(), durationMs: z.number(), createdAt: z.string() }).openapi('WebhookAttempt');
@@ -1343,6 +1343,17 @@ function registerPublicEvents(app: App) {
       if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
+    // An SES tenant status event (EventBridge) has no mail object: it is judged by its topic, account, region and an
+    // owned tenant ARN (src/standing.ts), before the mail checks below; both ingress paths use the same check.
+    const tenantEvent = c.env.config.multiTenant && (message as { source?: unknown } | null)?.source === 'aws.ses' ? (await import('./standing.js')).tenantStatusEvent(message as Record<string, unknown>) : null;
+    if (tenantEvent) {
+      if (binding?.kind !== 'shared') throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'SES tenant status events are accepted only from a Bane-owned shared feedback topic.');
+      const tenantItem = { message: message as Record<string, unknown>, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region, topicKind: 'shared' as const };
+      if (c.env.feedback) { await c.env.feedback.enqueue([tenantItem]); return c.json({ accepted: true }, 202); }
+      const refused = await (await import('./standing.js')).ingestTenantStatus(c.env, tenantEvent, tenantItem);
+      if (refused) throw new ApiError(403, refused, 'This SES tenant status event does not match a tenant Bane owns on this topic.');
+      return c.json({ accepted: true }, 202);
+    }
     verifySesAccount(c.env, message, envelope.TopicArn);
     if (binding?.kind==='byo' && c.env.allowFeedbackTopic && !await c.env.allowFeedbackTopic(envelope.TopicArn))
       throw new ApiError(503,'FEEDBACK_TOPIC_BUSY','Feedback for this topic is temporarily rate limited; retry.',undefined,true);
@@ -1570,6 +1581,14 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   const group: { index: number; input: RoutineIngress }[] = [];
   const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
   for (const [index, item] of items.entries()) {
+    // An SES tenant status change from EventBridge, published to the pool's own feedback topic (src/standing.ts).
+    // A database failure propagates, so the queue redelivers it.
+    const standing = runtime.config.multiTenant && !simulatedTopic(item.topicArn) && item.message?.source === 'aws.ses' ? await import('./standing.js') : null;
+    const tenantEvent = standing?.tenantStatusEvent(item.message);
+    if (standing && tenantEvent) {
+      const refused = await standing.ingestTenantStatus(runtime, tenantEvent, item);
+      outcomes[index] = refused ? { ok: false, error: refused } : { ok: true }; continue;
+    }
     try {
       if (simulatedTopic(item.topicArn)) assertSimulatedFeedback(runtime, item);
       else verifySesAccount(runtime, item.message, item.topicArn);

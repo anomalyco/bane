@@ -4,6 +4,7 @@ import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, respo
 import { authUser } from './db/google-auth.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { approvedGoogleIdentity, invitationRecipient, verifiedDashboardUser } from './google-auth.js';
+import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -74,6 +75,13 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 const maxOwnedWorkspaces = 10;
 
 /** Every workspace the user belongs to, with their role, by name: one statement. Read by GET /v1/me and the deprecated GET /v1/workspaces. */
+/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Bane operator role (if any). */
+export async function sessionMemberships(db: DbExecutor, userId: string) {
+  // One row even with no memberships, so an operator who belongs to no workspace still gets the role.
+  const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
+    coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces`);
+  return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null };
+}
 export async function memberships(db: DbExecutor, userId: string) {
   const rows = await db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, userId)).orderBy(workspaces.name, workspaces.id);
   return rows.map(row => Workspace.parse(row));

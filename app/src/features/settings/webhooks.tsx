@@ -12,13 +12,13 @@ import { AdminOnlyPage } from './admin-only'
 import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 
-const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
-// The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks and subscription changes are opt-in.
+const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
+// The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks, subscription and standing changes are opt-in.
 const defaultEvents: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']
-const eventHints: Partial<Record<WebhookEvent, string>> = { 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': 'Bane or SES refused to send it', 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
+const eventHints: Partial<Record<WebhookEvent, string>> = { 'account.standing.changed': 'Bane warned, held or released this workspace’s sending', 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': 'Bane or SES refused to send it', 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...defaultEvents] }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
-const eventLabel = (event: string) => label(event.replace(/^email\./, '').replace('.', '_'))
+const eventLabel = (event: string) => event === 'account.standing.changed' ? 'Sending standing changed' : label(event.replace(/^email\./, '').replace('.', '_'))
 // The events a webhook gets, named rather than counted: "All events", or the first and how many more.
 const eventSummary = (list: WebhookEvent[]) => list.length === events.length ? 'All events' : `${eventLabel(list[0] ?? '')}${list.length > 1 ? ` +${number(list.length - 1)}` : ''}`
 function scopeText(scope: Webhook['regionIds']) { return scope === 'all' ? 'All regions' : scope.join(', ') }

@@ -126,6 +126,42 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
   .score-factors > li > button > .score-bar { display: none; }
 }
 
+/* The sidebar card's standing dot (Warn and up), in the card's top-right corner: positioned, so it never moves anything. */
+.gauge-card > .gauge-alert { position: absolute; top: 8px; right: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); box-shadow: 0 0 0 2px var(--color-surface); animation: gauge-alert-in 240ms var(--ease-out-strong) both; }
+@keyframes gauge-alert-in { from { opacity: 0; transform: scale(.4); } }
+
+/* Hosted: the limit the score sets. Four fixed lines (the first may wrap to two), 100px in every state. */
+.score-limit { display: flex; flex-direction: column; gap: var(--space-4); height: 100px; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; font-variant-numeric: tabular-nums; }
+.score-limit > p { height: 16px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.score-limit > .score-limit__headline { display: -webkit-box; height: 40px; color: var(--color-text); font-size: var(--text-sm); line-height: 20px; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.score-limit__note { display: flex; align-items: center; gap: var(--space-6); }
+.score-limit__note > span:first-child { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-success-marker); }
+.score-limit__note > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.score-limit__note[data-tone='warning'] > span:first-child { background: var(--color-warning-marker); }
+.score-limit__note[data-tone='danger'] > span:first-child { background: var(--color-danger-marker); }
+.score-limit__note[data-tone='warning'], .score-limit__note[data-tone='danger'] { color: var(--color-text); }
+.score-breakdown__aside { display: flex; align-items: baseline; gap: var(--space-8); }
+.score-explain { height: 20px; padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; font-size: var(--text-xs); line-height: var(--leading-xs); text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 3px; cursor: pointer; transition: text-decoration-color var(--motion-duration); }
+@media (hover: hover) and (pointer: fine) { .score-explain:hover { text-decoration-color: currentColor; } }
+.score-explain:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: 2px; }
+
+/* Overview's standing card (Warn and up): tone from the step, three parts and the release action. */
+.standing-card { display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-12); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin-top: var(--space-24); }
+.ov-split__aside > .standing-card + * { border-top: 0; }
+.standing-card__head { display: flex; align-items: center; gap: var(--space-8); }
+.standing-card__head h2 { flex: 1; min-width: 0; color: var(--tone-ink); font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.standing-card__head .muted { font-size: var(--text-xs); white-space: nowrap; }
+.standing-card__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
+.standing-card__part { display: flex; flex-direction: column; gap: var(--space-4); }
+.standing-card__part h3 { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; font-weight: 400; letter-spacing: .12em; text-transform: uppercase; }
+.standing-card__part p, .standing-card__action p { margin: 0; text-wrap: pretty; }
+.standing-card__part ul, .standing-checklist { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); font-variant-numeric: tabular-nums; }
+.standing-card__action { display: flex; align-items: center; gap: var(--space-8); }
+.standing-card__action p { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.standing-card__docs { align-self: flex-start; font-size: var(--text-xs); line-height: var(--leading-xs); }
+.standing-release { display: flex; flex-direction: column; gap: var(--space-12); }
+@media (prefers-reduced-motion: reduce) { .gauge-alert { animation: none; } }
+
 /* The explainer: the status, what counts, how it is graded and the six parts. */
 .score-about { width: min(600px, calc(100vw - 32px)); }
 .score-about .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-16); }

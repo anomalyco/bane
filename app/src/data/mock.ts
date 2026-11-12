@@ -15,7 +15,7 @@ const ATTACHMENT_EXTENSIONS = ['pdf', 'txt', 'csv', 'json', 'png', 'jpg', 'jpeg'
 const ATTACHMENT_FILENAME = /^[^\x00-\x1f\x7f/\\]+$/
 const ATTACHMENT_CONTENT_TYPE = /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/
 const ATTACHMENT_CONTENT_ID = /^[a-zA-Z0-9_.@-]+$/
-const EVENTS: WebhookEvent[] = ['send', 'delivered', 'bounced', 'complaint', 'rejected', 'delivery_delayed', 'email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
+const EVENTS: WebhookEvent[] = ['send', 'delivered', 'bounced', 'complaint', 'rejected', 'delivery_delayed', 'email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
 const CONTACT_STATUSES = ['unknown', 'subscribed', 'unsubscribed', 'suppressed']
 const CONNECTABLE_REGIONS: Record<string, string> = {
   'us-east-1': 'US East (N. Virginia)', 'us-east-2': 'US East (Ohio)',
@@ -628,10 +628,12 @@ export function createMockApi(): BaneApi {
       get: signal => run(signal, false, s => {
         const sent = Math.min(s.emails.length, 100), graded = s.emails.length >= 100
         const factor = (key: SenderScoreFactor['key'], label: string, weight: number, value: number | null, score: number | null): SenderScoreFactor => ({ key, label, weight, value, score, points: score === null ? null : Math.round(weight * score) / 100, source: score === null ? 'neutral' : 'measured', basis: 'Demo data.' })
-        const factors = [factor('complaints', 'Complaints', 25, 0.0005, 89), factor('bounces', 'Bounces', 20, 0.009, 100), factor('content', 'Content', 20, null, null), factor('auth', 'Authentication', 15, 0.4, 40), factor('hygiene', 'List hygiene', 10, 0.012, 84.4), factor('consistency', 'Consistency', 10, 1.4, 100)]
+        const factors = [factor('complaints', 'Complaints', 30, 0.0005, 89), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 100), factor('hygiene', 'List quality', 15, 0.012, 84.4), factor('auth', 'Authentication', 10, 0.4, 40), factor('engagement', 'Engagement', 10, 0.0031, 93.9)]
         const history = Array.from({ length: 14 }, (_, i) => ({ date: new Date(Date.now() - (13 - i) * 86_400_000).toISOString().slice(0, 10), score: Math.min(84, 75 + 2 * (i + 1)) }))
-        return { state: graded ? 'graded' : 'warmup', emails: { firstEmails: sent, last30Days: s.emails.length }, needed: 100, score: graded ? 84 : null, grade: graded ? 'B' : null, target: 84.2, raw: 84.6, band: graded ? { min: 80, max: 90 } : null, next: graded ? { grade: 'A', at: 90 } : null, factors, history: graded ? history : [], computedAt: new Date().toISOString() }
+        // Self-hosted, like the demo: the score is for display only, with no hosted limit or standing.
+        return { state: graded ? 'graded' : 'warmup', emails: { firstEmails: sent, last30Days: s.emails.length }, needed: 100, calibratedAt: null, score: graded ? 84 : null, grade: graded ? 'B' : null, target: 84.2, raw: 84.6, band: graded ? { min: 80, max: 90 } : null, next: graded ? { grade: 'A', at: 90 } : null, factors, history: graded ? history : [], limit: null, standing: null, computedAt: new Date().toISOString() }
       }),
+      release: (_input, signal) => run(signal, true, () => { throw new ApiError('This workspace has no Hosted sending standing.', 'NOT_FOUND') }),
     },
     overview: {
       get: (input, signal) => run(signal, false, s => {

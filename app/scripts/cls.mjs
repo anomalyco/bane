@@ -42,7 +42,8 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // [name, path, { user, from, click, row }]. The in-app navigation starts on `from` and clicks the control whose text
 // starts with `click`, the table row containing `row`, or else a link to `path`; with none of those (pages reached
 // from a dropdown menu) it pushes `path` through the router's history. It must land on `path`.
-// dana owns an established hosted workspace, nia a brand-new one with a verified domain, ona one still onboarding.
+// dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
+// still onboarding, rae a restricted one (the standing banner on every page).
 const pages = ids => [
   ['Overview', '/', { from: '/logs' }],
   ['Overview · setup', '/', { user: 'nia' }],
@@ -83,6 +84,10 @@ const pages = ids => [
   ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Docs', '/docs', { from: '/' }],
+  ['Operator', '/operator', { from: '/' }],
+  ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
+  ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
+  ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
   ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
   ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
@@ -90,7 +95,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · webhook', 'Onboarding']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
