@@ -11,10 +11,12 @@ import { fieldError, MutationError, SecretDialog } from './shared'
 import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 
-const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
-const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...events] }
+const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
+// A new endpoint starts with every email and contact event; the account's standing is opted into.
+const defaultEvents = events.filter(event => event !== 'account.standing.changed')
+const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: defaultEvents }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
-const eventLabel = (event: string) => label(event.replace(/^email\./, '').replace('.', '_'))
+const eventLabel = (event: string) => event === 'account.standing.changed' ? 'Sending standing changed' : label(event.replace(/^email\./, '').replace('.', '_'))
 function scopeText(scope: Webhook['regionIds']) { return scope === 'all' ? 'All regions' : scope.join(', ') }
 function validate(input: WebhookInput) {
   const errors: Record<string, string> = {}
@@ -70,7 +72,7 @@ function NewWebhook() {
   const regions = useRegionCatalog({ enabled: !multiTenant })
   const save = useApiMutation((api, input: WebhookInput) => api.webhooks.save(input), 'Webhook endpoint created')
   // Hosted endpoints are created without a region scope, so they cover every region.
-  const [input, setInput] = useState<WebhookInput>(() => multiTenant ? { name: '', url: '', events: [...events] } : blankEndpoint)
+  const [input, setInput] = useState<WebhookInput>(() => multiTenant ? { name: '', url: '', events: defaultEvents } : blankEndpoint)
   const [headers, setHeaders] = useState<HeaderDraft>([])
   const [errors, setErrors] = useState<Record<string, string>>({})
   async function submit(event: FormEvent) {

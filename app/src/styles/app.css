@@ -37,6 +37,24 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation a { transition: color var(--motion-duration), background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .main-navigation a:active { transform: scale(.98); }
 .page-notice { flex-shrink: 0; margin-bottom: var(--page-gap); }
+/* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (three on a phone or
+   tablet), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
+.page-surface > .standing-banner { animation: none; }
+.standing-banner { flex-shrink: 0; display: flex; align-items: center; gap: var(--space-12); margin-bottom: var(--page-gap); padding: var(--space-8) var(--space-12); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.standing-banner__icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--tone-ink); }
+.standing-banner__text { flex: 1; min-width: 0; }
+.standing-banner__text > p { height: var(--leading-sm); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.standing-banner__what { display: flex; align-items: center; font-weight: var(--font-weight-bold); font-variant-numeric: tabular-nums; }
+.standing-banner__what:not(:has(.ui-skeleton-block)) { display: block; }
+.standing-banner__did { color: var(--color-muted); }
+.standing-banner__fix { flex: none; }
+.app-shell--compact .standing-banner { flex-wrap: wrap; align-items: flex-start; }
+.app-shell--compact .standing-banner__text { flex-basis: calc(100% - 28px); }
+.app-shell--compact .standing-banner__text > p { white-space: normal; text-overflow: clip; }
+.app-shell--compact .standing-banner__text > .standing-banner__did { height: auto; }
+.app-shell--compact .standing-banner__text > .standing-banner__what { display: -webkit-box; height: calc(3 * var(--leading-sm)); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.app-shell--compact .standing-banner__text > .standing-banner__what:has(.ui-skeleton-block) { display: flex; align-items: flex-start; padding-top: 4px; }
+.app-shell--compact .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }
 .boot-loader { display: grid; place-items: center; height: 100dvh; background: var(--color-deep); color: var(--color-muted); }

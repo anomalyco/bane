@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -9,7 +9,7 @@ import { campaignEditable, type ChartPoint, type LogEntry, type Overview, type S
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
-import { NextSteps, ReportCard, useNextSteps, useSenderScore } from '../score'
+import { NextSteps, ReportCard, StandingCard, useNextSteps, useSenderScore } from '../score'
 import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
 import { logColumns, logHref, useLogRowIntent } from '../logs/rows'
 import { usePrefetchQueries } from '../../data/prefetch'
@@ -55,12 +55,20 @@ export function OverviewPage() {
 }
 
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
+// The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash.
 function Aside() {
   const score = useSenderScore()
   const setup = useSetupSteps()
   const next = useNextSteps(score.data)
-  const ready = (score.data || score.isError) && !setup.loading && next.ready
+  const ready = Boolean((score.data || score.isError) && !setup.loading && next.ready)
+  const { hash, key } = useLocation()
+  useEffect(() => {
+    if (!ready || (hash !== '#standing' && hash !== '#sender-score')) return
+    const frame = requestAnimationFrame(() => (document.getElementById(hash.slice(1)) ?? document.getElementById('sender-score'))?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
+    return () => cancelAnimationFrame(frame)
+  }, [ready, hash, key])
   return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
+    {score.data && <StandingCard report={score.data} />}
     {setup.steps && <SetupRail steps={setup.steps} current={setup.current} />}
     {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : <ReportCard report={score.data} />}
     <SendingLimitRow />
