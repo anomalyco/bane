@@ -8660,49 +8660,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('direct-send HTML exceeding the tree budget is refused before admission SQL', async t=>{
-    await simulatedSesFixture(t,async({runtime,local,request,db})=>{
-      const key=ok(await local('POST','/v1/api-keys',{name:'HTML budget',permissions:['read','send']}),201).secret;
-      ok(await request('GET','/v1/me',key)); runtime.config.multiTenant=true;
-      const query=t.mock.method(db,'query');
-      const nested='<div>'.repeat(257);
-      for(const size of BENCH?[50000,100000,200000,400000]:[5000]) {
-        const html=nested.padEnd(size,' '),start=performance.now();
-        error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html}),422,'CONTENT_TOO_LARGE_TO_SCREEN');
-        const ms=performance.now()-start;
-        t.diagnostic(`Bounded HTML: ${size} bytes refused in ${ms.toFixed(1)} ms`);
-        if (BENCH) assert.ok(ms<50,`HTML validation took ${ms} ms`);
-      }
-      // The markup is validated as every mail client may read it, not only as an HTML parser does. Mail is read without
-      // scripting, so <noscript> is markup; Outlook shows the inside of a conditional comment; and what a parser keeps
-      // as data (any other comment, a template, the fallback of frames and plugins) is markup to a lenient reader.
-      const send=(html:string)=>request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html});
-      const link='<a href="javascript:void(0)">Notes</a>';
-      for(const html of [`<noscript>${link}</noscript>`,
-        `<!--[if mso]>${link}<![endif]-->`,`<!-- [IF gte mso 9]>${link}<![ENDIF] -->`,'<p>Notes</p><!--[if (gte mso 9)|(IE)]><table><tr><td background="javascript:void(0)">Notes</td></tr></table><![endif]-->',
-        '<!--[if mso]><v:roundrect href="file://files.example/notes"><center>Notes</center></v:roundrect><![endif]-->','<!--[if mso]><v:imagedata src="cid:notes" o:href="file://files.example/notes.png"/><![endif]-->',
-        `<!--[if mso]><p>One</p><!--[if gte mso 9]>${link}<![endif]--><p>Two</p><![endif]-->`,`<!--[if mso]><template>${link}</template><![endif]-->`,`<!--[if mso]>${link}-->`,
-        `<!-- ${link} -->`,`<!-- one -- > ${link} -->`,`<! ${link}`,`<template>${link}</template>`,
-        `<iframe>${link}</iframe>`,'<iframe srcdoc="&lt;a href=&quot;javascript:void(0)&quot;&gt;Notes&lt;/a&gt;"><textarea></iframe>',`<noembed>${link}</noembed>`,`<noframes>${link}</noframes>`,`<noframes><!--[if mso]>${link}<![endif]--></noframes>`,
-      ]) error(await send(html),422,'UNSAFE_HTML_URL');
-      // Their nesting and their size count against the one budget, wherever they sit and however they are chained.
-      for(const html of [`<noscript>${nested}</noscript>`,`<!--[if mso]>${nested}<![endif]-->`,'<div>'.repeat(200)+`<!--[if mso]>${'<div>'.repeat(100)}<![endif]-->`,`<!-- ${nested} -->`,
-        '<!--'.repeat(6000),'<iframe>'.repeat(6000),'<!--[if mso]><b>x</b><![endif]-->'.repeat(6000)]){
-        const start=performance.now();error(await send(html),422,'CONTENT_TOO_LARGE_TO_SCREEN');
-        assert.ok(performance.now()-start<1500,`${html.slice(0,24)} is refused within the budget`);
-      }
-      assert.equal(query.mock.callCount(),0); query.mock.restore();
-      // An ordinary message for Outlook and everyone else is none of that: Office settings, conditional tables, a VML
-      // button beside its plain link, and notes left in comments.
-      const ordinary='<!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--><!-- header: logo left, links right -->'
-        +'<!--[if (gte mso 9)|(IE)]><table role="presentation" width="600"><tr><td><![endif]--><p>Hello</p>'
-        +'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="https://example.invalid/open" style="height:44px;width:200px" arcsize="12%" fillcolor="#111111"><center>Open</center></v:roundrect><![endif]-->'
-        +'<!--[if !mso]><!--><a href="https://example.invalid/open">Open</a><!--<![endif]--><!--[if (gte mso 9)|(IE)]></td></tr></table><![endif]--><!-- <a href="/old">An older link</a> -->';
-      runtime.config.multiTenant=false;
-      ok(await local('POST','/v1/emails/send',mail({html:ordinary})),202);
-    });
-  });
-
   test('hosted screen reads what Outlook shows inside a conditional comment',async t=>{
     // A subtest, so its classifier mock is lifted before the fixture's own network guard is.
     await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
@@ -8752,6 +8709,49 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }
     const elapsed=performance.now()-started;t.diagnostic(`HTML scans: 6 MB of adversarial input in ${elapsed.toFixed(0)} ms`);
     assert.ok(elapsed<1000,`Scanning took ${elapsed.toFixed(0)} ms`);
+  });
+
+  test('direct-send HTML exceeding the tree budget is refused before admission SQL', async t=>{
+    await simulatedSesFixture(t,async({runtime,local,request,db})=>{
+      const key=ok(await local('POST','/v1/api-keys',{name:'HTML budget',permissions:['read','send']}),201).secret;
+      ok(await request('GET','/v1/me',key)); runtime.config.multiTenant=true;
+      const query=t.mock.method(db,'query');
+      const nested='<div>'.repeat(257);
+      for(const size of BENCH?[50000,100000,200000,400000]:[5000]) {
+        const html=nested.padEnd(size,' '),start=performance.now();
+        error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html}),422,'CONTENT_TOO_LARGE_TO_SCREEN');
+        const ms=performance.now()-start;
+        t.diagnostic(`Bounded HTML: ${size} bytes refused in ${ms.toFixed(1)} ms`);
+        if (BENCH) assert.ok(ms<50,`HTML validation took ${ms} ms`);
+      }
+      // The markup is validated as every mail client may read it, not only as an HTML parser does. Mail is read without
+      // scripting, so <noscript> is markup; Outlook shows the inside of a conditional comment; and what a parser keeps
+      // as data (any other comment, a template, the fallback of frames and plugins) is markup to a lenient reader.
+      const send=(html:string)=>request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html});
+      const link='<a href="javascript:void(0)">Notes</a>';
+      for(const html of [`<noscript>${link}</noscript>`,
+        `<!--[if mso]>${link}<![endif]-->`,`<!-- [IF gte mso 9]>${link}<![ENDIF] -->`,'<p>Notes</p><!--[if (gte mso 9)|(IE)]><table><tr><td background="javascript:void(0)">Notes</td></tr></table><![endif]-->',
+        '<!--[if mso]><v:roundrect href="file://files.example/notes"><center>Notes</center></v:roundrect><![endif]-->','<!--[if mso]><v:imagedata src="cid:notes" o:href="file://files.example/notes.png"/><![endif]-->',
+        `<!--[if mso]><p>One</p><!--[if gte mso 9]>${link}<![endif]--><p>Two</p><![endif]-->`,`<!--[if mso]><template>${link}</template><![endif]-->`,`<!--[if mso]>${link}-->`,
+        `<!-- ${link} -->`,`<!-- one -- > ${link} -->`,`<! ${link}`,`<template>${link}</template>`,
+        `<iframe>${link}</iframe>`,'<iframe srcdoc="&lt;a href=&quot;javascript:void(0)&quot;&gt;Notes&lt;/a&gt;"><textarea></iframe>',`<noembed>${link}</noembed>`,`<noframes>${link}</noframes>`,`<noframes><!--[if mso]>${link}<![endif]--></noframes>`,
+      ]) error(await send(html),422,'UNSAFE_HTML_URL');
+      // Their nesting and their size count against the one budget, wherever they sit and however they are chained.
+      for(const html of [`<noscript>${nested}</noscript>`,`<!--[if mso]>${nested}<![endif]-->`,'<div>'.repeat(200)+`<!--[if mso]>${'<div>'.repeat(100)}<![endif]-->`,`<!-- ${nested} -->`,
+        '<!--'.repeat(6000),'<iframe>'.repeat(6000),'<!--[if mso]><b>x</b><![endif]-->'.repeat(6000)]){
+        const start=performance.now();error(await send(html),422,'CONTENT_TOO_LARGE_TO_SCREEN');
+        assert.ok(performance.now()-start<1500,`${html.slice(0,24)} is refused within the budget`);
+      }
+      assert.equal(query.mock.callCount(),0); query.mock.restore();
+      // An ordinary message for Outlook and everyone else is none of that: Office settings, conditional tables, a VML
+      // button beside its plain link, and notes left in comments.
+      const ordinary='<!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--><!-- header: logo left, links right -->'
+        +'<!--[if (gte mso 9)|(IE)]><table role="presentation" width="600"><tr><td><![endif]--><p>Hello</p>'
+        +'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="https://example.invalid/open" style="height:44px;width:200px" arcsize="12%" fillcolor="#111111"><center>Open</center></v:roundrect><![endif]-->'
+        +'<!--[if !mso]><!--><a href="https://example.invalid/open">Open</a><!--<![endif]--><!--[if (gte mso 9)|(IE)]></td></tr></table><![endif]--><!-- <a href="/old">An older link</a> -->';
+      runtime.config.multiTenant=false;
+      ok(await local('POST','/v1/emails/send',mail({html:ordinary})),202);
+    });
   });
 
   test('hosted screen covers independent parts, hidden copy and link targets with a bounded request and a full-content cache key',async t=>{
