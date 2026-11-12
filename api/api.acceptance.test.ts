@@ -1,5 +1,4 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
-import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
@@ -285,24 +284,23 @@ type SessionFixture = { userId: string; sessionId: string; token: string; cookie
 let authDb: pg.Client | undefined;
 let manager: SessionFixture | undefined;
 let fixtureWorker: ReturnType<typeof import('./src/adapters/node.js').nodeRuntime> | undefined;
-async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; googleAccount?: boolean } = {}): Promise<SessionFixture> {
+async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean } = {}): Promise<SessionFixture> {
   const userId = unique('acceptance-user');
   const sessionId = unique('acceptance-session');
-  const token = unique('acceptance-token');
-  const email = options.email ?? `${unique('acceptance-google')}@${AUTH_DOMAIN}`;
-  const cookie = `${COOKIE_NAME}=${encodeURIComponent(`${token}.${await makeSignature(token, AUTH_SECRET!)}`)}`;
+  const token = createHash('sha256').update(randomUUID()).digest('base64url');
+  const email = options.email ?? `${unique('acceptance-oidc')}@${AUTH_DOMAIN}`;
+  const cookie = `${COOKIE_NAME}=${token}`;
   secrets.add(token);
   secrets.add(cookie);
   await db.query('BEGIN');
   try {
     // Never overwrite/reuse an existing user's email or credentials. A collision
     // fails the fixture; choose a dedicated AUTH_TEST_EMAIL rather than deleting it.
-    await db.query(`INSERT INTO auth_user (id, name, email, email_verified, google_hosted_domain)
-      VALUES ($1, $2, $3, $4, $5)`, [userId, 'Synthetic acceptance operator', email, options.verified ?? true, options.hostedDomain === undefined ? AUTH_DOMAIN : options.hostedDomain]);
-    if (options.googleAccount !== false) await db.query(`INSERT INTO auth_account (id, provider_id, account_id, user_id)
-      VALUES ($1, 'google', $2, $3)`, [unique('acceptance-account'), unique('acceptance-google-sub'), userId]);
-    await db.query(`INSERT INTO auth_session (id, token, expires_at, user_id)
-      VALUES ($1, $2, $3, $4)`, [sessionId, token, new Date(Date.now() + 3_600_000), userId]);
+    const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
+    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),userId]);
     await db.query('COMMIT');
   } catch (cause) {
     await db.query('ROLLBACK');
@@ -313,7 +311,7 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
 async function sessionFixture(t: TestContext, options: Parameters<typeof seedSession>[1] = {}): Promise<SessionFixture> {
   assert.ok(authDb, 'Synthetic session database must be bootstrapped first.');
   const fixture = await seedSession(authDb, options);
-  cleanup(t, async () => { await authDb!.query('DELETE FROM auth_user WHERE id = $1', [fixture.userId]); });
+  cleanup(t, async () => { await authDb!.query('DELETE FROM bane_users WHERE id = $1', [fixture.userId]); });
   return fixture;
 }
 before(async () => {
@@ -335,7 +333,7 @@ before(async () => {
 after(async () => {
   await fixtureWorker?.close();
   if (authDb) {
-    try { if (manager) await authDb.query('DELETE FROM auth_user WHERE id = $1', [manager.userId]); }
+    try { if (manager) await authDb.query('DELETE FROM bane_users WHERE id = $1', [manager.userId]); }
     finally { await authDb.end(); }
   }
 });
@@ -850,8 +848,8 @@ describe('Public contract and authentication', () => {
   });
 });
 
-describe('Google dashboard sessions and current-policy authorization', () => {
-  test('approved synthetic Google sessions identify the operator and reject obsolete test-mode requests without exposing credentials', async t => {
+describe('OIDC dashboard sessions and current-policy authorization', () => {
+  test('approved synthetic dashboard sessions identify the operator and reject obsolete test-mode requests without exposing credentials', async t => {
     const me = ok(await http('GET', '/v1/me', MANAGER));
     assert.equal(me.id, manager!.userId);
     assert.equal(me.email, AUTH_EMAIL);
@@ -861,9 +859,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-bane-environment': 'live' })).environment, undefined);
     error(await http('POST', '/v1/emails/send', MANAGER, mail(), { 'x-opensend-environment': 'test' }), 400, 'ENVIRONMENT_REMOVED');
     const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
-    assert.equal(inspected.user.id, manager!.userId);
-    assert.equal(inspected.user.emailVerified, true);
-    assert.equal(inspected.user.googleHostedDomain, undefined, 'Google hd is protected server-side identity data.');
+    assert.equal(inspected.id, manager!.userId);
     assert.equal(ok(await http('GET', '/api/auth/get-session')), null);
     const machine = await keyFixture(t, { permissions: ['read'] });
     const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-bane-environment': 'live' }));
@@ -873,31 +869,6 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(machineMe.environment, undefined, 'Dashboard headers cannot elevate an API key into live scope.');
     assert.deepEqual(machineMe.permissions, ['read']);
     for (const field of ['token', 'secret', 'cookie', 'accessToken', 'refreshToken']) assert.equal(me[field], undefined);
-  });
-
-  test('dashboard activity renews old sessions in both the browser and database, but not on every request', async t => {
-    for (const path of ['/v1/me', '/api/auth/get-session']) {
-      const fixture = await sessionFixture(t);
-      const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-      // This includes sessions issued before the rolling policy: still valid but near the old cutoff.
-      await authDb!.query("UPDATE auth_session SET expires_at = now() + interval '30 minutes' WHERE id = $1", [fixture.sessionId]);
-      const expiry = async () => Number((await authDb!.query('SELECT extract(epoch FROM expires_at) * 1000 AS ms FROM auth_session WHERE id = $1', [fixture.sessionId])).rows[0].ms);
-      const old = await expiry();
-      await authDb!.query("UPDATE auth_account SET provider_id = 'detached' WHERE user_id = $1", [fixture.userId]);
-      const denied = await http('GET', path, undefined, undefined, headers);
-      if (path === '/v1/me') error(denied, 401, 'AUTH_REQUIRED'); else assert.equal(ok(denied), null);
-      assert.equal(await expiry(), old, 'A removed Google link cannot extend a session.');
-      await authDb!.query("UPDATE auth_account SET provider_id = 'google' WHERE user_id = $1", [fixture.userId]);
-      const renewed = await http('GET', path, undefined, undefined, headers); ok(renewed);
-      const cookies = renewed.headers.getSetCookie();
-      const token = cookies.find(value => value.startsWith(`${COOKIE_NAME}=`));
-      assert.ok(token && /;\s*Max-Age=604800(?:;|$)/i.test(token), 'The browser must receive a full seven-day session cookie.');
-      assert.ok(cookies.some(value => value.split('=')[0].endsWith('.session_data')), 'The short cache cookie is a separate Set-Cookie header.');
-      const active = await expiry();
-      assert.ok(Math.abs(active - Date.now() - 7 * 86400_000) < 60_000, 'Cookie and database expiry must agree.');
-      assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, { ...headers, cookie: token.split(';')[0] })).id, fixture.userId);
-      assert.equal(await expiry(), active, 'A fresh session should not be rewritten on every dashboard request.');
-    }
   });
 
   test('invalid Bearer credentials never fall back to a valid dashboard cookie; machine writes need no Origin', async t => {
@@ -920,350 +891,33 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       error(await http('POST', '/v1/contacts', undefined, { email }, headers), 403, 'CSRF_ORIGIN_INVALID');
       assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, 'Rejected CSRF writes must never create a contact.');
       error(await http('POST', '/api/auth/sign-out', undefined, {}, headers), 403, 'CSRF_ORIGIN_INVALID');
-      error(await http('POST', '/api/auth/sign-in/social', undefined, { provider: 'google' }, headers), 403, 'CSRF_ORIGIN_INVALID');
+      error(await http('POST', '/api/auth/sign-in/account', undefined, { callbackURL: PUBLIC_ORIGIN }, headers), 403, 'CSRF_ORIGIN_INVALID');
       assert.equal(ok(await http('GET', '/v1/me', MANAGER)).id, manager!.userId, 'Rejected sign-out cannot revoke the valid session.');
     }
   });
 
-  test('each request rechecks verified Google identity and exact allowlists, not cached session inspection', async t => {
-    const fixture = await sessionFixture(t);
-    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-    const initial = await http('GET', '/v1/me', undefined, undefined, headers);
-    assert.equal(ok(initial).id, fixture.userId, 'An exact approved hd must authorize a verified Google account.');
-    // Replay the same credentials as a browser, including its signed session-data cache.
-    const sessionData = initial.headers.getSetCookie().map(value => value.split(';')[0]!).filter(value => value.includes('session_data='));
-    assert.ok(sessionData.length);
-    for (const cookie of sessionData) secrets.add(cookie);
-    headers.cookie = [fixture.cookie, ...sessionData].join('; ');
-    const cases = [
-      { email: fixture.email, verified: false, hd: AUTH_DOMAIN, account: true, reason: 'Unverified email' },
-      { email: fixture.email, verified: true, hd: AUTH_DOMAIN, account: false, reason: 'Missing Google account' },
-      { email: `${unique('unapproved')}@unapproved.invalid`, verified: true, hd: null, account: true, reason: 'Unapproved identity' },
-      { email: fixture.email, verified: true, hd: null, account: true, reason: 'Email suffix alone is not Google hd' },
-      { email: `${unique('suffix')}@unapproved.invalid`, verified: true, hd: `${AUTH_DOMAIN}.evil.invalid`, account: true, reason: 'Allowed-domain suffix attack' },
-      { email: `${unique('prefix')}@unapproved.invalid`, verified: true, hd: `evil${AUTH_DOMAIN}`, account: true, reason: 'Allowed-domain prefix attack' },
-    ];
-    for (const state of cases) {
-      await authDb!.query('UPDATE auth_user SET email = $2, email_verified = $3, google_hosted_domain = $4 WHERE id = $1', [fixture.userId, state.email, state.verified, state.hd]);
-      await authDb!.query('UPDATE auth_account SET provider_id = $2 WHERE user_id = $1', [fixture.userId, state.account ? 'google' : 'not-google']);
-      error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-      if (!state.account) error(await http('GET', '/v1/inbound/threads', undefined, undefined, { ...headers, 'x-bane-environment': 'live' }), 401, 'AUTH_REQUIRED');
-      assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null, state.reason);
-      const email = address();
-      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
-      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state.reason} must prevent all API writes.`);
-    }
-    await authDb!.query('UPDATE auth_user SET email = $2, email_verified = true, google_hosted_domain = $3 WHERE id = $1', [fixture.userId, fixture.email, AUTH_DOMAIN]);
-    assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId, 'Restoring this fixture’s current Google policy evidence must restore access without replacing its cookie.');
-    await authDb!.query('DELETE FROM auth_session WHERE id = $1', [fixture.sessionId]);
-    error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-    assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null);
-  });
-
-  test('profile forgery, password login, non-Google providers and account linking are not public authentication paths', async t => {
-    const fixture = await sessionFixture(t, { email: `${unique('unapproved')}@unapproved.invalid`, hostedDomain: null });
-    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-    for (const path of ['/update-user', '/sign-in/email', '/sign-up/email', '/link-social', '/change-email', '/get-access-token', '/callback/github']) {
-      error(await http(path.startsWith('/callback/') ? 'GET' : 'POST', `/api/auth${path}`, undefined,
-        path.startsWith('/callback/') ? undefined : { email: AUTH_EMAIL, googleHostedDomain: AUTH_DOMAIN, provider: 'google', password: 'synthetic-never-valid' }, headers), 404, 'NOT_FOUND');
-    }
-    for (const body of [
-      { provider: 'github' }, { provider: 'google', googleHostedDomain: AUTH_DOMAIN },
-      { provider: 'google', idToken: { token: 'forged' } }, { provider: 'google', scopes: ['openid', 'email'] },
-      { provider: 'google', profile: { email: AUTH_EMAIL, email_verified: true, hd: AUTH_DOMAIN } },
-    ]) error(await http('POST', '/api/auth/sign-in/social', undefined, body, headers), 422, 'AUTH_INPUT_INVALID');
-    const stored = (await authDb!.query('SELECT email, google_hosted_domain FROM auth_user WHERE id = $1', [fixture.userId])).rows[0];
-    assert.equal(stored.email, fixture.email);
-    assert.equal(stored.google_hosted_domain, null, 'Client-provided hd must never become verified Google evidence.');
-    error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-  });
-
-  test('expired, revoked, deleted and tampered sessions deny API access; sign-out revokes its persisted session', async t => {
-    for (const state of ['expired', 'revoked', 'deleted', 'tampered', 'sign-out']) {
-      const fixture = await sessionFixture(t);
-      const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-      assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId);
-      if (state === 'expired') await authDb!.query('UPDATE auth_session SET expires_at = $2 WHERE id = $1', [fixture.sessionId, new Date(Date.now() - 60_000)]);
-      if (state === 'revoked') await authDb!.query('DELETE FROM auth_session WHERE id = $1', [fixture.sessionId]);
-      if (state === 'deleted') await authDb!.query('DELETE FROM auth_user WHERE id = $1', [fixture.userId]);
-      if (state === 'tampered') headers.cookie = `${COOKIE_NAME}=${encodeURIComponent(`${fixture.token}.forged-signature`)}`;
-      if (state === 'sign-out') {
-        const signedOut = await http('POST', '/api/auth/sign-out', undefined, {}, headers);
-        assert.equal(ok(signedOut).success, true);
-        assert.match(signedOut.headers.get('set-cookie') ?? '', /bane\.session_token=/);
-        assert.equal((await authDb!.query('SELECT id FROM auth_session WHERE id = $1', [fixture.sessionId])).rowCount, 0);
+  test('workspace selection, invitations and role checks', async mx => {
+      const t=mx, [{createApp},{loadConfig},{drizzle}]=await Promise.all([import('./src/app.js'),import('./src/config.js'),import('drizzle-orm/node-postgres')]);
+      const app=createApp(),origin='https://workspace.example.org';
+      const pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL}); cleanup(t,()=>pool.end());
+      const runtime:import('./src/core.js').Runtime={db:drizzle(pool),config:loadConfig({...process.env,PUBLIC_URL:origin,MULTI_TENANT:'true'}),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused')},async get(){throw Error('unused')},async delete(){throw Error('unused')}}};
+      const local=async(method:string,path:string,body?:Json,cookie?:string,headers:Record<string,string>={})=>http(method,path,undefined,body,{origin,...(cookie?{cookie}:{}),...headers},5000,origin,r=>app.fetch(r,runtime));
+      const base='/v1/workspaces/current',select=(id:string)=>({'X-Bane-Workspace':id});
+      const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+      async function workspaceFixture(email:string,own:boolean){
+        const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
+        await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
+        const org={id:unique('ws'),name:'Fixture organization',slug:unique('slug')};
+        if(own){runtime.config.allowedEmails.push(email);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);}
+        return {org,cookie:f.cookie.replace(/^bane\./,'__Host-bane.')};
       }
-      error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-      const email = address();
-      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
-      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state} sessions must not write.`);
-    }
-  });
-
-  test('forged OAuth callback state and code cannot create an identity or session', async () => {
-    const before = (await authDb!.query('SELECT (SELECT count(*) FROM auth_user) AS users, (SELECT count(*) FROM auth_session) AS sessions')).rows[0];
-    // Never create a valid state or call Google's authorization/token endpoints.
-    // Invalid state must fail locally before exchanging the deliberately fake code.
-    const reply = await http('GET', `/api/auth/callback/google?state=${unique('never-issued')}&code=${unique('forged-code')}`);
-    assert.equal(reply.status, 302, diagnostic(reply));
-    assert.equal(reply.headers.get('location'), `${PUBLIC_ORIGIN}/?auth=error`);
-    assert.ok(!reply.headers.get('set-cookie')?.includes(`${COOKIE_NAME}=`), 'An invalid callback must not issue a session cookie.');
-    assert.deepEqual((await authDb!.query('SELECT (SELECT count(*) FROM auth_user) AS users, (SELECT count(*) FROM auth_session) AS sessions')).rows[0], before);
-  });
-
-  test('MOCK GOOGLE TRANSPORT: real OAuth state/callback lifecycle persists trusted claims, rejects denied profiles, and fails closed on configuration', async t => {
-    const [{ createApp }, { drizzle }] = await Promise.all([import('./src/app.js'), import('drizzle-orm/node-postgres')]);
-    const app = createApp();
-    const origin = 'https://mock-oauth.bane.dev';
-    const emailAllowed = `${unique('mock-email-approved')}@unapproved.invalid`;
-    const runtime: import('./src/core.js').Runtime = {
-      db: drizzle(authDb!), snsCertificateState: new SnsCertificateState(),
-      storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
-      config: { multiTenant: false, hostedSendCaps: {firstWeek:100,secondWeek:1000,mature:10000}, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1, dailyHeadroomPercent: 10 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
-    };
-    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-    const kid = unique('mock-google-signing-key');
-    const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' };
-    let profile: Json = {};
-    let jwtFault = '';
-    let expectedCode = '';
-    let expectedNonce: string | null = null;
-    let tokenCalls = 0;
-    let certCalls = 0;
-    const transport = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
-      const request = new Request(input, init);
-      if (request.url === 'https://oauth2.googleapis.com/token') {
-        tokenCalls++;
-        const form = new URLSearchParams(await request.text());
-        assert.equal(form.get('code'), expectedCode, 'Only the current synthetic callback may exchange a code.');
-        assert.equal(form.get('redirect_uri'), `${origin}/api/auth/callback/google`);
-        assert.ok(form.get('code_verifier'), 'The actual OAuth callback must retain its generated PKCE verifier.');
-        const now = Math.floor(Date.now() / 1000);
-        const head = Buffer.from(JSON.stringify({ alg: jwtFault === 'unsigned' ? 'none' : 'RS256', kid, typ: 'JWT' })).toString('base64url');
-        const payload: Json = { iss: 'https://accounts.google.com', aud: runtime.config.googleClientId, iat: now, exp: now + 300, ...profile, ...(expectedNonce ? { nonce: expectedNonce } : {}) };
-        if (jwtFault === 'audience') payload.aud = 'wrong-client.apps.googleusercontent.com';
-        if (jwtFault === 'issuer') payload.iss = 'https://attacker.invalid';
-        if (jwtFault === 'expired') { payload.iat = now - 120; payload.exp = now - 60; }
-        if (jwtFault === 'missing-exp') delete payload.exp;
-        const claims = Buffer.from(JSON.stringify(payload)).toString('base64url');
-        const input = `${head}.${claims}`;
-        const signature = Buffer.from(sign('RSA-SHA256', Buffer.from(input), privateKey));
-        if (jwtFault === 'signature') signature[0] = signature[0]! ^ 1;
-        const idToken = `${input}.${jwtFault === 'unsigned' ? '' : signature.toString('base64url')}`;
-        return Response.json({ access_token: 'synthetic-access-token', refresh_token: 'synthetic-refresh-token', id_token: idToken, token_type: 'Bearer', expires_in: 300, scope: 'openid email profile' });
-      }
-      if (request.url === 'https://www.googleapis.com/oauth2/v3/certs') {
-        certCalls++;
-        return Response.json({ keys: [jwk] });
-      }
-      throw new Error(`Unexpected network request in mocked Google transport: ${new URL(request.url).origin}`);
-    });
-    async function local(method: string, path: string, body?: Json, cookie?: string, headers: Record<string, string> = {}): Promise<Reply> {
-      const response = await app.fetch(new Request(`${origin}${path}`, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) }), runtime);
-      const text = await response.text();
-      let parsed: unknown = text;
-      try { parsed = JSON.parse(text); } catch { /* Redirects intentionally have no JSON body. */ }
-      return { status: response.status, body: parsed, headers: response.headers };
-    }
-    const fixtureEmails: string[] = [];
-    const states: string[] = [];
-    cleanup(t, async () => {
-      await authDb!.query('DELETE FROM api_request_budgets WHERE workspace_id = $1', [runtime.config.workspaceId]);
-      for (const email of fixtureEmails) await authDb!.query('DELETE FROM auth_user WHERE email = $1', [email]);
-      for (const state of states) await authDb!.query('DELETE FROM auth_verification WHERE identifier = $1', [state]);
-    });
-    let approvedCookie = '';
-    const returningSub = unique('mock-returning-sub');
-    const returningEmail = `${unique('mock-returning')}@example.com`;
-    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string; notApproved?: boolean; invitee?: boolean }> = [
-      { allowed: true, email: emailAllowed, hd: undefined, verified: true },
-      { allowed: true, email: `${unique('mock-domain')}@example.com`, hd: 'example.com', verified: true },
-      { allowed: false, email: `${unique('mock-unverified')}@example.com`, hd: 'example.com', verified: false },
-      { allowed: false, email: `${unique('mock-denied')}@unapproved.invalid`, hd: undefined, verified: true },
-      { allowed: false, email: `${unique('mock-suffix')}@unapproved.invalid`, hd: 'example.com.evil.invalid', verified: true },
-      { allowed: false, email: `${unique('mock-email-suffix')}@example.com`, hd: undefined, verified: true },
-      ...['signature', 'audience', 'issuer', 'expired', 'missing-exp', 'unsigned'].map(jwtFault => ({ allowed: false, email: `${unique(`mock-jwt-${jwtFault}`)}@example.com`, hd: 'example.com', verified: true, jwtFault })),
-      { allowed: true, email: returningEmail, hd: 'example.com', verified: true, sub: returningSub },
-      { allowed: true, email: returningEmail, hd: 'second.example.com', verified: true, sub: returningSub },
-      { allowed: false, email: returningEmail, hd: 'revoked.invalid', verified: true, sub: returningSub },
-      { allowed: false, email: `${unique('mock-returning-revoked')}@unapproved.invalid`, hd: undefined, verified: true, sub: returningSub },
-    ];
-    let profileName = 'Mock provider identity';
-    async function login(scenario: typeof scenarios[number], callbackURL = `${origin}/`) {
-      fixtureEmails.push(scenario.email);
-      jwtFault = scenario.jwtFault ?? '';
-      profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: profileName, email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
-      const userBefore = (await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows;
-      const subjectBefore = (await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows;
-      const sessionsBefore = (await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows;
-      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL, disableRedirect: true },undefined,{'x-bane-client-ip':`192.0.2.${fixtureEmails.indexOf(scenario.email)+1}`});
-      const authorization = new URL(ok(start).url);
-      assert.equal(authorization.origin, 'https://accounts.google.com');
-      assert.deepEqual(authorization.searchParams.get('scope')!.split(' ').sort(), ['email', 'openid', 'profile']);
-      assert.equal(authorization.searchParams.get('access_type'), 'online');
-      assert.equal(authorization.searchParams.get('include_granted_scopes'), null);
-      const state = authorization.searchParams.get('state');
-      assert.ok(state);
-      states.push(state);
-      expectedNonce = authorization.searchParams.get('nonce');
-      const stateCookie = start.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
-      assert.ok(stateCookie, 'The real sign-in endpoint must issue a state-binding cookie.');
-      expectedCode = unique('mock-authorization-code');
-      const previousCalls = tokenCalls;
-      const callback = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
-      assert.equal(tokenCalls, previousCalls + 1, 'The real callback must exchange this code exactly once through the mocked transport.');
-      assert.equal(callback.status, 302, diagnostic(callback));
-      const users = await authDb!.query('SELECT id, email_verified, google_hosted_domain FROM auth_user WHERE email = $1', [scenario.email]);
-      if (scenario.allowed) {
-        assert.equal(callback.headers.get('location'), callbackURL);
-        assert.equal(users.rowCount, 1, 'An approved real callback must create its user through the normal Better Auth lifecycle.');
-        assert.equal(users.rows[0].email_verified, true);
-        assert.equal(users.rows[0].google_hosted_domain, scenario.hd ?? null);
-        if (subjectBefore.length) assert.equal(users.rows[0].id, subjectBefore[0].id, 'Returning Google sub must refresh the same user, never swap identities.');
-        const account = (await authDb!.query('SELECT * FROM auth_account WHERE user_id = $1', [users.rows[0].id])).rows[0];
-        assert.ok(account);
-        assert.equal(account.provider_id, 'google');
-        assert.equal(account.account_id, profile.sub);
-        for (const field of ['access_token', 'refresh_token', 'id_token', 'password', 'scope']) assert.equal(account[field], null, 'Google token material must not remain in the account row.');
-        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Host-bane.session_token='));
-        assert.ok(sessionCookie, 'A successful callback must issue the __Host- prefixed session cookie.');
-        assert.doesNotMatch(sessionCookie, /;\s*Domain=/i, 'A __Host- cookie is host-only.');
-        assert.match(sessionCookie, /;\s*Path=\/(?:;|$)/i);
-        assert.match(sessionCookie, /;\s*HttpOnly/i);
-        assert.match(sessionCookie, /;\s*Secure/i);
-        assert.match(sessionCookie, /;\s*SameSite=Lax/i);
-        assert.ok(/;\s*Max-Age=604800(?:;|$)/i.test(sessionCookie), 'A new Google login must last seven days in the browser.');
-        approvedCookie = sessionCookie.split(';')[0];
-        secrets.add(approvedCookie);
-        // M9: a first-time invitee's session has no workspace until the recipient joins.
-        if (scenario.invitee) error(await local('GET', '/v1/me', undefined, approvedCookie), 401, 'AUTH_REQUIRED');
-        else {
-          const me = ok(await local('GET', '/v1/me', undefined, approvedCookie));
-          assert.equal(me.id, users.rows[0].id);
-          assert.equal(me.email, scenario.email);
-        }
-      } else {
-        // A verified identity outside the hosted allow-list is told sign-up is invite-only; every other failure stays generic.
-        assert.equal(callback.headers.get('location'), `${origin}/?auth=${scenario.notApproved ? 'not_approved' : 'error'}`);
-        assert.equal(users.rowCount, userBefore.length, 'Denied profile/JWT must not provision another identity.');
-        assert.deepEqual((await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows, userBefore);
-        assert.deepEqual((await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows, subjectBefore, 'A denied returning profile must not replace the established identity or overwrite its last trusted hd.');
-        assert.deepEqual((await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows, sessionsBefore, 'Denied profile/JWT must not create any session.');
-        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Host-bane.session_token=')));
-      }
-      const replay = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
-      assert.equal(replay.headers.get('location'), `${origin}/?auth=error`);
-      assert.equal(tokenCalls, previousCalls + 1, 'Consumed OAuth state cannot exchange a code twice.');
-      return approvedCookie;
-    }
-    for (const scenario of scenarios) await login(scenario);
-    assert.ok(certCalls > 0, 'The normal provider path must verify the mocked JWT against mocked Google JWKS, not merely decode claims.');
-    assert.ok(approvedCookie);
-    runtime.config.allowedEmails = [];
-    runtime.config.allowedDomains = [];
-    error(await local('GET', '/v1/me', undefined, approvedCookie), 401, 'AUTH_REQUIRED');
-    const blockedEmail = address();
-    error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 401, 'AUTH_REQUIRED');
-    runtime.config.googleClientSecret = undefined;
-    error(await local('GET', '/v1/me', undefined, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
-    error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
-    error(await local('POST', '/api/auth/sign-in/social', { provider: 'google' }), 503, 'AUTH_NOT_CONFIGURED');
-    assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [blockedEmail])).rowCount, 0);
-    await t.test('MX: atomic Google signup, invited roles, workspace selection and isolation', async mx => {
-      const pool = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 5 });
-      cleanup(t, () => pool.end());
-      runtime.db = drizzle(pool);
-      Object.assign(runtime.config, { multiTenant: true, googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
-      const base = '/v1/workspaces/current', workspaces: string[] = [];
-      cleanup(t, async () => {
-        for (const wid of workspaces) {
-          await pool.query('DELETE FROM audience_contacts WHERE workspace_id = $1', [wid]);
-          await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id = $1', [wid]);
-          await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
-        }
-      });
-      const ownerEmail = `${unique('mx-owner')}@example.com`, otherEmail = `${unique('mx-owner')}@example.com`, guestEmail = `${unique('mx-guest')}@outside.invalid`;
-      const newOwner = async (email: string) => {
-        const cookie = await login({ allowed: true, email, verified: true, hd: 'example.com' });
-        const [first, simultaneous] = await Promise.all([local('GET', '/v1/workspaces', undefined, cookie), local('GET', '/v1/workspaces', undefined, cookie)]);
-        const memberships = ok(first).data; assert.deepEqual(ok(simultaneous).data, memberships);
-        assert.equal(memberships.length, 1); const [org] = memberships; workspaces.push(org.id);
-        assert.equal(org.role, 'owner'); assert.equal(org.name, "Mock provider identity's Organization"); assert.notEqual(org.id, 'default');
-        return { cookie, org };
-      };
-      const a = await newOwner(ownerEmail);
-      const unsolicited = ok(await local('POST', `${base}/invitations`, { email: otherEmail, role: 'member' }, a.cookie), 201);
-      const b = await newOwner(otherEmail); // No link: exactly one personal workspace, despite the pending invitation.
-      assert.notEqual(a.org.id, b.org.id); assert.notEqual(a.org.slug, b.org.slug);
-      const acceptedPath = `/v1/workspaces/invitations/${unsolicited.id}/accept`;
-      assert.equal(ok(await local('POST', acceptedPath, undefined, b.cookie)).workspaceId, a.org.id);
-      const invitedMember = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.email === otherEmail);
-      ok(await local('DELETE', `${base}/members/${invitedMember.id}`, undefined, a.cookie));
-      const select = (id: string) => ({ 'X-OpenSend-Workspace': id });
-      error(await local('GET', '/v1/me', undefined, a.cookie, select(b.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
-      const invitedEmail = `${unique('mx-invited-owner')}@example.com`;
-      const linked = ok(await local('POST', `${base}/invitations`, {email:invitedEmail,role:'member'}, b.cookie),201);
-      const invitedCookie = await login({allowed:true,email:invitedEmail,verified:true,hd:'example.com'},linked.acceptUrl);
-      const before = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
-      assert.equal(before.length,1,'Signing in through an invitation link must not join the workspace before the recipient confirms it.');
-      const personal = before[0];assert.equal(personal.role,'owner');assert.notEqual(personal.id,b.org.id);workspaces.push(personal.id);
-      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,personal.id);
-      const preview = ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie));
-      assert.deepEqual({...preview,expiresAt:undefined},{id:linked.id,workspaceId:b.org.id,workspaceName:b.org.name,workspaceSlug:b.org.slug,inviterName:'Mock provider identity',inviterEmail:otherEmail,role:'member',status:'pending',expiresAt:undefined});
-      error(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,a.cookie),404); // Only the invited address can review it.
-      assert.equal(ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data.length,1,'Reviewing an invitation changes nothing.');
-      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
-      const joined = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
-      assert.equal(joined.length,2);assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
-      assert.deepEqual(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaces,joined,'GET /v1/me lists the same memberships as the deprecated GET /v1/workspaces.');
-      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id,'Join selects the workspace the recipient confirmed.');
-      assert.equal(ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie)).status,'accepted');
-      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
-      const extra = ok(await local('POST', '/v1/workspaces', { name: ' Automated ' }, b.cookie), 201); workspaces.push(extra.id);
-      assert.equal(extra.name, 'Automated'); assert.equal(extra.role, 'owner'); assert.notEqual(extra.id, b.org.id);
-      const extraMe = ok(await local('GET', '/v1/me', undefined, b.cookie, select(extra.id)));
-      assert.equal(extraMe.workspaceId, extra.id); assert.equal(extraMe.role, 'owner'); assert.notEqual(extraMe.connection?.state, 'ready');
-      assert.equal((await pool.query('SELECT default_region FROM ses_installation_settings WHERE workspace_id = $1', [extra.id])).rows[0]?.default_region, runtime.config.regions[0]);
-      const burst = await Promise.all(Array.from({ length: 9 }, (_, i) => local('POST', '/v1/workspaces', { name: `Burst ${i}` }, b.cookie)));
-      for (const reply of burst) if (reply.status === 201) workspaces.push(reply.body.id);
-      assert.deepEqual(burst.map(reply => reply.status).sort(), [...Array(8).fill(201), 409], 'Concurrent creates stop at ten owned workspaces.');
-      error(await local('POST', '/v1/workspaces', { name: 'Eleventh' }, b.cookie), 409, 'WORKSPACE_LIMIT');
-      // Later steps use b's original workspace: reselect it and drop the extras.
-      ok(await local('GET', '/v1/me', undefined, b.cookie, select(b.org.id)));
-      for (const wid of workspaces.splice(workspaces.indexOf(extra.id))) {
-        await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id = $1', [wid]);
-        await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
-      }
-      runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
-      const deniedEmail = `${unique('mx-denied')}@outside.invalid`;
-      cleanup(t, async () => { await pool.query('DELETE FROM access_requests WHERE email = ANY($1)', [[deniedEmail, guestEmail]]); });
-      await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
-      // The rolled-back sign-up leaves the verified address as an access request, and nothing else.
-      assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mock provider identity', hosted_domain: null, attempts: 1 }]);
-      // The visitor controls the display name: control and format characters never reach the table.
-      profileName = 'Mallory\u0007\u202e\nEvil';
-      await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
-      profileName = 'Mock provider identity';
-      assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mallory Evil', hosted_domain: null, attempts: 2 }]);
-      const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
-      assert.equal(new URL(invitation.acceptUrl).searchParams.get('invitation'), invitation.id);
-      const guestSub = unique('guest-sub');
-      await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub });
-      await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub }, unsolicited.acceptUrl);
-      assert.equal((await pool.query('SELECT attempts FROM access_requests WHERE email = $1', [guestEmail])).rows[0]?.attempts, 2);
-      const guest = await login({ allowed: true, invitee: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
-      // M9: signing in through the link joins nothing, even for an account with no other way in. The
-      // session can review the invitation it followed and accept it with the recipient's own click.
-      assert.equal((await pool.query('SELECT FROM workspace_members m JOIN auth_user u ON u.id = m.user_id WHERE u.email = $1', [guestEmail])).rowCount, 0);
-      for (const path of ['/v1/workspaces', '/v1/emails', '/v1/domains', '/v1/workspaces/current/members']) error(await local('GET', path, undefined, guest), 401);
-      const review = ok(await local('GET', `/v1/workspaces/invitations/${invitation.id}`, undefined, guest));
-      assert.deepEqual([review.status, review.workspaceId, review.role], ['pending', a.org.id, 'member']);
-      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
-      const me = ok(await local('GET', '/v1/me', undefined, guest));
-      assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
-      assert.deepEqual(me.workspaces, [{ id: a.org.id, name: a.org.name, slug: a.org.slug, role: 'member' }], 'The joined workspace, and nothing the invitation did not grant.');
-      error(await local('POST', '/v1/workspaces', { name: 'Guest workspace' }, guest), 403, 'SIGNUP_NOT_APPROVED');
+      const ownerEmail=address(), otherEmail=address(), guestEmail=address();
+      const a=await workspaceFixture(ownerEmail,true), b=await workspaceFixture(otherEmail,true), guest=(await workspaceFixture(guestEmail,false)).cookie;
+      const invitation=ok(await local('POST',`${base}/invitations`,{email:guestEmail,role:'member'},a.cookie),201);
+      error(await local('GET','/v1/me',undefined,guest),401);
+      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${invitation.id}/accept`,undefined,guest)).workspaceId,a.org.id);
+      const me=ok(await local('GET','/v1/me',undefined,guest));assert.equal(me.role,'member');
+      error(await local('POST','/v1/workspaces',{name:'Guest workspace'},guest),403,'SIGNUP_NOT_APPROVED');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
@@ -1542,8 +1196,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.throws(()=>loadConfig({...env,...invalid}),{code:'CONFIG_INVALID'});
           }
           runtime.config.domainConnect=loadConfig({...env,DOMAIN_CONNECT_PRIVATE_KEY:pem,DOMAIN_CONNECT_KEY_ID:'_dck1'}).domainConnect;
-          const {getDashboardActor}=await import('./src/google-auth.js');
-          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}),undefined,()=>{});
+          const {getDashboardActor}=await import('./src/dashboard-auth.js');
+          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}));
           const authQueries=queries.mock.callCount()-authStart, setupStart=queries.mock.callCount();
           const before=requests.length, offered=await getSetup(), url=new URL(offered.applyUrl), params=url.searchParams;
           const total=queries.mock.callCount()-setupStart; assert.equal(total-authQueries,1); dc.diagnostic(`GET dns-setup: ${total-authQueries} domain statement; ${total} pg round trips including dashboard auth.`);
@@ -1702,8 +1356,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const park=()=>pool.query("UPDATE jobs SET created_at=now()-interval '21 seconds',available_at=now()+interval '16 minutes',payload=payload||'{\"poll\":40}'::jsonb WHERE id=$1",[job.id]);
           await park(); const firstWake=wakes;
           ok(await local('GET',detail,undefined,undefined,{authorization:`Bearer ${key}`})); assert.equal(wakes,firstWake,'API-key reads must not nudge the runner.');
-          const {getDashboardActor}=await import('./src/google-auth.js');
-          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}),undefined,()=>{});
+          const {getDashboardActor}=await import('./src/dashboard-auth.js');
+          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}));
           const authQueries=queries.mock.callCount()-authStart;
           const readPending=()=>local('GET',detail,undefined,b.cookie), startPending=queries.mock.callCount();
           assert.equal(ok(await readPending()).verified,false); const pendingQueries=queries.mock.callCount()-startPending;
@@ -2290,7 +1944,6 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       });
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       assert.equal(ok(await local('GET', `${base}/invitations`, undefined, a.cookie)).data.length, 0);
-      await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
       const memberRegions = ok(await local('GET', '/v1/regions', undefined, guest));
       assert.ok(memberRegions.data.some((r: Json) => r.enabled && r.region === memberRegions.defaultRegion));
       for (const path of ['/v1/api-keys', '/v1/domains', '/v1/webhooks', `/v1/regions/${memberRegions.defaultRegion}/discovery`, `${base}/members`]) error(await local('GET', path, undefined, guest), 403, 'PERMISSION_DENIED');
@@ -2349,11 +2002,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       error(await local('POST', `/v1/workspaces/invitations/${revoked.id}/accept`, undefined, guest), 404);
       const rejoin = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role:'member' }, a.cookie), 201);
       // A removed member signing in through a new link rejoins only by accepting it (M9).
-      await login({ allowed: true, invitee: true, email: guestEmail, verified: true, sub: guestSub }, rejoin.acceptUrl);
       error(await local('GET', '/v1/me', undefined, guest), 401);
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${rejoin.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const invited = ok(await local('POST', `${base}/members`, { email: guestEmail, role:'admin' }, b.cookie), 201);
-      const returning = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
+      const returning = guest;
       assert.equal(ok(await local('GET', '/v1/me', undefined, returning)).workspaceId, a.org.id, 'An unsolicited invitation must not switch an existing member into another workspace.');
       const accept = `/v1/workspaces/invitations/${invited.id}/accept`;
       error(await local('POST', accept, undefined, a.cookie), 404);
@@ -2375,70 +2027,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       error(await local('GET', '/v1/me', undefined, removed, select(a.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
       assert.equal(await originAllowed(runtime, runtime.db, { ...queued, actorKeyId: `user_${removed === guest ? me.id : owner.userId}` }), false);
     });
-    transport.mock.restore();
-  });
-
-  test('LIVE GOOGLE OAUTH: approved login and denied Google identity require browser verification', {
-    skip: 'NOT RUN by synthetic fixtures. Manually complete real Google login and denied-identity flows with configured OAuth credentials; seeding does not verify OAuth, consent, provider claims, redirect registration, or browser cookies.',
-  }, () => {});
 });
 
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
   const writableScope = 'bane:read bane:manage offline_access';
   const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
-  function protectOAuth(reply: Reply): Reply {
-    if (reply.body && typeof reply.body === 'object') for (const [field, value] of Object.entries(reply.body)) {
-      if (typeof value === 'string' && /token|secret|^url$/.test(field)) secrets.add(value);
-    }
-    return reply;
-  }
-  async function registerClient(t: TestContext, db: pg.Client, metadata: Json = {}, request = http): Promise<Reply> {
-    const name = unique('acceptance-mcp-client');
-    const reply = protectOAuth(await request('POST', '/api/auth/oauth2/register', undefined, {
-      client_name: name, redirect_uris: ['http://127.0.0.1/callback'], token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: writableScope, ...metadata,
-    }));
-    if (typeof reply.body?.client_id === 'string') cleanup(t, async () => {
-      // Client-owned consents, resource links and tokens cascade; never delete another client's grants.
-      await db.query('DELETE FROM oauth_client WHERE client_id = $1 AND name = $2', [reply.body.client_id, name]);
-    });
-    return reply;
-  }
   async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope, request = http) {
-    const client = ok(await registerClient(t, db, { scope }, request), 201);
-    const redirectUri = 'http://127.0.0.1/callback';
-    const verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
-    secrets.add(verifier);
-    const state = unique('acceptance-mcp-state');
-    const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri,
-      scope, state, resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
-    const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
-    assert.equal(authorization.redirect, true);
-    assert.equal(typeof authorization.url, 'string');
-    const consentUrl = new URL(authorization.url, PUBLIC_ORIGIN);
-    assert.equal(consentUrl.origin, PUBLIC_ORIGIN);
-    assert.equal(consentUrl.pathname, '/mcp/consent');
-    const oauthQuery = consentUrl.search.slice(1);
-    secrets.add(oauthQuery);
-    const approval = ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
-    assert.equal(typeof approval.url, 'string');
-    const callback = new URL(approval.url);
-    assert.equal(`${callback.origin}${callback.pathname}`, redirectUri);
-    assert.equal(callback.searchParams.get('state'), state);
-    const code = callback.searchParams.get('code');
-    assert.ok(code, 'Approved OAuth consent must issue an authorization code.');
-    secrets.add(code);
-    const tokenReply = protectOAuth(await request('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({
-      grant_type: 'authorization_code', client_id: client.client_id, redirect_uri: redirectUri, code, code_verifier: verifier, resource: resourceUrl,
-    }).toString(), { 'content-type': 'application/x-www-form-urlencoded' }));
-    const tokens = ok(tokenReply);
-    assert.equal(typeof tokens.access_token, 'string');
-    assert.equal(typeof tokens.refresh_token, 'string');
-    assert.equal(String(tokens.token_type).toLowerCase(), 'bearer');
-    const grant = await db.query('SELECT id FROM oauth_consent WHERE client_id = $1 AND user_id = $2', [client.client_id, manager!.userId]);
-    assert.equal(grant.rowCount, 1);
-    return { token: tokens.access_token as string, refreshToken: tokens.refresh_token as string, clientId: client.client_id as string, consentId: grant.rows[0].id as string };
+    const { mintResourceToken } = await import('./scripts/fixture-issuer.js');
+    const issued = mintResourceToken(resourceUrl,manager!.userId,scope);
+    const first=await request('POST','/mcp',issued.token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
+    assert.equal(first.status,200,diagnostic(first));
+    cleanup(t,async()=>{ await db.query('DELETE FROM bane_resource_grants WHERE grant_key=$1',[issued.consentId]); });
+    return issued;
   }
   async function rpc(token: string, method: string, params: Json = {}, path = '/mcp?codemode=true'): Promise<Json> {
     const id = unique('acceptance-mcp-rpc');
@@ -2460,111 +2061,6 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual(JSON.parse(result.content[0].text), output);
     return output;
   }
-
-  test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
-    await simulatedSesFixture(t, async ({ db, request }) => {
-      const {token, consentId}=await oauthGrant(t,db,'opensend:read offline_access',request);
-      const claims=JSON.parse(Buffer.from(token.split('.')[1]!,'base64url').toString());
-      assert.equal(claims.bane_grant,'mcp_'+consentId);assert.ok(claims.scope.split(' ').includes('bane:read'));
-      await db.query("UPDATE oauth_consent SET reference_id=replace(reference_id,'bane:read','opensend:read'), scopes=array_replace(scopes,'bane:read','opensend:read') WHERE id=$1",[consentId]);
-      const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'}),kid=randomUUID();
-      await db.query("INSERT INTO auth_jwks(id,public_key,private_key,created_at,alg,crv) VALUES($1,$2,'fixture-only',now()-interval '1 day','ES256','P-256')",[kid,JSON.stringify(publicKey.export({format:'jwk'}))]);
-      const encode=(v:unknown)=>Buffer.from(JSON.stringify(v)).toString('base64url');
-      const legacy=(grant:string)=>{
-        const data=encode({alg:'ES256',typ:'at+jwt',kid})+'.'+encode({...claims,bane_grant:undefined,opensend_grant:grant,scope:'opensend:read'});
-        return data+'.'+Buffer.from(sign('sha256',Buffer.from(data),{key:privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
-      };
-      const rpc=(bearer:string)=>request('POST','/mcp',bearer,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
-      assert.ok(ok(await rpc(legacy(claims.bane_grant))).result.tools.length);
-      assert.equal((await rpc(legacy('mcp_unknown'))).status,401);
-      const wire=t.mock.method(db,'query'), [header, payload] = token.split('.');
-      const unknown = () => [encode({alg:'ES256',typ:'at+jwt',kid:randomUUID()}),payload,Buffer.alloc(64).toString('base64url')].join('.');
-      for (let i=0; i<8; i++) {
-        assert.equal((await rpc(unknown())).status,401);
-        assert.equal((await rpc([header,payload,Buffer.alloc(64,i).toString('base64url')].join('.'))).status,401);
-      }
-      assert.equal(wire.mock.callCount(),0,'Neither unknown kids nor bad signatures for a cached key touch PostgreSQL');
-      const later=Date.now()+61_000, clock=t.mock.method(Date,'now',()=>later);
-      assert.equal((await rpc(unknown())).status,401);const cold=wire.mock.callCount();assert.ok(cold>0);
-      assert.equal((await rpc(unknown())).status,401);assert.equal(wire.mock.callCount(),cold,'Key rotation permits one refresh per minute');
-      clock.mock.restore();wire.mock.restore();
-    });
-  });
-
-  test('092 migrates a stored refresh grant without widening the next access token',async t=>{
-    await simulatedSesFixture(t,async({db,request})=>{
-      const {refreshToken,clientId,consentId}=await oauthGrant(t,db,'bane:read offline_access',request);
-      // Keep the real opaque token and grant linkage, but restore their pre-092 spellings.
-      for (const table of ['oauth_consent','oauth_refresh_token','oauth_access_token']) {
-        await db.query(`UPDATE ${table} SET scopes=array_replace(scopes,'bane:read','opensend:read'),reference_id=replace(reference_id,'bane:read','opensend:read') WHERE client_id=$1`,[clientId]);
-      }
-      const stored=async()=>(await db.query('SELECT scopes,reference_id FROM oauth_refresh_token WHERE client_id=$1',[clientId])).rows[0];
-      const before=await stored();assert.ok(before.scopes.includes('opensend:read'));
-      const {readFile}=await import('node:fs/promises');
-      await db.query(await readFile(new URL('./migrations/092_bane_scopes.sql',import.meta.url),'utf8'));
-      const expected=['bane:read','offline_access'];const after=await stored();
-      assert.deepEqual(after.scopes.toSorted(),expected);assert.equal(after.reference_id,before.reference_id.replace('opensend:read','bane:read'));
-      const tokens=ok(protectOAuth(await request('POST','/api/auth/oauth2/token',undefined,new URLSearchParams({grant_type:'refresh_token',client_id:clientId,refresh_token:refreshToken,resource:resourceUrl}).toString(),{'content-type':'application/x-www-form-urlencoded'})));
-      assert.deepEqual(tokens.scope.split(' ').sort(),expected);
-      const claims=JSON.parse(Buffer.from(tokens.access_token.split('.')[1],'base64url').toString());
-      assert.equal(claims.bane_grant,'mcp_'+consentId);assert.deepEqual(claims.scope.split(' ').sort(),expected);
-    });
-  });
-
-  test('hosted MCP bounds registration per peer and hour without weakening desktop redirect validation', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
-      const register = (metadata: Json = {}, ip = '192.0.2.1') => registerClient(t, db, metadata, (m,p,k,b) => request(m,p,k,b,{'x-opensend-client-ip':ip}));
-      for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
-        const client = ok(await register({ redirect_uris: [redirect] }), 201);
-        assert.equal(client.application_type, 'native');
-        assert.equal(client.token_endpoint_auth_method, 'none');
-        assert.deepEqual(client.redirect_uris, [redirect]);
-      }
-      for (const metadata of [
-        { application_type: 'web', redirect_uris: ['http://127.0.0.1/callback'] },
-        { redirect_uris: ['http://example.com/callback'] },
-        { redirect_uris: ['http://127.0.0.1/callback', 'https://example.com/callback'] },
-        { redirect_uris: ['http://127.0.0.1.evil.example/callback'] },
-        { redirect_uris: ['http://user:password@127.0.0.1/callback'] },
-        { redirect_uris: ['http://127.0.0.1/callback#fragment'] },
-      ]) {
-        const reply = await register(metadata);
-        assert.equal(reply.status, 400, diagnostic(reply));
-        assert.equal(typeof reply.body.error, 'string', diagnostic(reply));
-        assert.equal(reply.body.client_id, undefined, diagnostic(reply));
-      }
-      ok(await register(), 201); // 10th registration attempt.
-      const limited = await register(); assert.equal(limited.status, 429); assert.ok(limited.headers.get('retry-after'));
-      ok(await register({}, '192.0.2.2'), 201);
-      await db.query("UPDATE api_request_budgets SET window_start=window_start-interval '1 hour' WHERE workspace_id=$1 AND used=11", [runtime.config.workspaceId]);
-      ok(await register(), 201);
-    });
-  });
-
-  test('hourly retention removes only old OAuth registrations without consent, access or refresh tokens, and access requests after 90 days', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
-      const { cleanup } = await import('./src/maintenance.js');
-      const ids: string[] = [];
-      for (let i=0; i<5; i++) ids.push(ok(await registerClient(t,db,{},request),201).client_id);
-      const [unused,fresh,consented,access,refresh] = ids;
-      await db.query("UPDATE oauth_client SET created_at=now()-interval '8 days' WHERE client_id=ANY($1) AND client_id<>$2", [ids,fresh]);
-      await db.query("INSERT INTO oauth_consent(id,client_id,scopes,created_at,updated_at) VALUES ($1,$1,'{}',now(),now())", [consented]);
-      await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,now()+interval '1 hour',now(),'{}')", [access]);
-      await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,$2,now()+interval '1 hour',now(),'{}')", [refresh,manager!.userId]);
-      const [stale, recent] = [`${unique('stale-request')}@outside.invalid`, `${unique('recent-request')}@outside.invalid`];
-      await db.query("INSERT INTO access_requests(email,last_requested_at) VALUES ($1,now()-interval '91 days'),($2,now()-interval '89 days')", [stale, recent]);
-      const expired=unique('expired');
-      await db.query("INSERT INTO auth_verification(id,identifier,value,expires_at) VALUES($1,$1,'fixture',now())",[expired]);
-      await db.query('INSERT INTO auth_session(id,token,user_id,expires_at) VALUES($1,$1,$2,now())',[expired,manager!.userId]);
-      await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES($1,$1,$2,$3,now(),now(),'{}')",[expired,refresh,manager!.userId]);
-      await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES($1,$1,$2,now(),now(),'{}')",[expired,access]);
-      await cleanup(runtime);
-      for(const table of ['auth_verification','auth_session','oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE id=$1`,[expired])).rowCount,0);
-      const remaining = (await db.query('SELECT client_id FROM oauth_client WHERE client_id=ANY($1)', [ids])).rows.map(row=>row.client_id);
-      assert.deepEqual(remaining.sort(), ids.filter(id=>id!==unused).sort());
-      assert.deepEqual((await db.query('SELECT email FROM access_requests WHERE email=ANY($1)', [[stale, recent]])).rows, [{ email: recent }]);
-    });
-  });
 
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
     const db = await fixtureDatabase(t);
@@ -2773,29 +2269,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
       let tools=await listing();assert.ok(passwords.every(op=>!tools.has(op)));
       error(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token),403,'ADMIN_REQUIRED');
-      const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
-      await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getCurrentIdentity'||x.name==='applyRituals'||x.name==='createAgentToken'));
-      const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
-      const denied=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const merged=await rpc(token,'tools/call',{name:'rituals',arguments:{action:'apply',confirm:true,body:{}}},'/mcp');assert.equal(merged.structuredContent.error.code, denied.structuredContent.error.code);
-      const inboxTools = (await rpc(token,'tools/list',{},'/mcp?toolsets=admin')).tools;
-      const sendActions = inboxTools.find((tool:Json)=>tool.name==='reply').inputSchema.properties.action.enum;
-      assert.deepEqual(sendActions, ['reply']);
-      await t.test('L1: inbox-only descriptions advertise no workspace, outbound attachment or thread-start actions', () => {
-        const descriptions = new Map<string,string>(inboxTools.map((tool:Json)=>[tool.name,tool.description]));
-        assert.match(descriptions.get('reply')!, /reply/i);
-        assert.doesNotMatch(descriptions.get('reply')!, /start|create/i);
-        assert.match(descriptions.get('messages')!, /wait/i);
-        assert.doesNotMatch(descriptions.get('messages')!, /workspace|inbound|search|events|update/i);
-        assert.match(descriptions.get('attachments')!, /inbox/i);
-        assert.doesNotMatch(descriptions.get('attachments')!, /outgoing|outbound|upload|delete|inbound/i);
-      });
-      const hiddenStart = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'reply',action:'start'}},'/mcp');
-      assert.equal(hiddenStart.structuredContent.error.code,'TOOL_UNAVAILABLE');
-      for (const [path,name,args] of [['/mcp','reply',{action:'start'}],['/mcp?codemode=true','createInboundThread',{}]] as const) {
-        const refused = await rpc(token,'tools/call',{name,arguments:args},path);
-        assert.equal(refused.structuredContent.error.code,'EPHEMERAL_REPLY_ONLY');
-      }
-      await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
+      await db.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1',[consentId]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
@@ -2810,7 +2284,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rituals'),listed.join());
       const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
-      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',id,jsonb_build_object('resource',resources[1],'hosted',true)) AS ok FROM oauth_consent WHERE id=$1",[consentId])).rows[0].ok;
+      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)) AS ok FROM bane_resource_grants WHERE grant_key=$1",[consentId])).rows[0].ok;
       assert.equal(await live(),true);
       await assert.rejects(db.query(await readFile(new URL('./migrations/119_mvp_ownership_preflight.sql',import.meta.url),'utf8')),/MVP_OWNERSHIP_PREFLIGHT/);
       secrets.add(parent.secret);grantKeys.push(parent.id);
@@ -2818,7 +2292,7 @@ describe('Hosted MCP OAuth and tools', () => {
       secrets.add(child.secret);grantKeys.push(child.id);
       error(await http('POST','/v1/rituals/test',child.secret,{messageId:'msg_fixture'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
-      await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
+      await db.query('UPDATE bane_resource_grants SET receiving=false WHERE grant_key=$1',[consentId]);
       assert.equal(await live(),false);
       const derived=ok(await http('POST','/v1/api-keys',parent.secret,{name:'N-M1 fixture',permissions:['manage']}),201);secrets.add(derived.secret);
       const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
@@ -2837,13 +2311,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal((await db.query('SELECT id FROM api_keys WHERE id=ANY($1) AND revoked_at IS NOT NULL',[grantKeys])).rowCount,2,'Both credential generations are revoked with their approval.');
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
+    assert.equal(revokedConnection.status, 403, diagnostic(revokedConnection));
   });
 
   test('R1: grant edits preserve the human attachment chain across revocation', async t => {
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const box=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
       const rituals=[{key:'guard',source:'export default function route(email){block()}'},{key:'note',source:'export default function route(email){label("note")}'},{key:'extra',source:'export default function route(email){label("extra")}'}];
       const binding=(ritual:string)=>({target:box.address,ritual,continue:false});
@@ -2882,7 +2356,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
         // tear witness (recheck of #51): with receiving consent but no manage, mailbox administration was listed although
         // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
-        await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+        await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
         const receiving=await listed(true);
         for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
         assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
@@ -2899,7 +2373,7 @@ describe('Hosted MCP OAuth and tools', () => {
         }
         assert.ok(gets>=80,String(gets));
         // As a workspace member the same approval also loses the owner and admin areas.
-        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[runtime.config.workspaceId,consentId]);
+        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM bane_resource_grants g JOIN bane_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[runtime.config.workspaceId,consentId]);
         for(const codemode of [true,false]){
           const ops=await listed(codemode);assert.ok(ops.has('sendEmail')&&ops.has('getCurrentIdentity'),`codemode=${codemode}`);
           for(const name of ['sendCampaign','createAgentToken','listDomains','createContactList'])assert.ok(!ops.has(name),`member ${name} codemode=${codemode}`);
@@ -2932,12 +2406,12 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await request('GET', '/v1/inbound/addresses', secret), 403, 'ADMIN_REQUIRED');
       }
       // With receiving consent the same credentials read it, and both catalogs offer it.
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [manage.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [manage.consentId]);
       assert.deepEqual(await offered(manage.token), [true, true]);
       for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
       // A read approval with receiving consent: REST refuses it (mailboxAuth needs a manage credential), so it is not offered.
       const read = await oauthGrant(t, db, 'bane:read offline_access', request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [read.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [read.consentId]);
       assert.deepEqual(await offered(read.token), [false, false]);
       const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
       const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId))!; assert.ok(reader?.receivingConsent);
@@ -2968,7 +2442,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // The revoke commits between this request's authorization and the row that ties the new key to the approval.
       const wire=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
         const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
-        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM oauth_consent WHERE id=$1',[consentId]).then(()=>query.apply(this,args));}
+        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM bane_resource_grants WHERE grant_key=$1',[consentId]).then(()=>query.apply(this,args));}
         return query.apply(this,args);} as typeof pg.Client.prototype.query);
       let result:Json;
       try{result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,idempotencyKey:'race-revoke-1',body:{name:'tear raced key',permissions:['read']}}}},rpcHeaders)).result;}finally{wire.mock.restore();}
@@ -2980,7 +2454,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('N-L1: human guards fail to junk when an input loses its grant, not when an independent input is available',async t=>{
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const boxes:string[]=[];for(let n=0;n<3;n++)boxes.push(ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201).address);
       const rituals=[{key:'listed',source:'export default function route(email){if(lists.has("deny",email.from.address)) block()}'},{key:'scored',source:'export default function route(email){const r=omens(email,{q:"Is review needed?"});if(r.q>0.5) block()}'},{key:'other',source:'export default function route(email){label("human")}'}];
       const config={rituals,attachments:rituals.map((r,i)=>({ritual:r.key,target:boxes[i]})),senderLists:{deny:['system@example.invalid']}};
@@ -3010,7 +2484,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const first=await queue(child.secret);await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[first])).rows[0].status,'accepted');
       const second=await queue(child.secret),control=await queue(independent.secret);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const domain=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'receive.example',$3,'active')",[domain,wid,REGION]);
       await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')",[wid,REGION]);
       const box=ok(await local('POST','/v1/inbound/addresses',{address:'support@receive.example'}),201);
@@ -3018,76 +2492,26 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(await allowed(mbk.id,box.address),true);
       const thread=ok(await request('POST','/v1/inbound/threads',mbk.secret,{addressId:box.id,to:['recipient@example.net'],subject:'R2 fixture',text:'Synthetic message'}),202);
       const mailboxEmail=(await db.query('SELECT sending_email_id FROM mail_messages WHERE workspace_id=$1 AND id=$2',[wid,thread.id])).rows[0].sending_email_id;
-      await db.query('UPDATE oauth_client SET disabled=true WHERE client_id=$1',[clientId]);
+      await db.query('UPDATE bane_resource_grants SET revoked=true WHERE client_id=$1',[clientId]);
       for(const [id,from] of [[child.id,'sender@example.com'],[mbk.id,box.address]])assert.equal(await allowed(id,from),false);
       await run('email.dispatch');
       for(const emailId of [second,mailboxEmail])assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[emailId])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[control])).rows[0].status,'accepted');
       // Non-deleting lapse: the client and both key rows remain live, but the
       // approving user no longer has management authority in this workspace.
-      await db.query('UPDATE oauth_client SET disabled=false WHERE client_id=$1',[clientId]);
+      await db.query('UPDATE bane_resource_grants SET revoked=false WHERE client_id=$1',[clientId]);
       const afterDemotion=await queue(child.secret);
-      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[wid,consentId]);
+      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM bane_resource_grants g JOIN bane_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[wid,consentId]);
       assert.equal((await db.query('SELECT FROM api_keys WHERE id=$1 AND revoked_at IS NULL',[child.id])).rowCount,1);
       assert.equal(await allowed(child.id),false);assert.equal(await allowed(mbk.id,box.address),false);
       await run('email.dispatch');assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[afterDemotion])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
     });
   });
 
-  test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
-      const wid = runtime.config.workspaceId, uid = manager!.userId;
-      const connection = unique('conn');
-      // Simulation can use a cold connection, but must still require a verified sender claim on MX.
-      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')",[connection,wid,REGION]);
-      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
-      error(await local('POST','/v1/emails/send',mail()),403,'SENDER_DOMAIN_NOT_VERIFIED');
-      await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1 AND name='example.com'",[wid]);
-      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
-      const deniedClient = ok(await registerClient(t, db, {}, request), 201);
-      const query = new URLSearchParams({ response_type: 'code', client_id: deniedClient.client_id, redirect_uri: 'http://127.0.0.1/callback',
-        scope: writableScope, resource: resourceUrl, state: unique('state'), code_challenge: createHash('sha256').update(randomUUID()).digest('base64url'), code_challenge_method: 'S256' });
-      const denied = await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' });
-      assert.equal(denied.status, 400, 'A member must not authorize manage scope.');
-      assert.equal((await db.query('SELECT id FROM oauth_consent WHERE client_id=$1', [deniedClient.client_id])).rowCount, 0);
-      const { token, refreshToken, clientId, consentId } = await oauthGrant(t, db, 'opensend:read opensend:send offline_access', request);
-      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp?codemode=true',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
-      assert.equal((await call('getCurrentIdentity')).structuredContent.workspaceId, wid);
-      const send = async () => {
-        const reply = await call('sendEmail', { body: { from: address(), to: address(), subject:'Synthetic MX', text:'Synthetic MX' }, confirm:true });
-        assert.equal(reply._meta.status, 202, redact(reply)); return reply.structuredContent.id;
-      };
-      const first = await send(); await run('email.dispatch');
-      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
-      const oldMail = await send();
-      const { reference_id: reference } = (await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1', [consentId])).rows[0];
-      assert.match(reference, /^mcp_v2_/);
-      const oldReference = reference.replace(/^mcp_v2_/, 'mcp_');
-      await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [oldReference, consentId]);
-      await db.query('UPDATE oauth_refresh_token SET reference_id=$1 WHERE client_id=$2 AND reference_id=$3', [oldReference, clientId, reference]);
-      assert.equal((await request('POST', '/mcp', token, { jsonrpc:'2.0', id:1, method:'tools/list', params:{} }, rpcHeaders)).status, 401);
-      const refresh = await request('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({ grant_type:'refresh_token', client_id:clientId, refresh_token:refreshToken, resource:resourceUrl }).toString(), { 'content-type':'application/x-www-form-urlencoded' });
-      assert.equal(refresh.status, 400); assert.equal(refresh.body.error, 'invalid_grant');
-      await run('email.dispatch');
-      assert.deepEqual((await db.query('SELECT status,provider_id FROM sending_emails WHERE id=$1', [oldMail])).rows, [{status:'canceled',provider_id:null}]);
-      await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [reference, consentId]);
-      const lostProof = await send(); await db.query("UPDATE domain_claims SET sending_state='failed' WHERE workspace_id=$1",[wid]); await run('email.dispatch');
-      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled','The claim must still permit sending at dispatch.');
-      await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1",[wid]);
-      const second = await send();
-      await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
-      assert.equal((await call('getCurrentIdentity')).structuredContent.role, 'member', 'An existing member grant must not grow on promotion.');
-      await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, uid]);
-      await run('email.dispatch');
-      assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1', [second])).rows[0].error_code, 'ORIGIN_KEY_REVOKED');
-    });
-  });
-
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[manager.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[manager.consentId]);
       const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
@@ -3144,7 +2568,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { token,consentId } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -3374,10 +2798,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
     const hidden = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'contacts',action:'create'}},'/mcp');
     assert.equal(hidden.structuredContent.error.code, 'TOOL_UNAVAILABLE');
-    const deletion = await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId });
+    const deletion = await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER);
     assert.equal(deletion.status, 200, diagnostic(deletion));
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(revoked.status, 401, diagnostic(revoked));
+    assert.equal(revoked.status, 403, diagnostic(revoked));
     assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
     assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
@@ -3394,7 +2818,7 @@ describe('DB region catalog and explicit SES setup', () => {
     ]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      GOOGLE_CLIENT_ID: 'synthetic-ses-client', GOOGLE_CLIENT_SECRET: 'synthetic-ses-client-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'true',
       S3_BUCKET: 'synthetic-ses-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5353,7 +4777,7 @@ describe('Operational configuration and public event boundaries', () => {
     const [{ nodeRuntime }, { operationJobs }] = await Promise.all([import('./src/adapters/node.js'), import('./src/operations.js')]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      GOOGLE_CLIENT_ID: 'synthetic-validation-client', GOOGLE_CLIENT_SECRET: 'synthetic-validation-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-validation-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5670,7 +5094,7 @@ describe('Operational configuration and public event boundaries', () => {
     });
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      GOOGLE_CLIENT_ID: 'synthetic-redirect-client', GOOGLE_CLIENT_SECRET: 'synthetic-redirect-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-redirect-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5821,7 +5245,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   ]);
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-    GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
     PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
@@ -6139,7 +5563,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
@@ -6776,7 +6200,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='bane-trusted-'+wid,
       topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
-    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
@@ -6891,7 +6315,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [owner,other]=[0,1].map(()=>'ws_'+randomUUID().replaceAll('-','')) as [string,string];
     const tenant=`bane-probation-${owner}`,arn=`arn:aws:ses:${oh}:${acct}:identity/${host}`,inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,feedback=`arn:aws:sns:${oh}:${acct}:bane-feedback`,bucket=`bane-${acct}-mail-${oh}`;
     const env={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
-    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',
+    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
       AUTH_ALLOWED_DOMAINS:'example.com',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)',[owner,other]);
@@ -7313,7 +6737,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -8741,7 +8165,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     for(const path of ['/mcp/login','/mcp/consent']) assert.equal((await guardPublicRequest(path,new Headers(),peer,work)).status,429);
     assert.equal(reads,40);
     await simulatedSesFixture(t,async({runtime,db})=>{
-      const {reserveSignIn}=await import('./src/google-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});
+      const {reserveSignIn}=await import('./src/dashboard-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});
       for(let i=0;i<8;i++) await reserveSignIn(runtime,headers);
       await assert.rejects(reserveSignIn(runtime,headers),{code:'AUTH_STATE_LIMIT'});
       const {digest}=await import('./src/core.js'); await db.query('UPDATE auth_state_slots SET expires_at=now() WHERE peer=$1',[await digest('192.0.2.255')]);

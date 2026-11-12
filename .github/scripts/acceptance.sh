@@ -12,7 +12,7 @@ ALTER ROLE fixture SET jit = off;
 SQL
 export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:5432/fixture
 export HOST=127.0.0.1
-export AUTH_ALLOWED_EMAILS=operator@example.com AUTH_ALLOWED_DOMAINS=example.com GOOGLE_CLIENT_ID=fixture GOOGLE_CLIENT_SECRET=fixture
+export AUTH_ALLOWED_EMAILS=operator@example.com ACCOUNT_CLIENT_ID=fixture ACCOUNT_CLIENT_PRIVATE_KEY=unused-by-session-fixture
 BETTER_AUTH_SECRET=$(openssl rand -hex 36); export BETTER_AUTH_SECRET
 export ENABLE_LIVE_SES=false AWS_EC2_METADATA_DISABLED=true WEBHOOK_ALLOWED_HOSTS=example.com
 export S3_ACCESS_KEY_ID=S3RVER S3_SECRET_ACCESS_KEY=S3RVER S3_BUCKET=fixture
@@ -32,6 +32,9 @@ shard() (
     if (( rc != 0 )); then tail -n 100 "$HOME"/*.log; fi
   }
   trap cleanup EXIT
+  export ACCOUNT_ISSUER="https://127.0.0.1:$((PORT+1000))" BANE_TEST_SIGNING_KEY="$HOME/fixture.pem" NODE_EXTRA_CA_CERTS="$HOME/fixture.crt"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' -keyout "$BANE_TEST_SIGNING_KEY" -out "$NODE_EXTRA_CA_CERTS" 2>/dev/null
+  node --import tsx scripts/fixture-issuer.ts > "$HOME/issuer.log" 2>&1 & pids+=("$!")
   ../.github/s3-fixture/node_modules/.bin/s3rver -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
   node --import tsx src/server.ts > "$HOME/server.log" 2>&1 & pids+=("$!")
   # The simulated shard runs its job handlers inside rollback-only transactions.
