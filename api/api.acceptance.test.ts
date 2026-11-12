@@ -2080,9 +2080,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(calls.length,awsBefore);assert.ok(lookups>txtBefore,'Hourly DNS upkeep must re-prove the exact claim without consuming SES control-plane quota.');
             await it.test('receiving rollout and TXT grace warn before admission expires',async()=>{
               await pool.query('UPDATE domain_claims SET receiving_proved_at=NULL,receiving_identity_at=NULL WHERE token=$1',[proof.value]);
+              // POST verify above made this real job due, and the fixture's runner process claims due jobs. The migration
+              // leaves a running job alone, so wait out any claim and settle the job as a finished, unscheduled verify.
+              const verifyJob='domain.verify:'+proof.value;
+              for(let i=0;!(await pool.query("UPDATE jobs SET status='completed',lease_until=NULL WHERE id=$1 AND status<>'running'",[verifyJob])).rowCount;i++){
+                assert.ok(i<100,'The fixture runner never released the verify job.');await new Promise(resolve=>setTimeout(resolve,30));
+              }
               const file=await (await import('node:fs/promises')).readFile(new URL('./migrations/095_receiving_rollout.sql',import.meta.url),'utf8');
               await pool.query(file);assert.equal(await probe(custom),1);
-              assert.equal((await pool.query('SELECT available_at>now() AS staggered FROM jobs WHERE id=$1',['domain.verify:'+proof.value])).rows[0]?.staggered,true);
+              assert.deepEqual((await pool.query("SELECT status,available_at>now() AS staggered FROM jobs WHERE id=$1",[verifyJob])).rows,[{status:'pending',staggered:true}]);
               const read=async()=>ok(await local('GET',detail,undefined,b.cookie));
               answer='';await mxCheck();assert.equal((await read()).receivingIssue.code,'proof_stale');assert.equal((await read()).receivingIssue.blocking,false);assert.equal(await probe(custom),1);
               await pool.query("UPDATE domain_claims SET receiving_proof_missed_at=now()-interval '49 hours' WHERE token=$1",[proof.value]);assert.equal((await read()).receivingIssue.blocking,true);assert.equal(await probe(custom),0);
