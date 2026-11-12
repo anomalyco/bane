@@ -2249,10 +2249,17 @@ export type InboxMessage = {
     flags: Array<'flagged' | 'answered' | 'draft' | 'forwarded' | 'junk' | 'notJunk' | 'mdnSent'>;
     labels: Array<string>;
     folders: Array<{
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+        uid: number;
+        uidValidity: number;
+        modseq: string;
+        deleted: boolean;
+    }>;
+    additionalFolders: Array<{
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        folder: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         uid: number;
         uidValidity: number;
         modseq: string;
@@ -13489,8 +13496,25 @@ export type ListInboxFoldersResponses = {
             /**
              * Stable folder locator: a built-in role or a custom folder ID.
              */
-            id: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
-            role: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | null;
+            id: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
+            role: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash';
+            path: string;
+            subscribed: boolean;
+            uidValidity: number;
+            uidNext: number;
+            highestModseq: string;
+            total: number;
+            unseen: number;
+        }>;
+        /**
+         * Drafts and custom folders, outside the original five-role contract.
+         */
+        additionalFolders: Array<{
+            /**
+             * Stable folder locator: a built-in role or a custom folder ID.
+             */
+            id: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
+            role: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | null;
             path: string;
             subscribed: boolean;
             uidValidity: number;
@@ -13569,7 +13593,7 @@ export type CreateInboxFolderResponses = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        id: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        id: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         state: string;
     };
 };
@@ -13583,7 +13607,7 @@ export type DeleteInboxFolderData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        folder: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
     };
     query?: never;
     url: '/v1/inboxes/{id}/folders/{folder}';
@@ -13642,7 +13666,7 @@ export type DeleteInboxFolderResponses = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        id: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        id: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         state: string;
     };
 };
@@ -13660,7 +13684,7 @@ export type UpdateInboxFolderData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        folder: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
     };
     query?: never;
     url: '/v1/inboxes/{id}/folders/{folder}';
@@ -13719,7 +13743,7 @@ export type UpdateInboxFolderResponses = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        id: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        id: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         state: string;
     };
 };
@@ -13736,7 +13760,7 @@ export type DeleteInboxMessageData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        source?: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         uid?: number;
         permanent?: 'true' | 'false';
         ifModseq?: string;
@@ -13879,7 +13903,7 @@ export type UpdateInboxMessageData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        source?: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         uid?: number;
         ifModseq?: string;
         read?: boolean;
@@ -13967,13 +13991,13 @@ export type MoveInboxMessageData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        source?: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         uid?: number;
         ifModseq?: string;
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        folder: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
     };
     path: {
         id: string;
@@ -14048,13 +14072,13 @@ export type CopyInboxMessageData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        source?: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        source?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         uid?: number;
         ifModseq?: string;
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        folder: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
     };
     path: {
         id: string;
@@ -14133,7 +14157,7 @@ export type ExpungeInboxFolderData = {
         /**
          * Stable folder locator: a built-in role or a custom folder ID.
          */
-        folder: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
     };
     query?: never;
     url: '/v1/inboxes/{id}/folders/{folder}/expunge';
@@ -14979,7 +15003,7 @@ export type ListInboxMessagesData = {
         /**
          * Select one folder. In a folder, after and cursor are UIDs, not delivery cursors.
          */
-        folder?: 'inbox' | 'sent' | 'drafts' | 'junk' | 'archive' | 'trash' | string;
+        folder?: 'inbox' | 'sent' | 'junk' | 'archive' | 'trash' | 'drafts' | string;
         flagged?: 'true' | 'false';
         /**
          * Only messages from this sender address.

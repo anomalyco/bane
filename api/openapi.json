@@ -8205,16 +8205,57 @@
               "type": "object",
               "properties": {
                 "folder": {
+                  "type": "string",
+                  "enum": [
+                    "inbox",
+                    "sent",
+                    "junk",
+                    "archive",
+                    "trash"
+                  ]
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                },
+                "uidValidity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                },
+                "modseq": {
+                  "type": "string"
+                },
+                "deleted": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "folder",
+                "uid",
+                "uidValidity",
+                "modseq",
+                "deleted"
+              ]
+            }
+          },
+          "additionalFolders": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "folder": {
                   "anyOf": [
                     {
                       "type": "string",
                       "enum": [
                         "inbox",
                         "sent",
-                        "drafts",
                         "junk",
                         "archive",
-                        "trash"
+                        "trash",
+                        "drafts"
                       ]
                     },
                     {
@@ -8362,6 +8403,7 @@
           "flags",
           "labels",
           "folders",
+          "additionalFolders",
           "modseq",
           "uid",
           "uidValidity",
@@ -38572,10 +38614,10 @@
                                 "enum": [
                                   "inbox",
                                   "sent",
-                                  "drafts",
                                   "junk",
                                   "archive",
-                                  "trash"
+                                  "trash",
+                                  "drafts"
                                 ]
                               },
                               {
@@ -38586,18 +38628,13 @@
                             "description": "Stable folder locator: a built-in role or a custom folder ID."
                           },
                           "role": {
-                            "type": [
-                              "string",
-                              "null"
-                            ],
+                            "type": "string",
                             "enum": [
                               "inbox",
                               "sent",
-                              "drafts",
                               "junk",
                               "archive",
-                              "trash",
-                              null
+                              "trash"
                             ]
                           },
                           "path": {
@@ -38637,12 +38674,91 @@
                         ]
                       }
                     },
+                    "additionalFolders": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "inbox",
+                                  "sent",
+                                  "junk",
+                                  "archive",
+                                  "trash",
+                                  "drafts"
+                                ]
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^fld_[0-9a-f]{32}$"
+                              }
+                            ],
+                            "description": "Stable folder locator: a built-in role or a custom folder ID."
+                          },
+                          "role": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "inbox",
+                              "sent",
+                              "junk",
+                              "archive",
+                              "trash",
+                              "drafts",
+                              null
+                            ]
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "subscribed": {
+                            "type": "boolean"
+                          },
+                          "uidValidity": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 4294967295
+                          },
+                          "uidNext": {
+                            "type": "number"
+                          },
+                          "highestModseq": {
+                            "type": "string"
+                          },
+                          "total": {
+                            "type": "number"
+                          },
+                          "unseen": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "role",
+                          "path",
+                          "subscribed",
+                          "uidValidity",
+                          "uidNext",
+                          "highestModseq",
+                          "total",
+                          "unseen"
+                        ]
+                      },
+                      "description": "Drafts and custom folders, outside the original five-role contract."
+                    },
                     "state": {
                       "type": "string"
                     }
                   },
                   "required": [
                     "data",
+                    "additionalFolders",
                     "state"
                   ]
                 }
@@ -38828,10 +38944,10 @@
                           "enum": [
                             "inbox",
                             "sent",
-                            "drafts",
                             "junk",
                             "archive",
-                            "trash"
+                            "trash",
+                            "drafts"
                           ]
                         },
                         {
@@ -39005,10 +39121,10 @@
                   "enum": [
                     "inbox",
                     "sent",
-                    "drafts",
                     "junk",
                     "archive",
-                    "trash"
+                    "trash",
+                    "drafts"
                   ]
                 },
                 {
@@ -39076,10 +39192,10 @@
                           "enum": [
                             "inbox",
                             "sent",
-                            "drafts",
                             "junk",
                             "archive",
-                            "trash"
+                            "trash",
+                            "drafts"
                           ]
                         },
                         {
@@ -39251,10 +39367,10 @@
                   "enum": [
                     "inbox",
                     "sent",
-                    "drafts",
                     "junk",
                     "archive",
-                    "trash"
+                    "trash",
+                    "drafts"
                   ]
                 },
                 {
@@ -39285,10 +39401,10 @@
                           "enum": [
                             "inbox",
                             "sent",
-                            "drafts",
                             "junk",
                             "archive",
-                            "trash"
+                            "trash",
+                            "drafts"
                           ]
                         },
                         {
@@ -39479,10 +39595,10 @@
                         "enum": [
                           "inbox",
                           "sent",
-                          "drafts",
                           "junk",
                           "archive",
-                          "trash"
+                          "trash",
+                          "drafts"
                         ]
                       },
                       {
@@ -39756,10 +39872,10 @@
                   "enum": [
                     "inbox",
                     "sent",
-                    "drafts",
                     "junk",
                     "archive",
-                    "trash"
+                    "trash",
+                    "drafts"
                   ]
                 },
                 {
@@ -40212,10 +40328,10 @@
                         "enum": [
                           "inbox",
                           "sent",
-                          "drafts",
                           "junk",
                           "archive",
-                          "trash"
+                          "trash",
+                          "drafts"
                         ]
                       },
                       {
@@ -40241,10 +40357,10 @@
                         "enum": [
                           "inbox",
                           "sent",
-                          "drafts",
                           "junk",
                           "archive",
-                          "trash"
+                          "trash",
+                          "drafts"
                         ]
                       },
                       {
@@ -40474,10 +40590,10 @@
                         "enum": [
                           "inbox",
                           "sent",
-                          "drafts",
                           "junk",
                           "archive",
-                          "trash"
+                          "trash",
+                          "drafts"
                         ]
                       },
                       {
@@ -40503,10 +40619,10 @@
                         "enum": [
                           "inbox",
                           "sent",
-                          "drafts",
                           "junk",
                           "archive",
-                          "trash"
+                          "trash",
+                          "drafts"
                         ]
                       },
                       {
@@ -40719,10 +40835,10 @@
                   "enum": [
                     "inbox",
                     "sent",
-                    "drafts",
                     "junk",
                     "archive",
-                    "trash"
+                    "trash",
+                    "drafts"
                   ]
                 },
                 {
@@ -42995,10 +43111,10 @@
                   "enum": [
                     "inbox",
                     "sent",
-                    "drafts",
                     "junk",
                     "archive",
-                    "trash"
+                    "trash",
+                    "drafts"
                   ]
                 },
                 {

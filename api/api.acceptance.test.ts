@@ -9219,12 +9219,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const p=ok(await local('POST',root,{type:'persistent',localPart:'persistent',send:{enabled:true},credential:{name:'owner',permissions:['read','modify']}}),201);
         assert.equal(p.expiresAt,null);assert.equal(p.deleteAfter,null);assert.equal(p.retention.mode,'forever');
         const token=p.credential.secret,base=`${root}/${p.id}`,folders=()=>request('GET',base+'/folders',token),initial=ok(await folders());
-        assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','drafts','inbox','junk','sent','trash']);
+        assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','inbox','junk','sent','trash']);
+        assert.deepEqual(initial.additionalFolders.map((f:Json)=>f.role),['drafts']);
         const custom=ok(await local('POST',base+'/folders',{path:'Work'}),201),fp=base+'/folders/'+custom.id;
         ok(await local('PATCH',fp,{subscribed:true}));ok(await local('PATCH',fp,{path:'Renamed'}));
-        const before=ok(await folders()).data.find((f:Json)=>f.id===custom.id);assert.equal(before.path,'Renamed');assert.equal(before.subscribed,true);
+        const before=ok(await folders()).additionalFolders.find((f:Json)=>f.id===custom.id);assert.equal(before.path,'Renamed');assert.equal(before.subscribed,true);
         ok(await local('DELETE',fp));const recreated=ok(await local('POST',base+'/folders',{path:'Renamed'}),201);
-        assert.notEqual(ok(await folders()).data.find((f:Json)=>f.id===recreated.id).uidValidity,before.uidValidity);
+        assert.notEqual(ok(await folders()).additionalFolders.find((f:Json)=>f.id===recreated.id).uidValidity,before.uidValidity);
         error(await request('POST',base+'/app-passwords',token,{name:'denied',protocols:['smtp']}),403);
         const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
         assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
@@ -9235,6 +9236,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
         const url=`${base}/messages/${m.id}`,v=(await page('inbox'))[0];assert.equal(v.uid,1);assert.equal(v.uidValidity,initial.data.find((f:Json)=>f.role==='inbox').uidValidity);
         const post=(action:string,body:Json)=>request('POST',`${url}/${action}`,token,body);
+        const copy=ok(await post('copy',{folder:recreated.id,source:'inbox',uid:1}));
+        const detail=ok(await request('GET',url,token));assert.deepEqual(detail.folders.map((f:Json)=>f.folder),['inbox']);assert.deepEqual(detail.additionalFolders.map((f:Json)=>f.folder),[recreated.id]);
+        ok(await request('DELETE',`${url}?permanent=true&source=${recreated.id}&uid=${copy.uid}`,token));
         const c1=ok(await charged(2,()=>post('copy',{folder:'archive',source:'inbox',uid:1})));assert.equal(c1.uid,1);
         const c2=ok(await post('copy',{folder:'archive',source:'inbox',uid:1}));assert.equal(c2.uid,2);assert.deepEqual((await page('archive')).map((x:Json)=>x.uid),[1,2]);
         error(await request('PATCH',url,token,{read:true,ifModseq:v.modseq}),409,'MODIFIED');

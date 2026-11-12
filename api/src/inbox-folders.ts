@@ -3,7 +3,9 @@ import {sql} from 'drizzle-orm';
 import {ApiError,errors,json,response,security,type App,type Ctx,type MailboxAccess} from './core.js';
 import type {MailboxPermission} from './db/mailbox.js';
 
-const Special=z.enum(['inbox','sent','drafts','junk','archive','trash']);
+export const LegacyRole=z.enum(['inbox','sent','junk','archive','trash']);
+const Special=z.enum([...LegacyRole.options,'drafts']);
+export function isLegacyRole(value:string|null):value is z.infer<typeof LegacyRole>{return value!==null&&Object.hasOwn(LegacyRole.enum,value);}
 export const Role=z.union([Special,z.string().regex(/^fld_[0-9a-f]{32}$/)]).describe('Stable folder locator: a built-in role or a custom folder ID.');
 const key=z.string().min(1).max(120), uid=z.number().int().min(1).max(4294967295);
 const seq=z.string().regex(/^(?:0|[1-9]\d{0,17})$/);
@@ -36,10 +38,11 @@ export function registerInboxFolders(app:App,access:(c:Ctx,p?:MailboxPermission)
   return unwrap(rows[0]?.r);
  };
  const folder=z.object({id:Role,role:Special.nullable(),path:z.string(),subscribed:z.boolean(),uidValidity:uid,uidNext:z.number(),highestModseq:z.string(),total:z.number(),unseen:z.number()});
- app.openapi(createRoute({...meta,method:'get',path:`${base}/folders`,operationId:'listInboxFolders',summary:'List folders, stable UID namespaces and counts',request:{params:box},responses:{200:response(z.object({data:z.array(folder),state:z.string()})),...errors}}),async c=>{
+ app.openapi(createRoute({...meta,method:'get',path:`${base}/folders`,operationId:'listInboxFolders',summary:'List folders, stable UID namespaces and counts',request:{params:box},responses:{200:response(z.object({data:z.array(folder.extend({role:LegacyRole})),additionalFolders:z.array(folder).describe('Drafts and custom folders, outside the original five-role contract.'),state:z.string()})),...errors}}),async c=>{
   const v=access(c,'read'),{id}=c.req.valid('param');
   const {rows}=await c.env.db.execute<{r:{data:z.infer<typeof folder>[];state:string}}>(sql`SELECT jsonb_build_object('state',s.modseq::text,'data',(SELECT jsonb_agg(jsonb_build_object('id',role,'role',CASE WHEN custom_path IS NULL THEN role END,'path',inbox_folder_path(f),'subscribed',subscribed,'uidValidity',uid_validity,'uidNext',uid_next,'highestModseq',highest_modseq::text,'total',total,'unseen',unseen) ORDER BY role) FROM inbox_folders f WHERE inbox_id=b.id)) r FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id WHERE ${inboxVisible(v)} AND b.id=${id}`);
-  return c.json(unwrap(rows[0]?.r),200);
+  const {state,data}=unwrap(rows[0]?.r);
+  return c.json({state,data:data.flatMap(f=>isLegacyRole(f.role)?[{...f,role:f.role}]:[]),additionalFolders:data.filter(f=>!isLegacyRole(f.role))},200);
  });
  const fp=box.extend({folder:Role}),path=z.string().min(1).max(255),edited=z.object({id:Role,state:z.string()});
  const edit=async(c:Ctx,bid:string,op:string,id:string|null,p:string|null,sub:boolean|null)=>{

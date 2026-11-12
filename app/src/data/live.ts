@@ -271,7 +271,10 @@ export function createLiveApi(): BaneApi {
       revokeKey: async (id, signal) => { await inboundCall(`/keys/${idPath(id)}/revoke`, 'POST', undefined, signal) },
     },
     inboxes: {
-      folders:(id,signal)=>call(`/inboxes/${idPath(id)}/folders`,'GET',undefined,signal),
+      folders:async(id,signal)=>{
+        const page=await call(`/inboxes/${idPath(id)}/folders`,'GET',undefined,signal);
+        return {data:[...page.data,...(page.additionalFolders??[])]};
+      },
       list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await call<{ data: Inbox[]; nextCursor: string | null }>(`/inboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       get: (id, signal) => call<Inbox>(`/inboxes/${idPath(id)}`, 'GET', undefined, signal),
       create: (input, signal) => call<CreatedInbox>('/inboxes', 'POST', input, signal),

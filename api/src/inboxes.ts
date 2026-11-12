@@ -11,7 +11,7 @@ import { storageBinding } from './mailbox-ingest-input.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { signedUrl } from './inbound-threads.js';
 import { displayText, visibleMail } from './inbox-content.js';
-import {registerInboxFolders,Role,Location,flagNames,flagsOf,inboxVisible as visible,locations} from './inbox-folders.js';
+import {registerInboxFolders,LegacyRole,isLegacyRole,Role,Location,flagNames,flagsOf,inboxVisible as visible,locations} from './inbox-folders.js';
 import {registerInboxPasswords} from './inbox-passwords.js';
 import { replyText } from './mailbox-store.js';
 
@@ -77,7 +77,7 @@ const Message = z.object({
   cursor: z.string().describe('Pass as after to continue after this message.'),
   from: address.describe('The claimed sender. Check auth before trusting it.'), to: z.array(address),
   subject: z.string(), snippet: z.string(), receivedAt: z.string(), read: z.boolean(),
-  flags:z.array(z.enum(flagNames)), labels:z.array(z.string()), folders:z.array(Location), modseq:z.string(),
+  flags:z.array(z.enum(flagNames)), labels:z.array(z.string()), folders:z.array(Location.extend({folder:LegacyRole})), additionalFolders:z.array(Location), modseq:z.string(),
   uid:z.number().nullable(), uidValidity:z.number().nullable(),
   junk: z.boolean().describe('SES judged this message spam.'),
   held: z.enum(['quota', 'expired']).nullable().describe('null when delivered; quota or expired when stored but held.'),
@@ -153,7 +153,7 @@ function project(row: Row, extract?: string) {
   return {
     message: {
       id: row.id, threadId: row.thread_id, cursor: String(row.inbox_seq ?? 0), from: { name, address: row.from_address }, to,
-      uid:row.uid??null, uidValidity:row.uid_validity??null, folders:row.folders, modseq:row.modseq, flags:flagsOf(row.flags), labels:row.labels,
+      uid:row.uid??null, uidValidity:row.uid_validity??null, folders:row.folders.flatMap(f=>isLegacyRole(f.folder)?[{...f,folder:f.folder}]:[]), additionalFolders:row.folders.filter(f=>!isLegacyRole(f.folder)), modseq:row.modseq, flags:flagsOf(row.flags), labels:row.labels,
       subject, snippet: p.text.slice(0, 240), receivedAt: new Date(row.received_at).toISOString(), read: row.read, junk: row.spam, held: row.held_reason,
       attachmentCount: row.attachment_count, auth: { spf: row.verdicts.spf, dkim: row.verdicts.dkim, dmarc: row.verdicts.dmarc }, simulated: row.verdicts.simulated === true,
       hiddenContent: p.hiddenContent, extract: p.extract,
