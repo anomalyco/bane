@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { cachedDashboardRead, mailActivity } from './dashboard-cache.js';
+import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { actor, ApiError, errors, response, security, type App, type Runtime } from './core.js';
 
 // Sender score: a per-workspace reputation grade from the workspace's own sending, computed on request from one SQL
@@ -179,14 +179,14 @@ async function loadInputs(runtime: Runtime, workspaceId: string, now: Date): Pro
 export async function protocolScoreCap(runtime:Runtime,w:string){const now=new Date();const grade=computeSenderScore(await loadInputs(runtime,w,now),now).grade;return grade===null?200:({'A+':2000,A:2000,B:1000,C:300,D:100,F:50})[grade];}
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
-    description: 'The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 real emails: simulated sends and emails only to the SES mailbox simulator (…@simulator.amazonses.com) never count. The score starts at 75 and moves at most +2 or −15 a day towards its target. Dashboard sessions may receive a cached result until the workspace sends or records an email event, or for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.',
+    description: 'The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 real emails: simulated sends and emails only to the SES mailbox simulator (…@simulator.amazonses.com) never count. The score starts at 75 and moves at most +2 or −15 a day towards its target. ' + DASHBOARD_CACHE_NOTE + ' Workspace-wide: keys restricted to domains get 403.',
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
     const compute = async () => { const now = new Date(); return computeSenderScore(await loadInputs(c.env, a.workspaceId, now), now); };
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
-    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, Math.floor(Date.now() / 60_000), await mailActivity(c.env, a.workspaceId)].join('|'), compute);
-    c.header('x-bane-sender-score-cache', body.hit ? 'hit' : 'miss');
+    const body = await dashboardRead(c, ['sender-score', a.workspaceId, Math.floor(Date.now() / 60_000)].join('|'), compute);
+    c.header('x-bane-sender-score-cache', body.cache);
     return c.json(body.value, 200);
   });
 }

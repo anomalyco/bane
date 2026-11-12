@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { actor, actorMailAccess, ApiError, errors, isSimulatedSes, notFound, response, security, type App } from './core.js';
-import { cachedDashboardRead, mailActivity } from './dashboard-cache.js';
+import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 
 // Plan & usage (hosted only): what the dashboard's Plan & usage page and an agent need to answer "what does this cost
@@ -48,7 +48,7 @@ export const PRICING = { currency: 'USD', perThousand: 0.2, freeSent: 3000, free
 
 export function registerUsage(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/usage', operationId: 'getUsage', tags: ['Metrics'], security, summary: 'Plan, pricing and sending limits',
-    description: 'Hosted only. Pricing (information only: billing is not on yet), this month\'s sent and received counts against the free allowance (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace sends or records an email event, or for up to 60 seconds.',
+    description: 'Hosted only. Pricing (information only: billing is not on yet), this month\'s sent and received counts against the free allowance (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
     responses: { 200: response(Usage), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = actor(c, 'read');
@@ -76,7 +76,8 @@ export function registerUsage(app: App) {
     };
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
     // The scope keeps the two views apart: a member's read is never served an owner's received count.
-    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['usage', a.workspaceId, receiving ? 'all' : 'sent', Math.floor(Date.now() / 60_000), await mailActivity(c.env, a.workspaceId)].join('|'), compute);
+    const body = await dashboardRead(c, ['usage', a.workspaceId, receiving ? 'all' : 'sent', Math.floor(Date.now() / 60_000)].join('|'), compute);
+    c.header('x-bane-usage-cache', body.cache);
     return c.json(body.value, 200);
   });
 }

@@ -4669,6 +4669,25 @@ describe('Dashboard API capabilities', () => {
         VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', now())`, [unique('score-late-'), wid, REGION]);
       const fresh = await local('GET', '/v1/sender-score');
       assert.deepEqual([fresh.status, fresh.headers.get('x-bane-sender-score-cache'), fresh.body.emails.last30Days], [200, 'miss', 601]);
+      // PR92 P2: only emails and email events move the key. A contact consent change, which a member can make as often as
+      // they like, leaves every Overview read cached instead of forcing all three to be computed again.
+      const metrics = '/v1/metrics?granularity=day';
+      const cacheOf = async () => [(await local('GET', '/v1/sender-score')).headers.get('x-bane-sender-score-cache'), (await local('GET', metrics)).headers.get('x-bane-metrics-cache')];
+      await cacheOf(); await local('GET', '/v1/usage');
+      assert.deepEqual(await cacheOf(), ['hit', 'hit']);
+      await db.query(`INSERT INTO operation_events(id, workspace_id, type, region, created_at, data) VALUES ($1, $2, 'contact.subscription_changed', NULL, now(), jsonb_build_object('contactId', 'con_fixture', 'status', 'unsubscribed'))`, [unique('evt_consent_'), wid]);
+      assert.deepEqual(await cacheOf(), ['hit', 'hit']);
+      assert.equal((await local('GET', '/v1/usage')).headers.get('x-bane-usage-cache'), 'hit');
+      // A session recomputes at most 30 of these reads a minute. Past that it gets the last result, marked stale, or a 429
+      // when there is none, so reads can't be turned into repeated scans. (now() is fixed in this transaction: a second later is newer mail.)
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["later@example.com"]', '[]', '[]', 'Later', '{}', false, 'queued', now() + interval '1 second')`, [unique('score-later-'), wid, REGION]);
+      await db.query(`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used) VALUES ($1, $2, date_trunc('minute', now()) + interval '1 minute', 30)
+        ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = 30, window_start = excluded.window_start`, [wid, `dashboard-reads:user_${manager!.userId}`]);
+      const stale = await local('GET', '/v1/sender-score');
+      assert.deepEqual([stale.status, stale.headers.get('x-bane-sender-score-cache'), stale.body.emails.last30Days], [200, 'stale', 601]);
+      const unseen = await local('GET', `/v1/metrics?from=2026-01-01T00:00:00.000Z&to=2026-01-02T00:00:00.000Z`);
+      assert.equal(error(unseen, 429).code, 'DASHBOARD_RATE_LIMITED');
     });
   });
 
