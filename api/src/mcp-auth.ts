@@ -1,4 +1,5 @@
 import { mcp } from '@better-auth/mcp';
+import { authorizeResource, externalMcpGrant, protectedResourceMetadata } from './oidc-resource.js';
 import { createResourceServerChallenge } from '@better-auth/oauth-provider';
 import { APIError } from 'better-auth/api';
 import { createDpopReplayStore, enforceDpopBinding, isDpopBindingError, parseAccessTokenAuthorization, verifyJwsAccessToken } from 'better-auth/oauth2';
@@ -122,6 +123,7 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
 }
 
 export async function getMcpGrantActor(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
+  if (runtime.config.accountIssuer) return keyId.startsWith('mcp_at_') ? externalMcpGrant(runtime, keyId, db) : null;
   const g=await loadGrant(runtime,keyId,db);return g&&!g.inboxIds?g.actor:null;
 }
 function deniedToken(runtime: Runtime) {
@@ -153,6 +155,7 @@ async function verificationKey(runtime: Runtime, kid: string) {
   return entry.keys.get(kid);
 }
 export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor|import('./core.js').MailboxAccess) => Promise<Response>): Promise<Response> {
+  if (runtime.config.accountIssuer) return authorizeResource(runtime, request, handler);
   const authorization = parseAccessTokenAuthorization(request.headers.get('authorization'));
   if (!authorization?.token || authorization.scheme === 'Unknown' || authorization.token.length > 16 * 1024) return deniedToken(runtime);
   const parts=/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{86})$/.exec(authorization.token);
@@ -477,6 +480,8 @@ export function registerMcpAuth(app: App): void {
   for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/api/auth']) {
     app.on(['GET', 'HEAD', 'OPTIONS'], path, async c => {
       if (c.req.method === 'OPTIONS') return publicCors(new Response(null, { status: 204 }));
+      if (c.env.config.accountIssuer) return path.startsWith('/.well-known/oauth-protected-resource')
+        ? publicCors(Response.json(protectedResourceMetadata(c.env))) : c.notFound();
       try {
         const url = new URL(c.req.raw.url);
         if (path === '/.well-known/oauth-authorization-server') url.pathname = '/.well-known/oauth-authorization-server/api/auth';

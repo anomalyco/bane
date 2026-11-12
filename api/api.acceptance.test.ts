@@ -370,6 +370,47 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
   }
 });
 
+test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
+  const { drizzle } = await import('drizzle-orm/node-postgres');
+  const { loadConfig } = await import('./src/config.js');
+  const { authorizeResource, protectedResourceMetadata } = await import('./src/oidc-resource.js');
+  const db = await fixtureDatabase(t);
+  const issuer = 'https://resource-test.example.org', resource = 'https://bane.example.org/mcp';
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, BETTER_AUTH_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
+    storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
+  const signer = generateKeyPairSync('ec', {namedCurve:'P-256'}), holder = generateKeyPairSync('ec', {namedCurve:'P-256'});
+  const jwk = holder.publicKey.export({format:'jwk'});
+  t.mock.method(globalThis, 'fetch', async (url: string | URL) => {
+    assert.equal(new URL(url).origin, issuer);
+    return new URL(url).pathname === '/keys' ? Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),kid:'fixture',alg:'ES256'}]}) :
+      Response.json({issuer, jwks_uri:issuer+'/keys'});
+  });
+  const jwt = (key: typeof signer.privateKey, header: object, claims: object) => {
+    const body = [header, claims].map(part=>Buffer.from(JSON.stringify(part)).toString('base64url')).join('.');
+    return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  };
+  const now = Math.floor(Date.now()/1000);
+  const claims = {iss:issuer, aud:resource, sub:'subject', client_id:'fixture', iat:now, exp:now+300, jti:randomUUID(), scope:'bane:read'};
+  const token = (extra: object = {}) => jwt(signer.privateKey,{alg:'ES256',typ:'at+jwt',kid:'fixture'},{...claims,...extra});
+  const run = (access: string, proof?: string) => authorizeResource(runtime, new Request(resource,{method:'POST',headers:{authorization:`${proof?'DPoP':'Bearer'} ${access}`,...(proof?{DPoP:proof}:{})}}),async a=>Response.json(a.permissions));
+  await db.query('BEGIN');
+  try {
+    assert.ok(manager);
+    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[manager.userId,'fixture',AUTH_EMAIL]);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
+    assert.deepEqual(protectedResourceMetadata(runtime).authorization_servers,[issuer]);
+    assert.deepEqual(await (await run(token())).json(),['read']);
+    for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
+    assert.equal((await run(token({scope:'openid'}))).status,403);
+    const thumbprint=createHash('sha256').update(JSON.stringify({crv:jwk.crv,kty:jwk.kty,x:jwk.x,y:jwk.y})).digest('base64url');
+    const bound=token({cnf:{jkt:thumbprint}});
+    assert.equal((await run(bound)).status,401);
+    const proof=jwt(holder.privateKey,{typ:'dpop+jwt',alg:'ES256',jwk},{iat:now,jti:randomUUID(),htm:'POST',htu:resource,ath:createHash('sha256').update(bound).digest('base64url')});
+    assert.equal((await run(bound,proof)).status,200);
+    assert.equal((await run(bound,proof)).status,401);
+  } finally { await db.query('ROLLBACK'); }
+});
+
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
   const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
