@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
 import { useApiMutation, useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { AgentTokenSummary, ApiKey, MailboxKey, McpConnection } from '../../data/types'
@@ -59,13 +59,15 @@ export function ApiKeysPage() {
         {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
           empty={<EmptyState title={emptyTitle} description={cursor || showRevoked || apiFailed || inboundFailed ? undefined : 'Create a key to send from your app or let an agent work on an inbound address.'} />}
           columns={[
-            { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} /> },
+            { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} />, cardRender: row => row.key.name },
             { ...settingsColumns.keys[1], render: row => row.kind === 'api'
               ? <TwoLines first={accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} second={domainScope(row.key.domains)} />
-              : <TwoLines first={<>Inbound: {row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</>} second={permissionList(row.key.permissions)} /> },
+              : <TwoLines first={<>Inbound: {row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</>} second={permissionList(row.key.permissions)} />,
+              cardRender: row => row.kind === 'api' ? `${accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} · ${domainScope(row.key.domains)}` : <>Inbound: {row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</> },
             { ...settingsColumns.keys[2], render: row => <code>{row.key.prefix}</code> },
-            { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt) },
-            { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button> },
+            { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt), cardRender: row => row.key.revokedAt ? 'Revoked' : row.key.lastUsedAt ? `Used ${date(row.key.lastUsedAt)}` : 'Never used' },
+            { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button>,
+              cardRender: row => row.key.revokedAt ? null : <DropdownMenu label={`Actions for ${row.key.name}`} title={row.key.name} items={[{ label: 'Revoke key', destructive: true, onSelect: () => setRevokeKey(row) }]} /> },
           ]} />}
         {apiFailed && <ErrorState error={keys.error} onRetry={() => void keys.refetch()} />}
         {inboundFailed && <ErrorState error={inboundKeys.error} onRetry={() => void inboundKeys.refetch()} />}
@@ -77,17 +79,21 @@ export function ApiKeysPage() {
           <p className="muted">Signed in through MCP. Agent tokens are short-lived keys they create.</p>
         </div>
         {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id} columns={[
-          { key: 'name', label: 'Name', width: '30%', render: row => row.kind === 'mcp'
+          { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
             ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
-            : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} /> },
-          { key: 'access', label: 'Access', width: '30%', render: row => row.kind === 'mcp'
+            : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
+            cardRender: row => row.kind === 'mcp' ? row.item.name || 'MCP client' : row.item.purpose },
+          { key: 'access', label: 'Access', width: '30%', card: 'line', render: row => row.kind === 'mcp'
             ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)} second={row.item.scopes.map(scope => scope.replace('bane:', '').replaceAll('_', ' ')).join(', ')} />
-            : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} /> },
-          { key: 'when', label: 'Connected / expires', width: '18%', render: row => row.kind === 'mcp' ? `Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
-          { key: 'used', label: 'Last used', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
-          { key: 'actions', label: '', align: 'right', width: 100, render: row => row.kind === 'mcp'
+            : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} />,
+            cardRender: row => row.kind === 'mcp' ? `MCP · ${accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)}` : `Agent token · ${accessLabel(row.item.permissions, false)}` },
+          { key: 'when', label: 'Connected / expires', width: '18%', card: 'line', render: row => row.kind === 'mcp' ? `Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
+          { key: 'used', label: 'Last used', card: 'hide', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
+          { key: 'actions', label: '', align: 'right', width: 100, card: 'end', render: row => row.kind === 'mcp'
             ? <Button variant="danger" aria-label={`Revoke ${row.item.name || 'MCP connection'}`} onClick={() => setRevokeConnection(row.item)}>Revoke</Button>
-            : tokenInactive(row.item) ? null : <Button variant="danger" aria-label={`Revoke ${row.item.purpose}`} onClick={() => setRevokeToken(row.item)}>Revoke</Button> },
+            : tokenInactive(row.item) ? null : <Button variant="danger" aria-label={`Revoke ${row.item.purpose}`} onClick={() => setRevokeToken(row.item)}>Revoke</Button>,
+            cardRender: row => row.kind === 'mcp' ? <DropdownMenu label={`Actions for ${row.item.name || 'MCP connection'}`} title={row.item.name || 'MCP connection'} items={[{ label: 'Revoke connection', destructive: true, onSelect: () => setRevokeConnection(row.item) }]} />
+              : tokenInactive(row.item) ? null : <DropdownMenu label={`Actions for ${row.item.purpose}`} title={row.item.purpose} items={[{ label: 'Revoke token', destructive: true, onSelect: () => setRevokeToken(row.item) }]} /> },
         ]} />}
       </section>}
     </div>
