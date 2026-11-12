@@ -109,6 +109,43 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
+test('Cloudflare static files: only files the deployed build has get a cache lifetime',async()=>{
+  // Workers Assets answers a path that matches no file with the dashboard shell, under every _headers rule the path
+  // matches. The build therefore writes the cache rules itself, one per file it has (app/asset-headers.ts).
+  const {withFileRules,FILE_CACHE,MAX_RULES}=await import('../app/asset-headers.js');
+  const source=await readFile(new URL('../app/public/_headers',import.meta.url),'utf8');
+  const built=['assets/index-CxQdVBrk.js','assets/index-DTeZx0D0.css','assets/logs-Bq3k_9aZ.js','assets/inter-latin-Bv.T1~x.woff2'],fonts=['fonts/inter-latin.woff2','fonts/opentui-regular.woff2'];
+  // Cloudflare's reading of the file: a path, then its headers. * is any run, :name one segment, and every matching rule applies.
+  const sent=(headers:string,path:string)=>{
+    const out=new Map<string,string>();let applies=false;
+    for(const line of headers.split('\n').map(l=>l.trim())){
+      if(!line||line.startsWith('#'))continue;
+      if(line.startsWith('/')){applies=new RegExp('^'+line.replace(/[.+?^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/:[A-Za-z]\w*/g,'[^/]+')+'$').test(path);continue;}
+      const at=line.indexOf(':');
+      if(applies&&at>0){const name=line.slice(0,at).trim().toLowerCase(),value=line.slice(at+1).trim();out.set(name,out.has(name)?`${out.get(name)}, ${value}`:value);}
+    }
+    return out;
+  };
+  const {headers,uncached}=withFileRules(source,[...built,'index.html','constructor/index.js','theme.js',...fonts]);
+  assert.deepEqual(uncached,[]);assert.equal(sent(headers,'/constructor/index.js').get('cache-control'),undefined,'Only the directories with a lifetime get rules.');
+  for(const file of built)assert.equal(sent(headers,'/'+file).get('cache-control'),'public, max-age=31536000, immutable',file);
+  for(const file of fonts)assert.equal(sent(headers,'/'+file).get('cache-control'),FILE_CACHE.fonts,file);
+  assert.match(FILE_CACHE.fonts!,/^public, max-age=86400\b/);
+  // Another build's file, a longer and a shorter name, the directories, another case, a nested copy, a font no build has yet, dashboard routes.
+  for(const path of ['/assets/index-N3xtBu1d.js','/assets/index-CxQdVBrk.js.map','/assets/index-CxQdVBrk.j','/assets/','/assets','/ASSETS/index-CxQdVBrk.js','/assets/x/index-CxQdVBrk.js','/fonts/next.woff2','/fonts/','/index.html','/','/logs']){
+    assert.equal(sent(headers,path).get('cache-control'),undefined,`${path} keeps the revalidating default`);
+    assert.ok(sent(headers,path).get('content-security-policy'),`${path} keeps the security headers`);
+  }
+  for(const file of [...built,...fonts])assert.equal(sent(source,'/'+file).get('cache-control'),undefined,'The checked-in file gives no directory a lifetime of its own.');
+  // A name the rule syntax would read as a pattern gets no rule. Nor does a file past the rule limit, which Cloudflare would skip without a word.
+  const odd=['assets/a*-1.js','assets/:name-2.js','assets/has space-3.js','assets/sub/dir-4.js','fonts/a*.woff2'],strict=withFileRules(source,[...odd,...built]);
+  assert.deepEqual(strict.uncached,odd);
+  for(const path of ['/assets/abc-1.js','/assets/x-2.js','/assets/has','/assets/sub/dir-4.js','/fonts/abc.woff2'])assert.equal(sent(strict.headers,path).get('cache-control'),undefined,path);
+  const many=Array.from({length:150},(_,i)=>`assets/chunk-${i}.js`),capped=withFileRules(source,many);
+  assert.equal(capped.headers.split('\n').filter(line=>line.startsWith('/')).length,MAX_RULES);
+  assert.ok(capped.uncached.length>0);assert.deepEqual(capped.uncached,many.slice(-capped.uncached.length),'The files listed first keep their rules.');
+  assert.equal(sent(capped.headers,'/assets/chunk-0.js').get('cache-control'),FILE_CACHE.assets);
+});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
