@@ -10735,7 +10735,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ok(await local('PATCH',`${base}/webhooks/${allHook.id}`,{paused:false}));assert.equal((await state()).generation,0);
         const resume=async()=>mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:allHook.id},{id:'page',attempts:1,workspaceId:scope});
         await assert.rejects(resume(),(await import('./src/jobs.js')).JobDeferred);assert.equal((await db.query("SELECT FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND status='paused'",[allHook.id])).rowCount,2);
-        await resume();await (await import('./src/mailbox-events.js')).pruneMailboxEvents(runtime);assert.equal((await db.query('SELECT FROM mailbox_webhook_deliveries WHERE id=$1',[clone+'101'])).rowCount,0);
+        // Held past the 30-day retention: not resumed, and dead-lettered with its reason rather than deleted.
+        await resume();await (await import('./src/mailbox-events.js')).pruneMailboxEvents(runtime);assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[clone+'101'])).rows,[{status:'failed',last_error:'ENDPOINT_PAUSED_EXPIRED'}]);
         assert.equal((await state()).generation,1);await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:clone},{id:'old',attempts:1,workspaceId:scope});assert.equal(attempts,0);
         // The reaper runs in a savepoint with only the spent lease visible; no unrelated delivery is dispatched.
         await runtime.db.transaction(async tx=>{const {sql}=await import('drizzle-orm');await tx.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('spent','mailbox.webhook',${scope},${JSON.stringify({deliveryId:clone,generation:1})}::jsonb,'running',10,now()-interval '1 minute')`);assert.equal(await processJobs({...runtime,db:tx},{},1,1),0);await tx.execute(sql`DROP TABLE pg_temp.jobs`);});
@@ -13396,6 +13397,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_action_attempts (LIKE public.mail_action_attempts INCLUDING ALL);
           CREATE VIEW \${schema}.regional_simulated_connections AS SELECT * FROM public.regional_simulated_connections WHERE false;\`);
         try {
           const scopedUrl = new URL(dbUrl);
