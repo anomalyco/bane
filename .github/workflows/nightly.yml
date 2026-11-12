@@ -1,0 +1,171 @@
+name: Nightly
+
+# Flake hunting (docs/ci.md). On the dev tip, ten times in parallel: the whole acceptance suite, quarantined
+# [flaky #N] tests included, with the deadlock guard on; and the CLS gate on every page. The report job keeps one
+# issue current: every test or CLS measurement that failed at least once, with its count and first error, and every
+# quarantined test that passed every run (ready to un-quarantine). A clean night closes the issue.
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: How many parallel acceptance runs
+        type: choice
+        options: ['10', '5', '20']
+        default: '10'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      runs: ${{ steps.runs.outputs.runs }}
+    steps:
+      - id: runs
+        env:
+          RUNS: ${{ inputs.runs || '10' }}
+        run: echo "runs=$(jq -cn --argjson n "$RUNS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
+
+  acceptance:
+    needs: plan
+    name: acceptance run ${{ matrix.run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(needs.plan.outputs.runs) }}
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_PASSWORD: fixture-admin
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-acceptance-${{ hashFiles('*/bun.lock', '.github/s3-fixture/bun.lock') }}
+      - run: for pkg in api mcp .github/s3-fixture; do (cd "$pkg" && bun install --frozen-lockfile); done
+      - name: Acceptance, quarantined tests included
+        id: acceptance
+        continue-on-error: true
+        working-directory: api
+        env:
+          ACCEPTANCE_QUARANTINE: all
+          ACCEPTANCE_JUNIT: ${{ runner.temp }}/results
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: bash ../.github/scripts/acceptance.sh 2>&1 | tee "$RUNNER_TEMP/acceptance.log"
+      - name: Record the outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.acceptance.outcome }}
+          RUN: ${{ matrix.run }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          deadlocks=$(grep -o 'Postgres detected [0-9]* deadlock' "$RUNNER_TEMP/acceptance.log" | grep -o '[0-9]*' || echo 0)
+          jq -n --arg run "$RUN" --arg outcome "$OUTCOME" --argjson deadlocks "${deadlocks:-0}" '{run: $run, outcome: $outcome, deadlocks: $deadlocks}' > "$RUNNER_TEMP/results/outcome.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: nightly-acceptance-${{ matrix.run }}
+          path: ${{ runner.temp }}/results/
+          retention-days: 14
+
+  # The CLS gate, the same number of times: a page whose shift depends on timing shows up as failing some runs.
+  cls:
+    needs: plan
+    name: cls run ${{ matrix.run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(needs.plan.outputs.runs) }}
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_PASSWORD: fixture-admin
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-cls-${{ hashFiles('api/bun.lock', 'app/bun.lock') }}
+      - run: for pkg in api app; do (cd "$pkg" && bun install --frozen-lockfile); done
+      - name: Measure layout shift on every page
+        id: cls
+        continue-on-error: true
+        working-directory: app
+        env:
+          CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
+        run: bun run cls
+      - name: Record the outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.cls.outcome }}
+          RUN: ${{ matrix.run }}
+        run: |
+          mkdir -p app/.cls
+          jq -n --arg run "$RUN" --arg outcome "$OUTCOME" '{run: $run, outcome: $outcome, deadlocks: 0}' > app/.cls/outcome.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: nightly-cls-${{ matrix.run }}
+          path: |
+            app/.cls/report.json
+            app/.cls/outcome.json
+          retention-days: 14
+
+  report:
+    needs: [acceptance, cls]
+    if: always() && (needs.acceptance.result != 'skipped' || needs.cls.result != 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: nightly-*
+          path: ${{ runner.temp }}/nightly
+      - name: Summarize and keep the flake issue current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node .github/scripts/flake-report.mjs "$RUNNER_TEMP/nightly"

@@ -156,6 +156,37 @@ test('ritual compile limits: maximum-size comments remain valid; identifiers, to
   assert.equal(compileRitual(source('/*'+' '.repeat(65536-prefix.length-5)+'*/')).v,1);
   for(const body of ['const '+'a'.repeat(65)+'=0;', ';'.repeat(8193), 'email'+'.a'.repeat(65)]) assert.throws(()=>compileRitual(source(body)),RitualError);
 });
+test('ritual regex tests run on a bounded matcher: its state is charged as steps and a pattern that needs too much is a ritual error',async t=>{
+  const {compileRitual,runRitual,REGEX_STATE_BYTES,RUN_STEPS,MESSAGE_STEPS}=await import('./src/ritual-engine.js'),{RE2JS}=await import('re2js');
+  assert.equal(JSON.parse(await readFile(new URL('./package.json',import.meta.url),'utf8')).dependencies.re2js,'2.10.0','re2js must stay on the version whose matcher limits were checked.');
+  const source=(tests:[string,string][])=>`export default function route(email,ctx){\n${tests.map(([p,f],i)=>`if (/${p}/${f}.test(email.text)) label("m${i}");`).join('\n')}\n}`;
+  const run=(tests:[string,string][],text:string,limit=RUN_STEPS)=>runRitual(compileRitual(source(tests)),{text},{},{},{},limit);
+  let seed=12345;const noise=Array.from({length:65536},()=>{seed=(seed*1103515245+12345)&0x7fffffff;return 'ab'[(seed>>16)&1]}).join('');
+  // Patterns whose matcher needs a new state for almost every character of this text.
+  const wide:[string,string][]=Array.from({length:22},(_,i)=>['a'+'.'.repeat(200+i)+'[XY]','s']);
+  const scan=Math.ceil(65537/32),rss=process.resourceUsage().maxRSS,started=performance.now(),refused=run(wide,noise),ms=performance.now()-started;
+  assert.match(refused.error??'',/^Line 2: Regex needs too many matcher states for this text$/);assert.deepEqual(refused.intents,[]);
+  assert.ok(refused.steps>scan+REGEX_STATE_BYTES/64*0.9&&refused.steps<=scan+REGEX_STATE_BYTES/64+8,`a refused test is charged its whole allowance: ${refused.steps} steps`);
+  assert.ok(ms<1500,`one refused test took ${ms.toFixed(0)} ms`);
+  // A whole message of them: every run stops at its first test, and the message budget ends the rest.
+  let steps=0,runs=0;const all=performance.now();
+  while(steps<MESSAGE_STEPS){steps+=run(wide,noise,MESSAGE_STEPS-steps).steps;runs++;}
+  assert.ok(runs<=Math.ceil(MESSAGE_STEPS/(scan+REGEX_STATE_BYTES/64*0.9)),`${runs} runs`);assert.ok(performance.now()-all<3000,'a message of refused tests');
+  assert.ok((process.resourceUsage().maxRSS-rss)/1024<128,'matcher state is released after every test');
+  // On a short text the same patterns stay inside the allowance, so the state they build is what a run can afford.
+  const short=run(wide,noise.slice(0,300));
+  assert.match(short.error??'',/Step budget exceeded/);assert.ok(short.steps>RUN_STEPS);
+  t.diagnostic(`Refused regex test: ${ms.toFixed(1)} ms, ${refused.steps} steps; ${runs} runs fill a message; 300 characters: ${short.error}`);
+  // Ordinary patterns answer exactly as re2js does, and cost little more than reading the text.
+  const english=('Dear Sir,\nplease RESET your password now. The invoice of $1,299.00 is overdue: wire it to john.doe@example.co.uk\r\n').repeat(580).slice(0,65536);
+  const ordinary:[string,string][]=[['viagra|casino','i'],['\\bpassword\\b','i'],['^dear','im'],['reset.*now',''],['reset.*overdue.*wire','is'],['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z][a-z]+','i'],['\\$\\s?[0-9][0-9,]*(?:\\.[0-9][0-9])?',''],['^.*(?:urgent|immediately).*(?:wire|transfer|payment).*$','im'],['(?:refund|chargeback|dispute)\\W+(?:\\w+\\W+)?(?:\\w+\\W+)?(?:request|claim|now)','i'],['x+x+x+y',''],['\\Bass','']];
+  const bits=(f:string)=>(f.includes('i')?RE2JS.CASE_INSENSITIVE:0)|(f.includes('m')?RE2JS.MULTILINE:0)|(f.includes('s')?RE2JS.DOTALL:0);
+  for(const text of ['',english.slice(0,300),english,noise,'x'.repeat(65536)])for(const [p,f] of ordinary){
+    const r=run([[p,f]],text);
+    assert.equal(r.error,null,`${p} on ${text.length} characters`);assert.equal(r.intents.length===1,RE2JS.compile(p,bits(f)).test(text),`${p} on ${text.length} characters`);
+    assert.ok(r.steps<=Math.ceil((text.length+1)/32)+2500,`${p} on ${text.length} characters: ${r.steps} steps`);
+  }
+});
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
@@ -4649,6 +4680,29 @@ describe('Dashboard API capabilities', () => {
     }
     error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'Name\nBcc: victim@example.com' })), 422);
     error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'billing@example.com' })),422);
+    // Lookalikes of @ < > as Unicode's confusables data folds them (compatibility forms, angle quotes, ornamental,
+    // mathematical and CJK angle brackets, the deprecated angle brackets NFD turns into them, dotted and doubled signs),
+    // enclosed a in every form (circled, negative circled, a combining enclosing mark over a Latin, mathematical or
+    // Cyrillic a), marks or format characters between the characters that matter, and the bidi controls that reorder
+    // a name read as an address or a route in clients.
+    for (const fromName of ['billing\uFF20example.com', 'billing\uFE6Bexample.com', 'Billing \uFF1Cbilling\uFF20example.com\uFF1E', 'PayPal \u2039security\u24D0paypal.com\u203A', 'Billing \u27E8billing\u24B6example.com\u27E9',
+      'security\u24D0paypal.com', 'security\u24B6paypal.com', 'security\u{1F150}paypal.com', 'securitya\u20DDpaypal.com', 'security\u{1D4B6}\u20DDpaypal.com', 'security\u0430\u20DDpaypal.com', 'securitya\u200D\u20DDpaypal.com',
+      'Billing \u2329billing\u232A', 'Billing \u3008billing\u3009', 'Billing \u276Ebilling\u276F', 'Billing \u02C2billing\u02C3', 'Billing \u22D6billing\u22D7', 'Billing \u226Abilling\u226B', 'Billing \u{1D236}billing\u{1D237}',
+      'billing\u034F\uFF20\uFE0Fexample.com', 'Support \u202Emoc.elpmaxe', 'Acme\u2066 Billing\u2069', 'Billing\u0085example'])
+      error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName })), 422, 'VALIDATION_FAILED');
+    // Ordinary names keep working: emoji joiner sequences and keycaps, non-Latin scripts (including the letters that are
+    // drawn as arrowheads, and CJK title brackets), other enclosed letters and the weak directional marks a mixed-script name may need.
+    for (const fromName of ['Acme Billing', 'Élodie 日本語', 'Acme 👩‍💻 Team', 'O\u2019Brien & Sons', 'Ärzte – Praxis', 'شركة أكمي\u200F Acme', 'Heart ❤\uFE0F Co', 'Team 1\uFE0F\u20E3', 'さくら Sakura', 'ᐃᓄᒃᑎᑐᑦ ᐸᐳ', '《新闻周刊》编辑部', 'Αθήνα \u24B7 Brand'])
+      ok(await http('POST', '/v1/emails/send', key.secret, mail({ fromName })), 202);
+    // Dispatch applies the same policy to names that were queued before it existed: the bare address is sent instead.
+    const { formattedSender } = await import('./src/sending.js');
+    assert.equal(formattedSender('sender@example.com', 'billing\uFF20example.com'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'security\u24D0paypal.com'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'securitya\u20DDpaypal.com'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'Support \u202Emoc.elpmaxe'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'Acme Billing'), '"Acme Billing" <sender@example.com>');
+    const template = await resource(t, key.secret, '/v1/templates', { name: unique('display-name') });
+    error(await http('PATCH', `/v1/templates/${template.id}`, key.secret, { revision: template.revision, draft: { ...template.draft, fromName: 'billing\uFF20example.com' } }), 422, 'VALIDATION_FAILED');
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     const marketing = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email, kind: 'marketing', subject: `${marker} marketing` })), 202);
@@ -4911,6 +4965,9 @@ describe('Dashboard API capabilities', () => {
       for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
       // Jobs: a refusal is retried with backoff (attempt charged); a real bug still fails the job.
       const { processJobs } = await import('./src/jobs.js');
+      // processJobs claims the next due job of any workspace: under the full suite another test's committed job could be
+      // claimed instead (CI flake: attempts 0). Shadow the queue in this rolled-back fixture, as the campaign.run tests do.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       const job = async (id: string, failure: unknown) => {
         await db.query("INSERT INTO jobs(id, workspace_id, type, payload, available_at) VALUES ($1, $2, 'campaign.run', '{}'::jsonb, now() - interval '1 second')", [id, wid]);
         assert.equal(await processJobs(runtime, { 'campaign.run': async () => { throw failure; } }, 1, 1), 1);
@@ -7902,19 +7959,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('dev E2E: finite operator override releases a held simulator campaign without exempting it', async t => {
+  test('dev E2E: the deploy sets a finite, audited fixture override that releases a held campaign without exempting it', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
-      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333';
+      const {applyDevE2eFixture,DEV_E2E_SEND_CAP}=await import('./scripts/dev-e2e-fixture.js');
+      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333', domainId='dom_'+randomUUID().replaceAll('-','');
+      const dev={STAGE:'dev',PUBLIC_URL:'https://dev.bane.mx',BANE_E2E_DOMAIN_ID:domainId};
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`UPDATE workspaces SET name='E2E' WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO operation_domains(id,name,workspace_id,region) VALUES ($1,$2,$3,$4)`,[domainId,domain,wid,REGION]);
       const claim=(host:string)=>db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[host,wid]);
       await claim(domain);
-      const script=await readFile(new URL('./scripts/set-dev-e2e-send-cap.sql',import.meta.url),'utf8');
-      const apply=()=>db.query(script.replace(":'workspace_id'",'$1'),[wid]);
-      assert.equal((await apply()).rowCount,0,'A Hosted workspace without both verified fixture domains is unchanged');
+      const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-dev-e2e-send-cap'`,[wid])).rows.map(r=>r.details);
+      // Never production, never another workspace: a fixture without both verified claims is refused and unchanged.
+      await assert.rejects(applyDevE2eFixture(db,{...dev,STAGE:'production',PUBLIC_URL:'https://bane.mx'}),/only to dev/);
+      await assert.rejects(applyDevE2eFixture(db,{...dev,BANE_E2E_DOMAIN_ID:undefined}),/BANE_E2E_DOMAIN_ID/);
+      await assert.rejects(applyDevE2eFixture(db,dev),/No unique E2E fixture/);
       await claim('e2e-va.bane.mx');
-      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),91)`,[wid]);
+      // A day of E2E volume at the old 500 override: the campaign is held.
+      await db.query(`UPDATE workspaces SET send_cap_override=500 WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),469)`,[wid]);
       const list=ok(await local('POST','/v1/lists',{name:'E2E fixture'}),201);
       await db.query(`WITH contact AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ('e2e-cap-fixture',$1,'success@simulator.amazonses.com','subscribed') RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM contact`,[wid,list.id]);
@@ -7922,10 +7987,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const path=`/v1/campaigns/${c.id}`, delivery=async()=>ok(await local('GET',path)).delivery;
       ok(await local('POST',path+'/send',{revision:c.revision}),202);await run('campaign.run');
       const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
-      assert.equal((await apply()).rows[0].details.new,500);assert.equal((await apply()).rowCount,0);
+      // The deploy raises it once, audited; the next deploys change and audit nothing.
+      assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:true});
+      assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:false});
+      assert.deepEqual((await audits()).map(d=>[d.old,d.new]),[[500,DEV_E2E_SEND_CAP]]);
       await run('campaign.run');assert.equal((await delivery()).expanded,1);
-      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
-        [{used:'92',marketing:'450',burst:50,pending_cap_override:null,exempt_hosted_quotas:false}]);
+      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a) CROSS JOIN workspaces w WHERE w.id=$1`,[wid])).rows,
+        [{used:'470',marketing:'90000',burst:70,pending_cap_override:null,exempt_hosted_quotas:false}]);
+      // A larger operator override and an exemption are left alone.
+      await db.query(`UPDATE workspaces SET send_cap_override=$2 WHERE id=$1`,[wid,DEV_E2E_SEND_CAP*2]);
+      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
+      await db.query(`UPDATE workspaces SET send_cap_override=NULL,exempt_hosted_quotas=true WHERE id=$1`,[wid]);
+      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
+      assert.equal((await audits()).length,1);
     });
   });
 
@@ -10508,6 +10582,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(await submit(mid,['a@receive.example'],'sns\0\ud800'),1);await run('mailbox.ingest',{sesMessageId:mid});
         const {rows:[r]}=await db.query('SELECT m.subject,left(m.text,3) AS start,right(m.text,1) AS tail,m.body_truncated,f.filename FROM mail_messages m JOIN mail_attachments f ON f.message_id=m.id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid]);
         assert.deepEqual(r,{subject:'x�y',start:'x�y',tail:'�',body_truncated:true,filename:'a�b'});
+      });
+      await t.test('inbound Date and Message-ID headers the store cannot hold are left out, and the message is kept',async()=>{
+        // Varied text: a repeated character would compress into its index row.
+        let seed=7;const wide=(n:number)=>Array.from({length:n},()=>String.fromCharCode(0x4e00+(seed=(seed*1103515245+12345)&0x7fffffff)%20000)).join('')+'@example.net',fits=wide(328);
+        for(const [mid,headers,sent,id] of [
+          ['date-10000','Date: Mon, 01 Jan 10000 00:00:00 +0000\r\nMessage-ID: <a@example.net>',null,'a@example.net'],
+          ['date-275760','Date: +275760-09-12T00:00:00Z',null,null],
+          ['date-0','Date: 0000-06-01T00:00:00Z',null,null],
+          ['date-bce','Date: -000100-01-01T00:00:00Z',null,null],
+          ['date-1','Date: 0001-01-01T00:00:00Z','0001-01-01T00:00:00.000Z',null],
+          ['date-9999','Date: Fri, 31 Dec 9999 23:59:59 +0000','9999-12-31T23:59:59.000Z',null],
+          ['id-2862-bytes',`Message-ID: <${wide(950)}>`,null,null],
+          ['id-996-bytes',`Message-ID: <${fits}>`,null,fits],
+        ] as const){
+          raw.set(mid,Buffer.from(`From: a@example.net\r\nSubject: ${mid}\r\n${headers}\r\n\r\nbody`));
+          assert.equal(await submit(mid,['a@receive.example']),1);await run('mailbox.ingest',{sesMessageId:mid});
+          const {rows:[r]}=await db.query('SELECT status,sent_at,message_id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);
+          assert.deepEqual({...r,sent_at:r.sent_at?.toISOString()??null},{status:'received',sent_at:sent,message_id:id},mid);
+        }
+        const {normalizeMessageId}=await import('./src/mailbox-store.js');
+        assert.equal(normalizeMessageId(`<${'a'.repeat(998)}>`),'a'.repeat(998));assert.equal(normalizeMessageId(`<${'a'.repeat(999)}>`),null);
+        assert.equal(normalizeMessageId(`<${'\0'.repeat(333)}>`),null,'counted as stored: NUL becomes a three-byte replacement');
       });
       await t.test('large inbound mail stays downloadable using a pinned copy or multipart Bcc scrub',async()=>{
         for(const mid of ['large','scrub']){await submit(mid,['a@receive.example']);

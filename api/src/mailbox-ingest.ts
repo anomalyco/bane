@@ -502,7 +502,9 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
   const verifiedFrom = !!sesTimestamp && authenticatedFrom(email, from.address, notification.mail, verdicts);
-  const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
+  // The store reads years 1 to 9999. A Date header outside them says nothing about when the mail was sent.
+  const sentMs = email?.date ? Date.parse(email.date) : NaN;
+  const sentAt = sentMs >= -62135596800000 && sentMs <= 253402300799999 ? new Date(sentMs).toISOString() : null;
 
   // Attachments are uploaded before the database commit with deterministic keys, so retries overwrite rather than duplicate.
   const attachments: (typeof mailAttachments.$inferInsert)[] = [];
