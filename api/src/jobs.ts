@@ -15,6 +15,17 @@ const LOAD_ERROR_THRESHOLD = 6;
 export async function wakeWebhooks(runtime:Runtime,count:number) {
   if (count) try { await runtime.wake?.(count,'webhook'); } catch { log('warn',{code:'QUEUE_WAKE_FAILED',message:'Webhook jobs remain durable.'}); }
 }
+/** Manual webhook posts a caller asks for by hand (endpoint tests, redeliveries, retries) share one hourly budget per
+ * workspace across sending and inbound webhooks, counted in queued copies. A refused charge throws inside the caller's
+ * transaction, so the requeue and its jobs roll back with it. */
+export const MANUAL_DELIVERY_BUDGET = 60;
+export async function chargeManualDelivery(tx: DbExecutor, workspaceId: string, units: number) {
+  if (!units) return;
+  const q = await tx.execute(sql`INSERT INTO mailbox_manual_delivery_budget AS b VALUES(${workspaceId},date_trunc('hour',now()),${units})
+    ON CONFLICT(workspace_id) DO UPDATE SET hour=excluded.hour,used=CASE WHEN b.hour=excluded.hour THEN b.used ELSE 0 END+excluded.used
+    WHERE (CASE WHEN b.hour=excluded.hour THEN b.used ELSE 0 END)+excluded.used<=${MANUAL_DELIVERY_BUDGET} RETURNING used`);
+  if (!q.rowCount || units > MANUAL_DELIVERY_BUDGET) throw new ApiError(429, 'WEBHOOK_REDELIVERY_LIMIT', `At most ${MANUAL_DELIVERY_BUDGET} manual webhook posts per workspace per hour.`, undefined, true);
+}
 // Wake messages drain the installation, not a tenant. Reuse the existing singleton reservation on upgrade.
 export const WAKE_SCHEDULE_KEY = 'default';
 
