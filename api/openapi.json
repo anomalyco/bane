@@ -33,7 +33,7 @@
         "title": "Verify webhook signatures",
         "language": "js",
         "code": "import { createHmac, timingSafeEqual } from 'node:crypto'\n\n// secret: the webhook's signing secret (whsec_…). body: the raw request body, before JSON.parse.\nexport function verifyBaneWebhook(secret, headers, body) {\n  const id = headers['webhook-id'], timestamp = headers['webhook-timestamp']\n  if (!id || !timestamp || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false\n  const key = Buffer.from(secret.slice('whsec_'.length), 'base64')\n  const expected = createHmac('sha256', key).update(`${id}.${timestamp}.${body}`).digest()\n  return String(headers['webhook-signature'] ?? '').split(' ').some(part => {\n    const [version, signature = ''] = part.split(',')\n    const given = Buffer.from(signature, 'base64')\n    return version === 'v1' && given.length === expected.length && timingSafeEqual(given, expected)\n  })\n}",
-        "text": "Every webhook delivery (email events and inbound webhooks alike) carries Webhook-Id, Webhook-Timestamp (Unix seconds) and Webhook-Signature headers in the Standard Webhooks format. Compute HMAC-SHA256 over \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\" with the base64-decoded part of the signing secret after whsec_, and compare it in constant time to the value after v1, in Webhook-Signature. Reject timestamps more than five minutes old, and use Webhook-Id to skip a delivery you already handled. Standard Webhooks libraries (such as the standardwebhooks npm package) verify it too. The secret is shown once when you create a webhook; reveal or rotate it on the webhook’s page, or with revealWebhookSecret and rotateWebhookSecret."
+        "text": "Every webhook delivery (email events and inbound webhooks alike) carries Webhook-Id, Webhook-Timestamp (Unix seconds) and Webhook-Signature headers in the Standard Webhooks format. Compute HMAC-SHA256 over \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\" with the base64-decoded part of the signing secret after whsec_, and compare it in constant time to the value after v1, in Webhook-Signature. Reject timestamps more than five minutes old, and use Webhook-Id to skip a delivery you already handled. Standard Webhooks libraries (such as the standardwebhooks npm package) verify it too. The secret is shown once when you create a webhook; reveal or rotate it on the webhook’s page, or with revealWebhookSecret (from an API key you made: MCP approvals and agent tokens can only rotate it) and rotateWebhookSecret. Every reveal and rotation is recorded."
       }
     ]
   },
@@ -30352,6 +30352,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most 10 reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.",
         "parameters": [
           {
             "schema": {
@@ -30507,6 +30508,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Replace the endpoint's signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.",
         "parameters": [
           {
             "schema": {

@@ -8,7 +8,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
@@ -32,7 +32,7 @@ import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.j
 import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
-import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
+import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -97,6 +97,10 @@ async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIde
     throw new ApiError(503, 'SES_UNAVAILABLE', 'SES could not complete the operation. Check service availability and deployment connectivity.', undefined, true);
   }
 }
+const REVEALS_PER_MINUTE = 10;
+/** One row in webhook_secret_audit (migration 220) for each hand-out of a signing secret. */
+const recordSecret = (db: Pick<Database, 'insert'>, a: Actor, webhookId: string, action: 'created' | 'revealed' | 'rotated') =>
+  db.insert(webhookSecretAudit).values({ workspaceId: a.workspaceId, id: id('wsa'), webhookId, action, actorKeyId: a.keyId, credential: a.credential ?? 'apiKey', actorEmail: a.email ?? null });
 async function metadata(runtime: Runtime, row: typeof webhooks.$inferSelect, a: Actor) {
   const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, ...value } = row;
   return { ...value, url: webhookUrlHint(value.url), headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
@@ -1006,7 +1010,9 @@ export function registerOperations(app: App) {
     const [row] = await c.env.db.transaction(async tx => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(140913,hashtext(${a.workspaceId}))`);
       if ((await tx.execute(sql`SELECT 1 FROM operation_webhooks WHERE workspace_id=${a.workspaceId} OFFSET 9 LIMIT 1`)).rowCount) throw new ApiError(409,'WEBHOOK_LIMIT_REACHED','A workspace can have at most 10 operation webhook endpoints (including paused endpoints).');
-      return tx.insert(webhooks).values(values).returning();
+      const created = await tx.insert(webhooks).values(values).returning();
+      await recordSecret(tx, a, webhookId, 'created');
+      return created;
     });
     c.header('Cache-Control', 'no-store');
     return c.json({ ...await metadata(c.env, row!, a), secret }, 201);
@@ -1034,10 +1040,29 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
   });
-  for (const rotate of [false, true]) app.openapi(createRoute({ method: rotate ? 'post' : 'get', path: rotate ? '/v1/webhooks/{id}/rotate-secret' : '/v1/webhooks/{id}/secret', operationId: rotate ? 'rotateWebhookSecret' : 'revealWebhookSecret', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id), binding = secretBinding(a, row.id); c.header('Cache-Control', 'no-store');
-    const secret = rotate ? webhookSecret() : await decrypt(c.env, row.encryptedSecret, binding);
-    if (rotate) await c.env.db.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, row.id)));
+  // Reveal hands out a durable capability: whoever holds the secret can sign requests the receiver trusts, with no trace in
+  // Bane. So only a person's own credentials read it back (a dashboard session, or an API key not made through an MCP
+  // approval), at most REVEALS_PER_MINUTE times a minute per workspace, and every hand-out is recorded. Rotation stays open
+  // to every manage credential: it breaks the receiver until it is updated, so it can't go unnoticed.
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/secret', operationId: 'revealWebhookSecret', tags: ['Webhooks'], security, description: `Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most ${REVEALS_PER_MINUTE} reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.`, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage');
+    if (a.credential === 'mcp' || a.credential === 'agentToken' || a.grantId) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Read a signing secret back from the dashboard or with an API key you created. MCP approvals and agent tokens can rotate it instead.');
+    const row = await getWebhook(c.env, a, c.req.valid('param').id); c.header('Cache-Control', 'no-store');
+    if (!await chargeBudget(c.env, a.workspaceId, 'webhook-secret:reveal', REVEALS_PER_MINUTE)) {
+      c.header('Retry-After', '60');
+      throw new ApiError(429, 'REVEAL_RATE_LIMITED', `This workspace read signing secrets back ${REVEALS_PER_MINUTE} times in the last minute. Retry after the window resets.`, undefined, true);
+    }
+    const secret = await decrypt(c.env, row.encryptedSecret, secretBinding(a, row.id));
+    await recordSecret(c.env.db, a, row.id, 'revealed');
+    return c.json({ secret }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/rotate-secret', operationId: 'rotateWebhookSecret', tags: ['Webhooks'], security, description: 'Replace the endpoint\'s signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.', request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id), secret = webhookSecret(); c.header('Cache-Control', 'no-store');
+    const encryptedSecret = await encrypt(c.env, secret, secretBinding(a, row.id));
+    await c.env.db.transaction(async tx => {
+      await tx.update(webhooks).set({ encryptedSecret, updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, row.id)));
+      await recordSecret(tx, a, row.id, 'rotated');
+    });
     return c.json({ secret }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/test', operationId: 'testWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {

@@ -34,8 +34,9 @@ export interface McpOperation {
   /** Only a signed-in dashboard session may call it; never listed to an MCP connection. */
   readonly dashboardOnly: boolean;
 }
-// Provider-signed notifications are never agent calls; everything else with bearer auth becomes a tool.
-const EXCLUDED = new Set(['receiveSesSnsEvent']);
+// Provider-signed notifications are never agent calls, and REST refuses revealWebhookSecret to every delegated credential
+// (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool.
+const EXCLUDED = new Set(['receiveSesSnsEvent', 'revealWebhookSecret']);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
@@ -51,7 +52,7 @@ const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // agent token; it still needs confirm=true), and manageKeys() reads.
 const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
 const READ_LEVEL_WRITES = new Set(['createAgentToken']);
-const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'revealWebhookSecret']);
+const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
 const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection']);
@@ -337,6 +338,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   getDomainDnsSetup: 'Human step: Domain Connect opens the DNS provider in a browser. Agents can read the domain’s DNS records instead.',
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
+  revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). */
 export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|listWorkspaceMembers|inviteWorkspaceMember|createWorkspaceInvitation|listWorkspaceInvitations|revokeWorkspaceInvitation|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;

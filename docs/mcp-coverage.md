@@ -109,7 +109,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getWebhook` | `webhooks` · `get` · admin |
 | `updateWebhook` | `webhooks` · `update` · admin |
 | `deleteWebhook` | `webhooks` · `delete` · admin |
-| `revealWebhookSecret` | `webhooks` · `revealSecret` · admin |
+| `revealWebhookSecret` | Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret). |
 | `rotateWebhookSecret` | `webhooks` · `rotateSecret` · admin |
 | `testWebhook` | `webhooks` · `test` · admin |
 | `listWebhookDeliveries` | `webhooks` · `deliveries` · admin |

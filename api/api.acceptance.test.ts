@@ -149,7 +149,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
-  const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
+  const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
   const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
@@ -2471,7 +2471,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const fullSchema = (await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'contacts',action:'list'}},'/mcp')).structuredContent;
     assert.deepEqual(fullSchema.inputSchema.properties.email, tools.get('listContacts')!.inputSchema.properties.email);
     assert.deepEqual(fullSchema.outputSchema, tools.get('listContacts')!.outputSchema);
-    for (const name of ['sendEmail', 'sendEmailBatch', 'createInbox', 'waitForMessage', 'getInboxMessage', 'listInboundThreads', 'createInboundThread', 'replyToInboundThread', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'createApiKey', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState', 'revealWebhookSecret']) assert.ok(tools.has(name), name);
+    for (const name of ['sendEmail', 'sendEmailBatch', 'createInbox', 'waitForMessage', 'getInboxMessage', 'listInboundThreads', 'createInboundThread', 'replyToInboundThread', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'createApiKey', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState', 'rotateWebhookSecret']) assert.ok(tools.has(name), name);
+    assert.ok(!tools.has('revealWebhookSecret'), 'A signing secret is never read back through MCP.');
     assert.doesNotMatch(JSON.stringify(tools.get('sendCampaign')!.inputSchema), /reviewId/);
     assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['campaignId']);
     const context = await callTool(token, 'getCurrentIdentity');
@@ -2639,6 +2640,31 @@ describe('Hosted MCP OAuth and tools', () => {
       const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
       error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
       assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,'••••'+url.slice(-4));ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+    });
+    await t.test('PR92 P2: a webhook signing secret is never read back through a delegated credential, every hand-out is recorded, and reads have a small budget', async () => {
+      const hook = await resource(t, MANAGER, '/v1/webhooks', { url: `https://example.com/hooks/${unique('reveal')}`, paused: true }), path = `/v1/webhooks/${hook.id}/secret`;
+      const { rows: [{ workspace_id: wid }] } = await db.query('SELECT workspace_id FROM operation_webhooks WHERE id = $1', [hook.id]);
+      const owner = `user_${manager!.userId}`, ownKey = await keyFixture(t);
+      // The OAuth approval, an API key it created and a temporary agent token, all with manage, can't read the secret back.
+      const grantKey = await callTool(token, 'createApiKey', { confirm: true, body: { name: 'reveal fixture', permissions: ['manage'] } }, 201); secrets.add(grantKey.secret);
+      cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${grantKey.id}/revoke`, MANAGER), [200, 204]); });
+      const viaMcp = await rpc(token, 'tools/call', { name: 'revealWebhookSecret', arguments: { webhookId: hook.id } });
+      assert.equal(viaMcp.structuredContent?.error?.code, 'TOOL_UNAVAILABLE', 'An MCP approval must not read a signing secret back.');
+      for (const credential of [managed.token, grantKey.secret]) error(await http('GET', path, credential), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+      // Rotation stays available to the approval (the receiver breaks until it is updated, so it is visible). The owner's
+      // session and an API key the owner made read the new secret.
+      const rotated = await callTool(token, 'rotateWebhookSecret', { webhookId: hook.id, confirm: true });
+      assert.equal(ok(await http('GET', path, MANAGER)).secret, rotated.secret);
+      assert.equal(ok(await http('GET', path, ownKey.secret)).secret, rotated.secret);
+      // Each hand-out of the secret is recorded with the credential, the webhook and the time.
+      const audit = (await db.query('SELECT action, actor_key_id, credential FROM webhook_secret_audit WHERE workspace_id = $1 AND webhook_id = $2 ORDER BY created_at, id', [wid, hook.id])).rows;
+      assert.deepEqual(audit.map(row => [row.action, row.actor_key_id, row.credential]), [['created', owner, 'dashboard'], ['rotated', 'mcp_' + consentId, 'mcp'], ['revealed', owner, 'dashboard'], ['revealed', ownKey.id, 'apiKey']]);
+      // A workspace reads secrets back at most 10 times a minute; a refused read records nothing.
+      await db.query(`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used) VALUES ($1, 'webhook-secret:reveal', date_trunc('minute', now()) + interval '1 minute', 10)
+        ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = 10, window_start = excluded.window_start`, [wid]);
+      try { error(await http('GET', path, MANAGER), 429, 'REVEAL_RATE_LIMITED'); }
+      finally { await db.query("DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'webhook-secret:reveal'", [wid]); }
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM webhook_secret_audit WHERE webhook_id = $1 AND action = 'revealed'", [hook.id])).rows[0].n, 2);
     });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));

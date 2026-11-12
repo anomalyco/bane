@@ -2064,6 +2064,9 @@ export const updateWebhook = <ThrowOnError extends boolean = false>(options: Opt
     }
 });
 
+/**
+ * Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most 10 reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.
+ */
 export const revealWebhookSecret = <ThrowOnError extends boolean = false>(options: Options<RevealWebhookSecretData, ThrowOnError>): RequestResult<RevealWebhookSecretResponses, RevealWebhookSecretErrors, ThrowOnError> => (options.client ?? client).get<RevealWebhookSecretResponses, RevealWebhookSecretErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -2082,6 +2085,9 @@ export const revealWebhookSecret = <ThrowOnError extends boolean = false>(option
     ...options
 });
 
+/**
+ * Replace the endpoint's signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.
+ */
 export const rotateWebhookSecret = <ThrowOnError extends boolean = false>(options: Options<RotateWebhookSecretData, ThrowOnError>): RequestResult<RotateWebhookSecretResponses, RotateWebhookSecretErrors, ThrowOnError> => (options.client ?? client).post<RotateWebhookSecretResponses, RotateWebhookSecretErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
