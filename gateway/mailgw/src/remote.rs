@@ -398,6 +398,9 @@ impl Store {
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
         let cached = p.cached;
+        let tenant = api
+            .tenant_sessions
+            .load(std::sync::atomic::Ordering::Relaxed);
         let (lanes, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
             gates.retain(|_, v| {
@@ -407,9 +410,6 @@ impl Store {
                 gates.len() < 8192 || gates.contains_key(&p.kid),
                 "credential admission full"
             );
-            let open = api
-                .tenant_sessions
-                .load(std::sync::atomic::Ordering::Relaxed);
             let account_share = gates
                 .values()
                 .find(|g| g.account == p.account)
@@ -418,7 +418,7 @@ impl Store {
                     let share = crate::admission::Shares::new(4, 2, 4, 144);
                     // The fallback lane is no one's account: its workspaces keep only their own share.
                     Arc::new(if p.account.starts_with("sponsor:") {
-                        share.with_sessions(open)
+                        share.with_sessions(tenant)
                     } else {
                         share
                     })
@@ -428,7 +428,7 @@ impl Store {
                 .find(|g| g.workspace == p.workspace)
                 .map(|g| g.lanes.0[2].clone())
                 .unwrap_or_else(|| {
-                    Arc::new(crate::admission::Shares::new(4, 2, 4, 144).with_sessions(open))
+                    Arc::new(crate::admission::Shares::new(4, 2, 4, 144).with_sessions(tenant))
                 });
             let inbox_share = gates
                 .values()
