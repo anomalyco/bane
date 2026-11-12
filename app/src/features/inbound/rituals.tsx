@@ -1,5 +1,6 @@
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { basicSetup } from 'codemirror'
 import { javascript } from '@codemirror/lang-javascript'
 import { autocompletion } from '@codemirror/autocomplete'
@@ -7,20 +8,22 @@ import { linter, lintGutter, type Diagnostic as LintDiagnostic } from '@codemirr
 import { EditorView } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
-import { Alert, Button, Checkbox, DataTable, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, type Column } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
-const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
+import { useLeaveGuard } from '../../lib/leave-guard'
 import { ritualTemplates } from '../../../../api/src/ritual-schema'
-import { concepts } from './concepts'
+import { concepts, guides } from './concepts'
 import { useOverview } from './overview'
 import { ConceptLine } from './parts'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
 
+const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
 type Config = { rituals: { key: string; source: string }[]; attachments: Binding[]; senderLists: Record<string, string[]>; evaluateDomains: string[]; evaluateRoutes: string[] }
 type Saved = { version: number; config: Config }
@@ -28,7 +31,9 @@ type Problem = { ritual?: string; line: number; column: number; endLine?: number
 type Check = { ok: boolean; diagnostics: Problem[]; calls: string[]; omens: string[]; questions: Record<string, string>; lists: string[] }
 type Completion = { label: string; detail: string; info: string; apply?: string; type: string }
 
+const KEY = /^[a-z0-9][a-z0-9-]{0,62}$/
 const blank = () => `export default function route(email, ctx) {\n  \n}\n`
+const starter = () => ritualTemplates.find(t => t.id === 'junk-newsletters')!.source()
 const listsToText = (lists: Record<string, string[]>) => Object.entries(lists).map(([name, entries]) => `${name}: ${entries.join(', ')}`).join('\n')
 function textToLists(text: string): Record<string, string[]> {
   const out: Record<string, string[]> = {}
@@ -39,6 +44,7 @@ function textToLists(text: string): Record<string, string[]> {
   }
   return out
 }
+const domainsToText = (domains: string[]) => domains.join(', ')
 // Bane's color tokens, so the editor follows the light and dark themes. Few colors on purpose.
 const highlight = syntaxHighlighting(HighlightStyle.define([
   { tag: [tags.keyword, tags.controlKeyword, tags.definitionKeyword, tags.moduleKeyword, tags.operatorKeyword], color: 'var(--color-muted)', fontWeight: '600' },
@@ -86,9 +92,16 @@ function Editor({ value, change, completions, check }: { value: string; change: 
   return <div className="ritual-editor" ref={parent} />
 }
 
+/**
+ * One ritual at a time. The script, sender lists and omen domains are a draft until Save (the bar at the bottom says
+ * which, and leaving asks first). Where a ritual runs is not part of the draft: attaching, detaching, reordering and
+ * "Run the next one too" save at once, because a row that looks attached must be attached.
+ */
 export function RitualsPage() {
   const { canAdminister } = useWorkspaceAccess()
-  const [params] = useSearchParams()
+  const toast = useToast()
+  const client = useQueryClient()
+  const [params, setParams] = useSearchParams()
   const routeLocation = useLocation()
   const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: canAdminister })
   const overview = useOverview({ limit: 1 })
@@ -96,7 +109,8 @@ export function RitualsPage() {
   const [loadError, setLoadError] = useState<Error | null>(null)
   const [key, setKey] = useState('')
   const [source, setSource] = useState('')
-  const [bindings, setBindings] = useState<Binding[]>([])
+  // A new ritual's starting script, so an untouched new ritual has nothing to save or lose.
+  const [origin, setOrigin] = useState('')
   const [lists, setLists] = useState('')
   const [domains, setDomains] = useState('')
   const [target, setTarget] = useState('')
@@ -104,8 +118,12 @@ export function RitualsPage() {
   const [completions, setCompletions] = useState<Completion[]>([])
   const [check, setCheck] = useState<Check | null>(null)
   const [problems, setProblems] = useState<Problem[]>([])
-  const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null)
   const [pending, setPending] = useState(false)
+  const [binding, setBinding] = useState(false)
+  const [template, setTemplate] = useState('')
+  const [confirmTemplate, setConfirmTemplate] = useState<string | null>(null)
+  const [confirmSwitch, setConfirmSwitch] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const recent = useRecentMail()
   const [picked, setChoice] = useState<EmailChoice | null>(null)
   const [as, setAs] = useState('')
@@ -117,50 +135,95 @@ export function RitualsPage() {
   const keyRef = useRef(key)
   keyRef.current = key
 
+  /** Shows one ritual (or a new one) from a saved config; the sender lists and omen domains come with it. */
+  function open(s: Saved, wanted: string | null) {
+    const r = wanted === null ? undefined : s.config.rituals.find(x => x.key === wanted) ?? (wanted === '' ? undefined : s.config.rituals[0])
+    const start = s.config.rituals.length ? blank() : starter()
+    setKey(r?.key ?? (s.config.rituals.length ? '' : 'triage')); setSource(r?.source ?? start); setOrigin(r?.source ?? start)
+    setLists(listsToText(s.config.senderLists)); setDomains(domainsToText(s.config.evaluateDomains))
+    setTemplate(''); setProblems([]); dry.clear()
+  }
   useEffect(() => {
     if (!canAdminister) return
     const ac = new AbortController()
     request<{ completions: Completion[] }>('/v1/rituals/typings', { signal: ac.signal }).then(t => setCompletions(t.completions)).catch(() => {})
     request<Saved>('/v1/rituals', { signal: ac.signal }).then(s => {
-      setSaved(s); setBindings(s.config.attachments); setLists(listsToText(s.config.senderLists)); setDomains(s.config.evaluateDomains.join(', '))
       // ?key= opens that ritual, ?new=1 starts one; otherwise the first.
-      const wanted = params.get('key'), first = params.get('new') ? undefined : s.config.rituals.find(r => r.key === wanted) ?? s.config.rituals[0]
-      setKey(first?.key ?? (s.config.rituals.length ? '' : 'triage')); setSource(first?.source ?? ritualTemplates.find(t => t.id === 'junk-newsletters')!.source())
+      setSaved(s); open(s, params.get('new') ? '' : params.get('key') ?? s.config.rituals[0]?.key ?? '')
     }).catch(e => { if (!ac.signal.aborted) setLoadError(e as Error) })
     return () => ac.abort()
   }, [canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
   // #try and #attach links from Receiving land on their section once it exists.
   useEffect(() => { if (saved && routeLocation.hash) requestAnimationFrame(() => document.getElementById(routeLocation.hash.slice(1))?.scrollIntoView({ block: 'start' })) }, [saved, routeLocation.hash])
 
-  // The edited ritual keeps its place, so an untouched page is not "changed".
+  const isSaved = !!saved?.config.rituals.some(r => r.key === key)
+  // The draft: this ritual's script, the sender lists and omen domains. Attachments are always the saved ones.
   const config = useMemo<Config | null>(() => saved && ({
     ...saved.config,
-    rituals: saved.config.rituals.some(r => r.key === key) ? saved.config.rituals.map(r => r.key === key ? { key, source } : r) : [...saved.config.rituals, ...(key ? [{ key, source }] : [])],
-    attachments: bindings,
+    rituals: isSaved ? saved.config.rituals.map(r => r.key === key ? { key, source } : r) : [...saved.config.rituals, ...(key ? [{ key, source }] : [])],
     senderLists: textToLists(lists),
     evaluateDomains: domains.split(',').map(x => x.trim().toLowerCase()).filter(Boolean),
-  }), [saved, key, source, bindings, lists, domains])
-  const dirty = !!saved && !!config && JSON.stringify(config) !== JSON.stringify(saved.config)
+  }), [saved, isSaved, key, source, lists, domains])
+  const scriptChanged = isSaved ? saved!.config.rituals.find(r => r.key === key)!.source !== source : source !== origin
+  const settingsChanged = !!saved && !!config && (JSON.stringify(config.senderLists) !== JSON.stringify(saved.config.senderLists) || JSON.stringify(config.evaluateDomains) !== JSON.stringify(saved.config.evaluateDomains))
+  const dirty = !!saved && (scriptChanged || settingsChanged)
+  const keyValid = KEY.test(key)
 
+  const refresh = () => void client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) }).catch(() => {})
   async function lint(text: string): Promise<Problem[]> {
     try {
-      const r = await request<Check>('/v1/rituals/check', { method: 'POST', body: { source: text, key: /^[a-z0-9][a-z0-9-]{0,62}$/.test(keyRef.current) ? keyRef.current : 'draft', senderLists: listsRef.current } })
+      const r = await request<Check>('/v1/rituals/check', { method: 'POST', body: { source: text, key: KEY.test(keyRef.current) ? keyRef.current : 'draft', senderLists: listsRef.current } })
       setCheck(r)
       return r.diagnostics
     } catch { return [] }
   }
-  async function save() {
-    if (!saved || !config) return
-    setPending(true); setNotice(null); setProblems([])
+  /** Saves the draft (and any attachment to add with it). Resolves false when it didn't save; the reason is shown. */
+  async function save(attachments?: Binding[]): Promise<boolean> {
+    if (!saved || !config || !keyValid) return false
+    setPending(true); setProblems([])
     try {
-      const s = await request<Saved>('/v1/rituals', { method: 'PUT', body: config, ifMatch: saved.version })
-      setSaved(s); setNotice({ tone: 'success', text: `Saved as version ${s.version}.` })
+      const s = await request<Saved>('/v1/rituals', { method: 'PUT', body: { ...config, ...(attachments ? { attachments } : {}) }, ifMatch: saved.version })
+      setSaved(s); setOrigin(source); refresh()
+      if (!isSaved || params.get('new')) setParams(current => { const p = new URLSearchParams(current); p.delete('new'); p.set('key', key); return p }, { replace: true })
+      toast(`${key} saved · version ${s.version}`, 'success')
+      return true
     } catch (e) {
       const details = (e instanceof ApiError ? e.details as Problem[] | undefined : undefined)
       if (details?.length) setProblems(details)
-      setNotice({ tone: 'danger', text: errorText(e) })
+      toast(`Not saved: ${errorText(e)}`, 'error')
+      return false
     } finally { setPending(false) }
   }
+  /** Attach, detach, reorder and "Run the next one too" save at once; the draft script is left as it is. */
+  async function saveBindings(attachments: Binding[], done: string) {
+    if (!saved) return
+    // A ritual that was never saved can't be attached on its own: it is saved with its first attachment.
+    if (!isSaved && attachments.some(b => b.ritual === key)) { if (await save(attachments)) setTarget(''); return }
+    setBinding(true)
+    try {
+      const s = await request<Saved>('/v1/rituals/attachments', { method: 'PUT', body: { attachments }, ifMatch: saved.version })
+      setSaved(s); setTarget(''); refresh(); toast(done, 'success')
+    } catch (e) { toast(errorText(e), 'error') }
+    finally { setBinding(false) }
+  }
+  async function remove() {
+    if (!saved) return
+    const s = await request<Saved>(`/v1/rituals/scripts/${encodeURIComponent(key)}`, { method: 'DELETE', ifMatch: saved.version })
+    setSaved(s); refresh(); toast(`${key} deleted`, 'success')
+    open(s, s.config.rituals[0]?.key ?? '')
+    setParams(current => { const p = new URLSearchParams(current); p.delete('key'); p.delete('new'); return p }, { replace: true })
+  }
+  const leaveGuard = useLeaveGuard(dirty, { what: `the changes to ${key || 'this ritual'}`, save: () => save() })
+  // ⌘S / Ctrl+S saves the draft from anywhere on the page, the editor included. A new ritual can be saved as it starts.
+  const saveRef = useRef(save)
+  saveRef.current = save
+  const canSave = (dirty || (!isSaved && !!key)) && keyValid && !pending
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); if (canSave) void saveRef.current() } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [canSave])
+
   // Try runs only this ritual, unsaved, as if it were attached to the address the email was sent to.
   const choice = picked ?? defaultChoice(recent.data, (addresses.data ?? []).find(a => !a.expiresAt)?.address ?? '')
   const recipient = (choice.mode === 'sample' ? choice.to : as || (choice.mode === 'recent' ? choice.to ?? '' : (choice.mime.match(/^to:\s*(?:.*<)?([^\s<>,]+@[^\s<>,]+)/im)?.[1] ?? ''))).trim().toLowerCase()
@@ -169,52 +232,67 @@ export function RitualsPage() {
     if (!config || !key || !recipient.includes('@')) return
     const input = traceInput(choice, choice.mode === 'sample' ? undefined : recipient)
     if (!input) return
-    // Jev is never asked in a try: the answers set here stand in for it, keyed by question.
+    // The AI is never asked in a try: the answers set here stand in for it, keyed by question.
     const scores = Object.fromEntries(omens.filter(name => check?.questions[name]).map(name => [check!.questions[name]!, answers[name] ?? 0.5]))
     await dry.run({ ...input, to: [recipient], config: { ...config, attachments: [{ ritual: key, target: recipient, continue: false }] }, ...(Object.keys(scores).length ? { scores } : {}) })
     requestAnimationFrame(() => tryRef.current?.querySelector('.trace-out')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }))
   }
+  function applyTemplate(id: string) {
+    const t = ritualTemplates.find(x => x.id === id)
+    if (!t) return
+    setSource(t.source(completions.find(c => c.detail.startsWith(`${t.needs} ·`))?.label.replace(/^endpoints\.|^endpoints\["|"\]$/g, '')))
+    setTemplate(id); setConfirmTemplate(null); dry.clear()
+  }
+  function switchTo(value: string) {
+    if (!saved) return
+    open(saved, value); setConfirmSwitch(null)
+    setParams(current => { const p = new URLSearchParams(current); if (value) { p.set('key', value); p.delete('new') } else { p.delete('key'); p.set('new', '1') } return p }, { replace: true })
+  }
 
   if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title="Rituals" backTo="/receiving?tab=rituals" /><EmptyState title="Only owners and admins can manage rituals" /></div>
   if (loadError) return <div className="stack inbound-stack"><PageHeader title="Rituals" backTo="/receiving?tab=rituals" /><ErrorState error={loadError} onRetry={() => location.reload()} /></div>
-  const targets = (addresses.data ?? []).flatMap(a => [{ label: `${a.address} (inbox)`, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
-  const targetName = (value: string) => targets.find(t => t.value === value)?.label.replace(/ \(inbox\)$/, '') ?? value
-  const move = (i: number, by: number) => { const a = [...bindings]; const [item] = a.splice(i, 1); a.splice(i + by, 0, item!); setBindings(a) }
+  const bindings = saved?.config.attachments ?? []
+  const targets = (addresses.data ?? []).flatMap(a => [{ label: a.address, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
+  const targetName = (value: string) => targets.find(t => t.value === value)?.label ?? value
+  const move = (i: number, by: number) => { const a = [...bindings]; const [item] = a.splice(i, 1); a.splice(i + by, 0, item!); void saveBindings(a, `Moved ${item!.ritual} ${by < 0 ? 'up' : 'down'}`) }
   const bindingColumns: Column<Binding & { i: number }>[] = [
     { key: 'order', label: '#', width: 48, render: b => b.i + 1 },
     { key: 'ritual', label: 'Ritual', render: b => <code>{b.ritual}</code> },
     { key: 'target', label: 'Runs on mail to', render: b => targetName(b.target) },
-    { key: 'continue', label: 'After it acts', width: 190, render: b => <Checkbox checked={b.continue} onCheckedChange={v => setBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x))} label="Run the next one too" /> },
+    { key: 'continue', label: 'After it acts', width: 190, render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.ritual} now lets the next ritual run` : `${b.ritual} now stops the next ritual`)} label="Run the next one too" /> },
     { key: 'actions', label: '', width: 132, align: 'right', render: b => <span className="ritual-row-actions">
-      <IconButton label="Move up" disabled={!b.i} onClick={() => move(b.i, -1)}>↑</IconButton>
-      <IconButton label="Move down" disabled={b.i === bindings.length - 1} onClick={() => move(b.i, 1)}>↓</IconButton>
-      <IconButton label="Detach" onClick={() => setBindings(bindings.filter((_, i) => i !== b.i))}>×</IconButton>
+      <IconButton label="Move up" disabled={!b.i || binding} onClick={() => move(b.i, -1)}>↑</IconButton>
+      <IconButton label="Move down" disabled={b.i === bindings.length - 1 || binding} onClick={() => move(b.i, 1)}>↓</IconButton>
+      <IconButton label={`Detach ${b.ritual} from ${targetName(b.target)}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual} from ${targetName(b.target)}`)}>×</IconButton>
     </span> },
   ]
   const recipients = (addresses.data ?? []).filter(a => !a.expiresAt).map(a => a.address)
-  return <div className="stack inbound-stack">
+  const attached = bindings.some(b => b.target === target && b.ritual === key)
+  const status = pending ? 'Saving…' : !saved ? '' : !isSaved ? `${key || 'This new ritual'} isn’t saved yet` : dirty ? 'Unsaved changes' : `All changes saved · version ${saved.version}`
+  return <div className="stack inbound-stack ritual-page">
     <PageHeader title="Rituals" backTo="/receiving?tab=rituals" actions={<>
       <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=endpoints">Endpoints</Link>
-      <Button variant="primary" disabled={pending || !dirty || !key} onClick={() => void save()}>Save</Button>
+      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>
+      {/* Always in the header, so the buttons beside it never move; hidden until there's a saved ritual to delete. */}
+      <Button variant="danger" className="ritual-delete" data-hidden={!isSaved || undefined} disabled={!isSaved} onClick={() => setConfirmDelete(true)}>Delete</Button>
     </>} />
-    <ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} />
-    {notice && <Alert tone={notice.tone} onDismiss={() => setNotice(null)}>{notice.text}</Alert>}
-    {problems.length > 0 && <ul className="ritual-problems">{problems.map((p, i) => <li key={i}><code>{p.ritual ? `${p.ritual}:` : ''}{p.line}:{p.column}</code> {p.message}{p.hint ? <span className="muted"> {p.hint}</span> : null}</li>)}</ul>}
+    <ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} guide={guides.rituals} />
+    {problems.length > 0 && <Alert tone="danger" title="Not saved. Fix these first:"><ul className="ritual-problems">{problems.map((p, i) => <li key={i}><code>{p.ritual ? `${p.ritual}:` : ''}{p.line}:{p.column}</code> {p.message}{p.hint ? <span className="muted"> {p.hint}</span> : null}</li>)}</ul></Alert>}
     {saved && <>
       <div className="ritual-pickers">
         <Field label="Ritual">
-          <Select value={saved.config.rituals.some(r => r.key === key) ? key : ''} onValueChange={v => {
-            const r = saved.config.rituals.find(x => x.key === v)
-            setKey(r?.key ?? ''); setSource(r?.source ?? blank()); dry.clear()
-          }} options={[...saved.config.rituals.map(r => ({ label: r.key, value: r.key })), { label: 'New ritual', value: '' }]} />
+          <Select value={isSaved ? key : ''} onValueChange={v => { if (v === (isSaved ? key : '')) return; if (scriptChanged) setConfirmSwitch(v); else switchTo(v) }}
+            options={[...saved.config.rituals.map(r => ({ label: r.key, value: r.key })), { label: 'New ritual', value: '' }]} />
         </Field>
-        <Field label="Key" hint="Lowercase letters, digits and hyphens."><Input value={key} onChange={e => setKey(e.target.value.toLowerCase())} placeholder="triage" /></Field>
-        <Field label="Start from a template">
-          <Select value="" onValueChange={id => { const t = ritualTemplates.find(x => x.id === id); if (t) setSource(t.source(completions.find(c => c.detail.startsWith(`${t.needs} ·`))?.label.replace(/^endpoints\.|^endpoints\["|"\]$/g, ''))) }}
+        <Field label="Key" error={key && !keyValid ? 'Use lowercase letters, digits and hyphens, like refund-triage.' : undefined} hint={isSaved ? 'Renaming saves it as a new ritual; this one stays until you delete it.' : 'How addresses and the API refer to it. Lowercase letters, digits and hyphens.'}>
+          <Input value={key} onChange={e => setKey(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} placeholder="triage" aria-invalid={(!!key && !keyValid) || undefined} />
+        </Field>
+        <Field label="Start from a template" hint={template ? `Applied “${ritualTemplates.find(t => t.id === template)?.name}”. Not saved until you save.` : 'Replaces the script below.'}>
+          <Select value={template} onValueChange={id => { if (!id) return; if (source.trim() && source !== blank() && source !== origin) setConfirmTemplate(id); else applyTemplate(id) }}
             options={[{ label: 'Choose…', value: '' }, ...ritualTemplates.map(t => ({ label: t.name, value: t.id }))]} />
         </Field>
       </div>
-      <Editor value={source} change={setSource} completions={completions} check={lint} />
+      <Editor value={source} change={value => { setSource(value); if (template && value !== source) setTemplate('') }} completions={completions} check={lint} />
       <p className={check && !check.ok ? 'ritual-status ritual-error' : 'ritual-status muted'}>{check === null ? 'Checking…' : check.ok
         ? <>No problems{check.calls.length ? <> · calls <code>{check.calls.join(', ')}</code></> : null}{check.omens.length ? <> · omens <code>{check.omens.join(', ')}</code></> : null}</>
         : (p => <>Line {p.line}, column {p.column}: {p.message}{p.hint ? ` ${p.hint}` : ''}{check.diagnostics.length > 1 ? ` (+${check.diagnostics.length - 1} more)` : ''}</>)(check.diagnostics[0]!)}</p>
@@ -223,11 +301,11 @@ export function RitualsPage() {
       {check !== null && (recent.data !== undefined || !!recent.error) && <>
       <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
         <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
-        <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Jev isn’t asked.`} />
+        <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Bane’s AI isn’t asked: you set each omen’s answer here.`} />
         <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
         <div className="ritual-try__options">
           {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to" hint="The address the ritual is attached to for this try."><Input id="ritual-try-to" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
-          {omens.map(name => <Field key={name} label={<>If <code>{name}</code> answers <strong className="ritual-try__score">{(answers[name] ?? 0.5).toFixed(2)}</strong></>} hint={check?.questions[name]}>
+          {omens.map(name => <Field key={name} label={<>If omen <code>{name}</code> answers <strong className="ritual-try__score">{(answers[name] ?? 0.5).toFixed(2)}</strong></>} hint={check?.questions[name]}>
             <input className="ritual-try__range" type="range" min={0} max={1} step={0.05} value={answers[name] ?? 0.5} onChange={e => { setAnswers({ ...answers, [name]: Number(e.target.value) }); dry.clear() }} aria-label={`Answer for ${name}`} />
           </Field>)}
         </div>
@@ -238,25 +316,43 @@ export function RitualsPage() {
 
       <section id="attach" className="section section--bordered stack" aria-labelledby="ritual-attach">
         <SectionHeader title={<span id="ritual-attach">Runs on</span>} />
-        <ConceptLine line="Attach a ritual to an address or alias. Up to three run in order; the first that acts stops the rest unless “Run the next one too” is on." />
+        <ConceptLine line="Attach a ritual to an address or alias; changes here save at once. Up to three run in order; the first that acts stops the rest unless “Run the next one too” is on." />
         <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
           empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual only runs on mail to the addresses it’s attached to." />} />
         <div className="ritual-attach">
-          <Field label={`Attach ${key || 'this ritual'} to`}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an address', value: '' }, ...targets]} /></Field>
+          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an address', value: '' }, ...targets]} /></Field>
           <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
-          <Button disabled={!target || !key || bindings.some(b => b.target === target && b.ritual === key)} onClick={() => { setBindings([...bindings, { ritual: key, target, continue: next }]); setTarget('') }}>Attach</Button>
+          <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key} to ${targetName(target)}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
         </div>
+        {attached && <p className="muted ritual-attach__note">{key} already runs on {targetName(target)}.</p>}
       </section>
 
       <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
-        <Field label="Sender lists" hint={<>One per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
+        <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
           <Textarea rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
-        <Field label="Domains that may ask omens" hint="Receiving hosts whose mail Jev may read to answer omen questions. Elsewhere omens answer their default.">
-          <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder="reply.example.com" />
+        <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI only reads mail at the receiving hosts listed here, separated by commas; everywhere else an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
+          <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />
         </Field>
       </section>
+
+      {/* Always on screen while editing, so the save state and Save are never scrolled away. It arrives with the
+          sections above, in its final place. */}
+      <div className="ritual-savebar" data-dirty={dirty || !isSaved || undefined} role="status" aria-live="polite">
+        <span className="ritual-savebar__state"><span className="ritual-savebar__dot" aria-hidden="true" />{status}</span>
+        <div className="cluster">
+          <Button variant="ghost" className="ritual-savebar__discard" data-hidden={!dirty || undefined} disabled={!dirty || pending} onClick={() => open(saved, isSaved ? key : '')}>Discard</Button>
+          <Button variant="primary" loading={pending} disabled={!canSave} onClick={() => void save()}>Save<kbd className="ritual-savebar__kbd" aria-hidden="true">⌘S</kbd></Button>
+        </div>
+      </div>
       </>}
     </>}
+    {leaveGuard}
+    <ConfirmDialog open={confirmTemplate !== null} onOpenChange={value => { if (!value) setConfirmTemplate(null) }} title={`Replace the script with “${ritualTemplates.find(t => t.id === confirmTemplate)?.name ?? 'this template'}”?`}
+      description="The script you’ve written is replaced. Nothing is saved until you save, and Discard brings back the saved version." confirmLabel="Replace script" onConfirm={() => { if (confirmTemplate) applyTemplate(confirmTemplate) }} />
+    <ConfirmDialog open={confirmSwitch !== null} onOpenChange={value => { if (!value) setConfirmSwitch(null) }} title={`Discard the changes to ${key || 'this ritual'}?`}
+      description="You haven’t saved them. Save first to keep them." confirmLabel="Discard changes" danger onConfirm={() => { if (confirmSwitch !== null) switchTo(confirmSwitch) }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${key}?`} description={`It stops running on every address it’s attached to${bindings.some(b => b.ritual === key) ? ` (${bindings.filter(b => b.ritual === key).length})` : ''}. Earlier versions stay restorable over the API.`}
+      confirmLabel="Delete ritual" danger onConfirm={remove} />
   </div>
 }

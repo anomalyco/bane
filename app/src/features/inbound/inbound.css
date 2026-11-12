@@ -24,7 +24,8 @@
 .mailbox-thread-row__count { flex: none; min-width: 20px; height: 18px; padding: 0 6px; border-radius: 9px; background: var(--color-hover); color: var(--color-muted); font-size: 11px; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .mailbox-thread-row[data-selected] .mailbox-thread-row__count { background: var(--color-surface); }
 .mailbox-thread-row__time { flex: none; min-width: 52px; color: var(--color-muted); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; }
-.inbound-thread-row__subject { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--color-text); font-weight: 500; }
+.inbound-thread-row__subject { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--color-text); font-size: var(--text-sm); line-height: 20px; }
+.mailbox-thread-row__top .mailbox-thread-row__people { color: var(--color-text); font-weight: 500; }
 .mailbox-thread-row__subject, .mailbox-thread-row__snippet { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .mailbox-thread-row__subject { font-size: var(--text-sm); line-height: 20px; }
 .mailbox-thread-row__snippet { color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
@@ -187,7 +188,25 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .ritual-attach .ui-check-field { min-height: var(--control-height); }
 .ritual-row-actions { display: inline-flex; gap: var(--space-4); }
 .ritual-error { color: var(--color-danger); }
+.ritual-attach__note { margin: calc(-1 * var(--space-8)) 0 0; font-size: var(--text-xs); }
+/* The save bar: in the page flow at the end (its space is reserved), stuck to the bottom of the view while scrolling. */
+/* Left-aligned, so toasts (bottom right) never cover Save. */
+.ritual-savebar { position: sticky; bottom: var(--space-16); z-index: 5; align-self: flex-start; width: min(560px, 100%); display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 52px; padding: var(--space-8) var(--space-8) var(--space-8) var(--space-16); border-radius: var(--radius-lg); background: var(--color-layer-1); box-shadow: var(--shadow-popover); font-size: var(--text-sm); }
+.ritual-savebar__state { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-muted); }
+.ritual-savebar__dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--color-success); transition: background 200ms ease; }
+.ritual-savebar[data-dirty] .ritual-savebar__state { color: var(--color-text); }
+.ritual-savebar[data-dirty] .ritual-savebar__dot { background: var(--color-warning-marker); }
+.ritual-savebar__discard[data-hidden], .ritual-delete[data-hidden] { visibility: hidden; }
+.ritual-savebar__kbd { margin-left: var(--space-8); font: inherit; font-size: var(--text-xs); opacity: .6; }
+@media (hover: none) { .ritual-savebar__kbd { display: none; } }
 .endpoint-config { margin: 0; padding: var(--space-12); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-layer-1); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
 .endpoint-steps { display: grid; gap: var(--space-4); }
 .endpoint-steps p { margin: 0; font-size: var(--text-sm); }
 
+
+/* Optional settings folded under a summary line. */
+.inbound-advanced > summary { width: fit-content; max-width: 100%; cursor: pointer; font-size: var(--text-sm); font-weight: 500; }
+.inbound-advanced > summary .muted { font-weight: var(--font-weight-regular); }
+.inbound-advanced__body { padding-top: var(--space-16); }
+.inbox-facts-note { max-width: 72ch; margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.connect-agent__title { font-size: var(--text-sm); }
