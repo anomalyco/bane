@@ -60,6 +60,20 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('mail gateway: private admission binds the credential lane and append metadata',async()=>{
+  const {gatewayLane}=await import('./src/protocol-admission.js');
+  const key=randomUUID(),ts='1800000000',path='/internal/v1/mail';
+  const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+  const h=new Headers({'x-bane-timestamp':ts,'x-bane-content':hash('mail'),'x-bane-scope':hash('app_test'),'x-bane-append':'fixture'});
+  h.set('x-bane-signature',createHmac('sha256',key).update(['POST',path,ts,hash('mail'),hash('app_test'),hash('fixture')].join('\n')).digest('hex'));
+  const lane=()=>gatewayLane('POST',path,h,key,Number(ts)*1000);
+  assert.equal(lane(),`bane:protocol:${hash('app_test')}`);
+  assert.equal(gatewayLane('POST',path,h,key,(Number(ts)+61)*1000),null);
+  h.set('x-bane-scope',hash('other'));assert.equal(lane(),null);
+  h.set('x-bane-scope',hash('app_test'));h.delete('x-bane-append');assert.equal(lane(),null);
+  const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
+  assert.equal(response.status,403);
+});
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
   const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';
