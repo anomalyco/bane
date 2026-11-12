@@ -9087,6 +9087,42 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(),{status:'pending',error:null,n:160,active:1,charged:1,jobs:1});
     });
   });
+  // Review of #57, P2 (tear witness, 9 steps: ... W accept m3 a, V accept m3 ab, X release -> the release
+  // waited on A's window while holding B's, behind an admission that then needed B's: a deadlock).
+  test('receive release: the global pass skips a busy workspace instead of deadlocking with a multi-workspace admission',async t=>{
+    const g=await fixtureDatabase(t),adm=await fixtureDatabase(t),rel=await fixtureDatabase(t),base=unique('rdl'),A=base+'-a',B=base+'-b',ids=[A,B];
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_receive_limits','mail_ingest_turns'])await g.query(`DELETE FROM ${table} WHERE workspace_id=ANY($1)`,[ids]);});
+    const receipt=(c:pg.Client,w:string,mid:string,extra='')=>c.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification${extra?',status,error,budget_retry_at':''})
+      VALUES($1,$2,$3,'tear-bucket','key','["x@rdl.invalid"]','{}'${extra})`,[w,mid,REGION]);
+    await g.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,10,10),($2,10,1)',[A,B]);
+    await g.query("INSERT INTO mail_receive_windows(workspace_id,window_at,messages,bytes) SELECT w,date_trunc('hour',now()),0,0 FROM unnest($1::text[]) w",[ids]);
+    // B's backlog is full; both workspaces have a due hold, B's older, so the release visits B first.
+    await receipt(g,B,'busy');await g.query(`INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'mailbox.ingest',$2,'{"sesMessageId":"busy"}')`,[unique('job'),B]);
+    await receipt(g,B,'held-b',",'held','MAILBOX_RECEIVE_BUDGET',now()-interval '2 hours'");
+    await receipt(g,A,'held-a',",'held','MAILBOX_RECEIVE_BUDGET',now()-interval '1 hour'");
+    const waiting=async(c:pg.Client)=>{const pid=(await c.query('SELECT pg_backend_pid() pid')).rows[0].pid;return async()=>(await g.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';};
+    const admWaiting=await waiting(adm),relWaiting=await waiting(rel);
+    // A gate holds A's window row; one statement then creates new receipts in A and B, in workspace order.
+    await g.query('BEGIN');
+    try {
+      await g.query('UPDATE mail_receive_windows SET messages=messages WHERE workspace_id=$1',[A]);
+      const admission=adm.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification)
+        SELECT w,'multi',$2,'tear-bucket','key','["x@rdl.invalid"]','{}' FROM unnest($1::text[]) w ORDER BY w`,[ids,REGION]).then(()=>'ok',(e:Json)=>String(e.code));
+      for(let i=0;i<400&&!await admWaiting();i++)await new Promise(r=>setTimeout(r,5));
+      assert.ok(await admWaiting(),'the admission waits on A\'s window row');
+      // The global release finishes without waiting: B's hold stays held (backlog full); A's is skipped.
+      let settled=false;
+      const release=rel.query('SELECT release_receive_budget_holds(NULL) n').then(r=>({n:r.rows[0].n}),(e:Json)=>({error:String(e.code)})).finally(()=>{settled=true;});
+      for(let i=0;i<200&&!settled&&!await relWaiting();i++)await new Promise(r=>setTimeout(r,5));
+      assert.equal(await relWaiting(),false,'the release never waits on a workspace row');
+      await g.query('COMMIT');
+      const [released,admitted]=await Promise.all([release,admission]);
+      assert.ok('n' in released,`release failed: ${JSON.stringify(released)}`);
+      assert.equal(admitted,'ok');
+    } finally { await g.query('ROLLBACK'); }
+    const holds=(await g.query("SELECT workspace_id,ses_message_id,status,budget_retry_at>now() AS later FROM mail_receipts WHERE workspace_id=ANY($1) AND ses_message_id LIKE 'held-%' ORDER BY 1",[ids])).rows;
+    assert.deepEqual(holds.map(h=>[h.ses_message_id,h.status,h.later]),[['held-a','held',false],['held-b','held',true]]);
+  });
   // tear witness (5 steps): U1 upload, expire, sweep, purge, U1 ok -> the object outlived its reservation with no deletion queued.
   test('attachment upload: a put that outlasts its swept reservation still queues the object for deletion',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
