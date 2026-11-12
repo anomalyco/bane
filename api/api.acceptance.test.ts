@@ -6226,7 +6226,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const inputs=['--old-account',old,'--new-account',dest,'--region',r,'--old-bucket',bucket(old),'--new-bucket',bucket(dest),'--workspaces',[...inventory].reverse().join(',')];
   let runId=run;
   const command=(...args:string[])=>rehomeHostedAccount(db,[...inputs,'--run-id',runId,...args]);
-  const apply=(hash:string)=>command('--apply','--expect-plan-sha256',hash), restore=()=>command('--restore',runId);
+  const why=['--reason','Synthetic account re-home'];
+  const apply=(hash:string)=>command('--apply','--expect-plan-sha256',hash,...why), restore=()=>command('--restore',runId,...why);
   const first=await command(), hash=first.planSha256;
   const database=async()=>{
     const names=(await db.query(`SELECT tablename FROM pg_tables WHERE schemaname=$1 ORDER BY tablename`,[schema])).rows.map(row=>row.tablename as string);
@@ -6309,7 +6310,9 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   });
   const baseline=await database(), valid=(await command()).planSha256;
   await t.test('atomic apply changes only reviewed rows; immediate guarded restore round-trips',async()=>{
-    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images']);
+    await assert.rejects(command('--apply','--expect-plan-sha256',valid),/--reason/);assert.deepEqual(await database(),baseline,'No reason, no change.');
+    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images','hosted_operator_audit']);
+    assert.deepEqual((await db.query(`SELECT workspace_id FROM hosted_operator_audit WHERE action='rehome-apply' AND details->>'reason'='Synthetic account re-home' ORDER BY workspace_id`)).rows.map(r=>r.workspace_id),[...inventory].sort(),'Every re-homed workspace is audited with the reason.');
     for(const [tab,digest] of Object.entries(baseline))if(!allowed.has(tab))assert.equal(changed[tab],digest,tab);
     assert.equal((await db.query('SELECT FROM regional_sending_connections')).rowCount,0);
     const targets=(await db.query('SELECT workspace_id,aws_account_id,managed_tenant,tenant_state,pool_tenant_name,legacy_names FROM regional_connections ORDER BY workspace_id')).rows;
@@ -6331,7 +6334,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     for(const tab of Object.keys(first.counts))assert.equal(after[tab],baseline[tab],tab);
     for(const tab of Object.keys(after))if(!allowed.has(tab))assert.equal(after[tab],preRestore[tab],tab);
     assert.ok((await db.query('SELECT restored_at FROM hosted_rehome_runs')).rows[0]?.restored_at);
-    await command('--finalize',runId);assert.equal((await db.query('SELECT FROM hosted_rehome_images')).rowCount,0);await assert.rejects(restore(),/finalized/);
+    await command('--finalize',runId,...why);assert.equal((await db.query('SELECT FROM hosted_rehome_images')).rowCount,0);await assert.rejects(restore(),/finalized/);
   });
   await t.test('late feedback jobs do not invalidate either fence; before-images are bounded chunks',async()=>{
     runId=run+'-feedback';await db.query(`INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('fixture',$1,'https://callback.invalid','["email.opened","email.clicked"]','fixture')`,[w[0]]);
@@ -6341,7 +6344,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const plan=await command();await late('Open');const review=await command();assert.equal(review.planSha256,plan.planSha256);assert.notDeepEqual(review.jobs,plan.jobs);await apply(plan.planSha256);
     const sizes=await db.query(`SELECT (SELECT count(*)::int FROM jsonb_object_keys(before_image)) size FROM hosted_rehome_images WHERE relation='mail_messages' ORDER BY chunk`);assert.deepEqual(sizes.rows,[{size:256},{size:5}]);
     await late('Click');await restore();assert.equal((await db.query(`SELECT FROM jobs WHERE type='operation.webhook'`)).rowCount,2);
-    await command('--finalize',runId);await db.query(`DELETE FROM mail_messages WHERE id LIKE 'bulk-%'`);
+    await command('--finalize',runId,...why);await db.query(`DELETE FROM mail_messages WHERE id LIKE 'bulk-%'`);
   });
   runId+='-reconcile';await apply((await command()).planSha256);
   await t.test('flags-on reconciliation, fresh claim-tagged identities, receiving and signed historical feedback',async integration=>{
@@ -6447,7 +6450,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     await mailboxIngestJobs['mailbox.ingest']!(runtime,receiptJob.payload,{id:receiptJob.id,workspaceId:receiptJob.workspace_id,attempts:1});assert.equal((await db.query(`SELECT FROM mail_receipts WHERE ses_message_id=$1 AND status='processed' AND bucket=$2`,[recv,bucket(dest)])).rowCount,1);
     const download=ok(await api('GET','/v1/inbound/messages/mail/attachments/attachment'));assert.equal(await (await fetch(download.url)).text(),'old bytes');
     await assert.rejects(restore(),/refused/);
-    await command('--finalize',runId);await assert.rejects(restore(),/finalized/);
+    await command('--finalize',runId,...why);await assert.rejects(restore(),/finalized/);
   });
   await t.test('cold Hosted connection can create, list, read and verify domains before the pool binds its account',async cold=>{
     // POST /connection takes its account only from a ready sending pool.
@@ -6963,8 +6966,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const {adoptionFacts}=await import('./src/adopted-identity.js');const rows=Array.from({length:12},(_,i)=>{const name=`adopted-${i}.fixture.test`;return {arn:`arn:aws:ses:${va}:${acct}:identity/${name}`,...adoptionFacts(identity(name) as any)};});
     const inventory={workspaceId:wid,installation:'opensend-042df6f752eaa1f62cb8',scope:'exclusive-send-only',identities:rows};
     const op=new SESv2Client({region:va,credentials:runtime.config.aws!});cleanup(t,async()=>op.destroy());
-    const adopt=(apply:boolean)=>adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,apply,flags);
+    const adopt=(apply:boolean)=>adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,apply,flags,'Synthetic identity adoption');
     assert.equal((await adopt(false)).length,12);assert.equal((await db.query('SELECT FROM hosted_adoptions WHERE workspace_id=$1',[wid])).rowCount,0);
+    await assert.rejects(adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,true,flags),/--reason/,'An apply without a reason fails before any read.');
     drift=true;await assert.rejects(adopt(true),/drift/);drift=false;
     await db.query(`INSERT INTO domain_claims(workspace_id,name) VALUES($1,'adopted-0.fixture.test')`,[wid]);await assert.rejects(adopt(true),/Overlapping/);await db.query(`DELETE FROM domain_claims WHERE workspace_id=$1 AND name='adopted-0.fixture.test'`,[wid]);
     await assert.rejects(adopt(true),/interrupted/);assert.equal((await db.query(`SELECT FROM domain_claims WHERE workspace_id=$1 AND sending_state='verified' AND identity ? 'adopted'`,[wid])).rowCount,0);
@@ -7054,9 +7058,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
     const operator=`arn:aws:sts::${acct}:assumed-role/platform-operator/fixture`,op=new SESv2Client({region:oh,credentials:runtime.config.aws!});cleanup(t,async()=>op.destroy());
     const {adoptionFacts,adoptionFingerprint}=await import('./src/adopted-identity.js'),reviewed=adoptionFingerprint(adoptionFacts(identity as any));
-    const adopt=(apply:boolean,overrides:Record<string,string|undefined>={},who=operator,fingerprint=reviewed)=>adoptPlatformDomain(db,op,owner,who,apply?{apply,fingerprint}:{},{...env,...overrides});
+    const adopt=(apply:boolean,overrides:Record<string,string|undefined>={},who=operator,fingerprint=reviewed)=>adoptPlatformDomain(db,op,owner,who,apply?{apply,fingerprint,reason:'Synthetic platform adoption'}:{},{...env,...overrides});
     await assert.rejects(adopt(true,{BANE_PLATFORM_DOMAIN_WORKSPACE:undefined}),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
-    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed},env),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
+    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed,reason:'Synthetic platform adoption'},env),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
     await assert.rejects(adopt(true,{},`arn:aws:iam::${acct}:user/bane-runtime`),/operator role/);
     identity.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];await assert.rejects(adopt(false),/domain claim created/);identity.Tags=[];
     identity.Policies={delegate:'{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"ses:SendEmail"}]}'};
@@ -7071,7 +7075,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const planned=await adopt(false);
     assert.deepEqual([planned.fingerprint,planned.tenant,planned.action,planned.dkimTokens,planned.receiving],[reviewed,tenant,'associate and adopt',[...dkim].sort(),{name:host,type:'MX',priority:10,value:'inbound-smtp.us-east-2.amazonaws.com'}]);
     assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0,'A dry run writes nothing.');
-    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true},env),/Review the dry run first/);
+    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true},env),/--reason/,'A change without a reason fails before any read.');
+    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true,reason:'Synthetic platform adoption'},env),/Review the dry run first/);
     await assert.rejects(adopt(true,{},operator,'0'.repeat(64)),/no longer matches the reviewed fingerprint/);assert.deepEqual(writes,[]);
     const adopted={domainId:(await adopt(true)).domainId!};
     assert.deepEqual(writes,[`CreateTenantResourceAssociationCommand:${arn}`],'Adoption only joins the existing identity to the workspace tenant.');assert.equal(members.get(arn),tenant);
@@ -7167,14 +7172,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // Revoke: the operator undo releases the claim and leaves the workspace's tenant, even once the configuration has moved on.
     await adopt(true,{},operator,renewed);assert.equal(members.get(arn),tenant);
     runtime.config.platformDomainWorkspace=undefined;
-    const revokePlan=await revokePlatformDomain(db,op,owner,operator,false,env);
+    const revokePlan=await revokePlatformDomain(db,op,owner,operator,{apply:false},env);
     assert.equal(revokePlan.action,`release the adopted claim, then remove the identity from ${tenant}`);assert.equal(members.get(arn),tenant);
-    await assert.rejects(revokePlatformDomain(db,op,owner,`arn:aws:iam::${acct}:user/bane-runtime`,true,env),/operator role/);
-    await revokePlatformDomain(db,op,owner,operator,true,{...env,BANE_PLATFORM_DOMAIN_WORKSPACE:undefined});
+    await assert.rejects(revokePlatformDomain(db,op,owner,operator,{apply:true},env),/--reason/);
+    await assert.rejects(revokePlatformDomain(db,op,owner,`arn:aws:iam::${acct}:user/bane-runtime`,{apply:true,reason:'Synthetic platform revoke'},env),/operator role/);
+    await revokePlatformDomain(db,op,owner,operator,{apply:true,reason:'Synthetic platform revoke'},{...env,BANE_PLATFORM_DOMAIN_WORKSPACE:undefined});
     assert.equal(members.has(arn),false);assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);
     assert.deepEqual(writes.slice(settled),[`DeleteTenantResourceAssociationCommand:${arn}`],'Revoking never touches the identity itself.');
     assert.equal((await db.query("SELECT details->>'tenant' AS tenant FROM hosted_operator_audit WHERE workspace_id=$1 AND action='platform-domain-revoked'",[owner])).rows[0].tenant,tenant);
-    assert.equal((await revokePlatformDomain(db,op,owner,operator,false,env)).action,'nothing to revoke');
+    assert.equal((await revokePlatformDomain(db,op,owner,operator,{apply:false},env)).action,'nothing to revoke');
     runtime.config.platformDomainWorkspace=owner;
   });
 

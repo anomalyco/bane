@@ -10,7 +10,7 @@ const sha = (text:string) => createHash('sha256').update(text).digest('hex');
 const str = {type:'string'} as const, flag = {type:'boolean'} as const;
 function options(args:string[]) {
   const {values:v,tokens} = parseArgs({args,tokens:true,options:{plan:flag,apply:flag,restore:str,finalize:str,'expect-plan-sha256':str,
-    'old-account':str,'new-account':str,region:str,workspaces:str,'old-bucket':str,'new-bucket':str,'run-id':str}});
+    'old-account':str,'new-account':str,region:str,workspaces:str,'old-bucket':str,'new-bucket':str,'run-id':str,reason:str}});
   if (new Set(tokens.map(t=>t.kind==='option'?t.name:'')).size!==tokens.length) throw Error('Duplicate option.');
   const old=v['old-account'], dest=v['new-account'], region=v.region, run=v['run-id']??v.restore??v.finalize, expect=v['expect-plan-sha256'];
   if (!old || !dest || !/^\d{12}$/.test(old) || !/^\d{12}$/.test(dest) || old===dest) throw Error('Expected distinct 12-digit old and new accounts.');
@@ -21,7 +21,10 @@ function options(args:string[]) {
   if (v['old-bucket']!==buckets[0] || v['new-bucket']!==buckets[1]) throw Error('Expected the account-specific Ohio Hosted mail bucket names.');
   if (!run || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(run) || [v.restore,v.finalize].some(id=>id!==undefined && id!==run)) throw Error('Expected a single run ID.');
   if ([v.apply,v.plan,v.restore,v.finalize].filter(Boolean).length>1 || (v.apply ? !expect || !/^[0-9a-f]{64}$/.test(expect) : expect!==undefined)) throw Error('Choose --plan, --apply --expect-plan-sha256 HASH, --restore RUN, or --finalize RUN.');
-  return {inputs:{run,old,dest,region,workspaces,oldBucket:buckets[0]!,newBucket:buckets[1]!},mode:v.apply?'apply':v.restore?'restore':v.finalize?'finalize':'plan',expect};
+  // Every change (apply, restore, finalize) is audited per workspace with the operator's reason; a plan changes nothing.
+  const reason=v.reason?.trim()??null;
+  if ((v.apply || v.restore || v.finalize) && (!reason || reason.length<10)) throw Error('--apply, --restore and --finalize need --reason "why (at least 10 characters)".');
+  return {inputs:{run,old,dest,region,workspaces,oldBucket:buckets[0]!,newBucket:buckets[1]!},mode:v.apply?'apply':v.restore?'restore':v.finalize?'finalize':'plan',expect,reason};
 }
 type Inputs = ReturnType<typeof options>['inputs'];
 const binding = `SELECT b.domain_id,b.workspace_id,b.name,b.connection_id,b.region,dc.token FROM domain_sending_bindings b
@@ -157,14 +160,17 @@ async function writeRows(db:Client,i:Inputs,counts:Record<string,number>,restore
 }
 
 export async function rehomeHostedAccount(db:Client,args:string[]) {
-  const {inputs:i,mode,expect}=options(args), restore=mode==='restore';
+  const {inputs:i,mode,expect,reason}=options(args), restore=mode==='restore';
+  // Written in the run's own transaction, so a refused or rolled-back run leaves no audit row and vice versa.
+  const audit=()=>db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT w,'rehome-'||$2,jsonb_build_object('run',$3::text,'from',$4::text,'to',$5::text,'reason',$1::text,'via','script')
+    FROM unnest($6::text[]) w`,[reason,mode,i.run,i.old,i.dest,i.workspaces]);
   await db.query(mode==='plan'?'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY':'BEGIN ISOLATION LEVEL SERIALIZABLE');
   try {
     await db.query("SET LOCAL lock_timeout='3s'; SET LOCAL TIME ZONE 'UTC'; SET LOCAL enable_hashagg=off");
     if (mode==='finalize') {
       const done=await db.query('UPDATE hosted_rehome_runs SET finalized_at=now() WHERE run_id=$1 AND inputs=$2::jsonb AND finalized_at IS NULL RETURNING run_id AS finalized,plan_sha256 AS "planSha256"',[i.run,i]);
       if (!done.rowCount) throw Error('Finalize refused: missing, mismatched or already finalized run.');
-      await db.query('DELETE FROM hosted_rehome_images WHERE run_id=$1',[i.run]);await db.query('COMMIT');return done.rows[0]!;
+      await db.query('DELETE FROM hosted_rehome_images WHERE run_id=$1',[i.run]);await audit();await db.query('COMMIT');return done.rows[0]!;
     } else if (mode!=='plan') {
       // LOCK before the first SELECT establishes the SERIALIZABLE snapshot. Writers that were already
       // finishing an admission or a provider update must commit first (or cause a short timeout).
@@ -192,6 +198,7 @@ export async function rehomeHostedAccount(db:Client,args:string[]) {
       if (before.hash!==run.plan_sha256) throw Error('Restored state does not match reviewed plan.');
       await db.query('UPDATE hosted_rehome_runs SET restored_at=now() WHERE run_id=$1',[i.run]);
     }
+    if (mode!=='plan') await audit();
     await db.query('COMMIT');return restore?{...summary,planSha256:run!.plan_sha256}:summary;
   } catch(e) {await db.query('ROLLBACK');throw e;}
 }
