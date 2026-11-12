@@ -65,7 +65,7 @@ async function body(snapshot: EmailSnapshot) {
   if (snapshot.html) {
     const { boundedHtmlFragment } = await import('./bounded-html.js');
     if (snapshot.html.length>512*1024) throw tooLarge();
-    const fragment=boundedHtmlFragment(snapshot.html);
+    const fragment=boundedHtmlFragment(snapshot.html,'fragment',{clients:true});
     if (!fragment) throw tooLarge();
     const nodes = fragment.childNodes.slice().reverse().map(node=>({node,anchor:''})), text:string[]=[];
     while (nodes.length) {

@@ -8673,11 +8673,52 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         t.diagnostic(`Bounded HTML: ${size} bytes refused in ${ms.toFixed(1)} ms`);
         if (BENCH) assert.ok(ms<50,`HTML validation took ${ms} ms`);
       }
-      // Mail is read without scripting, so <noscript> content is markup: its links and its depth count like the rest.
-      error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html:'<noscript><a href="javascript:void(0)">Notes</a></noscript>'}),422,'UNSAFE_HTML_URL');
-      error(await request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html:`<noscript>${nested}</noscript>`}),422,'CONTENT_TOO_LARGE_TO_SCREEN');
+      // The markup is validated as every mail client may read it, not only as an HTML parser does. Mail is read without
+      // scripting, so <noscript> is markup; Outlook shows the inside of a conditional comment; and what a parser keeps
+      // as data (any other comment, a template, the fallback of frames and plugins) is markup to a lenient reader.
+      const send=(html:string)=>request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html});
+      const link='<a href="javascript:void(0)">Notes</a>';
+      for(const html of [`<noscript>${link}</noscript>`,
+        `<!--[if mso]>${link}<![endif]-->`,`<!-- [IF gte mso 9]>${link}<![ENDIF] -->`,'<p>Notes</p><!--[if (gte mso 9)|(IE)]><table><tr><td background="javascript:void(0)">Notes</td></tr></table><![endif]-->',
+        '<!--[if mso]><v:roundrect href="file://files.example/notes"><center>Notes</center></v:roundrect><![endif]-->','<!--[if mso]><v:imagedata src="cid:notes" o:href="file://files.example/notes.png"/><![endif]-->',
+        `<!--[if mso]><p>One</p><!--[if gte mso 9]>${link}<![endif]--><p>Two</p><![endif]-->`,`<!--[if mso]><template>${link}</template><![endif]-->`,`<!--[if mso]>${link}-->`,
+        `<!-- ${link} -->`,`<!-- one -- > ${link} -->`,`<! ${link}`,`<template>${link}</template>`,
+        `<iframe>${link}</iframe>`,'<iframe srcdoc="&lt;a href=&quot;javascript:void(0)&quot;&gt;Notes&lt;/a&gt;"><textarea></iframe>',`<noembed>${link}</noembed>`,`<noframes>${link}</noframes>`,`<noframes><!--[if mso]>${link}<![endif]--></noframes>`,
+      ]) error(await send(html),422,'UNSAFE_HTML_URL');
+      // Their nesting and their size count against the one budget, wherever they sit and however they are chained.
+      for(const html of [`<noscript>${nested}</noscript>`,`<!--[if mso]>${nested}<![endif]-->`,'<div>'.repeat(200)+`<!--[if mso]>${'<div>'.repeat(100)}<![endif]-->`,`<!-- ${nested} -->`,
+        '<!--'.repeat(6000),'<iframe>'.repeat(6000),'<!--[if mso]><b>x</b><![endif]-->'.repeat(6000)]){
+        const start=performance.now();error(await send(html),422,'CONTENT_TOO_LARGE_TO_SCREEN');
+        assert.ok(performance.now()-start<1500,`${html.slice(0,24)} is refused within the budget`);
+      }
       assert.equal(query.mock.callCount(),0); query.mock.restore();
+      // An ordinary message for Outlook and everyone else is none of that: Office settings, conditional tables, a VML
+      // button beside its plain link, and notes left in comments.
+      const ordinary='<!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--><!-- header: logo left, links right -->'
+        +'<!--[if (gte mso 9)|(IE)]><table role="presentation" width="600"><tr><td><![endif]--><p>Hello</p>'
+        +'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="https://example.invalid/open" style="height:44px;width:200px" arcsize="12%" fillcolor="#111111"><center>Open</center></v:roundrect><![endif]-->'
+        +'<!--[if !mso]><!--><a href="https://example.invalid/open">Open</a><!--<![endif]--><!--[if (gte mso 9)|(IE)]></td></tr></table><![endif]--><!-- <a href="/old">An older link</a> -->';
+      runtime.config.multiTenant=false;
+      ok(await local('POST','/v1/emails/send',mail({html:ordinary})),202);
     });
+  });
+
+  test('hosted screen reads what Outlook shows inside a conditional comment',async t=>{
+    // A subtest, so its classifier mock is lifted before the fixture's own network guard is.
+    await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
+      const {screenSnapshot}=await import('./src/screen.js');
+      runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>Response.json({answers:{spam:{noul:JSON.parse(String(init.body)).state.email.body.toLowerCase().includes('samplemarker')?0.99:0.1}}}));
+      const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,text:'Hello',raw:'Hello'};
+      // Its text, with or without markup, and where its links go.
+      for(const html of ['<p>Hello</p><!--[if mso]><p>SampleMarker</p><![endif]-->','<p>Hello</p><!-- [if gte mso 9]>SampleMarker<![endif] -->','<!--[if (gte mso 9)|(IE)]><table><tr><td>SampleMarker</td></tr></table><![endif]--><p>Hello</p>',
+        '<p>Hello</p><!--[if mso]><v:roundrect href="https://samplemarker.invalid/open"><center>Open</center></v:roundrect><![endif]-->'])
+        assert.equal((await screenSnapshot(runtime,{...s,html},true))?.spam,.99,html);
+      // A note in an ordinary comment, a template and a conditional style sheet are not the message's copy.
+      for(const html of ['<p>Hello</p><!-- SampleMarker <p>SampleMarker</p> -->','<p>Hello</p><template><p>SampleMarker</p></template>','<p>Hello</p><!--[if mso]><style>.samplemarker{color:red}</style><![endif]-->'])
+        assert.equal((await screenSnapshot(runtime,{...s,html},true))?.spam,.1,html);
+      await assert.rejects(screenSnapshot(runtime,{...s,html:`<p>Hello</p><!--[if mso]>${'<div>'.repeat(257)}<![endif]-->`},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
+    }));
   });
 
   test('received HTML past the parsing budget is flagged for readers, and the dashboard scans HTML in one pass',async t=>{
