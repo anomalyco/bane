@@ -87,6 +87,16 @@ test('Cloudflare routing: every API route reaches the Worker before static asset
     assert.deepEqual(paths.filter(p=>!first(p)),[],`${file} serves these API routes from static assets`);
   }
 });
+test('Cloudflare static headers: a year-long /assets/ answer is kept per fetch destination',async()=>{
+  // Workers Assets answers an /assets/ path that matches no file with the dashboard shell, under the same cache rule as
+  // the files. Vary keeps a browser from using a shell it once opened as a page for the script or style of that name.
+  const blocks=(await readFile(new URL('../app/public/_headers',import.meta.url),'utf8')).split(/\n(?=\S)/).map(block=>block.split('\n').map(line=>line.trim()).filter(Boolean));
+  const assets=blocks.find(([path])=>path==='/assets/*');
+  assert.ok(assets?.some(line=>/^Cache-Control:.*\bimmutable\b/i.test(line)),'hashed assets stay immutable');
+  assert.ok(assets?.some(line=>/^Vary:\s*Sec-Fetch-Dest$/i.test(line)),'/assets/* must vary by Sec-Fetch-Dest');
+  // Fonts are also read with fetch() for the email preview, which must reuse the copy the page already has.
+  assert.ok(!blocks.find(([path])=>path==='/fonts/*')?.some(line=>/^Vary:/i.test(line)));
+});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
