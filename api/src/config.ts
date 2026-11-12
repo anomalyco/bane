@@ -88,6 +88,12 @@ const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).
 export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
+/** Sign-up approval: an exact allowlisted address, or a verified address at an allowlisted domain when the
+ * required authentication context is configured (and, at sign-in, was asserted). Callers pass verified emails only. */
+export function signupApproved(config: Pick<Config,'allowedEmails'|'allowedDomains'|'accountRequiredAcr'>, email: string, acr: unknown = config.accountRequiredAcr) {
+  const address = email.toLowerCase(), domain = address.slice(address.lastIndexOf('@') + 1);
+  return config.allowedEmails.includes(address) || (!!config.accountRequiredAcr && acr === config.accountRequiredAcr && config.allowedDomains.includes(domain));
+}
 export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);

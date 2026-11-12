@@ -365,7 +365,7 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
       ('connected','Ada','ada@example.org', true), ('legacy','Lee','lee@example.org', true);
       INSERT INTO auth_account(id, account_id, provider_id, user_id) VALUES
       ('link','["https://id.example.org","A"]','account','connected'),('old','123','google','legacy')`);
-    await db.query(await readFile(new URL('./migrations/184_oidc_identities.sql', import.meta.url), 'utf8'));
+    await db.query(await readFile(new URL('./migrations/240_oidc_identities.sql', import.meta.url), 'utf8'));
     assert.deepEqual((await db.query('SELECT * FROM bane_oidc_identities')).rows, [
       {issuer:'https://id.example.org', subject:'A', user_id:'connected'},
     ]);
@@ -378,6 +378,22 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
     assert.equal(await claim(true), 'legacy');
     assert.equal(await claim(true), null);
     assert.equal((await db.query('SELECT count(*) FROM auth_account')).rows[0].count, '2');
+    // 247: Google-only legacy users carry over on their first Google sign-in, once, by exact verified address.
+    await db.query(`INSERT INTO auth_user(id,name,email,email_verified) VALUES ('google','Gia','gia@example.org',true),('mixed','Max','max@example.org',true),('unverified','Uma','uma@example.org',false);
+      INSERT INTO bane_users(id,name,email,email_verified) SELECT id,name,email,email_verified FROM auth_user WHERE id IN ('google','mixed','unverified');
+      INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES ('g1','456','google','google'),('m1','789','google','mixed'),('m2','pw','credential','mixed'),('u1','999','google','unverified')`);
+    for (const file of ['244_current_email','247_legacy_google_claims']) await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
+    assert.deepEqual((await db.query('SELECT user_id,issuer,source FROM bane_legacy_claims ORDER BY user_id')).rows,[{user_id:'google',issuer:null,source:'google'}]);
+    const google = async (email: string, acr: string | null, subject = 'G') =>
+      (await db.query('SELECT claim_bane_legacy_user($1,$2,$3,true,$4) AS id', ['https://id.example.org', subject, email, acr])).rows[0].id;
+    assert.equal(await google('gia@example.org','urn:anomaly:acr:passkey'), null, 'Only a Google sign-in can use an automatic claim');
+    assert.equal(await google('gia@example.org',null), null);
+    assert.equal(await google('Gia@example.org','urn:anomaly:acr:google'), null, 'The verified address must match exactly');
+    assert.equal(await google('max@example.org','urn:anomaly:acr:google'), null, 'A user with another sign-in method needs an operator claim');
+    assert.equal(await google('uma@example.org','urn:anomaly:acr:google'), null, 'An unverified legacy address is never claimed');
+    assert.equal(await google('gia@example.org','urn:anomaly:acr:google'), 'google');
+    assert.equal(await google('gia@example.org','urn:anomaly:acr:google','H'), null, 'A claim is consumed once');
+    assert.deepEqual((await db.query('SELECT user_id,issuer,subject,source FROM bane_legacy_claim_audit')).rows,[{user_id:'google',issuer:'https://id.example.org',subject:'G',source:'google'}]);
   } finally {
     await db.query('ROLLBACK');
   }
@@ -532,7 +548,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
   } finally { await db.query('ROLLBACK'); }
 });
 
-test('MCP cutover expires legacy approvals, credentials and their derived keys together',async t=>{
+test('MCP cutover expires legacy approvals and tokens but keeps the objects they created',async t=>{
   assert.ok(manager);
   const db=await fixtureDatabase(t);
   await db.query('BEGIN');
@@ -547,12 +563,15 @@ test('MCP cutover expires legacy approvals, credentials and their derived keys t
     await db.query("INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES('agent','default','mcp_consent','[\"read\"]','[]','fixture',now()+interval '1 day')");
     await db.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT k,'default',k,k,k,'[\"read\"]','[]' FROM unnest(ARRAY['derived','independent']) k");
     await db.query("INSERT INTO mail_grant_objects VALUES('consent','default','api_key','derived')");
-    const migrate=await readFile(new URL('./migrations/190_expire_mcp_legacy.sql',import.meta.url),'utf8');
+    const migrate=await readFile(new URL('./migrations/246_expire_mcp_legacy.sql',import.meta.url),'utf8');
     await db.query(migrate);await db.query(migrate);
     assert.equal((await db.query('SELECT FROM oauth_client WHERE NOT disabled')).rowCount,0);
     for(const table of ['oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE revoked IS NULL OR expires_at>now()`)).rowCount,0);
     assert.equal((await db.query('SELECT FROM agent_tokens WHERE revoked_at IS NULL')).rowCount,0);
-    assert.deepEqual((await db.query('SELECT id FROM api_keys WHERE revoked_at IS NULL')).rows,[{id:'independent'}]);
+    // Objects a retired approval created keep working; only the approval itself and its tokens expire.
+    assert.deepEqual((await db.query('SELECT id FROM api_keys WHERE revoked_at IS NULL ORDER BY id')).rows,[{id:'derived'},{id:'independent'}]);
+    assert.equal((await db.query('SELECT FROM mail_grant_objects')).rowCount,0);
+    assert.deepEqual((await db.query("SELECT kind,resource FROM bane_retired_grant_objects WHERE grant_id='consent'")).rows,[{kind:'api_key',resource:'derived'}]);
     const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
     const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
     const response=await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections',{headers:{cookie:manager.cookie}}),runtime);
@@ -2412,7 +2431,9 @@ describe('Hosted MCP OAuth and tools', () => {
       const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rituals'),listed.join());
       const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
-      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)) AS ok FROM bane_resource_grants WHERE grant_key=$1",[consentId])).rows[0].ok;
+      // The policy the server passes (receivingPolicy): this shard is self-hosted, so the address must be allowlisted.
+      const grantPolicy={hosted:false,emails:(process.env.AUTH_ALLOWED_EMAILS??'').split(',').map(e=>e.trim().toLowerCase())};
+      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)||$2::jsonb) AS ok FROM bane_resource_grants WHERE grant_key=$1",[consentId,JSON.stringify(grantPolicy)])).rows[0].ok;
       assert.equal(await live(),true);
       await assert.rejects(db.query(await readFile(new URL('./migrations/119_mvp_ownership_preflight.sql',import.meta.url),'utf8')),/MVP_OWNERSHIP_PREFLIGHT/);
       secrets.add(parent.secret);grantKeys.push(parent.id);

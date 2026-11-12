@@ -4,6 +4,7 @@ import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, respo
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
+import { signupApproved } from './config.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -133,7 +134,7 @@ export function registerWorkspaces(app: App) {
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
       const [user] = await db.select({email:baneUsers.email}).from(baneUsers).where(and(eq(baneUsers.id,a.userId),eq(baneUsers.emailVerified,true))).for('update');
-      const allowed = user && c.env.config.allowedEmails.includes(user.email.toLowerCase());
+      const allowed = user && signupApproved(c.env.config, user.email);
       if (!allowed) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
       const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId });
       if (row) return row;

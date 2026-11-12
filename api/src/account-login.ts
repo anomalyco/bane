@@ -1,9 +1,10 @@
 import * as oidc from 'oauth4webapi';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { ApiError, digest, type Actor, type Ctx, type Runtime } from './core.js';
+import { ApiError, digest, log, type Actor, type Ctx, type Runtime } from './core.js';
 import { getCookie, setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
+import { signupApproved } from './config.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -88,17 +89,24 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     if (!userId) {
       if (!emailAtLogin) throw loginFailed();
       const email = emailAtLogin;
-      const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},true) AS id`);
+      // Pre-approved legacy users (operator claims, or Google-only users carried over by migration 247).
+      const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},true,${typeof claims.acr === 'string' ? claims.acr : null}) AS id`);
       userId = migrated.rows[0]?.id ?? undefined;
+      if (userId) log('info', { code: 'SIGN_IN_LEGACY_CLAIMED', userId });
       if (!userId) {
-        const allowed = runtime.config.allowedEmails.includes(email.toLowerCase());
-        if (!allowed && (!runtime.config.multiTenant || !invitation || !await pendingInvitation(db,email,invitation))) throw loginFailed();
+        // Staff domains need the configured authentication context (Google in hosted mode), checked above.
+        const allowed = signupApproved(runtime.config, email, claims.acr);
+        if (!allowed && (!runtime.config.multiTenant || !invitation || !await pendingInvitation(db,email,invitation))) {
+          log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: invitation ? 'invitation' : 'not_allowlisted' });
+          throw loginFailed();
+        }
         userId = crypto.randomUUID();
         const name = typeof claims.name === 'string' ? claims.name.slice(0,200) : email;
         // A colliding legacy email is reserved; only the reviewed claim above can adopt it.
         const inserted = await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) SELECT ${userId},${name},${email},true
           WHERE NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${email})) ON CONFLICT DO NOTHING RETURNING id`);
-        if (!inserted.rowCount) throw loginFailed();
+        if (!inserted.rowCount) { log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: 'address_reserved' }); throw loginFailed(); }
+        log('info', { code: 'SIGN_IN_USER_CREATED', userId });
         await db.execute(sql`INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
         if (runtime.config.multiTenant) {
           if (!await onboardNewUser(db,{id:userId,email,name},allowed,runtime.config.regions[0]!,invitation)) throw loginFailed();
@@ -187,6 +195,7 @@ export async function accountBrowserRoute(c: Ctx) {
       return c.redirect(returnUrl,303);
     } catch (error) {
       const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
+      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error') });
       return c.redirect(`${origin}/?auth=${issue?.reason ?? 'error'}`,303);
     }
   }

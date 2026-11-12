@@ -1,3 +1,4 @@
+SET LOCAL lock_timeout='2s';
 -- The PR's new resource-grant table is empty at cutover. Keep a revocation
 -- tombstone even when the access token expires or the workspace is deleted.
 ALTER TABLE bane_resource_grants DROP CONSTRAINT bane_resource_grants_issuer_subject_fkey,

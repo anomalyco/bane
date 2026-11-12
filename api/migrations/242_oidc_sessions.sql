@@ -1,3 +1,4 @@
+SET LOCAL lock_timeout='2s';
 CREATE UNIQUE INDEX bane_oidc_identity_owner ON bane_oidc_identities(issuer,subject,user_id);
 CREATE TABLE bane_sessions (
   token_hash text PRIMARY KEY, user_id text NOT NULL, issuer text NOT NULL, subject text NOT NULL,
