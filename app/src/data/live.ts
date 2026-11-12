@@ -31,6 +31,14 @@ async function takeEarly(path: string, signal?: AbortSignal) {
     return response
   } finally { signal?.removeEventListener('abort', restore) }
 }
+// The request IDs of the last few failed API calls, newest first: Contact support sends them so support can find the errors.
+const failedRequests: string[] = []
+function rememberFailedRequest(id: string) {
+  if (!/^[\w.:-]{1,64}$/.test(id) || failedRequests[0] === id) return
+  failedRequests.unshift(id)
+  failedRequests.length = Math.min(failedRequests.length, 5)
+}
+export const recentFailedRequestIds = () => [...failedRequests]
 export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number } = {}): Promise<T> {
   const started = performance.now()
   let response: Response
@@ -58,6 +66,7 @@ export async function request<T = Json>(path: string, options: { method?: string
     const message = typeof error?.message === 'string' ? error.message : 'Couldn’t complete the request.'
     if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('bane:unauthorized'))
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
+    if (failure.requestId) rememberFailedRequest(failure.requestId)
     if (Array.isArray(error?.details)) failure.details = error.details
     throw failure
   }

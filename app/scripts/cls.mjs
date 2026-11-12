@@ -80,6 +80,7 @@ const pages = ids => [
   ['Settings · members', '/settings#members', { from: '/settings' }],
   ['Settings · sending', '/settings#sending', { from: '/settings' }],
   ['Settings · webhooks', '/settings#webhooks', { from: '/settings' }],
+  ['Settings · activity', '/settings#activity', { from: '/settings' }],
   ['Settings · account', '/settings#account', { from: '/settings' }],
   ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
@@ -95,7 +96,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },

@@ -419,6 +419,80 @@ Postgres request/resource budgets bound major amplification paths. Authenticated
 
 Coarse admission runs before DB access: 6,000 requests/minute per IPv4 or IPv6 /64 per Node process or Cloudflare location (approximate). SNS has a separate Cloudflare lane at the same limit, and its signature is verified before looking up the topic. An isolate/process reserves up to 40 public credential attempts per peer per minute before dispatch; successful authentication refunds the reservation. Public auth entry points have their own 40/minute lane. Node does not trust forwarded-IP headers. Use correctly configured proxy/WAF controls for distributed abuse. Cloudflare invocation URL logs/traces are disabled; review every external log sink independently.
 
+## Audit trail
+
+Every account has one append-only trail, `audit_events` (migration 260): who acted (a member, an API key, an MCP grant or agent token, an inbox key, an operator, a support grant, Bane itself or Stripe), in which workspace and for which user, the action (`api_key.create`, `member.role_change`, `domain.delete`, `support.view`…), the target, a before/after summary, the reason and ticket, the request ID, and the client's network (/24 or /48) and user-agent family. Summaries never hold secrets (key values, hashes, passwords, webhook secrets or URLs) or message content.
+
+- **Immutable in SQL:** triggers refuse `UPDATE`, `TRUNCATE` and any `DELETE` before `retain_until` for every role, the superuser included. A role that owns the table (or holds DDL on it) can still disable the triggers, so the API must connect as a non-owner role with `SELECT`, `INSERT` and `DELETE` (the purge) only; check it with `SELECT privilege_type FROM information_schema.role_table_grants WHERE table_name='audit_events' AND grantee=current_user`. The hourly maintenance purge deletes expired rows in pages.
+- **Retention:** 1 year by default (it covers card dispute windows and an annual review), 7 years for billing and payment events, 90 days for the per-call log of a support grant.
+- **Writers:** `recordAudit(tx, c, event)` inside the change's own transaction, or `auditInsert(...)` composed into the change's single statement (no extra round trip). Send admission never writes here; sending activity is in the sending logs. Operator scripts, the operator API, hosted pauses and limit overrides reach the trail through SQL triggers (migration 262).
+- **Readers:** owners and admins see their workspace's customer-visible rows in Settings → Activity (`GET /v1/activity`). Operators see everything through `GET /v1/operator/workspaces/{id}/audit` and `GET /v1/operator/users/{id}/audit` (filter by `since`, `until`, `action`, `actorType`, `actorId`, `requestId`; cursor pages; `include=enforcement,billing` joins the standing events and billing ledger where those tables exist). Each operator read is itself written to the trail.
+
+## Support integration
+
+Internal: these routes serve Bane's operators and its support platform, never customers. `/v1/operator/*` answers only an operator and `/v1/support/*` only a support grant; every customer credential (any dashboard role, API keys, MCP grants, agent tokens, inbox keys, app passwords) gets the same `403` with no data on every path there, real or not. Neither appears as an MCP tool, and `/v1/support/*` is marked `x-internal` in `/openapi.json` and left out of `/docs`, `/docs.md` and `/llms.txt`. It stays in the SDK for the support platform.
+
+**Configuration** (hosted only):
+
+| Variable | What |
+| --- | --- |
+| `BANE_SUPPORT_PLATFORM_TOKEN` | The support platform's server-to-server operator credential, `bane_ops_` + 64 hex. A secret, as strong as an `operator:read` session: it verifies senders, mints, lists and revokes support grants, reads handoffs, and reads every workspace's and user's full operator audit trail (internal rows included). It cannot change anything else. |
+| `BANE_SUPPORT_PLATFORM_TOKEN_PREVIOUS` | Rotation overlap: the token being retired. Set the new token in `BANE_SUPPORT_PLATFORM_TOKEN` and the old one here, deploy, switch the platform to the new one, then remove this and deploy again. The trail names each as `service:support-platform:current` or `:previous`. |
+| `BANE_SUPPORT_URL` | Where "Contact support" sends a member (https). The handoff rides in the fragment: `#handoff=<token>`. |
+| `BANE_SUPPORT_SIGNING_KEY` | Ed25519 private JWK (`kty`, `crv`, `d`, `x`) that signs handoffs. Generate one with `node -e "console.log(JSON.stringify(require('crypto').generateKeyPairSync('ed25519').privateKey.export({format:'jwk'})))"`. A secret. Public keys: `GET /v1/public/support-keys`. |
+
+**The flow.** The agent never chooses or asserts who the customer is; the support platform's server does, then hands the agent a grant bound to that one user.
+
+1. **In-app:** "Contact support" calls `POST /v1/contact-support` (dashboard session, any role) with the page, recent request IDs, an optional message and an off-by-default `shareContent`. Bane stores a handoff (`sho_…`) that opens **one** grant within **30 minutes**, and returns the support URL with an EdDSA JWS (10 minutes, `aud: bane-support`, claims: workspace, user, role, page, request IDs, `shareContent`). The platform verifies it with the public keys, or reads it back with `GET /v1/operator/support/handoffs/{id}` (which also shows whether it was used). The platform should treat the JWS `jti` as single-use too.
+2. **By email:** Bane does not see the email: the support platform is responsible for verifying the sender (a DMARC pass aligned with the From domain, never a display name or a forwarded copy, or a magic link the person opened). It then calls `POST /v1/operator/support/verify-email` with the address and that evidence: `dmarc` needs the verified message's `messageId`, and a `magic_link` confirmation must be from the last day and not in the future. Both are recorded. Bane answers with the user and their workspaces only for a verified email of a signed-in user. If there are several workspaces, the platform asks which one.
+3. **Mint:** `POST /v1/operator/support/grants` with `userId`, `ticketRef`, `reason`, `verification` (`handoff` with its `handoffId`, `dmarc` or `magic_link`), optional `workspaceIds` and `ttlMinutes` (≤ 120). It returns a `bane_support_…` token once. A handoff grant covers the handoff's workspace unless `workspaceIds` says otherwise, and using the handoff marks it used: a second mint gets `409 SUPPORT_HANDOFF_USED`. One active grant per ticket, at most five per user.
+4. **Use:** put the token in the agent's environment only. Every `/v1/support/*` route derives the customer from the grant; `workspaceId` can only narrow it to one of the grant's workspaces (the ones the user still belongs to). Grants are read-only (GET), limited to 120 requests a minute, and expire within 2 hours. `POST /v1/operator/support/grants/{id}/revoke` ends one at once.
+
+**What a grant reads** (compact JSON, cursor pages where lists are long):
+
+| Route | Returns |
+| --- | --- |
+| `GET /v1/support/context` | Start here: user, workspaces and roles, sending and limits, domains, failures in the last 24 hours, open enforcement, the last 20 audit entries, the handoff and request IDs to drill into |
+| `GET /v1/support/workspaces` | Workspaces with role, sending connection and resource counts |
+| `GET /v1/support/domains` | Domains with DKIM, MAIL FROM, DMARC and receiving state |
+| `GET /v1/support/emails`, `/emails/{id}` | Sent or received mail: addresses, subject, status, error codes, delivery events; the body only with the customer's opt-in |
+| `GET /v1/support/events` | Delivery events (bounce, complaint, reject…) |
+| `GET /v1/support/webhook-deliveries` | Webhook deliveries with attempts, last status and error; never payloads or URLs |
+| `GET /v1/support/standing` | Pauses and reasons, limit overrides, sender standing, the last 24 hours by status |
+| `GET /v1/support/billing` | Balance and ledger of workspaces the user owns or administers (when billing is enabled) |
+| `GET /v1/support/audit` | The customer-visible audit trail of workspaces the user owns or administers |
+| `GET /v1/support/requests/{requestId}` | What one request changed: audit entries, campaign launches, routing versions |
+
+**Redaction.** Never key values, hashes, webhook secrets, endpoint URLs (only their last four characters), app passwords or webhook payloads. Email bodies only when the grant came from an in-app handoff whose `shareContent` was ticked, and only in the workspace the customer pressed "Contact support" in (`grant.contentWorkspaceId`); an emailed request never shares content. Every call is written to `audit_events` (actor: the grant, with the operator or service that minted it; 90 days), and each workspace's Activity shows "Bane support viewed this workspace" once per grant, with whose request and which ticket let support in.
+
+**Server-side mint** (the support platform, never the agent):
+
+```ts
+const grant = await fetch('https://bane.mx/v1/operator/support/grants', {
+  method: 'POST',
+  headers: { authorization: `Bearer ${process.env.BANE_SUPPORT_PLATFORM_TOKEN}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ userId, ticketRef: ticket.id, reason: 'Answering the customer’s ticket', verification: 'handoff', handoffId, ttlMinutes: 60 }),
+}).then(r => r.json());
+// Start the agent with BANE_SUPPORT_GRANT=grant.token in its environment; revoke when the ticket closes.
+```
+
+**An OpenCode custom tool** the agent calls (`.opencode/tool/get_user_info.ts`; the grant comes from the environment, so the agent cannot widen it):
+
+```ts
+import { tool } from '@opencode-ai/plugin';
+
+export default tool({
+  description: 'Who the customer is and what is going on in their Bane account: workspaces, sending and limits, domains, failures in the last 24 hours, recent changes and request IDs to look up.',
+  args: { workspaceId: tool.schema.string().optional().describe('Narrow to one of the customer’s workspaces.') },
+  async execute({ workspaceId }) {
+    const url = new URL('https://bane.mx/v1/support/context');
+    if (workspaceId) url.searchParams.set('workspaceId', workspaceId);
+    const res = await fetch(url, { headers: { authorization: `Bearer ${process.env.BANE_SUPPORT_GRANT}` } });
+    return await res.text();
+  },
+});
+```
+
 ## Secret rotation and upgrades
 
 A normal `bun run migrate` needs only `DATABASE_URL` and the intended `DEFAULT_SES_REGION` on first setup. Without rotation inputs it does not re-encrypt webhooks. If `BETTER_AUTH_SECRET` is supplied, it first decrypts one stored webhook signing secret read-only; `KEY_ROTATION_REQUIRED` means the sample could not be decrypted and nothing was written. No stored webhook is required, and secretless CI skips this probe. Only explicit rotation requires the new root and previous key as described below.

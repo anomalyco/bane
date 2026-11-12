@@ -273,7 +273,8 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
   const operations = new Map<string, McpOperation>();
   for (const [path, item] of Object.entries(spec.paths)) {
     if (!/^\/v1\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\})(?:\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\}))*$/.test(path)) continue;
-    if (/^\/v1\/(?:auth|dashboard|events)(?:\/|$)/.test(path)) continue;
+    // Support and operator routes are internal (Bane staff and support grants only): never an MCP tool.
+    if (/^\/v1\/(?:auth|dashboard|events)(?:\/|$)/.test(path) || INTERNAL_PATH.test(path)) continue;
     for (const [method, operation] of Object.entries(item as ObjectValue)) {
       if (!METHODS.has(method) || !object(operation)) continue;
       const name = operation.operationId;
@@ -339,9 +340,13 @@ export const HUMAN_STEPS: Record<string, string> = {
   getDomainDnsSetup: 'Human step: Domain Connect opens the DNS provider in a browser. Agents can read the domain’s DNS records instead.',
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
+  listActivity: 'Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity).',
+  contactSupport: 'Human step: a signed-in person contacts Bane support from the dashboard.',
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
+/** Internal routes (Bane operators and support grants): never tools, and not listed in the customer coverage document. */
+export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). */
 export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|listWorkspaceMembers|inviteWorkspaceMember|createWorkspaceInvitation|listWorkspaceInvitations|revokeWorkspaceInvitation|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;
 /** docs/mcp-coverage.md, generated from the catalog so the document cannot drift from the code. */
@@ -352,7 +357,7 @@ export function coverageMarkdown(catalog: ReadonlyMap<string, McpOperation>, spe
     if (op) byOperation.set(operation, `\`${name}\` · \`${action}\` · ${op.toolset}`);
   }
   const rows: string[] = [];
-  for (const item of Object.values(spec.paths ?? {}) as ObjectValue[]) for (const operation of Object.values(item)) {
+  for (const [path, item] of Object.entries(spec.paths ?? {}) as [string, ObjectValue][]) for (const operation of INTERNAL_PATH.test(path) ? [] : Object.values(item)) {
     const id = (operation as ObjectValue)?.operationId;
     if (typeof id !== 'string') continue;
     rows.push(`| \`${id}\` | ${byOperation.get(id) ?? HUMAN_STEPS[id] ?? (ACCOUNT_STEPS.test(id) ? 'Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS).' : 'UNCOVERED')} |`);

@@ -7,7 +7,9 @@ import { createLlmsText, createMarkdownDocs, createOpenApiDocument, createTagMar
 const INDEX_LIMIT = 128 * 1024, TAG_LIMIT = 128 * 1024;
 const bytes = (value: string) => new TextEncoder().encode(value).length;
 const document = createOpenApiDocument(await createOpenApiApp());
-const operations = Object.values(document.paths).flatMap(path => Object.values(path as Record<string, any>)).filter(operation => operation?.operationId);
+const all = Object.values(document.paths).flatMap(path => Object.values(path as Record<string, any>)).filter(operation => operation?.operationId);
+// Internal operations (x-internal: the support grant's /v1/support/* routes) stay out of customer docs.
+const operations = all.filter(operation => !operation['x-internal']), internal = all.filter(operation => operation['x-internal']);
 const llms = createLlmsText(document);
 const index = createMarkdownDocs(document)!;
 assert.match(llms, /Markdown API reference index: \/docs\.md/);
@@ -38,4 +40,11 @@ for (const operation of operations) {
 }
 assert.equal(createMarkdownDocs(document, 'missingOperation'), null);
 assert.equal(createTagMarkdownDocs(document, 'missing-tag'), null);
+assert.ok(internal.length > 0, 'The internal support operations are in the contract.');
+for (const operation of internal) {
+  const id = operation.operationId as string, slug = tagSlug(operation.tags?.[0] ?? 'API');
+  assert.ok(!llms.includes(`/docs/operations/${id}.md`) && !index.includes(`\`${id}\``) && !index.includes(`/docs/tags/${slug}.md`), `${id} is internal and must not be in customer docs.`);
+  assert.equal(createMarkdownDocs(document, id), null, `${id} has no customer doc page.`);
+  assert.ok(!createTagMarkdownDocs(document, slug)?.includes(`Operation ID: \`${id}\``), `${id} is internal and must not be in a tag reference.`);
+}
 console.log(`Verified llms.txt (${bytes(llms)} B), /docs.md (${bytes(index)} B), ${tags.length} tag references (largest ${largest} B) and ${operations.length} focused Markdown operation pages.`);

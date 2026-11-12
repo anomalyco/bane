@@ -12,7 +12,7 @@ export const SuppressionEventData = z.object({suppressionReason:SuppressionReaso
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
-  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
+  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken' | 'operatorService' | 'support'; email?: string; name?: string;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
@@ -53,6 +53,8 @@ export interface Config {
   platformDomainWorkspace?: string;
   /** Hosted only: From for Bane's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
+  /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
+  support?: { platformToken?: string; previousPlatformToken?: string; url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
   regionalSending?: boolean;
   trustedPool?: boolean;
   receivingRedrive?:boolean;
@@ -117,11 +119,14 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
+/** A support grant (src/support.ts): one user, the workspaces they still belong to, read-only, for one ticket. */
+export type SupportScope = { grantId: string; userId: string; ticketRef: string; operatorId: string; contentWorkspaceId: string | null; expiresAt: string;
+  workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
-  principal?: { type: string; workspace?: string } } };
+  principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };

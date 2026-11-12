@@ -40,7 +40,8 @@ function operations(document?: Document): Operation[] {
   const result: Operation[] = []
   for (const [path, pathItem] of Object.entries(document.paths)) for (const method of methods) {
     const operation = pathItem[method]
-    if (!operation?.operationId) continue
+    // Internal operations (x-internal: support tooling) stay out of the public docs; a tag left empty has no group.
+    if (!operation?.operationId || operation['x-internal'] === true) continue
     result.push({ id: operation.operationId, method, path, tag: operation.tags?.[0] ?? 'API', summary: operation.summary ?? operationTitle(operation.operationId), description: operation.description ?? '', parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] })
   }
   // Groups follow the document's tag order (Emails and Domains first); operations keep path order within a group.

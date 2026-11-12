@@ -3960,6 +3960,380 @@ export type OverviewSetup = {
     } | null;
 };
 
+export type AuditEntry = {
+    /**
+     * Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_.
+     */
+    id: string;
+    /**
+     * When it happened (ISO 8601, UTC).
+     */
+    at: string;
+    /**
+     * What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view.
+     */
+    action: string;
+    actor: {
+        /**
+         * member is a signed-in person; support is Bane support reading with your permission; system is Bane itself.
+         */
+        type: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
+        /**
+         * The member user ID, key ID, grant ID or support grant ID.
+         */
+        id: string | null;
+        /**
+         * A short display name for the actor, such as a key name, or null.
+         */
+        label: string | null;
+        /**
+         * The member’s email address, for member actors.
+         */
+        email: string | null;
+    };
+    /**
+     * Where the action came from: dashboard, api, mcp, support, job, webhook.
+     */
+    via: string;
+    /**
+     * The object acted on.
+     */
+    target: {
+        type: string;
+        id: string | null;
+    } | null;
+    /**
+     * The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in.
+     */
+    subject: {
+        userId: string;
+        email: string | null;
+    } | null;
+    /**
+     * Before and after, with secrets and message content removed.
+     */
+    summary: {
+        [key: string]: unknown;
+    };
+    reason: string | null;
+    /**
+     * The x-request-id of the API request that made the change.
+     */
+    requestId: string | null;
+    /**
+     * The client network (/24 or /48), never the full address.
+     */
+    network: string | null;
+    /**
+     * The client family, such as "Chrome 131 on macOS".
+     */
+    client: string | null;
+};
+
+export type SupportHandoff = {
+    /**
+     * The support reference (sho_…). Quote it to support.
+     */
+    id: string;
+    /**
+     * Where to continue with support, carrying the signed handoff; null when no support site is configured.
+     */
+    url: string | null;
+    /**
+     * The signed handoff (EdDSA JWS, 10 minutes), or null when signing is not configured.
+     */
+    token: string | null;
+    /**
+     * Until when support can use this handoff to open read access (30 minutes, once).
+     */
+    expiresAt: string;
+    shareContent: boolean;
+};
+
+export type SupportContext = {
+    grant: {
+        id: string;
+        ticketRef: string;
+        expiresAt: string;
+        /**
+         * Whether this request may read email bodies (the customer opted in).
+         */
+        contentShared: boolean;
+        /**
+         * The one workspace whose email bodies this request may read, or null.
+         */
+        contentWorkspaceId: string | null;
+    };
+    user: {
+        id: string;
+        name: string | null;
+        email: string | null;
+        createdAt: string | null;
+    };
+    workspaces: Array<SupportWorkspace>;
+    /**
+     * Up to 50 domains across the workspaces.
+     */
+    domains: Array<SupportDomain>;
+    recentFailures: {
+        since: string;
+        /**
+         * Failed, rejected, suppressed and bounced sends in the last 24 hours, by code.
+         */
+        sends: Array<{
+            [key: string]: unknown;
+        }>;
+        /**
+         * Bounce, complaint and reject events in the last 24 hours, by reason.
+         */
+        bounces: Array<{
+            [key: string]: unknown;
+        }>;
+        /**
+         * Webhook deliveries that failed in the last 24 hours, by webhook.
+         */
+        webhookDeliveries: Array<{
+            [key: string]: unknown;
+        }>;
+        /**
+         * Bane does not store failed sign-ins or rejected API keys; look up a request ID instead.
+         */
+        authErrors: null;
+    };
+    standing: Array<SupportStanding>;
+    /**
+     * The last 20 customer-visible audit entries (owner and admin workspaces).
+     */
+    recentActivity: Array<AuditEntry>;
+    /**
+     * Paused sending and paused campaigns.
+     */
+    openEnforcement: Array<{
+        workspaceId: string;
+        kind: string;
+        since: string | null;
+        reason: string | null;
+    }>;
+    /**
+     * What the customer sent from "Contact support", if the grant came from it.
+     */
+    handoff: {
+        id: string;
+        page: string | null;
+        requestIds: Array<string>;
+        message: string | null;
+        createdAt: string;
+    } | null;
+    links: {
+        /**
+         * Request IDs to look up with /v1/support/requests/{requestId}.
+         */
+        requestIds: Array<string>;
+    };
+};
+
+export type SupportWorkspace = {
+    id: string;
+    name: string;
+    /**
+     * The customer’s role in this workspace.
+     */
+    role: 'owner' | 'admin' | 'member';
+    createdAt: string;
+    /**
+     * The sending connection, or null when none is set up.
+     */
+    sending: {
+        /**
+         * shared (Bane Hosted) or byo (their own AWS).
+         */
+        kind: string;
+        region: string;
+        state: string | null;
+        paused: boolean;
+        pauseReason: string | null;
+        dailyLimitOverride: number | null;
+    } | null;
+    /**
+     * How many of each resource the workspace has: domains, apiKeys, webhooks, inboxes, addresses, routes, endpoints, campaigns, templates, contacts (counted up to 100,000).
+     */
+    counts: {
+        [key: string]: number;
+    };
+};
+
+export type SupportDomain = {
+    workspaceId: string;
+    id: string;
+    name: string;
+    region: string | null;
+    createdAt: string | null;
+    /**
+     * pending, verified, failed or lost.
+     */
+    sending: string | null;
+    dkim: string | null;
+    mailFrom: string | null;
+    dmarc: string | null;
+    /**
+     * off, pending, active or lost.
+     */
+    receiving: string | null;
+    lostSince: string | null;
+};
+
+export type SupportStanding = {
+    workspaceId: string;
+    connection: {
+        [key: string]: unknown;
+    } | null;
+    limits: {
+        [key: string]: unknown;
+    };
+    /**
+     * The sender standing (step, reasons, score, daily limit) where the reputation system is enabled.
+     */
+    standing: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Sent mail in the last 24 hours by status (counted up to 50,000).
+     */
+    last24h: {
+        [key: string]: number;
+    };
+};
+
+export type SupportEmail = {
+    workspaceId: string;
+    id: string;
+    direction: 'sent' | 'received';
+    at: string;
+    from: string;
+    to: Array<string>;
+    subject: string;
+    status: string;
+    errorCode: string | null;
+    suppressionReason: string | null;
+    campaignId: string | null;
+    kind: string | null;
+    simulated: boolean | null;
+    /**
+     * The SES message ID, for provider-side lookups.
+     */
+    providerMessageId: string | null;
+};
+
+export type SupportEmailDetail = SupportEmail & {
+    /**
+     * Delivery events for a sent email, oldest first.
+     */
+    events: Array<SupportDeliveryEvent>;
+    /**
+     * SPF, DKIM and DMARC verdicts of a received email.
+     */
+    authentication: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * The body, only when the customer shared message content with this request and the email is in that workspace (grant.contentWorkspaceId); otherwise null.
+     */
+    content: {
+        subject: string;
+        text: string | null;
+        html: string | null;
+    } | null;
+};
+
+export type SupportDeliveryEvent = {
+    workspaceId: string;
+    id: string;
+    emailId: string;
+    /**
+     * send, delivery, bounce, complaint, reject, open, click…
+     */
+    type: string;
+    at: string;
+    /**
+     * The provider’s event detail (bounce type and diagnostic, complaint feedback type).
+     */
+    detail: {
+        [key: string]: unknown;
+    };
+};
+
+export type SupportWebhookDelivery = {
+    workspaceId: string;
+    id: string;
+    /**
+     * email: sending events; inbound: received mail.
+     */
+    source: 'email' | 'inbound';
+    webhookId: string;
+    /**
+     * The last four characters of the URL; URLs are credentials.
+     */
+    endpoint: string;
+    eventType: string | null;
+    status: string;
+    attempts: number;
+    lastStatusCode: number | null;
+    lastError: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type SupportBilling = {
+    /**
+     * False until billing is enabled on this installation.
+     */
+    available: boolean;
+    data: Array<{
+        workspaceId: string;
+        account: {
+            [key: string]: unknown;
+        } | null;
+        /**
+         * The latest 50 ledger entries: top-ups, usage, refunds, disputes, credits.
+         */
+        ledger: Array<{
+            [key: string]: unknown;
+        }>;
+    }>;
+};
+
+export type SupportRequestTrace = {
+    requestId: string;
+    /**
+     * Whether Bane stored anything about this request for this customer.
+     */
+    found: boolean;
+    /**
+     * Changes the request made.
+     */
+    auditEvents: Array<AuditEntry>;
+    /**
+     * Campaign launches the request started.
+     */
+    campaigns: Array<{
+        workspaceId: string;
+        id: string;
+        name: string;
+        state: string;
+        error?: unknown;
+    }>;
+    /**
+     * Routing versions the request wrote.
+     */
+    routingVersions: Array<{
+        workspaceId: string;
+        version: number;
+        resourceId: string;
+        at: string;
+    }>;
+    note: string;
+};
+
 export type ListMcpConnectionsData = {
     body?: never;
     path?: never;
@@ -20232,3 +20606,975 @@ export type GetOverviewSetupResponses = {
 };
 
 export type GetOverviewSetupResponse = GetOverviewSetupResponses[keyof GetOverviewSetupResponses];
+
+export type ListActivityData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only entries at or after this time.
+         */
+        since?: string;
+        /**
+         * Only entries before this time.
+         */
+        until?: string;
+        /**
+         * An exact action (api_key.create) or an area followed by a dot (api_key.).
+         */
+        action?: string;
+        actorType?: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
+        actorId?: string;
+        /**
+         * Only what one API request (its x-request-id) changed.
+         */
+        requestId?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/activity';
+};
+
+export type ListActivityErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListActivityError = ListActivityErrors[keyof ListActivityErrors];
+
+export type ListActivityResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<AuditEntry>;
+        /**
+         * Pass as cursor for older entries; null at the end.
+         */
+        nextCursor: string | null;
+    };
+};
+
+export type ListActivityResponse = ListActivityResponses[keyof ListActivityResponses];
+
+export type ContactSupportData = {
+    body: {
+        kind?: 'support' | 'appeal' | 'limit_request';
+        /**
+         * The dashboard path the person was on.
+         */
+        page?: string;
+        /**
+         * x-request-id values of recent failed requests.
+         */
+        requestIds?: Array<string>;
+        /**
+         * Let support read message content (email bodies) in this workspace, for this request only.
+         */
+        shareContent?: boolean;
+        message?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/contact-support';
+};
+
+export type ContactSupportErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ContactSupportError = ContactSupportErrors[keyof ContactSupportErrors];
+
+export type ContactSupportResponses = {
+    /**
+     * Success
+     */
+    201: SupportHandoff;
+};
+
+export type ContactSupportResponse = ContactSupportResponses[keyof ContactSupportResponses];
+
+export type GetSupportContextData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/context';
+};
+
+export type GetSupportContextErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportContextError = GetSupportContextErrors[keyof GetSupportContextErrors];
+
+export type GetSupportContextResponses = {
+    /**
+     * Success
+     */
+    200: SupportContext;
+};
+
+export type GetSupportContextResponse = GetSupportContextResponses[keyof GetSupportContextResponses];
+
+export type ListSupportWorkspacesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/workspaces';
+};
+
+export type ListSupportWorkspacesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportWorkspacesError = ListSupportWorkspacesErrors[keyof ListSupportWorkspacesErrors];
+
+export type ListSupportWorkspacesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportWorkspace>;
+    };
+};
+
+export type ListSupportWorkspacesResponse = ListSupportWorkspacesResponses[keyof ListSupportWorkspacesResponses];
+
+export type ListSupportDomainsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/domains';
+};
+
+export type ListSupportDomainsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportDomainsError = ListSupportDomainsErrors[keyof ListSupportDomainsErrors];
+
+export type ListSupportDomainsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportDomain>;
+    };
+};
+
+export type ListSupportDomainsResponse = ListSupportDomainsResponses[keyof ListSupportDomainsResponses];
+
+export type ListSupportEmailsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only items at or after this time (default: 7 days ago).
+         */
+        since?: string;
+        direction?: 'sent' | 'received';
+        /**
+         * Sent: queued, accepted, delivered, bounced, complained, failed, suppressed, canceled…; received: received, held…
+         */
+        status?: string;
+        /**
+         * Only mail to or from this exact address.
+         */
+        address?: string;
+    };
+    url: '/v1/support/emails';
+};
+
+export type ListSupportEmailsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportEmailsError = ListSupportEmailsErrors[keyof ListSupportEmailsErrors];
+
+export type ListSupportEmailsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportEmail>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListSupportEmailsResponse = ListSupportEmailsResponses[keyof ListSupportEmailsResponses];
+
+export type GetSupportEmailData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/emails/{id}';
+};
+
+export type GetSupportEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportEmailError = GetSupportEmailErrors[keyof GetSupportEmailErrors];
+
+export type GetSupportEmailResponses = {
+    /**
+     * Success
+     */
+    200: SupportEmailDetail;
+};
+
+export type GetSupportEmailResponse = GetSupportEmailResponses[keyof GetSupportEmailResponses];
+
+export type ListSupportEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only items at or after this time (default: 7 days ago).
+         */
+        since?: string;
+        emailId?: string;
+        type?: string;
+    };
+    url: '/v1/support/events';
+};
+
+export type ListSupportEventsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportEventsError = ListSupportEventsErrors[keyof ListSupportEventsErrors];
+
+export type ListSupportEventsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportDeliveryEvent>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListSupportEventsResponse = ListSupportEventsResponses[keyof ListSupportEventsResponses];
+
+export type ListSupportWebhookDeliveriesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only items at or after this time (default: 7 days ago).
+         */
+        since?: string;
+        status?: 'pending' | 'delivered' | 'failed' | 'paused';
+        webhookId?: string;
+    };
+    url: '/v1/support/webhook-deliveries';
+};
+
+export type ListSupportWebhookDeliveriesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportWebhookDeliveriesError = ListSupportWebhookDeliveriesErrors[keyof ListSupportWebhookDeliveriesErrors];
+
+export type ListSupportWebhookDeliveriesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportWebhookDelivery>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListSupportWebhookDeliveriesResponse = ListSupportWebhookDeliveriesResponses[keyof ListSupportWebhookDeliveriesResponses];
+
+export type GetSupportStandingData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/standing';
+};
+
+export type GetSupportStandingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportStandingError = GetSupportStandingErrors[keyof GetSupportStandingErrors];
+
+export type GetSupportStandingResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportStanding>;
+    };
+};
+
+export type GetSupportStandingResponse = GetSupportStandingResponses[keyof GetSupportStandingResponses];
+
+export type GetSupportBillingData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/billing';
+};
+
+export type GetSupportBillingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportBillingError = GetSupportBillingErrors[keyof GetSupportBillingErrors];
+
+export type GetSupportBillingResponses = {
+    /**
+     * Success
+     */
+    200: SupportBilling;
+};
+
+export type GetSupportBillingResponse = GetSupportBillingResponses[keyof GetSupportBillingResponses];
+
+export type ListSupportAuditData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * Only entries at or after this time.
+         */
+        since?: string;
+        /**
+         * Only entries before this time.
+         */
+        until?: string;
+        /**
+         * An exact action (api_key.create) or an area followed by a dot (api_key.).
+         */
+        action?: string;
+        actorType?: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
+        actorId?: string;
+        /**
+         * Only what one API request (its x-request-id) changed.
+         */
+        requestId?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/support/audit';
+};
+
+export type ListSupportAuditErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportAuditError = ListSupportAuditErrors[keyof ListSupportAuditErrors];
+
+export type ListSupportAuditResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<AuditEntry>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListSupportAuditResponse = ListSupportAuditResponses[keyof ListSupportAuditResponses];
+
+export type GetSupportRequestData = {
+    body?: never;
+    path: {
+        requestId: string;
+    };
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/requests/{requestId}';
+};
+
+export type GetSupportRequestErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportRequestError = GetSupportRequestErrors[keyof GetSupportRequestErrors];
+
+export type GetSupportRequestResponses = {
+    /**
+     * Success
+     */
+    200: SupportRequestTrace;
+};
+
+export type GetSupportRequestResponse = GetSupportRequestResponses[keyof GetSupportRequestResponses];

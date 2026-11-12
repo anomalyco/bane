@@ -1,5 +1,6 @@
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { registerSenderScore } from './sender-score.js';
+import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { registerUsage } from './usage.js';
 import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
@@ -824,9 +825,11 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
-    if (c.env.config.multiTenant) await c.env.db.update(workspaces).set({ name }).where(eq(workspaces.id, a.workspaceId));
-    else await c.env.db.execute(sql`INSERT INTO operation_settings(workspace_id,name) VALUES (${a.workspaceId},${name})
-      ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=excluded.name,updated_at=now()`);
+    const audit = auditInsert(auditContext(c), { action: 'settings.update', workspaceId: a.workspaceId, target: { type: 'workspace', id: a.workspaceId }, before: sql`jsonb_build_object('name',(SELECT name FROM old))`, after: { name }, details: { fields: ['name'] } }, { from: sql`changed` });
+    await c.env.db.execute(c.env.config.multiTenant
+      ? sql`WITH old AS (SELECT name FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=${name} WHERE id=${a.workspaceId} RETURNING id), audit AS (${audit}) SELECT 1`
+      : sql`WITH old AS (SELECT name FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name) VALUES (${a.workspaceId},${name})
+      ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=excluded.name,updated_at=now() RETURNING workspace_id), audit AS (${audit}) SELECT 1`);
     return c.json({ name }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
@@ -840,7 +843,10 @@ export function registerOperations(app: App) {
       const pending=await (await wrapModuleLoad(() => import('./byo-regional.js'))).newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
       if (pending) {a.wakeJobs=1;return c.json(pending,202);}
       await Promise.all([preloadSesTransport(true), loadOperationsSesv2(), loadRegistries()]);
-      const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
+      // A new claim and its audit row are one statement; a retried or reconnected claim writes none.
+      const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region,reserved=>auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`${reserved}.id`},
+        after:sql`jsonb_build_object('name',${input.name}::text,'region',${reserved}.connection->>'region')`},{from:reserved,where:sql`${reserved}.fresh AND ${reserved}.id IS NOT NULL AND ${reserved}.error_code IS NULL`})),
+        row={name:input.name,region:claim.connection.region,id:claim.id};
       if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
@@ -876,9 +882,11 @@ export function registerOperations(app: App) {
       catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    const { rows: [row] } = await c.env.db.execute<DomainRef>(sql`INSERT INTO operation_domains(id,workspace_id,name,region)
+    const { rows: [row] } = await c.env.db.execute<DomainRef>(sql`WITH saved AS (INSERT INTO operation_domains(id,workspace_id,name,region)
       VALUES (${id('dom')},${a.workspaceId},${body.name},${body.region}) ON CONFLICT ON CONSTRAINT operation_domain_scope
-      DO UPDATE SET updated_at=now() RETURNING id,name,region`);
+      DO UPDATE SET updated_at=now() RETURNING id,name,region,xmax=0 AS created),
+      audit AS (${auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`saved.id`},after:body},{from:sql`saved`,where:sql`saved.created`})})
+      SELECT id,name,region FROM saved`);
     return c.json(await domainReadiness(c.env, row!, identity,'create'), 201);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
@@ -886,6 +894,7 @@ export function registerOperations(app: App) {
     if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const { mailFromDomain } = c.req.valid('json');
     if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
+    const mailFromAudit = { action: 'domain.mail_from', workspaceId: a.workspaceId, target: { type: 'domain', id: row.id }, after: { name: row.name, mailFromDomain } };
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
@@ -901,11 +910,17 @@ export function registerOperations(app: App) {
         const facts:IdentityFacts={...(current.identity ?? identityOnly(sesFacts(identity))),ses:{...(current.identity?.ses ?? sesFacts(identity)),MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}};
         await db.execute(sql`WITH saved AS (UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id} RETURNING ${current.id}::text AS id,token)
           ${recheckJob(a.workspaceId,sql`SELECT id,token FROM saved`,'supersede')}`);
+        await recordAudit(db,c,mailFromAudit);
         return derivedReadiness({...current,identity:facts});
       }); a.wakeJobs=1; return c.json(report,200);
     }
     const client = await getSes(c.env, row.region);
-    await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    // The change is in SES, not in a database row. Fail closed: the audit row is written first and committed only once SES
+    // accepted the change, so a change without its row needs a lost commit (the client then sees 500 and retries).
+    await c.env.db.transaction(async tx => {
+      await recordAudit(tx, c, mailFromAudit);
+      await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    });
     return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
@@ -936,6 +951,7 @@ export function registerOperations(app: App) {
       if (!current || current.token!==row.token || (current.receiving_host && host!==current.receiving_host)) throw new ApiError(409,'DOMAIN_CHANGED','The domain changed while its DNS was checked. Try again.',undefined,true);
       const identity:IdentityFacts={...(current.identity ?? identityOnly({VerificationStatus:'PENDING'})),...facts,...(host===null ? {mx:current.identity?.mx?.expected.name===current.receiving_host ? current.identity?.mx ?? null : null} : {})};
       await db.execute(sql`UPDATE domain_claims SET identity=${JSON.stringify(identity)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${current.name} AND token=${current.token}`);
+      await recordAudit(db,c,{action:'domain.receiving_host',workspaceId:a.workspaceId,target:{type:'domain',id:domainId},before:{receivingChoice:current.identity?.receivingChoice ?? null},after:{name:current.name,receivingChoice:host}});
       return derivedReadiness({...current,identity});
     });
     return c.json(saved,200);
@@ -1010,7 +1026,8 @@ export function registerOperations(app: App) {
         // A claim whose connection is gone has no SES identity to own; releasing it only frees the name.
         const detached=(await db.execute<{id:string;name:string;token:string}>(sql`SELECT d.id,d.name,dc.token FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
           WHERE d.workspace_id=${a.workspaceId} AND d.id=${c.req.valid('param').id} AND dc.connection_id IS NULL FOR UPDATE OF dc`)).rows[0] ?? notFound('Domain');
-        allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached); return;
+        allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached);
+        return recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:detached.id},before:{name:detached.name}});
       }
       allowedDomain(a,row.name);
       if (!row.identity?.imported) {
@@ -1021,6 +1038,7 @@ export function registerOperations(app: App) {
       }
       await releaseClaim(db,a.workspaceId,row);
       if (row.connection.kind==='byo' && row.receiving_host) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,a.workspaceId,row.region);
+      await recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:row.id},before:{name:row.name,region:row.region,receivingHost:row.receiving_host}});
     }); return c.json({deleted:true as const},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
@@ -1039,6 +1057,7 @@ export function registerOperations(app: App) {
       await ownWebhook(c, tx, a, webhookId);
       const created = await tx.insert(webhooks).values(values).returning();
       await recordSecret(tx, a, webhookId, 'created');
+      await recordAudit(tx, c, { action: 'webhook.create', workspaceId: a.workspaceId, target: { type: 'webhook', id: webhookId }, after: { url: webhookUrlHint(url), eventTypes: body.eventTypes, regions: body.regions ?? null, paused: body.paused, headerNames: headers?.map(h => h.name) } });
       return created;
     });
     c.header('Cache-Control', 'no-store');
@@ -1066,11 +1085,18 @@ export function registerOperations(app: App) {
           UPDATE operation_deliveries d SET status='pending', generation=d.generation+1, updated_at=now() FROM parked p WHERE d.id=p.id AND p.attempt_count<${WEBHOOK_ATTEMPTS} RETURNING d.id, d.generation, d.attempt_count
         ) INSERT INTO jobs(id, workspace_id, type, payload, attempts)
           SELECT 'job_'||replace(gen_random_uuid()::text,'-',''), ${a.workspaceId}, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', generation), attempt_count FROM resumed`);
+      // Changed field names and non-secret values: a URL hint, never header values.
+      await recordAudit(tx, c, { action: 'webhook.update', workspaceId: a.workspaceId, target: { type: 'webhook', id: current.id }, details: { fields: [...Object.keys(body), ...(headers ? ['headers'] : [])] },
+        before: { url: body.url ? webhookUrlHint(locked.url) : undefined, eventTypes: body.eventTypes ? locked.eventTypes : undefined, regions: body.regions !== undefined ? locked.regions : undefined, paused: body.paused !== undefined ? locked.paused : undefined },
+        after: { url: body.url ? webhookUrlHint(body.url) : undefined, eventTypes: body.eventTypes, regions: body.regions, paused: body.paused, headerNames: headers?.map(h => h.name) } });
       return updated!;
     }); return c.json(await metadata(c.env, row, a), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
-    const a = webhookManager(c), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
+    const a = webhookManager(c), row = await getWebhook(c.env, a, c.req.valid('param').id);
+    await c.env.db.execute(sql`WITH deleted AS (DELETE FROM operation_webhooks WHERE workspace_id=${a.workspaceId} AND id=${row.id} RETURNING id),
+      audit AS (${auditInsert(auditContext(c), { action: 'webhook.delete', workspaceId: a.workspaceId, target: { type: 'webhook', id: sql`deleted.id` }, before: { url: webhookUrlHint(row.url), eventTypes: row.eventTypes, paused: row.paused } }, { from: sql`deleted` })}) SELECT 1`);
+    return c.json({ deleted: true }, 200);
   });
   // Reveal hands out a durable capability: whoever holds the secret can sign requests the receiver trusts, with no trace in
   // Bane. So only a person's own credentials read it back (a dashboard session, or an API key not made through an MCP
@@ -1085,7 +1111,11 @@ export function registerOperations(app: App) {
       throw new ApiError(429, 'REVEAL_RATE_LIMITED', `This workspace read signing secrets back ${REVEALS_PER_MINUTE} times in the last minute. Retry after the window resets.`, undefined, true);
     }
     const secret = await decrypt(c.env, row.encryptedSecret, secretBinding(a, row.id));
-    await recordSecret(c.env.db, a, row.id, 'revealed');
+    // Both records commit before the secret is returned: the secret hand-out log and the account's audit trail.
+    await c.env.db.transaction(async tx => {
+      await recordSecret(tx, a, row.id, 'revealed');
+      await recordAudit(tx, c, { action: 'webhook.secret_reveal', workspaceId: a.workspaceId, target: { type: 'webhook', id: row.id }, details: { url: webhookUrlHint(row.url) } });
+    });
     return c.json({ secret }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/rotate-secret', operationId: 'rotateWebhookSecret', tags: ['Webhooks'], security, description: 'Replace the endpoint\'s signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.', request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
@@ -1098,6 +1128,7 @@ export function registerOperations(app: App) {
       const secret = webhookSecret();
       await tx.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId)));
       await recordSecret(tx, a, webhookId, 'rotated');
+      await recordAudit(tx, c, { action: 'webhook.secret_rotate', workspaceId: a.workspaceId, target: { type: 'webhook', id: row.id }, details: { url: webhookUrlHint(row.url) } });
       return secret;
     });
     return c.json({ secret }, 200);

@@ -254,3 +254,9 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 /* A form's own Save and Cancel stay in reach above the tab bar while its fields scroll. */
 .app-shell--compact .form-actions { position: sticky; bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); z-index: 2; flex-wrap: nowrap; margin-inline: calc(-1 * var(--bleed)); padding: var(--space-12) var(--bleed); background: color-mix(in srgb, var(--color-surface) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border-muted); backdrop-filter: blur(12px); }
 @media (max-width: 640px) { .app-shell--compact .form-actions > .ui-button { flex: 1 1 0; } }
+/* Contact support (components/ContactSupport.tsx): the share choice with its note under it, and the reference to copy. */
+.contact-support__share { display: flex; flex-direction: column; gap: var(--space-4); }
+.contact-support__share > .ui-field__hint { padding-inline-start: calc(var(--space-16) + var(--space-8)); margin: 0; }
+.contact-support__reference { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
+.contact-support__reference code { overflow-wrap: anywhere; }
+.contact-support__link { display: inline-flex; align-items: center; gap: var(--space-4); width: fit-content; }

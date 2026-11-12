@@ -13,10 +13,15 @@ import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview';
+type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview';
+// Internal areas: /v1/operator/* answers only Bane operators and /v1/support/* only support grants (src/support.ts).
+const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
+const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/v1/public/stats') return 'public-stats';
+  if (operatorPath(pathname)) return 'operator';
+  if (supportPath(pathname) || pathname === '/v1/activity' || pathname === '/v1/contact-support' || pathname === '/v1/public/support-keys') return 'support';
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
@@ -34,7 +39,6 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
   if (pathname === '/v1/connection' || pathname.startsWith('/v1/connection/')) return 'provider-connections';
   if (pathname === '/v1/overview' || pathname.startsWith('/v1/overview/')) return 'overview';
-  if (pathname === '/v1/operator' || pathname.startsWith('/v1/operator/')) return 'operator';
   return null;
 }
 
@@ -45,6 +49,8 @@ function allowPathFor(group: Exclude<RouteGroup, 'mcp'>): ((path: string) => boo
     case 'ops-other': return p => p !== '/v1/events/ses' && p !== '/v1/domains' && !p.startsWith('/v1/domains/');
     case 'sending-emails': return p => p === '/v1/emails' || p.startsWith('/v1/emails/');
     case 'sending-other': return p => p !== '/v1/emails' && !p.startsWith('/v1/emails/');
+    case 'operator': return operatorPath;
+    case 'support': return p => !operatorPath(p);
     default: return undefined;
   }
 }
@@ -72,7 +78,11 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'provider-connections': return (await import('./provider-connections.js')).registerProviderConnections;
       case 'public-stats': return (await import('./public-stats.js')).registerPublicStats;
       case 'overview': return (await import('./overview-setup.js')).registerOverviewSetup;
-      case 'operator': return (await import('./operator.js')).registerOperator;
+      case 'operator':
+      case 'support': {
+        const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js')]);
+        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); };
+      }
     }
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
@@ -175,6 +185,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     return next();
   });
   app.use('/v1/*', async (c, next) => {
+    // Operators and support grants only: every other caller gets the same 403 for any path here, real or not.
+    if (operatorPath(c.req.path)) return (await wrapModuleLoad(() => import('./support.js'))).operatorGate(c, next);
+    if (supportPath(c.req.path)) return (await wrapModuleLoad(() => import('./support.js'))).supportGate(c, next);
+    if (c.req.path === '/v1/public/support-keys') return next();
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
@@ -294,14 +308,17 @@ export async function createOpenApiApp(): Promise<App> {
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
     { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats }, { registerOverviewSetup }, { registerOperator },
+    { registerAudit }, { registerSupport, registerSupportOperator },
   ] = await wrapModuleLoad(() => Promise.all([
     import('./mcp-auth.js'), import('./google-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
+    import('./audit.js'), import('./support.js'),
   ]));
   registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
+  registerAudit(full); registerSupport(full); registerSupportOperator(full);
   return full;
 }
 

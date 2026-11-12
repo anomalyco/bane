@@ -6,6 +6,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, like, ne, sql } from 'drizzle-orm';
 import { actor, ApiError, digest, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
+import { recordAudit } from './audit.js';
 import { currentGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin, reserveSignIn } from './google-auth.js';
 import { workspaces } from './db/workspaces.js';
 import { agentTokens } from './db/core.js';
@@ -492,6 +493,7 @@ export function registerMcpAuth(app: App): void {
       }
       await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.grantId, connectionId)));
       await tx.delete(oauthConsent).where(eq(oauthConsent.id, consentId));
+      await recordAudit(tx, c, { action: 'mcp_connection.revoke', workspaceId: identity.workspaceId, userId: connection.userId, target: { type: 'mcp_connection', id: connectionId }, before: { clientId: connection.clientId, scopes: connection.scopes } });
       return true;
     });
     if (!revoked) throw new ApiError(404, 'NOT_FOUND', 'MCP connection was not found.');

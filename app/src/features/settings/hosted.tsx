@@ -14,17 +14,19 @@ import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
 import { PlanUsage } from './usage'
 import { WebhooksSection } from './webhooks'
+import { ActivitySection } from './activity'
+import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'usage' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'usage', label: 'Plan & usage' }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -51,6 +53,7 @@ export function HostedSettings() {
           {section === 'members' && <Team />}
           {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
           {section === 'webhooks' && <WebhooksSection note={false} />}
+          {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
         </>}
@@ -127,12 +130,15 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
+  const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
     <Row title="Name" hint="From your Google account">{session.identity.name || '—'}</Row>
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
+    <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
+    {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
 // Members and invitations appear together once both are known, so the second table never pushes down. Gated on the
