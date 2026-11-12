@@ -4934,6 +4934,9 @@ describe('Dashboard API capabilities', () => {
       for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
       // Jobs: a refusal is retried with backoff (attempt charged); a real bug still fails the job.
       const { processJobs } = await import('./src/jobs.js');
+      // processJobs claims the next due job of any workspace: under the full suite another test's committed job could be
+      // claimed instead (CI flake: attempts 0). Shadow the queue in this rolled-back fixture, as the campaign.run tests do.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       const job = async (id: string, failure: unknown) => {
         await db.query("INSERT INTO jobs(id, workspace_id, type, payload, available_at) VALUES ($1, $2, 'campaign.run', '{}'::jsonb, now() - interval '1 second')", [id, wid]);
         assert.equal(await processJobs(runtime, { 'campaign.run': async () => { throw failure; } }, 1, 1), 1);
@@ -7916,19 +7919,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('dev E2E: finite operator override releases a held simulator campaign without exempting it', async t => {
+  test('dev E2E: the deploy sets a finite, audited fixture override that releases a held campaign without exempting it', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
-      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333';
+      const {applyDevE2eFixture,DEV_E2E_SEND_CAP}=await import('./scripts/dev-e2e-fixture.js');
+      const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333', domainId='dom_'+randomUUID().replaceAll('-','');
+      const dev={STAGE:'dev',PUBLIC_URL:'https://dev.bane.mx',BANE_E2E_DOMAIN_ID:domainId};
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`UPDATE workspaces SET name='E2E' WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO operation_domains(id,name,workspace_id,region) VALUES ($1,$2,$3,$4)`,[domainId,domain,wid,REGION]);
       const claim=(host:string)=>db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[host,wid]);
       await claim(domain);
-      const script=await readFile(new URL('./scripts/set-dev-e2e-send-cap.sql',import.meta.url),'utf8');
-      const apply=()=>db.query(script.replace(":'workspace_id'",'$1'),[wid]);
-      assert.equal((await apply()).rowCount,0,'A Hosted workspace without both verified fixture domains is unchanged');
+      const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-dev-e2e-send-cap'`,[wid])).rows.map(r=>r.details);
+      // Never production, never another workspace: a fixture without both verified claims is refused and unchanged.
+      await assert.rejects(applyDevE2eFixture(db,{...dev,STAGE:'production',PUBLIC_URL:'https://bane.mx'}),/only to dev/);
+      await assert.rejects(applyDevE2eFixture(db,{...dev,BANE_E2E_DOMAIN_ID:undefined}),/BANE_E2E_DOMAIN_ID/);
+      await assert.rejects(applyDevE2eFixture(db,dev),/No unique E2E fixture/);
       await claim('e2e-va.bane.mx');
-      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),91)`,[wid]);
+      // A day of E2E volume at the old 500 override: the campaign is held.
+      await db.query(`UPDATE workspaces SET send_cap_override=500 WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),469)`,[wid]);
       const list=ok(await local('POST','/v1/lists',{name:'E2E fixture'}),201);
       await db.query(`WITH contact AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ('e2e-cap-fixture',$1,'success@simulator.amazonses.com','subscribed') RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM contact`,[wid,list.id]);
@@ -7936,10 +7947,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const path=`/v1/campaigns/${c.id}`, delivery=async()=>ok(await local('GET',path)).delivery;
       ok(await local('POST',path+'/send',{revision:c.revision}),202);await run('campaign.run');
       const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
-      assert.equal((await apply()).rows[0].details.new,500);assert.equal((await apply()).rowCount,0);
+      // The deploy raises it once, audited; the next deploys change and audit nothing.
+      assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:true});
+      assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:false});
+      assert.deepEqual((await audits()).map(d=>[d.old,d.new]),[[500,DEV_E2E_SEND_CAP]]);
       await run('campaign.run');assert.equal((await delivery()).expanded,1);
-      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
-        [{used:'92',marketing:'450',burst:50,pending_cap_override:null,exempt_hosted_quotas:false}]);
+      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a) CROSS JOIN workspaces w WHERE w.id=$1`,[wid])).rows,
+        [{used:'470',marketing:'90000',burst:70,pending_cap_override:null,exempt_hosted_quotas:false}]);
+      // A larger operator override and an exemption are left alone.
+      await db.query(`UPDATE workspaces SET send_cap_override=$2 WHERE id=$1`,[wid,DEV_E2E_SEND_CAP*2]);
+      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
+      await db.query(`UPDATE workspaces SET send_cap_override=NULL,exempt_hosted_quotas=true WHERE id=$1`,[wid]);
+      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
+      assert.equal((await audits()).length,1);
     });
   });
 
@@ -10522,6 +10542,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(await submit(mid,['a@receive.example'],'sns\0\ud800'),1);await run('mailbox.ingest',{sesMessageId:mid});
         const {rows:[r]}=await db.query('SELECT m.subject,left(m.text,3) AS start,right(m.text,1) AS tail,m.body_truncated,f.filename FROM mail_messages m JOIN mail_attachments f ON f.message_id=m.id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid]);
         assert.deepEqual(r,{subject:'x�y',start:'x�y',tail:'�',body_truncated:true,filename:'a�b'});
+      });
+      await t.test('inbound Date and Message-ID headers the store cannot hold are left out, and the message is kept',async()=>{
+        // Varied text: a repeated character would compress into its index row.
+        let seed=7;const wide=(n:number)=>Array.from({length:n},()=>String.fromCharCode(0x4e00+(seed=(seed*1103515245+12345)&0x7fffffff)%20000)).join('')+'@example.net',fits=wide(328);
+        for(const [mid,headers,sent,id] of [
+          ['date-10000','Date: Mon, 01 Jan 10000 00:00:00 +0000\r\nMessage-ID: <a@example.net>',null,'a@example.net'],
+          ['date-275760','Date: +275760-09-12T00:00:00Z',null,null],
+          ['date-0','Date: 0000-06-01T00:00:00Z',null,null],
+          ['date-bce','Date: -000100-01-01T00:00:00Z',null,null],
+          ['date-1','Date: 0001-01-01T00:00:00Z','0001-01-01T00:00:00.000Z',null],
+          ['date-9999','Date: Fri, 31 Dec 9999 23:59:59 +0000','9999-12-31T23:59:59.000Z',null],
+          ['id-2862-bytes',`Message-ID: <${wide(950)}>`,null,null],
+          ['id-996-bytes',`Message-ID: <${fits}>`,null,fits],
+        ] as const){
+          raw.set(mid,Buffer.from(`From: a@example.net\r\nSubject: ${mid}\r\n${headers}\r\n\r\nbody`));
+          assert.equal(await submit(mid,['a@receive.example']),1);await run('mailbox.ingest',{sesMessageId:mid});
+          const {rows:[r]}=await db.query('SELECT status,sent_at,message_id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);
+          assert.deepEqual({...r,sent_at:r.sent_at?.toISOString()??null},{status:'received',sent_at:sent,message_id:id},mid);
+        }
+        const {normalizeMessageId}=await import('./src/mailbox-store.js');
+        assert.equal(normalizeMessageId(`<${'a'.repeat(998)}>`),'a'.repeat(998));assert.equal(normalizeMessageId(`<${'a'.repeat(999)}>`),null);
+        assert.equal(normalizeMessageId(`<${'\0'.repeat(333)}>`),null,'counted as stored: NUL becomes a three-byte replacement');
       });
       await t.test('large inbound mail stays downloadable using a pinned copy or multipart Bcc scrub',async()=>{
         for(const mid of ['large','scrub']){await submit(mid,['a@receive.example']);

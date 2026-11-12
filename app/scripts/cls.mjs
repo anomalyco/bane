@@ -1,5 +1,6 @@
 // CLS gate: cumulative layout shift on every main dashboard page, light and dark, on a cold full load and on in-app
-// navigation, over a throttled network with slow API responses that arrive out of order; the main pages again on a
+// navigation, over a throttled network with slow API responses that arrive out of order (web fonts load before any text,
+// the same way every run; CLS_FONTS=late delays them instead); the main pages again on a
 // phone (390 × 844, touch: the tab bar, cards and native selects). Fails when any page's CLS
 // exceeds 0.001 (or a page errors). The longest task during each in-app navigation is reported, not gated: on CI's
 // shared runner the composer and rituals chunks measured 105–179 ms between runs of the same page, too close to a
@@ -12,6 +13,7 @@
 //   CLS_CHROME=<path>  Chrome executable; otherwise the installed Google Chrome
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
 //   CLS_PHONE=0        skip the phone pass
+//   CLS_FONTS=late     deliver web fonts 1.8 s late, to measure the fallback-to-web-font swap
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
@@ -25,7 +27,7 @@
 // fixed sleeps, and polling pages settle between polls.
 import { mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { seed, start } from './cls-fixture.mjs';
@@ -95,6 +97,12 @@ const devices = {
 // every run. Assets load through Chrome's own throttling (150 ms latency, 1.6 Mbps down).
 const apiDelay = path => { let h = 0; for (const c of path) h = (h * 31 + c.charCodeAt(0)) >>> 0; return 300 + (h % 6) * 200; };
 const throttle = { offline: false, latency: 150, downloadThroughput: 1.6 * 1024 * 1024 / 8, uploadThroughput: 750 * 1024 / 8 };
+// Web fonts are served at once from app/dist, not through the throttled network, so they have loaded before the
+// (throttled) script that renders any text runs. Before, whether a font arrived before or after the page's text varied
+// with the runner's load, and a page whose text changed size when the font swapped in failed only sometimes (Settings ·
+// webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
+// late, after the slowest API response, so text first paints in its local fallback (tokens.css).
+const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800, fontDir = join(app, 'dist', 'fonts');
 
 // Runs in the page before its own scripts.
 const probe = () => {
@@ -228,6 +236,11 @@ async function measure(browser, job, fx) {
       await new Promise(done => setTimeout(done, apiDelay(url.pathname + url.search)));
       await route.continue().catch(() => {});
     });
+    await context.route(url => url.origin === origin && url.pathname.startsWith('/fonts/'), async route => {
+      if (lateFonts) { await new Promise(done => setTimeout(done, FONT_DELAY_MS)); return route.continue().catch(() => {}); }
+      const file = join(fontDir, basename(new URL(route.request().url()).pathname));
+      await route.fulfill({ path: file, contentType: 'font/woff2', headers: { 'cache-control': 'public, max-age=31536000, immutable' } }).catch(() => route.continue().catch(() => {}));
+    });
     page = await context.newPage();
     net = network(page);
     page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429)) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
@@ -236,6 +249,9 @@ async function measure(browser, job, fx) {
     await cdp.send('Network.enable');
     await cdp.send('Network.emulateNetworkConditions', throttle);
     await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'load', timeout: 60_000 });
+    // With late fonts, the fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
+    const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
+    for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
     if (job.mode === 'in-app') {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
@@ -298,7 +314,7 @@ function summarize(results, seconds) {
   const lines = [
     `### Layout shift: ${failed.length ? `❌ ${failed.length} of ${results.length} measurements failed` : `✅ ${results.length} measurements, every page at CLS ≤ ${LIMIT}`}`,
     '',
-    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
+    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order, web fonts ${lateFonts ? `after ${FONT_DELAY_MS} ms` : 'before any text'}; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
     '',
     '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Phone load | Phone in-app | Longest task |',
     '| --- | --- | --: | --: | --: | --: | --: | --: | --: |',

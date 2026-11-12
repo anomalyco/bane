@@ -49,7 +49,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
 // index.html for GET), so a route missing there is unreachable on Cloudflare while the Node server still serves it.
 // The Worker's own fetch also hands GET/HEAD outside its API prefixes to the assets binding.
 {
-  const { createOpenApiApp } = await import('../src/app.js');
+  const before = failed, { createOpenApiApp } = await import('../src/app.js');
   const glob = (p: string) => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*') + '$');
   const routes = (await createOpenApiApp()).routes.filter(r => r.path !== '*' && r.path !== '/*');
   const paths = [...new Set(routes.map(r => r.path.replace(/:[^/]+/g, 'x').replaceAll('*', 'x')))];
@@ -78,7 +78,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     }
   } finally { Object.assign(console, quiet); }
   for (const path of served) fail('Worker routes', `GET ${path} is an API route, but src/worker.ts hands it to the static assets binding. Add its prefix to the API path pattern in the Worker's fetch handler.`, 'api/src/worker.ts');
-  console.log(`Worker routes: ${paths.length} API paths reach the Worker in both wrangler configs and src/worker.ts.`);
+  if (failed === before) console.log(`Worker routes: ${paths.length} API paths reach the Worker in both wrangler configs and src/worker.ts.`);
 }
 
 // 3. Migrations. src/migrate.ts applies every /^\d+_[a-z_]+\.sql$/ file once, in name order, and refuses a changed one.
@@ -171,6 +171,34 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     for (const column of now.filter(c => !before.has(c.key))) added++, fail('Card slots', `Table column ${column.key} has no card slot. Below 640 px DataTable renders each row as a card: set card to 'title', 'aside', 'line', 'inline', 'field', 'end' or 'hide' (see Column in app/src/components/ui/primitives.tsx).`, file, column.line);
   }
   console.log(`Card slots: ${total - added} grandfathered columns without a card slot, ${added} new.`);
+}
+
+// 5. Flake quarantine: an acceptance test named with [flaky #N] is skipped by the required job and run by the nightly.
+// It must name its tracking issue, and that issue must still be open (closing it means the flake was fixed).
+{
+  const file = 'api/api.acceptance.test.ts', text = readFileSync(new URL('api.acceptance.test.ts', api), 'utf8');
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const tagged: { name: string; issue?: number; line: number }[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ['test', 'it', 'describe'].includes(node.expression.text)) {
+      const title = node.arguments[0];
+      if (title && ts.isStringLiteralLike(title) && /flaky/i.test(title.text)) {
+        tagged.push({ name: title.text, issue: Number(/\[flaky #(\d+)\]/.exec(title.text)?.[1]) || undefined, line: source.getLineAndCharacterOfPosition(title.getStart(source)).line + 1 });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const token = process.env.GH_TOKEN, repo = process.env.GITHUB_REPOSITORY;
+  for (const test of tagged) {
+    if (!test.issue) { fail('Quarantine', `"${test.name}" mentions flaky but has no [flaky #<issue>] tag. Quarantine a test with the exact tag and its open issue, or rename it.`, file, test.line); continue; }
+    if (!token || !repo) continue;
+    const response = await fetch(`https://api.github.com/repos/${repo}/issues/${test.issue}`, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' } });
+    const issue = response.ok ? await response.json() as { state: string } : null;
+    if (!issue) fail('Quarantine', `"${test.name}" is quarantined under #${test.issue}, which does not exist. Open an issue for the flake and use its number.`, file, test.line);
+    else if (issue.state !== 'open') fail('Quarantine', `#${test.issue} is closed but "${test.name}" is still quarantined. Remove the [flaky #${test.issue}] tag so the test blocks again, or reopen the issue.`, file, test.line);
+  }
+  console.log(`Quarantine: ${tagged.length} acceptance test${tagged.length === 1 ? '' : 's'} quarantined${tagged.length ? ` (${tagged.map(t => `#${t.issue ?? '?'}`).join(', ')}); the nightly runs them` : ''}.`);
 }
 
 if (failed) {
