@@ -6820,7 +6820,7 @@ describe('Billing: API, MCP and notices', () => {
       error(await local('GET', '/v1/billing/usage?granularity=hour&from=2026-01-01&to=2026-03-01'), 422, 'VALIDATION_FAILED');
       // Plan & usage carries the combined free allowance and whether billing charges yet.
       const plan = ok(await local('GET', '/v1/usage'));
-      assert.deepEqual([plan.billing, plan.pricing], [{ enabled: false, enforcement: 'off' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1_000_000_000 }]);
+      assert.deepEqual([plan.billing, plan.pricing], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1_000_000_000 }]);
     });
   });
 
@@ -7035,13 +7035,15 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual(await setBillingMode(db, [wid, 'exempt', '--reason', 'Anomaly workspace exemption']), { old: 'prepaid', new: 'exempt', reason: 'Anomaly workspace exemption', via: 'script' });
       assert.equal((await db.query('SELECT mode FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].mode, 'exempt');
       await assert.rejects(setBillingEnforcement(db, ['enforce', '--receive-hold', 'yes', '--reason', 'Billing goes live']), /on or off/);
+      // Billing launches enforced (249); a rollback to shadow and back stamps enforced_at again.
+      await setBillingEnforcement(db, ['shadow', '--reason', 'Roll back before the storage notice']);
       const live = await setBillingEnforcement(db, ['enforce', '--storage-from', '2027-02-10', '--bill-simulated', 'on', '--reason', 'Billing goes live']);
-      assert.deepEqual([live.old.mode, live.new.mode, live.new.bill_simulated, live.new.storage_billing_from, typeof live.new.enforced_at], ['off', 'enforce', true, '2027-02-10', 'string']);
+      assert.deepEqual([live.old.mode, live.new.mode, live.new.bill_simulated, live.new.storage_billing_from, typeof live.new.enforced_at], ['shadow', 'enforce', true, '2027-02-10', 'string']);
       await setBillingEnforcement(db, ['shadow', '--storage-from', 'none', '--reason', 'Roll back to shadow']);
       const config = (await db.query('SELECT mode,storage_billing_from,enforced_at IS NOT NULL AS stamped FROM billing_config')).rows[0];
       assert.deepEqual([config.mode, config.storage_billing_from, config.stamped], ['shadow', null, true]);
       assert.deepEqual((await db.query(`SELECT action FROM hosted_operator_audit WHERE workspace_id IN ($1,'installation') AND action LIKE 'set-billing-%' ORDER BY at`, [wid])).rows.map(r => r.action),
-        ['set-billing-mode', 'set-billing-enforcement', 'set-billing-enforcement']);
+        ['set-billing-mode', 'set-billing-enforcement', 'set-billing-enforcement', 'set-billing-enforcement']);
     });
   });
 });
@@ -9795,7 +9797,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
       // Plan & usage shows the same limit, the step it is on and the steps above it, the price and the combined free allowance.
       const usage = ok(await request('GET','/v1/usage',key));
-      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: false, enforcement: 'off' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1000000000 }, false]);
+      // Billing launches enforced (migration 249); the workspace-wide switch is billing_config.
+      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1000000000 }, false]);
       assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [100, limit.used, 0, [100, 1000, 10000]]);
       assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
       // PR92 P2: received volume counts unrouted and spam mail, so only credentials that may read every received message
