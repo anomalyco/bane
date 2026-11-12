@@ -331,6 +331,32 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
 }
 
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+// How a client's self-chosen name is shown, on the approval page and in the connections list:
+// - Every space, line break and control character, and the blank cells U+2800, U+FFFC and U+1D159, become one space.
+// - Characters that are never drawn are dropped: default-ignorable code points (soft hyphen, grapheme joiner,
+//   direction marks and overrides, word joiners, fillers, tags), lone surrogates and annotation marks.
+// - Two of those shape their neighbours, so they stay where they do: a zero-width joiner or non-joiner between two
+//   shown characters, and one variation selector directly after a shown character. Emoji sequences and joining
+//   scripts keep their form; emoji tag sequences fall back to their base.
+// - At most 160 characters. A name left without a letter, number, punctuation mark or symbol has no label ('').
+const NAME_BLANK = /[\s\p{Cc}\p{Zl}\p{Zp}\u2800\uFFFC\u{1D159}]+/gu, NAME_SHOWN = /[\p{L}\p{N}\p{P}\p{S}]/u;
+const NAME_HIDDEN = /^[\p{Default_Ignorable_Code_Point}\p{Cs}\uFFF9-\uFFFB]$/u;
+const NAME_JOINER = /^[\u200C\u200D]$/, NAME_SELECTOR = /^[\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]$/u;
+function clientLabel(name: string | null | undefined) {
+  const out: string[] = [];
+  // A joiner needs a shown character after it.
+  const settle = () => { while (out.length && NAME_JOINER.test(out.at(-1)!)) out.pop(); };
+  for (const ch of (name ?? '').replace(NAME_BLANK, ' ')) {
+    const last = out.at(-1);
+    if (ch === ' ') { settle(); if (out.length && out.at(-1) !== ' ') out.push(ch); }
+    else if (!NAME_HIDDEN.test(ch)) out.push(ch);
+    else if (last !== undefined && last !== ' ' && !NAME_JOINER.test(last) && (NAME_JOINER.test(ch) || (NAME_SELECTOR.test(ch) && !NAME_SELECTOR.test(last)))) out.push(ch);
+  }
+  out.length = Math.min(out.length, 160);
+  settle();
+  const label = out.join('').trim();
+  return NAME_SHOWN.test(label) ? label : '';
+}
 function page(title: string, content: string) {
   const nonce = crypto.randomUUID();
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Bane</title><style nonce="${nonce}">@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}*{box-sizing:border-box;letter-spacing:-0.01em}body{margin:0;background:#fafafa;color:#202020;font:16px/1.5 Inter,Arial,sans-serif;letter-spacing:-0.01em}main{max-width:520px;margin:12vh auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0 0 24px;font-weight:600}p{margin:16px 0}ul{padding-left:22px;margin:20px 0}li{margin:8px 0}.identity{color:#555;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}button{font:inherit;letter-spacing:inherit;padding:10px 18px;border:1px solid #bbb;border-radius:6px;background:transparent;color:inherit;cursor:pointer}button[value=approve],button[value=signin]{background:#202020;color:white;border-color:#202020}button:focus-visible{outline:2px solid #345ad4;outline-offset:3px}small{font-size:14px}.warn{border:1px solid #bbb;border-radius:6px;padding:12px 14px;overflow-wrap:anywhere}a{color:inherit}strong{font-weight:600}</style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`, {
@@ -423,7 +449,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     const [client] = await runtime.db.select({ name: oauthClient.name, disabled: oauthClient.disabled, redirectUris: oauthClient.redirectUris }).from(oauthClient).where(eq(oauthClient.clientId, clientId)).limit(1);
     if (!client || client.disabled) return page('Client unavailable', '<p>This client can no longer connect to Bane.</p>');
     const [workspace] = member ? await runtime.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, member.workspaceId)) : [];
-    const name = client.name?.slice(0, 160) || 'This MCP client';
+    const name = clientLabel(client.name) || 'This MCP client';
     const redirectUri = params.get('redirect_uri') ?? client.redirectUris[0] ?? '';
     let host = redirectUri; try { host = new URL(redirectUri).host || redirectUri; } catch { /* Show the raw value when it is not a URL. */ }
     const hostname = host.replace(/:\d+$/, '');
@@ -452,7 +478,7 @@ export function registerMcpAuth(app: App): void {
     const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
       .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
       .where(and(like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
-    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, scopes: row.scopes.map(canonicalScope).filter(scope => scope !== 'bane:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, name: clientLabel(row.name) || null, scopes: row.scopes.map(canonicalScope).filter(scope => scope !== 'bane:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';
