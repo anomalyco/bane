@@ -2965,17 +2965,30 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
+  test('hosted MCP read-only OAuth hides state changes except read-only delegation, offers REST read operations, and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
-    assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
+    // The one state change a read grant may make is read-only delegation, which REST allows too.
+    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['createAgentToken']);
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
-    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'queryAudience'));
+    // REST lets a read credential run AudienceQL reads and segment previews (POSTs that change nothing): no confirm argument.
+    for (const name of ['queryAudience', 'previewSegment']) {
+      const tool = catalog.tools.find((x: Json) => x.name === name);
+      assert.ok(tool, name); assert.equal(tool.annotations.readOnlyHint, true, name); assert.equal(tool.inputSchema.properties.confirm, undefined, name);
+    }
+    await callTool(token, 'queryAudience', { body: { statement: 'SELECT count(*) FROM contacts' } });
+    const unconfirmed = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } } });
+    assert.equal(unconfirmed.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(unconfirmed));
+    const delegated = await callTool(token, 'createAgentToken', { confirm: true, body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } }, 201);
+    secrets.add(delegated.token); assert.deepEqual(delegated.permissions, ['read']);
+    assert.equal((await http('GET', '/v1/me', delegated.token)).status, 200);
+    const escalation = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { confirm: true, body: { permissions: ['read', 'send'], expiresInSeconds: 60, purpose: 'escalation' } } });
+    assert.equal(escalation._meta.status, 403, redact(escalation));
     // One HTTP request is one JSON-RPC call: batches and unbounded non-JSON bodies never reach the SDK.
     const batch = await http('POST', '/mcp', token, Array.from({ length: 500 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'tools/list', params: {} })), rpcHeaders);
     assert.equal(batch.status, 400, diagnostic(batch));
@@ -3026,8 +3039,10 @@ describe('Hosted MCP OAuth and tools', () => {
     await t.test('L1: read-only descriptions omit contact writes, credential creation and inbound keys', () => {
       assert.match(contacts.description, /list contacts/i);
       assert.doesNotMatch(contacts.description, /manage|create|update|delete/i);
-      // Every keys action needs manage in REST (listing agent tokens included), so a read-only grant has no keys tool.
-      assert.ok(!plainTools.some((tool:Json)=>tool.name==='keys'), 'keys tool listed to a read-only grant');
+      // A read grant's only credential action is read-only delegation: no API keys, inbound keys, listing or revocation.
+      const keys = plainTools.find((tool:Json)=>tool.name==='keys');
+      assert.deepEqual(keys.inputSchema.properties.action.enum, ['createToken']);
+      assert.doesNotMatch(keys.description, /api key|inbound|revoke|secret|manage/i);
     });
     const mergedDenied = await rpc(token, 'tools/call', { name:'contacts', arguments:{ action:'create', confirm:true, body:{ email:address() } } }, '/mcp');
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
@@ -3038,6 +3053,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revoked.status, 401, diagnostic(revoked));
     assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+    assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
     const fallback = await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(fallback.status, 401, 'Hosted MCP must not fall back to API-key authentication.');

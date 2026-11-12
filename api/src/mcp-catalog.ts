@@ -31,21 +31,21 @@ export interface McpOperation {
 }
 // Provider-signed notifications are never agent calls; everything else with bearer auth becomes a tool.
 const EXCLUDED = new Set(['receiveSesSnsEvent']);
-// POST operations that change nothing: no confirm argument, read-only hint.
-const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual']);
-// Keep the former workflow gates on the operations themselves, including GETs that
-// could only be reached via a confirmed import or a writable visual preview.
-const WRITABLE_ONLY = new Set(['listContactImports', 'getContactImport', 'renderCampaignTemplatePreviewImage']);
-const NO_CONFIRM = new Set(['queryAudience', 'planAudienceMutation', 'renderCampaignTemplatePreviewImage']);
+// POST operations that change nothing: no confirm argument, read-only hint, read permission.
+const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment']);
+// Writes whose calls need no confirm argument. Access to every operation is decided by its
+// REST permission below, never by the HTTP method; confirm=true marks only state changes.
+const NO_CONFIRM = new Set(['planAudienceMutation']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // Listings must not offer what REST refuses. These mirror the handlers' permission checks where
 // they differ from the method default (reads need read, writes need manage): actor(c, 'send')
-// for email, attachment and campaign work, read-level POSTs, and manageKeys() reads.
+// for email, attachment and campaign work, read-only delegation (a read grant may mint a read
+// agent token; it still needs confirm=true), and manageKeys() reads.
 const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
-const READ_LEVEL_WRITES = new Set(['createAgentToken', 'queryAudience', 'previewSegment']);
+const READ_LEVEL_WRITES = new Set(['createAgentToken']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens']);
 const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection']);
 // app.ts notMember(): workspace members cannot use these areas whatever their scopes.
@@ -272,12 +272,11 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (EXCLUDED.has(name)) continue;
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
       if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
-      const write = (method !== 'get' && !READ_ONLY_POSTS.has(name)) || WRITABLE_ONLY.has(name);
+      const write = method !== 'get' && !READ_ONLY_POSTS.has(name);
       const confirm = write && !NO_CONFIRM.has(name);
       const input = inputSchema(spec, item as ObjectValue, operation, confirm);
       if (!input) continue; // Never offer reply without the expected-recipient guard.
       const props = input.properties!;
-      if (['listContactImports', 'getContactImport', 'previewSegment'].includes(name)) delete props.idempotencyKey;
       const queryParameters = toolParameters(spec, item as ObjectValue, operation).filter(p => p.in === 'query').map(p => p.name as string);
       const pollPage = queryParameters.includes('after');
       const aliases: Record<string, string> = {};

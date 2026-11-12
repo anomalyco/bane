@@ -43,6 +43,8 @@ const WITNESSES: &[&[&str]] = &[
     &["mint grant2", "probe grant2 code", "probe grant2 plain"],
     &["promote member", "mint grant2", "probe grant2 code"],
     &["mint grant", "probe grant code", "probe grant plain"],
+    // A read-only grant was not offered (or allowed) REST's read-level operations (review of #51).
+    &["mint grant3", "probe grant3 code", "probe grant3 plain", "probe grant3 delegate", "probe grant3 query"],
     // Checklist items the bounded graphs do not reach: C1 (8 steps), R6, R7, I7.
     &["mint key", "A begin list key k1 b1", "A step", "A step", "B begin list key k1 b1", "B step", "B step", "B step"],
     &["mint key", "mint box", "delete box", "probe bkey rest", "probe bkey mcp"],

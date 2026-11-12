@@ -58,6 +58,9 @@
 //! - M2  plain (resource tool) listing equals the same set.
 //! - M3  a tool call from a grant has the REST status (getCurrentIdentity); non-MCP
 //!       credentials (API keys, agent tokens) are refused by /mcp.
+//! - M4  read-level operations a `bane:read` grant may use in REST (AudienceQL query, segment
+//!       preview, read-only agent-token delegation) are listed and callable, and only state
+//!       changes need confirm=true.
 //!
 //! Out of model (reported with the reason by `coverage`)
 //! - X1  Worker/DB clock skew: the host stamps reservations with the Worker clock, so both agree.
@@ -80,10 +83,10 @@ pub const TOKEN_TTL: i64 = 60_000;
 pub const ACCESS_TTL_S: i64 = 300;
 
 /// Sampled operations for the MCP-versus-REST check, in the host's reporting order.
-pub const SAMPLE: [&str; 16] = [
+pub const SAMPLE: [&str; 18] = [
     "getCurrentIdentity", "listContactLists", "createContactList", "createApiKey", "createAgentToken", "listInboxes",
     "createInbox", "getRouting", "listInboundKeys", "sendEmail", "deleteInbox", "replyToInboundThread",
-    "listApiKeys", "listMcpConnections", "listDomains", "sendCampaign",
+    "listApiKeys", "listMcpConnections", "listDomains", "sendCampaign", "queryAudience", "previewSegment",
 ];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,14 +217,20 @@ impl Model {
                 "bkey" => op == "listInboxes",
                 _ => {
                     let g = &self.grants[who];
+                    // Scopes: grant read+send+manage, grant2 read+send, grant3 read.
                     let manage = who == "grant";
+                    let send = who != "grant3";
                     let receiving = who == "grant" && self.receiving;
                     let member = g.role == "member";
                     match op {
-                        "getCurrentIdentity" | "listContactLists" | "sendEmail" => true,
+                        // Read-level operations, including the two read-only POSTs.
+                        "getCurrentIdentity" | "listContactLists" | "queryAudience" | "previewSegment" => true,
+                        "sendEmail" => send,
+                        "sendCampaign" => send && !member,
                         "createContactList" | "createApiKey" | "listInboxes" | "createInbox" | "deleteInbox"
                         | "replyToInboundThread" => manage,
-                        "createAgentToken" | "listDomains" | "sendCampaign" => !member,
+                        // Read-only delegation: a read grant may mint a read token.
+                        "createAgentToken" | "listDomains" => !member,
                         "getRouting" => receiving && !member,
                         "listInboundKeys" => receiving && manage,
                         "listApiKeys" => manage,
@@ -301,7 +310,7 @@ impl Model {
         } else {
             push("revoke grant".into());
             push("refresh grant".into());
-            for how in ["code", "plain", "call"] {
+            for how in ["code", "plain", "call", "delegate", "query"] {
                 push(format!("probe grant {how}"));
             }
             if !self.receiving {
@@ -334,8 +343,18 @@ impl Model {
         if self.grants.contains_key("grant2") {
             push("revoke grant2".into());
             push("refresh grant2".into());
-            for how in ["code", "plain", "call"] {
+            for how in ["code", "plain", "call", "delegate", "query"] {
                 push(format!("probe grant2 {how}"));
+            }
+        }
+        // A read-only owner grant (bane:read).
+        if !self.grants.contains_key("grant3") {
+            push("mint grant3".into());
+        } else {
+            push("revoke grant3".into());
+            push("refresh grant3".into());
+            for how in ["code", "plain", "call", "delegate", "query"] {
+                push(format!("probe grant3 {how}"));
             }
         }
         if self.minted("key") {
@@ -452,7 +471,7 @@ impl Model {
     /// Whether the host holds a secret for this credential (it was minted).
     fn can_use(&self, c: &str) -> bool {
         match c {
-            "grant" | "grant2" => self.grants.contains_key(c),
+            "grant" | "grant2" | "grant3" => self.grants.contains_key(c),
             _ => self.minted(c),
         }
     }
@@ -558,8 +577,8 @@ impl Model {
                 self.keys += 1;
                 json!({"status": 201})
             }
-            "grant" | "grant2" => {
-                let role = if c == "grant" { "owner".to_string() } else { self.member.clone() };
+            "grant" | "grant2" | "grant3" => {
+                let role = if c == "grant2" { self.member.clone() } else { "owner".to_string() };
                 self.grants.insert(c.into(), Grant { revoked: false, at: Self::access_exp(t), role, replaced: false });
                 json!({"status": "ok"})
             }
@@ -610,7 +629,7 @@ impl Model {
 
     fn revoke(&mut self, c: &str) -> Value {
         match c {
-            "grant" | "grant2" => {
+            "grant" | "grant2" | "grant3" => {
                 let g = self.grants.get_mut(c).unwrap();
                 let status = if g.revoked { 404 } else { 200 };
                 g.revoked = true;
@@ -636,10 +655,17 @@ impl Model {
 
     fn probe(&self, who: &str, how: &str) -> Value {
         match (who, how) {
-            ("grant" | "grant2", "call") => {
-                if self.access_ok(who) { json!({"status": 200, "code": null}) } else { json!({"status": 401, "code": null}) }
+            ("grant" | "grant2" | "grant3", "call" | "delegate" | "query") => {
+                let (op, status) = match how { "call" => ("getCurrentIdentity", 200), "delegate" => ("createAgentToken", 201), _ => ("queryAudience", 200) };
+                if !self.access_ok(who) {
+                    json!({"status": 401, "code": null})
+                } else if self.visible(who).contains(&op) {
+                    json!({"status": status, "code": null})
+                } else {
+                    json!({"status": null, "code": "TOOL_UNAVAILABLE"})
+                }
             }
-            ("grant" | "grant2", _) => {
+            ("grant" | "grant2" | "grant3", _) => {
                 if self.access_ok(who) { json!({"status": 200, "visible": self.visible(who)}) } else { json!({"status": 401}) }
             }
             (_, "mcp") if REST_CREDS.contains(&who) => json!({"status": 401}),
@@ -926,6 +952,9 @@ impl Model {
         if w[0] == "probe" && w[2] == "call" {
             t.push("M3");
         }
+        if w[0] == "probe" && (matches!(w[2], "delegate" | "query") || (w[1] == "grant3" && observed["visible"].is_array())) {
+            t.push("M4");
+        }
         if w[0] == "tick" {
             let n: i64 = w[1].parse().unwrap_or_default();
             if self.creds.values().any(|c| c.exp != 0 && (n == c.exp - 1 || n == c.exp)) || self.grants.values().any(|g| n == g.at - 1 || n == g.at) {
@@ -941,7 +970,7 @@ fn with_at(mut v: Value) -> Value {
     v
 }
 
-pub const CHECKLIST: [(&str, &str); 37] = [
+pub const CHECKLIST: [(&str, &str); 38] = [
     ("I1", "same key, same body replays the original"), ("I2", "same key, different body: 409 conflict"),
     ("I3", "secret-bearing create replay withheld; no secret replayed"), ("I4", "key length 200/201, empty, non-printable"),
     ("I5", "a failed create releases its key"), ("I6", "keys are scoped per credential"),
@@ -959,6 +988,7 @@ pub const CHECKLIST: [(&str, &str); 37] = [
     ("R11", "token and access-token expiry boundaries"), ("R12", "refresh only while the grant lives"),
     ("R13", "deploy overlap: os_live_ keys and v3 tokens"), ("M1", "Code Mode listing equals REST authorization"),
     ("M2", "plain listing equals the same set"), ("M3", "tool call status; non-MCP credentials refused by /mcp"),
+    ("M4", "read grant: query, preview and read-only delegation listed and callable"),
     ("X1", "out of model: Worker/DB clock skew (host pins both clocks; NTP-bounded in production)"),
     ("X2", "out of model: SES/R2/webhook failures (these creates make no external call)"),
     ("X3", "out of model: interleavings inside one SQL statement (statement-granular checkpoints)"),

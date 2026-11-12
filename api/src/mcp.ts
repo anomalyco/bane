@@ -80,14 +80,14 @@ function untrustedNotice(response: ObjectValue | undefined) {
 async function serve(app: App, request: Request, runtime: Runtime, principal: Actor|MailboxAccess, catalog: ReadonlyMap<string, McpOperation>): Promise<Response> {
   const base = new URL(runtime.config.publicUrl);
   const inbox='admin' in principal?principal:null;
-  const allowWrites='receivingConsent' in principal && principal.receivingConsent?principal.permissions.includes('manage'):principal.permissions.some(p=>p!=='read');
   const allowInbound='domains' in principal && principal.permissions.includes('manage') && !principal.domains.length;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  // A workspace grant sees only operations REST would authorize for it: the permission, the
-  // member role and dashboard-only administration, on top of the receiving and write gates.
+  // A workspace grant sees, and may call, exactly the operations REST would authorize for it:
+  // the operation's REST permission (not its HTTP method), the member role and dashboard-only
+  // administration, plus explicit receiving consent for receiving administration.
   const authorized = (op: McpOperation) => 'domains' in principal && !op.dashboardOnly && !(op.ownerOnly && principal.role === 'member') && (principal.permissions.includes('manage') || principal.permissions.includes(op.permission));
-  const operations = new Map([...catalog].filter(([, op]) => op.receiving ? (inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : 'receivingConsent' in principal && !!principal.receivingConsent && (!op.write || principal.permissions.includes('manage')) && authorized(op)) : inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.inbound || allowInbound) && (allowWrites || !op.write) && authorized(op)));
+  const operations = new Map([...catalog].filter(([, op]) => op.receiving ? (inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : 'receivingConsent' in principal && !!principal.receivingConsent && authorized(op)) : inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.inbound || allowInbound) && authorized(op)));
   const params = new URL(request.url).searchParams;
   const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());
   const codeMode = params.get('codemode') === 'true' || (params.get('codemode') !== 'false' && requested.includes('all'));
@@ -127,7 +127,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Ac
     return output;
   }
   async function invoke(op: McpOperation, args: ObjectValue) {
-      if (op.confirm && (!allowWrites || args.confirm !== true)) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
+      if (op.confirm && args.confirm !== true) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
       if (!op.validate(args)) fail('INVALID_ARGUMENTS', 'Arguments do not match the tool input schema. No API request was made.');
       args = op.apiArgs(args);
       const path = op.path.replace(/\{([^}]+)\}/g, (_, field) => {

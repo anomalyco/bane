@@ -179,7 +179,7 @@ type User = { id: string; cookie: string; memberId: string };
 type Cred = { id: string; secret: string };
 type Grant = { access: string; refresh: string; clientId: string; consentId: string; keyId: string };
 let fx: Fixture | null = null;
-const SAMPLE_REST = ['getCurrentIdentity', 'listContactLists', 'createContactList', 'createApiKey', 'createAgentToken', 'listInboxes', 'createInbox', 'getRouting', 'listInboundKeys', 'sendEmail', 'deleteInbox', 'replyToInboundThread', 'listApiKeys', 'listMcpConnections', 'listDomains', 'sendCampaign'];
+const SAMPLE_REST = ['getCurrentIdentity', 'listContactLists', 'createContactList', 'createApiKey', 'createAgentToken', 'listInboxes', 'createInbox', 'getRouting', 'listInboundKeys', 'sendEmail', 'deleteInbox', 'replyToInboundThread', 'listApiKeys', 'listMcpConnections', 'listDomains', 'sendCampaign', 'queryAudience', 'previewSegment'];
 
 async function seedUser(w: string, role: 'owner' | 'member'): Promise<User> {
   const id = `tear-user-${randomUUID()}`, token = `tear-token-${randomUUID()}`, memberId = randomUUID();
@@ -360,6 +360,7 @@ async function act(action: string): Promise<Obs> {
       case 'legacy': { f.creds.set('legacy', await legacyKey()); return { status: 201 }; }
       case 'grant': return mintGrant('grant', f.owner, 'bane:read bane:send bane:manage offline_access');
       case 'grant2': return mintGrant('grant2', f.member, 'bane:read bane:send offline_access');
+      case 'grant3': return mintGrant('grant3', f.owner, 'bane:read offline_access');
       case 'token': {
         const o = await callTool('grant', 'createAgentToken', { confirm: true, body: { permissions: ['read', 'send', 'manage'], expiresInSeconds: 60, purpose: 'tear' } });
         if (o.status === 201) { f.creds.set('token', { id: o.body.id, secret: o.body.token }); }
@@ -390,7 +391,7 @@ async function act(action: string): Promise<Obs> {
     case 'revoke': switch (a1) {
       case 'key': case 'dkey': case 'legacy': case 'gkey': return revokeKey(a1);
       case 'token': case 'token3': return { status: (await send(null, 'POST', `/v1/agent-tokens/${f.creds.get(a1)!.id}/revoke`, owner())).status };
-      case 'grant': case 'grant2': return { status: (await send(null, 'POST', `/v1/mcp-connections/${f.grants.get(a1)!.keyId}/revoke`, owner())).status };
+      case 'grant': case 'grant2': case 'grant3': return { status: (await send(null, 'POST', `/v1/mcp-connections/${f.grants.get(a1)!.keyId}/revoke`, owner())).status };
       case 'ikey': case 'gikey': return { status: (await send(null, 'POST', `/v1/inbound/keys/${f.creds.get(a1)!.id}/revoke`, owner())).status };
     } break;
     case 'delete': return { status: (await send(null, 'DELETE', `/v1/inboxes/${f.box}`, owner())).status };
@@ -400,9 +401,12 @@ async function act(action: string): Promise<Obs> {
     case 'promote': return { status: (await send(null, 'PATCH', `/v1/workspaces/current/members/${f.member.memberId}`, owner(), { role: 'admin' })).status };
     case 'probe': {
       const [, who, how] = w;
-      if (who === 'grant' || who === 'grant2') {
+      if (who === 'grant' || who === 'grant2' || who === 'grant3') {
         const g = f.grants.get(who)!;
         if (how === 'call') { const o = await callTool(who, 'getCurrentIdentity', {}); return { status: o.status, code: o.code }; }
+        // Read-level operations: read-only delegation and an AudienceQL read.
+        if (how === 'delegate') { const o = await callTool(who, 'createAgentToken', { confirm: true, body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'tear read delegation' } }); return { status: o.status, code: o.code }; }
+        if (how === 'query') { const o = await callTool(who, 'queryAudience', { body: { statement: 'SELECT count(*) FROM contacts' } }); return { status: o.status, code: o.code }; }
         return listing(g.access, how === 'code');
       }
       const secret = bearer(who!);
