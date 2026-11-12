@@ -39,14 +39,16 @@
 //! - R4 [x] Duplicate SNS notification (same receipt, same recipients), receipt reopen with more
 //!   recipients, and the same email under a second SES receipt (`ingest d1 ...`).
 //! - R5 [x] Retries exhaust at exactly 1 + retryAttempts (`--retries 0|1|2`), then dead-letter.
-//! - R6 [x] A forward retried or re-claimed after it was sent: mail_forward_once sends it once.
+//! - R6 [ ] A second forward of one message to one endpoint (mail_forward_once): unreachable now that
+//!   a message's recipients are routed once; a forward completes in one step (no in-flight state),
+//!   and its retryable failure (FORWARD_LIMIT) needs the hourly cap (L7). Acceptance tests cover it.
 //!
 //! ## Lease or lock expiry, clock skew and time boundaries
 //! - T1 [x] Lease expiry mid-send, before the handler and after the last attempt (JOB_LEASE_EXHAUSTED).
 //! - T2 [x] Backoff per attempt (15 s x 4^n), Retry-After above and below it, capped at 7 days.
 //! - T3 [x] Rate-limit minute rollover (`tick`).
-//! - T4 [ ] Worker/database clock skew and the 12 h backoff cap: Date.now() and now() are one clock
-//!   here; the cap needs attempt 7+ (nightly `--retries 9` walks reach attempt 10's 12 h cap).
+//! - T4 [x] The 12 h backoff cap at the seventh attempt (`--retries 9` boundary trace).
+//!   [ ] Worker/database clock skew: Date.now() and now() are one clock here, so not reached.
 //! - T5 [ ] Retry-After as an HTTP date: second-granular, so its delay is ±1 s; covered by the
 //!   acceptance tests of retryAfterMs.
 //!
@@ -55,7 +57,8 @@
 //! - L2 [x] Three calls per endpoint per message: a fourth is skipped (`rituals four`).
 //! - L3 [x] The 32-intent action budget: 32 runs (`rituals max`), 33 fails to junk (`rituals over`).
 //! - L4 [x] Loop suppression: X-Bane-Loop blocks a forward; 24 Received headers forward, 25 do not.
-//! - L5 [x] The transport breaker: a fourth call after three timeouts defers without sending.
+//! - L5 [x] The transport breaker: a fourth call after three timeouts defers without sending
+//!   (its 30 s window is real time, so walks that trip it skip the drain's liveness check).
 //! - L6 [x] retryAttempts 0 (one attempt only), 1 and 2.
 //! - L7 [ ] Fan-out caps (10 inboxes, 20 webhooks), 50 endpoints, 200 forwards per hour, 1,000 per
 //!   day, the 250,000-step message budget: unreachable at model sizes (the step budget needs loops,
@@ -143,6 +146,9 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // A runner whose claim went stale still sent a delivery that had settled or been resumed.
     (1, &["ingest m1 a", "claim K m1:W", "expire m1:W", "run L m1:W", "reply L 400", "go K"]),
     (1, &["ingest m1 z", "claim K m1:V", "pause V", "expire m1:V", "run L m1:V", "unpause V", "go K"]),
+    // Boundary: backoff 15 s x 4^n reaches its 12 h cap at the seventh attempt (retryAttempts 9).
+    (9, &["ingest m1 a", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503",
+        "run K m1:W", "reply K 503", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503"]),
 ];
 
 fn model(v: &Value) -> R<Model> {
@@ -475,6 +481,11 @@ fn reached(m: &Model, label: &str, obs: &Value) -> Vec<&'static str> {
         }
         Act::Reply { w, resp } => {
             out.extend(["R3", "E1"]);
+            if let Wk::Flight { attempts, .. } = &m.workers[w] {
+                if *attempts >= 7 && resp != "200" {
+                    out.push("T4");
+                }
+            }
             if resp.starts_with("429") || resp.starts_with("503") || resp == "timeout" {
                 out.push("T2");
             }
@@ -684,9 +695,21 @@ fn main() -> R<()> {
             // alphabet (retries 1, 0, 2) in the time left.
             let start = Instant::now();
             let mut regressions = vec![];
+            let mut coverage: BTreeMap<String, u64> = BTreeMap::new();
+            let mut check = Check { retries: 1, host: Host::spawn()?, fixtures: 0 };
             for (r, actions) in REGRESSIONS {
-                let mut check = Check { retries: *r, host: Host::spawn()?, fixtures: 0 };
+                check.retries = *r;
                 let run = conformance::dispatch("runTrace", &json!({"actions": actions}), &mut check)?;
+                if run["status"] == json!("match") {
+                    let mut m = Model::initial(*r);
+                    for s in run["steps"].as_array().into_iter().flatten() {
+                        let label = s["action"].as_str().unwrap_or_default();
+                        for item in reached(&m, label, &s["observed"]) {
+                            *coverage.entry(item.to_string()).or_default() += 1;
+                        }
+                        m.step(parse(label).unwrap());
+                    }
+                }
                 regressions.push(json!({"retries": r, "actions": actions, "status": run["status"], "mismatch": run["mismatch"]}));
             }
             let mut parts = vec![];
@@ -712,7 +735,12 @@ fn main() -> R<()> {
                 parts.push(campaign(&format!("random walks, drained (retries {r}, seed {seed})"), traces, &Campaign { retries: *r, replays }, Host::spawn()?, Some(Instant::now() + slice))?);
             }
             let bad = parts.iter().any(failed) || regressions.iter().any(|r| r["status"] != json!("match"));
-            let report = json!({"regressions": regressions, "runs": parts, "totalMs": start.elapsed().as_millis() as u64});
+            for p in &parts {
+                for (k, v) in p["coverage"].as_object().into_iter().flatten() {
+                    *coverage.entry(k.clone()).or_default() += v.as_u64().unwrap_or(0);
+                }
+            }
+            let report = json!({"regressions": regressions, "runs": parts, "coverage": coverage, "totalMs": start.elapsed().as_millis() as u64});
             println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
             if bad {
                 std::process::exit(1);
