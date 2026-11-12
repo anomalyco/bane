@@ -10575,6 +10575,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           // Ours and theirs alike: mailbox addresses and address patterns are masked; domains and *@domain stay readable.
           assert.deepEqual([box.address, 'someone@elsewhere.example', 'sales-*@receive.example'].map(value => maskedParts(value)?.shown), [box.address.slice(0, 2), 'so', 'sa']);
           assert.deepEqual(['receive.example', '@receive.example', '*@receive.example', ''].map(maskedParts), [null, null, null, null]);
+          // The same rule renders what an endpoint delivers to, what a ritual runs on and the Inbox's address labels:
+          // a forward's address is masked; a write-only URL hint and an address ID (shown until its address loads) are not.
+          assert.deepEqual(['founders@partner.example', '••••/crm', 'Slack incoming webhook ••••0001', box.id].map(value => maskedParts(value)?.shown ?? null), ['fo', null, null, null]);
         } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
       });
       // PR #55 recheck P2: listInboundWebhooks returned 100 webhooks with no cursor, and a route's subscribers were cut at

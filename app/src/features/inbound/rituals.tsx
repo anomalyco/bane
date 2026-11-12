@@ -17,6 +17,7 @@ import { ritualTemplates } from '../../../../api/src/ritual-schema'
 import { concepts } from './concepts'
 import { useOverview } from './overview'
 import { ConceptLine } from './parts'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
@@ -183,7 +184,7 @@ export function RitualsPage() {
   const bindingColumns: Column<Binding & { i: number }>[] = [
     { key: 'order', label: '#', width: 48, render: b => b.i + 1 },
     { key: 'ritual', label: 'Ritual', render: b => <code>{b.ritual}</code> },
-    { key: 'target', label: 'Runs on mail to', render: b => targetName(b.target) },
+    { key: 'target', label: 'Runs on mail to', render: b => <PrivateAddress value={targetName(b.target)} /> },
     { key: 'continue', label: 'After it acts', width: 190, render: b => <Checkbox checked={b.continue} onCheckedChange={v => setBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x))} label="Run the next one too" /> },
     { key: 'actions', label: '', width: 132, align: 'right', render: b => <span className="ritual-row-actions">
       <IconButton label="Move up" disabled={!b.i} onClick={() => move(b.i, -1)}>↑</IconButton>

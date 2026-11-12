@@ -178,7 +178,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
           <span className="trace-result__title">Result</span>
           <span className="trace-result__items">
             {rcpt.dropped ? <span className="trace-chip"><TargetIcon type="drop" size={13} />{outcomes.drop}</span> : <>
-              {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} />{inboxName(id)}</span>)}
+              {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} /><PrivateAddress value={inboxName(id)} /></span>)}
               {(rcpt.webhooks ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type={hook(id)?.type ?? 'webhook'} size={13} />{hook(id)?.name ?? 'Webhook'}</span>)}
               {!rcpt.inboxes?.length && !rcpt.webhooks?.length && <span className="trace-chip"><TargetIcon type="store" size={13} />{outcomes.store}</span>}
               {rcpt.junk && <span className="trace-chip" data-tone="warning">Junk</span>}

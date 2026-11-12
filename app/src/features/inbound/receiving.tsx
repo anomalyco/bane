@@ -137,7 +137,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
     <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
       empty={<EmptyState title="No endpoints yet" description="An endpoint is a named place rituals and routes send mail: Slack, Discord, a webhook or a forward. For example, a ritual calls endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
-        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip">{e.target}</span></div></div> },
+        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div> },
         { key: 'type', label: 'Type', width: '14%', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
         { key: 'used', label: 'Used by', width: '30%', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },

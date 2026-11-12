@@ -22,7 +22,7 @@ type Addresses = Map<string, InboundAddress>
 const ownAddresses = (addresses: Addresses) => new Set([...addresses.values()].flatMap(address => [...ownAddressesOf(address)]))
 
 function AddressLabels({ ids, addresses }: { ids: string[]; addresses: Addresses }) {
-  return <>{ids.slice(0, 3).map(id => <span key={id} className="mailbox-address-label" title={addressName(addresses, id)}>{addressName(addresses, id)}</span>)}{ids.length > 3 && <span className="mailbox-address-label">+{ids.length - 3}</span>}</>
+  return <>{ids.slice(0, 3).map(id => <span key={id} className="mailbox-address-label"><PrivateAddress value={addressName(addresses, id)} /></span>)}{ids.length > 3 && <span className="mailbox-address-label">+{ids.length - 3}</span>}</>
 }
 
 function ThreadRow({ thread, addresses, showAddresses, selected, onSelect }: { thread: InboundThread; addresses: Addresses; showAddresses: boolean; selected: boolean; onSelect: () => void }) {
