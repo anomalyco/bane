@@ -56,12 +56,16 @@ const pages = ids => [
   ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving/webhooks' }],
   ['Campaigns', '/campaigns', { from: '/' }],
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
+  ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
+  ['Campaign review', `/campaigns/${ids.campaign}/review`, { from: '/campaigns' }],
   ['Templates', '/campaigns/templates', { from: '/campaigns' }],
+  ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt' }],
   ['Audience', '/audience', { from: '/' }],
   ['Contact', `/audience/contacts/${ids.contact}`, { from: '/audience' }],
   ['Lists', '/audience/lists', { from: '/audience' }],
   ['List', `/audience/lists/${ids.list}`, { from: '/audience/lists' }],
   ['Segments', '/audience/segments', { from: '/audience' }],
+  ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
   ['Domains', '/domains', { from: '/' }],
   ['Domain', `/domains/${ids.domain}`, { from: '/domains' }],
   ['API keys', '/api-keys', { from: '/' }],
@@ -77,7 +81,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · webhook', 'Onboarding']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · webhook', 'Onboarding']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
