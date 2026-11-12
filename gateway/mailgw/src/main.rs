@@ -299,10 +299,14 @@ impl Gateway {
                             if selects {
                                 stale = false;
                             }
-                            Ok(match &mut core {
+                            let reply = match &mut core {
                                 Core::Imap(i) => i.step(&bytes, identity, store, now),
                                 Core::Smtp(s) => s.step(&bytes, identity, store, now),
-                            })
+                            };
+                            // A parse, folder or access refusal can bypass Store::change.
+                            // No uploaded literal ever belongs to the next command.
+                            drop(store.upload.take());
+                            Ok(reply)
                         } else {
                             Ok(match &mut core {
                                 Core::Imap(i) => {

@@ -810,6 +810,8 @@ def shutdown(tmp):
 def quotas(tmp):
     with gateway(tmp) as (p,_),connect(p['IMAPS']) as c:
         ok(c.create('Quota'));ok(c.select('Quota'))
+        assert c.append('MissingFolder',None,None,RAW)[0]=='NO'
+        ok(c.append('Quota',None,None,RAW))
         try:
             for column in ('quota_messages','quota_bytes'):
                 sql(f"UPDATE mailboxes SET {column}=1 WHERE id='mbx_fixture'")
