@@ -9541,6 +9541,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await assert.rejects(post('two'),{name:'TimeoutError'});assert.equal(calls,4);
     });
   });
+  test('a sending webhook behind the timeout breaker keeps its spent attempts, so a hanging endpoint exhausts its retries',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId,hook=ok(await local('POST','/v1/webhooks',{url:`https://${unique('breaker')}.example.org/hook`,eventTypes:['email.delivered']}),201);
+      const transport=runtime.webhookFetch;let posts=0;
+      runtime.webhookFetch=async()=>{posts++;throw new DOMException('local synthetic timeout','TimeoutError');};
+      try{
+        for(const n of [1,2,3,4]){
+          const event={id:`evt_breaker_${n}_${hook.id}`,type:'email.delivered',createdAt:new Date().toISOString(),workspaceId:wid,region:null,data:{}};
+          await db.query("INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload) VALUES($1,$2,$3,$4,$5)",[`whd_breaker_${n}_${hook.id}`,wid,hook.id,event.id,event]);
+          await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'operation.webhook',$2,$3)",[`job_breaker_${n}`,wid,{deliveryId:`whd_breaker_${n}_${hook.id}`,generation:0}]);
+        }
+        const round=async()=>{await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND status='pending'",[wid]);await processJobs(runtime,operationJobs,4,1,20000,'webhooks');};
+        const attempts=async()=>(await db.query("SELECT id,attempts FROM jobs WHERE workspace_id=$1 ORDER BY id",[wid])).rows;
+        // Three timeouts trip the breaker; the fourth delivery is deferred before anything leaves.
+        await round();assert.equal(posts,3);
+        // The next round defers all four: the three that timed out keep their attempt, the deferred one has none.
+        await round();assert.equal(posts,3);
+        assert.deepEqual((await attempts()).map(row=>row.attempts),[1,1,1,0]);
+        assert.deepEqual((await db.query("SELECT attempt_count FROM operation_deliveries WHERE workspace_id=$1 AND webhook_id=$2 ORDER BY id",[wid,hook.id])).rows.map(row=>row.attempt_count),[1,1,1,0]);
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
 
   test('dispatch leases return bounded inline snapshots and deliver deferred content intact',async t=>{
     await simulatedSesFixture(t,async({db,local,runtime})=>{
