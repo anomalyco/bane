@@ -296,12 +296,15 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
 
 // Bane is the source of truth for the SES tenant status. Every pause and resume bumps provider_connections.tenant_generation;
 // hosted_tenant_status records, per regional tenant, what was applied at which generation. The job reads what Bane
-// wants now (desiredTenantStatus), applies it to every ready tenant that differs, records each success, finishes a
-// resume once no ready tenant is still disabled, and runs again if a transition happened meanwhile. A transition while
-// it runs cannot requeue it, so the periodic reconcile (tenantStatusDrift) queues anything still out of line: every
-// interleaving converges. AWS denying the call (the runtime policy lacks ses:UpdateReputationEntityCustomerManagedStatus)
-// records nothing, so a resume does not wait on a disable that never happened.
-type TenantRow = { id: string; generation: string; desired: 'ENABLED' | 'DISABLED'; region: string; ready: boolean; tenant: string | null; managed_tenant: boolean; arn: string | null; applied: 'ENABLED' | 'DISABLED' | null; applied_generation: string | null };
+// wants now (desiredTenantStatus), applies it to every ready tenant that differs, finishes a resume once no ready tenant
+// may still be disabled, and runs again if a transition happened meanwhile. A transition while it runs cannot requeue
+// it, so the periodic reconcile (tenantStatusDrift) queues anything still out of line: every interleaving converges.
+// An outcome AWS may have applied is never forgotten: a disable is journaled as DISABLING before the call (DISABLED once
+// AWS confirms), and ENABLED is recorded only after AWS confirms, so a crash or a lost checkpoint leaves "possibly
+// disabled", which a resume enables again. Only AWS refusing the call (AccessDenied: the runtime policy lacks
+// ses:UpdateReputationEntityCustomerManagedStatus) is a definite "not applied", and restores the previous record.
+type Applied = 'ENABLED' | 'DISABLING' | 'DISABLED';
+type TenantRow = { id: string; generation: string; desired: 'ENABLED' | 'DISABLED'; region: string; ready: boolean; tenant: string | null; managed_tenant: boolean; arn: string | null; applied: Applied | null; applied_generation: string | null };
 export const tenantStatusJob: JobHandler = retryDatabaseFailures(async (runtime, _payload, job) => {
   if (!runtime.config.multiTenant) return;
   const wid = job.workspaceId;
@@ -312,25 +315,31 @@ export const tenantStatusJob: JobHandler = retryDatabaseFailures(async (runtime,
       LEFT JOIN hosted_tenant_status t ON t.connection_id=c.id AND t.region=r.region WHERE c.workspace_id=${wid} AND c.kind='shared' ORDER BY r.region`);
     if (!rows.length) return;
     const { id: connection, generation, desired } = rows[0]!;
-    const work = rows.filter(r => r.ready && (desired === 'DISABLED' ? !(r.applied === 'DISABLED' && r.applied_generation === generation) : r.applied === 'DISABLED'));
-    const record = (region: string) => runtime.db.execute(sql`INSERT INTO hosted_tenant_status AS t(connection_id,region,applied,generation) VALUES(${connection},${region},${desired},${generation}::bigint)
+    const work = rows.filter(r => r.ready && (desired === 'DISABLED' ? !(r.applied === 'DISABLED' && r.applied_generation === generation) : r.applied !== null && r.applied !== 'ENABLED'));
+    const record = (region: string, applied: Applied) => runtime.db.execute(sql`INSERT INTO hosted_tenant_status AS t(connection_id,region,applied,generation) VALUES(${connection},${region},${applied},${generation}::bigint)
       ON CONFLICT(connection_id,region) DO UPDATE SET applied=excluded.applied,generation=excluded.generation,applied_at=now()`);
-    if (isSimulatedSes(runtime)) for (const row of work) await record(row.region);
+    const restore = (row: TenantRow) => row.applied === null ? runtime.db.execute(sql`DELETE FROM hosted_tenant_status WHERE connection_id=${connection} AND region=${row.region}`)
+      : runtime.db.execute(sql`UPDATE hosted_tenant_status SET applied=${row.applied},generation=${row.applied_generation}::bigint WHERE connection_id=${connection} AND region=${row.region}`);
+    if (isSimulatedSes(runtime)) for (const row of work) await record(row.region, desired);
     else if (work.length) {
       const { setTenantSendingStatus, mxResourceName } = await wrapModuleLoad(() => import('./ses-setup.js'));
       for (const row of work) {
+        if (desired === 'DISABLED') await record(row.region, 'DISABLING');
         try { await setTenantSendingStatus(runtime, row.region, row.tenant ?? (row.managed_tenant ? mxResourceName(wid) : `bane-${wid}`), row.arn, desired); }
         catch (error) {
-          if (error instanceof ApiError && error.code === 'AWS_ACCESS_DENIED') { log('error', { code: 'SES_TENANT_STATUS_DENIED', workspaceId: wid, region: row.region, status: desired }); return; }
-          throw error;
+          if (error instanceof ApiError && error.code === 'AWS_ACCESS_DENIED') {
+            if (desired === 'DISABLED') await restore(row);
+            log('error', { code: 'SES_TENANT_STATUS_DENIED', workspaceId: wid, region: row.region, status: desired }); return;
+          }
+          throw error; // Unknown outcome: the journal keeps "possibly disabled"; the job retries.
         }
-        await record(row.region);
+        await record(row.region, desired);
       }
     }
-    // A resume that waited for its tenants restarts sending once no ready tenant is still disabled, fenced on its generation.
+    // A resume that waited for its tenants restarts sending once no ready tenant may still be disabled, fenced on its generation.
     await runtime.db.execute(sql`UPDATE provider_connections pc SET paused_at=NULL,pause_reason=NULL,resume_pending_at=NULL WHERE pc.id=${connection} AND pc.resume_pending_at IS NOT NULL
       AND pc.tenant_generation=${generation}::bigint AND NOT EXISTS (SELECT FROM hosted_tenant_status t JOIN provider_connection_regions r ON r.connection_id=t.connection_id AND r.region=t.region
-        WHERE t.connection_id=pc.id AND t.applied='DISABLED' AND r.tenant_state='ready')`);
+        WHERE t.connection_id=pc.id AND t.applied<>'ENABLED' AND r.tenant_state='ready')`);
     const { rows: [now] } = await runtime.db.execute<{ generation: string }>(sql`SELECT tenant_generation::text AS generation FROM provider_connections WHERE id=${connection}`);
     if (work.length) log('info', { code: 'SES_TENANT_STATUS_SET', workspaceId: wid, status: desired, tenants: work.length, simulated: isSimulatedSes(runtime) });
     if (now?.generation === generation) return;

@@ -6,7 +6,8 @@ SET LOCAL lock_timeout='2s';
 --    resume) for 48 hours, as an absolute cap that a second resume cannot raise.
 -- 3. Bane is the source of truth for the SES tenant status: every pause and resume bumps a generation, each regional
 --    tenant records what was applied at which generation, and a resume holds sending until the tenants it disabled
---    are enabled again.
+--    are enabled again. A disable is journaled (DISABLING) before AWS is called, so an outcome lost between AWS and
+--    the database reads as "possibly disabled" and is enabled again on resume, never as "never disabled".
 -- 4. Content-screen verdicts are counted when the screen runs (dispatch), by the epoch then current.
 ALTER TABLE provider_connections
   ADD COLUMN restore_until timestamptz,

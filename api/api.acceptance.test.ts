@@ -8229,7 +8229,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { SESv2Client, GetTenantCommand, UpdateReputationEntityCustomerManagedStatusCommand } = await import('@aws-sdk/client-sesv2');
       const f = await hostedHoldFixture(runtime, db);
       const jobId = `hosted.tenantStatus:${f.wid}`, job = { id: 'job_tenant_status', workspaceId: f.wid, attempts: 1 };
-      const aws = new Map<string, string>(); let during: (() => Promise<unknown>) | null = null, denied = false, failRegion: string | null = null;
+      const aws = new Map<string, string>(); let during: (() => Promise<unknown>) | null = null, denied = false, failRegion: string | null = null, lost = false;
       t.mock.method(SESv2Client.prototype, 'send', async function (this: InstanceType<typeof SESv2Client>, cmd: any) {
         const region = await this.config.region();
         if (cmd instanceof GetTenantCommand) return { Tenant: { TenantName: cmd.input.TenantName, TenantArn: `arn:aws:ses:${region}:${f.pool}:tenant/${cmd.input.TenantName}/t-1` } };
@@ -8237,6 +8237,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (denied) throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
         if (failRegion === region) throw Object.assign(new Error('throttled'), { name: 'ThrottlingException' });
         aws.set(String(region), String(cmd.input.SendingStatus));
+        if (lost) throw Object.assign(new Error('socket hang up'), { name: 'TimeoutError' }); // AWS applied it; the response never arrived.
         const transition = during; during = null; await transition?.();
         return {};
       });
@@ -8263,11 +8264,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.match((await f.connection()).pause_reason, /resuming/);
       await tenantStatusJob(runtime, {}, job);
       assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } });
+      // Review round 2: AWS applies a disable but its response is lost. The journal says "possibly disabled" (it used to
+      // say nothing, so the resume cleared the hold and the tenant stayed disabled), so the resume waits for an enable.
+      await f.pause(); lost = true;
+      await assert.rejects(tenantStatusJob(runtime, {}, job));
+      assert.deepEqual([aws.get(REGION), (await f.applied())[0].applied], ['DISABLED', 'DISABLING']);
+      assert.deepEqual((await f.resume(100)).rows.map(r => r.pending), [true]);
+      // The enable's outcome is lost too: still possibly disabled, still held; the retry enables it and finishes the resume.
+      await assert.rejects(tenantStatusJob(runtime, {}, job));
+      assert.deepEqual([aws.get(REGION), (await settled()).paused, (await settled()).pending], ['ENABLED', true, true]);
+      lost = false; await tenantStatusJob(runtime, {}, job);
+      assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } });
       // A second region: a partial failure is retried, and a tenant that becomes ready later is covered by the reconcile.
       await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name,tenant_state) VALUES($1,'us-west-1','bane-west-fixture','ready')`, [f.wid]);
       await f.pause(); failRegion = 'us-west-1';
       await assert.rejects(tenantStatusJob(runtime, {}, job));
-      assert.deepEqual((await f.applied()).map(r => [r.region, r.applied]), [[REGION, 'DISABLED']], 'Each region records its own success.');
+      assert.deepEqual((await f.applied()).map(r => [r.region, r.applied]), [[REGION, 'DISABLED'], ['us-west-1', 'DISABLING']], 'Each region records its own outcome; an unknown one stays possibly disabled.');
       failRegion = null; await tenantStatusJob(runtime, {}, job);
       assert.deepEqual((await f.applied()).map(r => r.applied), ['DISABLED', 'DISABLED']);
       await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name,tenant_state) VALUES($1,'us-west-2','bane-west2-fixture','ready')`, [f.wid]);
