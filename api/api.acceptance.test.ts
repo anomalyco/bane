@@ -510,6 +510,18 @@ async function poll(path: string, key: string, predicate: (body: Json) => boolea
 // Each top-level scenario owns its own randomly named fixtures. Operations inside
 // a scenario are sequential; no shared ordering dependency exists between scenarios.
 describe('Public contract and authentication', () => {
+  test('Node server: a public document asked for with HEAD first still serves its whole body', async () => {
+    // The Node server compresses each public document once and reuses the result. No other scenario reads this
+    // operation page, so the HEAD below is its first request with this encoding.
+    const path = '/docs/operations/revokeAgentToken.md', headers = { 'accept-encoding': 'gzip' };
+    assert.equal((await fetch(BASE + path, { method: 'HEAD', headers })).status, 200);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await fetch(BASE + path, { headers });
+      assert.equal(reply.status, 200);
+      assert.match(await reply.text(), /revokeAgentToken/, 'A HEAD must not replace the document with its own empty body.');
+    }
+    assert.equal((await fetch(BASE + path, { method: 'HEAD', headers })).status, 200);
+  });
   test('health and OpenAPI are public, protected routes require credentials', async () => {
     const healthReply = await http('GET', '/health');
     const health = ok(healthReply);
