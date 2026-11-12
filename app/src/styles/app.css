@@ -32,8 +32,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .page-surface > .stack { gap: var(--page-gap); }
 .page-surface > .stack > .section { margin-block: 0; }
 .page-surface:focus { outline: none; }
-/* Route transitions: a new page (or a skeleton giving way to content) fades up 4px. Transform and opacity only. */
-.page-surface > :not(.page-notice) { animation: section-enter 200ms var(--ease-out-strong) both; }
+/* Route transitions: a new page (or a skeleton giving way to content) crossfades in 120 ms. Opacity only, no movement. */
+.page-surface > :not(.page-notice) { animation: section-enter 120ms ease-out both; }
 .main-navigation a { transition: color var(--motion-duration), background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .main-navigation a:active { transform: scale(.98); }
 .page-notice { flex-shrink: 0; margin-bottom: var(--page-gap); }

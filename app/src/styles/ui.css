@@ -164,9 +164,9 @@ a.ui-tab { text-decoration: none; }
 @keyframes dialog-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.97); } }
 @keyframes dialog-out { to { opacity: 0; transform: translate(-50%, -50%) scale(.98); } }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
-@keyframes row-enter { from { opacity: 0; transform: translateY(4px); } }
+@keyframes row-enter { from { opacity: 0; } }
 /* From 40%, not 0: the skeleton a page replaces never blinks to an empty frame, and the page counts as painted at once. */
-@keyframes section-enter { from { opacity: .4; transform: translateY(4px); } }
+@keyframes section-enter { from { opacity: .4; } }
 @media (max-width: 900px) {
   .data-toolbar > .cluster { flex-wrap: wrap; }
 }
