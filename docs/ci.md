@@ -71,3 +71,9 @@ Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two
 **When it fails:** the log excerpt names both statements and the rows they waited for. Find the two code paths and make them take their locks in the same order: the workspace's `ses_installation_settings` row first, then domain claims, then receipts and their windows (`lockedSettings()` in `api/src/sending.ts` is the helper). Add a test that holds the first lock and proves the second path waits for it (see `regional sender: a send waits on the settings row…`), and add the pair to the `lock order:` stress test once it is fixed.
 
 Locally: `PGPORT=<port> PG_CONTAINER=<container> RUNNER_TEMP=$(mktemp -d) bash ../.github/scripts/acceptance.sh` from `api/`, against a disposable Postgres (`docker run -d -e POSTGRES_PASSWORD=fixture-admin -p 127.0.0.1:<port>:5432 postgres:17.11-alpine`).
+
+## tear (local nightly)
+
+tear, the model checker behind `api/tear/*` (access, admission, delivery, dispatch, inbox, ses), is a private repository, so CI cannot fetch it. `api/tear/nightly.sh` runs every checker's `ci` (with a seed that rotates by date) against a disposable Postgres in Docker, on a machine that can fetch it, in about 20 minutes. Logs and a summary go to `~/.cache/bane-tear/<date>`. With `TEAR_REPORT_REPO=anomalyco/bane`, a failing night opens or comments on the `tear-nightly` issue with each failing checker's minimal witnesses.
+
+Ryan's Mac runs it nightly with cronctl (`bane-tear-nightly`, 02:30) from a detached checkout of `dev` at `~/dev/bane-tear-nightly`. A witness after an API change is often model drift: for example, the first run found `rescheduleCampaign` and `unscheduleCampaign` missing from `api/tear/src/rest.rs`. Add new routes there when you add them to the API.
