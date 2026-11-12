@@ -49,3 +49,17 @@
   .ov-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 960px) { .ov-split { grid-template-columns: minmax(0, 1fr); } }
+/* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four facts are a
+   2 × 2 grid with smaller values; the chart's legend sits under its title. Heights stay fixed, as above. */
+@media (max-width: 640px) {
+  .page-surface > .ui-page-header:has(+ .ov-split) > .cluster:last-child, .ov-controls { flex: 1 1 100%; }
+  .ov-controls .ui-tabs { flex: none; }
+  .ov-controls .ui-select-trigger { flex: 1; width: auto; min-width: 0; }
+  .ov-split { gap: var(--space-28); }
+  .ov-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-16); }
+  .ov-facts > div { height: 68px; }
+  .ov-facts__value { font-size: 20px; }
+  .ov-spark { width: 44px; height: 20px; }
+  .ov-chart__head { height: auto; flex-wrap: wrap; row-gap: var(--space-4); }
+  .ov-chart__head .chart-legend { gap: var(--space-12); }
+}
