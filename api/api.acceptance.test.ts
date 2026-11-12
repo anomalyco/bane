@@ -7411,7 +7411,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const baseline=await database(), valid=(await command()).planSha256;
   await t.test('atomic apply changes only reviewed rows; immediate guarded restore round-trips',async()=>{
     await assert.rejects(command('--apply','--expect-plan-sha256',valid),/--reason/);assert.deepEqual(await database(),baseline,'No reason, no change.');
-    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images','hosted_operator_audit']);
+    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images','hosted_operator_audit','audit_events']);
+    // hosted_operator_audit rows are mirrored into the account audit trail (migration 262), which is append-only.
     assert.deepEqual((await db.query(`SELECT workspace_id FROM hosted_operator_audit WHERE action='rehome-apply' AND details->>'reason'='Synthetic account re-home' ORDER BY workspace_id`)).rows.map(r=>r.workspace_id),[...inventory].sort(),'Every re-homed workspace is audited with the reason.');
     for(const [tab,digest] of Object.entries(baseline))if(!allowed.has(tab))assert.equal(changed[tab],digest,tab);
     assert.equal((await db.query('SELECT FROM regional_sending_connections')).rowCount,0);
