@@ -19,8 +19,10 @@ pub fn contains(set: &SequenceSet, n: u32, last: u32) -> bool {
 }
 pub fn matches(k: &K<'_>, e: &Entry, seq: u32, last: u32, uidmax: u32) -> bool {
     let has = |s: &str| e.flags.iter().any(|f| f.eq_ignore_ascii_case(s));
-    let sub =
-        |h: &[u8], n: &[u8]| n.is_empty() || h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
+    let sub = |h: &[u8], n: &[u8]| {
+        n.is_empty()
+            || memchr::memmem::find(&h.to_ascii_lowercase(), &n.to_ascii_lowercase()).is_some()
+    };
     let hdr = |name: &[u8], n: &[u8]| {
         MessageParser::default()
             .parse_headers(&*e.raw)
@@ -65,8 +67,8 @@ pub fn matches(k: &K<'_>, e: &Entry, seq: u32, last: u32, uidmax: u32) -> bool {
         K::SentBefore(d) => sent().is_some_and(|s| s < *d.as_ref()),
         K::SentOn(d) => sent() == Some(*d.as_ref()),
         K::SentSince(d) => sent().is_some_and(|s| s >= *d.as_ref()),
-        K::Larger(s) => e.raw.len() > *s as usize,
-        K::Smaller(s) => e.raw.len() < *s as usize,
+        K::Larger(s) => e.size > *s as usize,
+        K::Smaller(s) => e.size < *s as usize,
         K::Body(n) => sub(&e.raw[header_end(&e.raw)..], n.as_ref()),
         K::Text(n) => sub(&e.raw, n.as_ref()),
         K::Header(k, n) => hdr(k.as_ref(), n.as_ref()),
@@ -88,5 +90,44 @@ pub fn matches(k: &K<'_>, e: &Entry, seq: u32, last: u32, uidmax: u32) -> bool {
                 })
         }
         K::Subject(n) => hdr(b"Subject", n.as_ref()),
+    }
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Default)]
+pub enum Need {
+    #[default]
+    Meta,
+    Header,
+    Body,
+}
+pub fn need(k: &K<'_>) -> Need {
+    match k {
+        K::Body(_) | K::Text(_) => Need::Body,
+        K::From(_)
+        | K::To(_)
+        | K::Cc(_)
+        | K::Bcc(_)
+        | K::Header(..)
+        | K::Subject(_)
+        | K::SentBefore(_)
+        | K::SentOn(_)
+        | K::SentSince(_) => Need::Header,
+        K::Or(a, b) => need(a).max(need(b)),
+        K::Not(k) => need(k),
+        K::And(v) => v.as_ref().iter().map(need).max().unwrap_or_default(),
+        _ => Need::Meta,
+    }
+}
+
+pub fn bounded(k: &K<'_>) -> bool {
+    match k {
+        K::Body(q) | K::Text(q) | K::From(q) | K::To(q) | K::Cc(q) | K::Bcc(q) | K::Subject(q) => {
+            q.as_ref().len() <= 1024
+        }
+        K::Header(key, q) => key.as_ref().len() <= 256 && q.as_ref().len() <= 1024,
+        K::Not(q) => bounded(q),
+        K::Or(a, b) => bounded(a) && bounded(b),
+        K::And(v) => v.as_ref().iter().all(bounded),
+        _ => true,
     }
 }

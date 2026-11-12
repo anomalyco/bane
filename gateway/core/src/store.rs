@@ -74,10 +74,19 @@ pub struct Applied {
 }
 
 pub trait MailStore {
+    fn subject(&self, _path: &str, _term: &str) -> Result<Option<Vec<u32>>, Error> {
+        Ok(None)
+    }
     fn list_fresh(&mut self) -> Result<(), Error> {
         Ok(())
     }
     fn select(&mut self, _path: &str) -> Result<(), Error> {
+        Ok(())
+    }
+    fn header(&self, path: &str, e: &Entry) -> Result<Entry, Error> {
+        self.materialize(path, e)
+    }
+    fn budget(&self) -> Result<(), Error> {
         Ok(())
     }
     fn materialize(&self, _path: &str, entry: &Entry) -> Result<Entry, Error> {

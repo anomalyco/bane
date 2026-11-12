@@ -29,9 +29,15 @@ struct Selected {
     ro: bool,
     view: Vec<(u32, u64)>,
     keywords: Flags,
+    announced: u64,
+    synced: u64,
 }
 impl Selected {
     fn announce_flags(&mut self, f: &Folder, r: &mut Reply, force: bool) {
+        if !force && self.announced == f.highest {
+            return;
+        }
+        self.announced = f.highest;
         let before = self.keywords.len();
         for e in &f.entries {
             self.keywords
@@ -54,12 +60,42 @@ impl Selected {
         } else {
             self.view.len() as u32
         };
-        self.view
+        use imap_codec::imap_types::sequence::{SeqOrUid, Sequence};
+        let v = |x: SeqOrUid| match x {
+            SeqOrUid::Asterisk => last,
+            SeqOrUid::Value(n) => n.get(),
+        };
+        let mut ranges = set
+            .0
+            .as_ref()
             .iter()
-            .enumerate()
-            .filter(|(i, (u, _))| search::contains(set, if uid { *u } else { *i as u32 + 1 }, last))
-            .map(|(_, v)| v.0)
-            .collect()
+            .map(|s| match *s {
+                Sequence::Single(a) => (v(a), v(a)),
+                Sequence::Range(a, b) => (v(a).min(v(b)), v(a).max(v(b))),
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_unstable();
+        let mut result = Vec::new();
+        let mut prior = 0usize;
+        for (a, b) in ranges {
+            let (lo, hi) = if uid {
+                (
+                    self.view.partition_point(|x| x.0 < a),
+                    self.view.partition_point(|x| x.0 <= b),
+                )
+            } else {
+                (
+                    a.saturating_sub(1) as usize,
+                    (b as usize).min(self.view.len()),
+                )
+            };
+            let start = lo.max(prior);
+            if start < hi {
+                result.extend(self.view[start..hi].iter().map(|x| x.0));
+                prior = hi;
+            }
+        }
+        result
     }
 }
 pub struct Imap {
@@ -84,7 +120,7 @@ impl Imap {
     }
     pub fn capabilities(&self) -> String {
         format!(
-            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID APPENDLIMIT=41943040{}",
+            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID APPENDLIMIT=8388608{}",
             if !self.tls {
                 " STARTTLS LOGINDISABLED"
             } else if !self.authenticated {
@@ -120,6 +156,10 @@ impl Imap {
             r.action = Action::Close;
             return r;
         };
+        if s.synced == f.highest {
+            return r;
+        }
+        s.synced = f.highest;
         s.announce_flags(f, &mut r, false);
         let entries: BTreeMap<_, _> = f.entries.iter().map(|e| (e.uid, e)).collect();
         let mut i = 0;
@@ -370,6 +410,8 @@ impl Imap {
                     ro,
                     view: f.entries.iter().map(|e| (e.uid, e.modseq)).collect(),
                     keywords: Flags::new(),
+                    announced: 0,
+                    synced: f.highest,
                 };
                 selected.announce_flags(f, r, true);
                 self.selected = Some(selected);
@@ -456,7 +498,10 @@ impl Imap {
                                 .folder(&p)?
                                 .entries
                                 .iter()
-                                .filter(|e| uids.contains(&e.uid) && !e.flags.contains("\\Seen"))
+                                .filter(|e| {
+                                    uids.binary_search(&e.uid).is_ok()
+                                        && !e.flags.contains("\\Seen")
+                                })
                                 .map(|e| e.uid)
                                 .collect();
                             if !unseen.is_empty() {
@@ -474,14 +519,15 @@ impl Imap {
                             }
                         }
                         let f = s.folder(&p)?;
-                        for (i, (u, ms)) in sel.view.iter_mut().enumerate() {
-                            if uids.binary_search(u).is_ok()
+                        for u in &uids {
+                            if let Ok(i) = sel.view.binary_search_by_key(u, |v| v.0)
                                 && let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
                             {
                                 let e = &f.entries[j];
+                                s.budget()?;
                                 let loaded;
-                                let e = if items.iter().any(|x| {
-                                    !matches!(
+                                let e = if items.iter().all(|x| {
+                                    matches!(
                                         x,
                                         Item::Flags
                                             | Item::Uid
@@ -489,10 +535,15 @@ impl Imap {
                                             | Item::Rfc822Size
                                     )
                                 }) {
-                                    loaded = s.materialize(&p, e)?;
-                                    &loaded
-                                } else {
                                     e
+                                } else {
+                                    let header_only=items.iter().all(|x|matches!(x,Item::Flags|Item::Uid|Item::InternalDate|Item::Rfc822Size|Item::Envelope|Item::Rfc822Header|Item::BodyExt{section:Some(imap_codec::imap_types::fetch::Section::Header(None)|imap_codec::imap_types::fetch::Section::HeaderFields(None,_)|imap_codec::imap_types::fetch::Section::HeaderFieldsNot(None,_)),..}));
+                                    loaded = if header_only {
+                                        s.header(&p, e)?
+                                    } else {
+                                        s.materialize(&p, e)?
+                                    };
+                                    &loaded
                                 };
                                 if let Err(err) = fetch::render(&mut r.bytes, i + 1, e, &items) {
                                     r.bytes.clear();
@@ -500,7 +551,7 @@ impl Imap {
                                     return Ok(None);
                                 }
                                 if items.contains(&Item::Flags) {
-                                    *ms = e.modseq
+                                    sel.view[i].1 = e.modseq
                                 }
                             }
                         }
@@ -555,6 +606,9 @@ impl Imap {
                         charset,
                         uid,
                     } => {
+                        if !criteria.as_ref().iter().all(search::bounded) {
+                            return Err(Error::Limit);
+                        }
                         if charset.as_ref().is_some_and(|c| {
                             !["utf-8", "us-ascii"]
                                 .iter()
@@ -564,14 +618,51 @@ impl Imap {
                             return Ok(None);
                         }
                         let f = s.folder(&p)?;
+                        if let [imap_codec::imap_types::search::SearchKey::Subject(q)] =
+                            criteria.as_ref()
+                            && let Ok(term) = str::from_utf8(q.as_ref())
+                            && !term.is_empty()
+                            && let Some(hits) = s.subject(&p, term)?
+                        {
+                            let mut line = String::from("* SEARCH");
+                            for u in hits {
+                                if let Ok(i) = sel.view.binary_search_by_key(&u, |x| x.0) {
+                                    line.push_str(&format!(
+                                        " {}",
+                                        if *uid { u } else { i as u32 + 1 }
+                                    ));
+                                }
+                            }
+                            r.line(line);
+                            return Ok(Some(String::new()));
+                        }
+                        let need = criteria
+                            .as_ref()
+                            .iter()
+                            .map(search::need)
+                            .max()
+                            .unwrap_or_default();
                         let mut text = String::from("* SEARCH");
                         for (i, (u, _)) in sel.view.iter().enumerate() {
                             if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid) {
-                                let loaded = s.materialize(&p, &f.entries[j])?;
+                                s.budget()?;
+                                let mem;
+                                let entry = &f.entries[j];
+                                let loaded = match need {
+                                    search::Need::Meta => entry,
+                                    search::Need::Header => {
+                                        mem = s.header(&p, entry)?;
+                                        &mem
+                                    }
+                                    search::Need::Body => {
+                                        mem = s.materialize(&p, entry)?;
+                                        &mem
+                                    }
+                                };
                                 if criteria.as_ref().iter().all(|k| {
                                     search::matches(
                                         k,
-                                        &loaded,
+                                        loaded,
                                         i as u32 + 1,
                                         sel.view.len() as u32,
                                         sel.view.last().map_or(0, |v| v.0),
