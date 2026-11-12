@@ -43,7 +43,7 @@ export interface Config {
   mailGatewayToken?:string;
   previousAuthSecret?: string;
   accountIssuer?: string;
-  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
+  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
   allowedEmails: string[];
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;

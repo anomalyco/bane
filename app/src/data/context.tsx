@@ -197,6 +197,9 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your OIDC address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This OIDC account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
+    : authResult === 'google_required' ? <Alert tone="danger">Bane requires Google sign-in. Try again and choose Google at Anomaly account.</Alert>
+    : authResult === 'method_required' ? <Alert tone="danger">Sign in again using the authentication method required by this installation.</Alert>
+    : authResult === 'interaction_required' ? <Alert tone="info">Your identity provider needs you to complete sign-in. Try again and follow its prompts.</Alert>
     : authResult === 'error' ? <Alert tone="danger">Sign-in didn’t finish. Check that you used your invited or approved account.</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>

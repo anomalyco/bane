@@ -7,6 +7,16 @@ import { onboardNewUser, pendingInvitation } from './workspaces.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
+class AuthenticationMethodRequired extends Error {}
+
+function loginIssue(error: unknown, requiredAcr?: string) {
+  const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
+  if (error instanceof AuthenticationMethodRequired || issuerError === 'unmet_authentication_requirements') {
+    if (requiredAcr === 'urn:anomaly:acr:google') return {reason:'google_required', message:'Bane requires Google sign-in. Try again and choose Google at Anomaly account.'};
+    return {reason:'method_required', message:'Sign in again using the authentication method required by this installation.'};
+  }
+  if (issuerError === 'interaction_required') return {reason:'interaction_required', message:'Your identity provider needs you to complete sign-in. Try again and follow its prompts.'};
+}
 
 async function provider(runtime: Runtime) {
   const { accountIssuer, accountClient, publicUrl } = runtime.config;
@@ -32,6 +42,8 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   const verifier = oidc.generateRandomCodeVerifier(), nonce = oidc.generateRandomNonce();
   let params = new URLSearchParams({ client_id:client.client_id, response_type:'code', scope:'openid profile email', redirect_uri:callback,
     state, nonce, code_challenge_method:'S256', code_challenge:await oidc.calculatePKCECodeChallenge(verifier) });
+  const requiredAcr = runtime.config.accountClient?.requiredAcr;
+  if (requiredAcr) params.set('claims', JSON.stringify({id_token:{acr:{essential:true, values:[requiredAcr]}}}));
   if (metadata.pushed_authorization_request_endpoint) {
     const response = await oidc.pushedAuthorizationRequest(metadata, client, authentication, params, options);
     const pushed = await oidc.processPushedAuthorizationResponse(metadata, client, response);
@@ -58,6 +70,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   const tokens = await oidc.processAuthorizationCodeResponse(metadata, client, response, {requireIdToken:true,expectedNonce:flow.nonce});
   await oidc.validateApplicationLevelSignature(metadata, response, options);
   const claims = oidc.getValidatedIdTokenClaims(tokens)!;
+  const requiredAcr = runtime.config.accountClient?.requiredAcr;
+  if (requiredAcr && claims.acr !== requiredAcr) throw new AuthenticationMethodRequired();
   const profile = (claims.email === undefined || claims.email_verified === undefined) && metadata.userinfo_endpoint
     ? await oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, options))
     : claims;
@@ -156,7 +170,11 @@ export async function accountBrowserRoute(c: Ctx) {
   if (path === '/api/auth/sign-in/account' && c.req.method === 'POST') {
     const input = z.object({ callbackURL:z.url().max(2048) }).strict().safeParse(await c.req.json().catch(()=>null));
     if (!input.success) throw new ApiError(422,'AUTH_INPUT_INVALID','Supply the dashboard return URL.');
-    const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header('x-bane-client-ip') ?? 'unknown');
+    const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header('x-bane-client-ip') ?? 'unknown').catch(error=>{
+      const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
+      if (issue) throw new ApiError(403,'SIGN_IN_DENIED',issue.message);
+      throw error;
+    });
     setCookie(c,cookieName(runtime,'login'),start.binding,cookieOptions(runtime,600));
     return c.json({url:start.url});
   }
@@ -167,7 +185,10 @@ export async function accountBrowserRoute(c: Ctx) {
       const { session,returnUrl } = await finishAccountLogin(runtime,new URL(c.req.url),binding);
       setCookie(c,cookieName(runtime,'session_token'),session,cookieOptions(runtime,604800));
       return c.redirect(returnUrl,303);
-    } catch { return c.redirect(`${origin}/?auth=error`,303); }
+    } catch (error) {
+      const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
+      return c.redirect(`${origin}/?auth=${issue?.reason ?? 'error'}`,303);
+    }
   }
   if (path === '/api/auth/sign-out' && c.req.method === 'POST') {
     const hash = await currentSession(runtime,c.req.raw.headers);

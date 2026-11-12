@@ -406,27 +406,42 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', AUTH_ALLOWED_EMAILS:approved}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
   let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false;
+  const googleAcr = 'urn:anomaly:acr:google';
+  let tokenAcr: string | undefined, peer = 0, pushed: URLSearchParams | undefined;
   t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
     assert.equal(new URL(url).origin,issuer);
     switch(new URL(url).pathname) {
-      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo'});
-      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified});
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined});
+      case '/par': {
+        pushed = new URLSearchParams(String(init?.body));
+        assert.equal(pushed.get('client_id'),'dashboard');
+        assert.ok(pushed.get('client_assertion'));
+        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{acr:{essential:true,values:[googleAcr]}}});
+        assert.equal(pushed.get('scope'),'openid profile email');
+        assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
+        return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
+      }
+      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr});
       case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
       case '/token': {
         const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
-        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,...(useUserInfo?{}:{email,email_verified:verified})}]
+        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified})}]
           .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
         return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
       default: throw Error('unexpected issuer endpoint');
     }
   });
-  const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);
-  async function login() {
+  const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
+  async function login(authorizationError?:string) {
+    peer++; pushed=undefined;
     const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
-    assert.equal(start.status,200); const params=new URL((await start.json() as {url:string}).url).searchParams;
+    assert.equal(start.status,200); const front=new URL((await start.json() as {url:string}).url).searchParams;
+    if (runtime.config.accountClient?.requiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
+    else assert.equal(front.has('claims'),false);
+    const params = pushed ?? front;
     nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
-    const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state:params.get('state')!,iss:issuer});
+    const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({...(authorizationError?{error:authorizationError}:{code:'fixture'}),state:params.get('state')!,iss:issuer});
     assert.equal((await request(path,'GET')).headers.get('location'),origin+'/?auth=error');
     const result=await request(path,'GET',cookie);
     assert.equal((await request(path,'GET',cookie)).headers.get('location'),origin+'/?auth=error');
@@ -447,6 +462,21 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   email=`changed-${approved}`;useUserInfo=true;
   const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
   assert.equal((await request('/v1/me','GET',session)).status,401);
+  runtime.config.accountClient!.requiredAcr=googleAcr;
+  const sessionCount = async () => (await db.query('SELECT count(*) FROM bane_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
+  const before = await sessionCount();
+  for (const wrong of [undefined,'urn:anomaly:acr:passkey']) {
+    tokenAcr=wrong;
+    const refused=await login();
+    assert.equal(refused.headers.get('location'),origin+'/?auth=google_required');
+    assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
+  }
+  assert.equal((await login('unmet_authentication_requirements')).headers.get('location'),origin+'/?auth=google_required');
+  assert.equal((await login('interaction_required')).headers.get('location'),origin+'/?auth=interaction_required');
+  assert.equal(await sessionCount(),before);
+  tokenAcr=googleAcr;
+  const accepted=await login();assert.equal(accepted.headers.get('location'),origin+'/');
+  assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
   assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
   verified=false;await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
