@@ -423,7 +423,7 @@ impl Fake {
                 return err(403, "PROTOCOL_DENIED");
             }
             return ok(
-                json!({"kid": c.kid, "inbox": INBOX_ID, "workspace": "ws_tear", "addresses": ADDRESSES, "folders": self.meta()}),
+                json!({"kid": c.kid, "inbox": INBOX_ID, "workspace": "ws_tear", "account": "sponsor_tear", "addresses": ADDRESSES, "folders": self.meta()}),
             );
         }
         let kid = p["kid"].as_str().unwrap_or_default().to_owned();

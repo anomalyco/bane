@@ -167,6 +167,14 @@ def real_services():
             INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES('default','{addr}','{bid}','primary');
             INSERT INTO inbox_state(inbox_id,workspace_id) VALUES('{bid}','default');
             INSERT INTO inbox_app_passwords VALUES('app_load{i}','{bid}','fixture','{hashed}',ARRAY['imap']);UPDATE inbox_state SET protocol_passwords=1 WHERE inbox_id='{bid}';""")
+        for i,sponsor in enumerate(['a','a','b']):
+            wid=f'fair{i}';addr=f'{wid}@example.invalid';hashed=hmac.new(pepper,(PASS+wid).encode(),'sha256').hexdigest()
+            sql(f"""INSERT INTO workspaces(id,name,slug,quota_sponsor) VALUES('{wid}','{wid}','{wid}','{sponsor}');
+            INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES('{wid}','{wid}','{wid}','{wid}.invalid','us-east-1','active');
+            INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES('{wid}','{wid}','{wid}','{addr}','inbox','forever');
+            INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES('{wid}','{addr}','{wid}','primary');
+            INSERT INTO inbox_state(inbox_id,workspace_id) VALUES('{wid}','{wid}');
+            INSERT INTO inbox_app_passwords VALUES('app_{wid}','{wid}','fixture','{hashed}',ARRAY['smtp']);""")
         proc = sp.Popen(
             ["node", "--import", "tsx", "src/server.ts"],
             cwd=api,
@@ -757,6 +765,19 @@ def long_headers(tmp):
         big=padded*100+RAW;ok(c.append('Headers',None,None,big));assert ok(c.select('Headers'))==[b'1001'];assert ok(c.uid('FETCH','1001','BODY.PEEK[HEADER]'))[0][1]==big[:big.index(b'\r\n\r\n')+4]
 
 
+def account_fairness(tmp):
+    # Two workspaces share a sponsor. A different sponsor can start DATA while
+    # the first uses its two reserved slots. No mail leaves the local fixture.
+    with gateway(tmp) as (ports,_),contextlib.ExitStack() as stack:
+        def begin(i):
+            wid=f'fair{i}';addr=f'{wid}@example.invalid'
+            c=smtplib.SMTP_SSL('localhost',ports['SMTPS'],context=CTX,timeout=5)
+            stack.callback(c.close);c.login(addr,PASS+wid)
+            assert c.mail(addr)[0]==250 and c.rcpt('recipient@example.invalid')[0]==250
+            return c.docmd('DATA')[0]
+        assert [begin(i) for i in [0,1,1,2]]==[354,354,452,354]
+
+
 def large_folder(tmp):
     # Ordinary indexed mailbox workload in the disposable database only. Distinct
     # memberships and raw keys; no saved PoC traffic or external addresses.
@@ -1003,7 +1024,7 @@ def main():
                 ("imaptest scripts", lambda: imaptest(tmp, p)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
-                *([('quotas',lambda:quotas(tmp)),('long headers',lambda:long_headers(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
+                *([('account shares',lambda:account_fairness(tmp)),('quotas',lambda:quotas(tmp)),('long headers',lambda:long_headers(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
             ]:
                 if len(sys.argv) > 1 and name not in sys.argv[1:]:
                     continue

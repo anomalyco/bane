@@ -115,7 +115,7 @@ export function registerMailGateway(app: App) {
     if (p.op === 'login') {
       const auth = principal(runtime, p.protocol, sql`p.hash=${passwordDigest(runtime.config.authSecret, p.password)}`);
       const { rows } = await runtime.db.execute(
-        sql`WITH a AS (${auth}) SELECT a.k AS kid,a.b AS inbox,a.w AS workspace,ARRAY(SELECT address FROM mailbox_addresses WHERE mailbox_id=a.b AND workspace_id=a.w) AS addresses,${folders} AS folders FROM a WHERE a.b=${p.user} OR EXISTS(SELECT FROM mailbox_addresses WHERE mailbox_id=a.b AND workspace_id=a.w AND address=lower(${p.user}))`,
+        sql`WITH a AS (${auth}) SELECT a.k AS kid,a.b AS inbox,a.w AS workspace,coalesce('sponsor:'||w.quota_sponsor,'unsponsored') AS account,ARRAY(SELECT address FROM mailbox_addresses WHERE mailbox_id=a.b AND workspace_id=a.w) AS addresses,${folders} AS folders FROM a JOIN workspaces w ON w.id=a.w WHERE a.b=${p.user} OR EXISTS(SELECT FROM mailbox_addresses WHERE mailbox_id=a.b AND workspace_id=a.w AND address=lower(${p.user}))`,
       );
       if (!rows[0]) throw bad();
       return c.json(rows[0]);

@@ -40,6 +40,7 @@ pub struct Principal {
     pub kid: String,
     pub inbox: String,
     workspace: String,
+    account: String,
     addresses: Vec<String>,
     folders: Vec<FolderMeta>,
 }
@@ -67,6 +68,7 @@ struct Gate {
     calls: crate::admission::Bucket,
     inbox: String,
     workspace: String,
+    account: String,
     last: Instant,
 }
 #[derive(Default)]
@@ -402,6 +404,11 @@ impl Store {
                 gates.len() < 8192 || gates.contains_key(&p.kid),
                 "credential admission full"
             );
+            let account_share = gates
+                .values()
+                .find(|g| g.account == p.account)
+                .map(|g| g.lanes.0[3].clone())
+                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(4, 2, 4, 144)));
             let workspace_share = gates
                 .values()
                 .find(|g| g.workspace == p.workspace)
@@ -417,9 +424,11 @@ impl Store {
                     Arc::new(crate::admission::Shares::new(3, 2, 3, 128)),
                     inbox_share,
                     workspace_share,
+                    account_share,
                 ]),
                 inbox: p.inbox.clone(),
                 workspace: p.workspace.clone(),
+                account: p.account.clone(),
                 last: Instant::now(),
                 bytes: Arc::new(Mutex::new(crate::admission::Bucket::new(
                     tokio::time::Instant::now(),
@@ -1122,15 +1131,16 @@ pub async fn listen(
 mod auth_tests {
     use super::*;
     #[tokio::test]
-    async fn workspace_capacity_is_shared_across_inboxes_and_waiters_are_fifo() {
+    async fn account_and_workspace_capacity_is_shared_and_waiters_are_fifo() {
         use crate::admission::{Reservation, Shares};
         use futures_util::FutureExt;
         let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
-        let store = |kid: &str, w: &str| {
+        let store = |kid: &str, w: &str, account: &str| {
             Store::new(
                 api.clone(),
                 Principal {
                     workspace: w.into(),
+                    account: account.into(),
                     inbox: kid.into(),
                     kid: kid.into(),
                     addresses: vec![],
@@ -1141,10 +1151,11 @@ mod auth_tests {
             )
             .unwrap()
         };
-        let a = store("a", "w");
-        let b = store("b", "w");
-        let c = store("c", "other");
-        let sibling = store("a", "w");
+        let a = store("a", "w", "owner");
+        let b = store("b", "w", "owner");
+        let c = store("c", "other", "other_owner");
+        let second_workspace = store("d", "w2", "owner");
+        let sibling = store("a", "w", "owner");
         let responses = Arc::new(tokio::sync::Semaphore::new(6));
         let mut concurrent = vec![];
         for session in [&a, &sibling, &a] {
@@ -1169,27 +1180,29 @@ mod auth_tests {
             (|s| &s.reads, 4),
         ] {
             let lanes = a.lanes.pools(resource);
-            let share = lanes[2].available_permits();
-            assert!(share < global);
-            let held = lanes[2]
-                .clone()
-                .acquire_many_owned(share as u32)
-                .await
-                .unwrap();
-            let pool = Arc::new(tokio::sync::Semaphore::new(global - share));
-            let take =
-                |s: &Store| Reservation::take(pool.clone(), Some(s.lanes.pools(resource)), 1);
-            let mut first = Box::pin(take(&b));
-            let mut second = Box::pin(take(&a));
-            assert!(first.as_mut().now_or_never().is_none());
-            assert!(second.as_mut().now_or_never().is_none());
-            assert!(take(&c).await.is_some());
-            let mut held = held;
-            drop(held.split(1));
-            let head = first.await.unwrap();
-            assert!(second.as_mut().now_or_never().is_none());
-            drop(head);
-            assert!(second.await.is_some());
+            for (level, waiting_store) in [(2, &b), (3, &second_workspace)] {
+                let share = lanes[level].available_permits();
+                assert!(share < global);
+                let held = lanes[level]
+                    .clone()
+                    .acquire_many_owned(share as u32)
+                    .await
+                    .unwrap();
+                let pool = Arc::new(tokio::sync::Semaphore::new(global - share));
+                let take =
+                    |s: &Store| Reservation::take(pool.clone(), Some(s.lanes.pools(resource)), 1);
+                let mut first = Box::pin(take(waiting_store));
+                let mut second = Box::pin(take(&a));
+                assert!(first.as_mut().now_or_never().is_none());
+                assert!(second.as_mut().now_or_never().is_none());
+                assert!(take(&c).await.is_some());
+                let mut held = held;
+                drop(held.split(1));
+                let head = first.await.unwrap();
+                assert!(second.as_mut().now_or_never().is_none());
+                drop(head);
+                assert!(second.await.is_some());
+            }
         }
     }
     #[test]
@@ -1232,7 +1245,7 @@ mod tests {
             // The login's folder list predates Archive; snapshots list it.
             Some("login") => (
                 200,
-                json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","addresses":[],
+                json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","account":"owner_test","addresses":[],
                        "folders":[meta(2, 2)[0].clone()]})
                 .to_string(),
             ),
@@ -1313,7 +1326,7 @@ mod tests {
         }
     }
     fn principal() -> Principal {
-        serde_json::from_value(json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","addresses":["x@example.invalid"],
+        serde_json::from_value(json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","account":"owner_test","addresses":["x@example.invalid"],
             "folders":[{"key":"inbox","path":"INBOX","validity":1,"next":2,"highest":2,"subscribed":true,"total":1,"unseen":1},
                        {"key":"archive","path":"Archive","validity":4,"next":1,"highest":1,"subscribed":true,"total":0,"unseen":0}]}))
         .unwrap()

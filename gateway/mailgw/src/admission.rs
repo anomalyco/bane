@@ -27,9 +27,9 @@ impl Shares {
 }
 pub struct Reservation(Vec<OwnedSemaphorePermit>);
 #[derive(Clone)]
-pub struct Lanes(pub [Arc<Shares>; 3]); // credential, inbox, workspace
+pub struct Lanes(pub [Arc<Shares>; 4]); // credential, inbox, workspace, account
 impl Lanes {
-    pub fn pools(&self, f: fn(&Shares) -> &Arc<Semaphore>) -> [Arc<Semaphore>; 3] {
+    pub fn pools(&self, f: fn(&Shares) -> &Arc<Semaphore>) -> [Arc<Semaphore>; 4] {
         self.0.each_ref().map(|s| f(s).clone())
     }
 }
@@ -37,11 +37,11 @@ impl Reservation {
     /// FIFO within each share; a busy credential waits without holding an inbox or global permit.
     pub async fn take(
         global: Arc<Semaphore>,
-        shares: Option<[Arc<Semaphore>; 3]>,
+        shares: Option<[Arc<Semaphore>; 4]>,
         n: u32,
     ) -> Option<Self> {
         tokio::time::timeout(Duration::from_secs(2), async move {
-            let mut permits = Vec::with_capacity(4);
+            let mut permits = Vec::with_capacity(5);
             if let Some(lanes) = shares {
                 for pool in lanes {
                     permits.push(pool.acquire_many_owned(n).await.ok()?);
@@ -287,9 +287,15 @@ mod tests {
         let inbox = Arc::new(Semaphore::new(1));
         let one = Arc::new(Semaphore::new(1));
         let workspace = Arc::new(Semaphore::new(1));
+        let account = Arc::new(Semaphore::new(1));
         let held = Reservation::take(
             global.clone(),
-            Some([one.clone(), inbox.clone(), workspace.clone()]),
+            Some([
+                one.clone(),
+                inbox.clone(),
+                workspace.clone(),
+                account.clone(),
+            ]),
             1,
         )
         .await
@@ -297,7 +303,7 @@ mod tests {
         let sibling = Arc::new(Semaphore::new(1));
         let mut waiting = Box::pin(Reservation::take(
             global.clone(),
-            Some([sibling, inbox, workspace]),
+            Some([sibling, inbox, workspace, account]),
             1,
         ));
         assert!(waiting.as_mut().now_or_never().is_none());
