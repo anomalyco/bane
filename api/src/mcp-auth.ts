@@ -475,7 +475,7 @@ export function registerMcpAuth(app: App): void {
     return c.json({ id: connectionId, revoked: true as const }, 200);
   });
   for (const path of ['/jwks', '/oauth2/authorize', ...machineEndpoints, ...sessionReads, ...sessionWrites]) {
-    app.on(['GET', 'POST', 'OPTIONS'], `/api/auth${path}`, c => protocolRequest(c.env, c.req.raw));
+    app.on(['GET', 'POST', 'OPTIONS'], `/api/auth${path}`, c => c.env.config.accountIssuer ? c.notFound() : protocolRequest(c.env, c.req.raw));
   }
   for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/api/auth']) {
     app.on(['GET', 'HEAD', 'OPTIONS'], path, async c => {
@@ -492,6 +492,6 @@ export function registerMcpAuth(app: App): void {
       }
     });
   }
-  app.on(['GET', 'POST'], '/mcp/login', c => consentPage(c.env, c.req.raw));
-  app.on(['GET', 'POST'], '/mcp/consent', c => consentPage(c.env, c.req.raw));
+  app.on(['GET', 'POST'], '/mcp/login', c => c.env.config.accountIssuer ? c.notFound() : consentPage(c.env, c.req.raw));
+  app.on(['GET', 'POST'], '/mcp/consent', c => c.env.config.accountIssuer ? c.notFound() : consentPage(c.env, c.req.raw));
 }

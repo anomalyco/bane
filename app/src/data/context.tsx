@@ -108,7 +108,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
         result = await request<Identity>('/v1/me', {signal})
       }
       selectWorkspace(result.multiTenant ? result.workspaceId : null)
-      console.info('[Bane timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
+      console.info('[Bane timing] Dashboard session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
       return result
     },
   })
@@ -213,7 +213,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
       </> : <>
         <h2>Couldn’t check your session</h2>
-        <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
+        <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
       </>}
       <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
     </div></main>}
