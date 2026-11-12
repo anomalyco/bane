@@ -847,9 +847,6 @@ impl MailStore for Store {
         let mut arg = json!({"op":"mutate","kid":self.principal.kid,"folder":folder,"flags":[],"mode":"add","to":null,"uids":null});
         match c {
             Change::Flags(uids, mode, flags) => {
-                if uids.len() > 1000 {
-                    return Err(store::Error::Limit);
-                }
                 arg["action"] = json!("flags");
                 arg["flags"] = json!(flags);
                 arg["uids"] = json!(uids);
@@ -861,12 +858,21 @@ impl MailStore for Store {
             }
             Change::Expunge(uids) => {
                 arg["action"] = json!("expunge");
-                arg["uids"] = json!(uids)
+                // A plain EXPUNGE (or CLOSE) names every UID this snapshot holds; the API
+                // keeps only the \Deleted ones. Batches then bound each statement, where a
+                // NULL list would expunge a whole folder in one.
+                arg["uids"] = match uids {
+                    Some(u) => json!(u),
+                    None => json!(
+                        self.folder(p)?
+                            .entries
+                            .iter()
+                            .map(|e| e.uid)
+                            .collect::<Vec<_>>()
+                    ),
+                }
             }
             Change::Transfer(uids, to, moving) => {
-                if !moving && uids.len() > 1000 {
-                    return Err(store::Error::Limit);
-                }
                 arg["action"] = json!(if moving { "move" } else { "copy" });
                 arg["uids"] = json!(uids);
                 arg["to"] = json!(self.keys.get(to).ok_or(store::Error::Missing)?);
@@ -969,12 +975,33 @@ impl MailStore for Store {
             if all.is_empty() {
                 out.validity = self.folder(p)?.validity;
             }
-            for batch in all.chunks(1000) {
-                self.budget()?;
+            // Large sets go in batches of BATCH UIDs inside this one command: each batch is
+            // one atomic API call with its own statement, its own 5 s budget and its own COPY
+            // replay ticket (derived from the command's, so a retry replays the batches that
+            // committed). Other connections get a turn between batches.
+            let ticket = arg.get("ticket").cloned();
+            for (i, batch) in all.chunks(BATCH).enumerate() {
+                if i > 0 {
+                    std::thread::yield_now();
+                }
+                self.deadline = Instant::now() + Duration::from_secs(5);
                 arg["uids"] = Value::Array(batch.to_vec());
-                let a: AppliedWire = self.api.json(arg.clone())?;
-                out.validity = a.validity;
-                out.pairs.extend(a.pairs)
+                if let Some(t) = &ticket {
+                    arg["ticket"] = batch_ticket(t, i);
+                }
+                match self.api.json::<AppliedWire>(arg.clone()) {
+                    Ok(a) => {
+                        out.validity = a.validity;
+                        out.pairs.extend(a.pairs)
+                    }
+                    // Nothing committed yet (that we know of): the plain error.
+                    Err(e) if i == 0 => return Err(e),
+                    // Earlier batches committed: show them, then fail the rest.
+                    Err(_) => {
+                        self.settle();
+                        return Err(store::Error::Partial);
+                    }
+                }
             }
         } else {
             let a: AppliedWire = self.api.json(arg)?;
@@ -987,6 +1014,15 @@ impl MailStore for Store {
         }
         Ok(out)
     }
+}
+/// UIDs per internal mutation call (the API's per-statement bound for COPY receipts too).
+const BATCH: usize = 1000;
+/// The replay ticket of batch `i`: the command's issue time and a nonce derived from the
+/// command's nonce, so each batch has its own receipt and a retry finds the same ones.
+fn batch_ticket(t: &Value, i: usize) -> Value {
+    let nonce = t["nonce"].as_str().unwrap_or_default();
+    let derived = Sha256::digest(format!("{nonce}:{i}").as_bytes());
+    json!({"nonce": hex::encode(&derived[..16]), "issued": t["issued"]})
 }
 impl Submitter for Store {
     fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
@@ -1141,10 +1177,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    type Mutation = (String, Vec<u64>, Option<String>);
     /// A scripted internal API: INBOX holds UID 1; snapshots fail while `down` is set.
     struct Script {
         down: AtomicBool,
         snapshots: AtomicUsize,
+        /// Every mutate call: (action, UIDs, ticket nonce).
+        mutations: Mutex<Vec<Mutation>>,
+        /// Fail the mutate call with this 1-based index (before committing).
+        fail_call: AtomicUsize,
     }
     fn reply(script: &Script, body: &[u8]) -> (u16, String) {
         let p: Value = serde_json::from_slice(body).unwrap_or_default();
@@ -1166,7 +1207,27 @@ mod tests {
                 let body = json!({"folders": meta(2, 2), "entries": entries, "gone": [], "floor": 0, "more": null});
                 (200, body.to_string())
             }
-            Some("mutate") => (200, json!({"pairs": [[1, 1]], "validity": 4}).to_string()),
+            Some("mutate") => {
+                let uids: Vec<u64> = p["uids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_u64).collect())
+                    .unwrap_or_default();
+                let mut log = script.mutations.lock().unwrap();
+                log.push((
+                    p["action"].as_str().unwrap_or_default().to_owned(),
+                    uids.clone(),
+                    p["ticket"]["nonce"].as_str().map(str::to_owned),
+                ));
+                if log.len() == script.fail_call.load(Ordering::SeqCst) {
+                    return (503, "{}".into());
+                }
+                let pairs: Vec<[u64; 2]> = if p["action"] == "copy" {
+                    uids.iter().map(|u| [*u, *u]).collect()
+                } else {
+                    vec![]
+                };
+                (200, json!({"pairs": pairs, "validity": 4}).to_string())
+            }
             _ => (422, "{}".into()),
         }
     }
@@ -1228,6 +1289,8 @@ mod tests {
         let script = Arc::new(Script {
             down: false.into(),
             snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
         });
         let l = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -1266,6 +1329,96 @@ mod tests {
         assert!(r.bytes.ends_with(b"a OK Completed\r\n"));
         assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
         assert_eq!(store.folder("Archive").unwrap().next, 2);
+    }
+
+    /// Large STORE/COPY/EXPUNGE sets run in 1,000-UID batches inside one command, each its own
+    /// call (a refused "STORE 1:*" broke "mark all read" in real clients). A batch failing
+    /// after others committed answers Partial; a COPY retry sends the same per-batch tickets,
+    /// so the API replays the batches it already committed.
+    #[test]
+    fn large_sets_run_in_batches_and_a_copy_retry_replays_them() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
+        });
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        store.select("INBOX").unwrap();
+        let uids: Vec<u32> = (1..=2500).collect();
+        let sizes = |from: usize| -> Vec<usize> {
+            script.mutations.lock().unwrap()[from..]
+                .iter()
+                .map(|m| m.1.len())
+                .collect()
+        };
+
+        let flags = mailgw_core::store::Flags::from(["\\Seen".to_owned()]);
+        store
+            .change(
+                "INBOX",
+                Change::Flags(&uids, mailgw_core::store::Mode::Add, flags.clone()),
+            )
+            .unwrap();
+        assert_eq!(sizes(0), [1000, 1000, 500]);
+
+        // The second batch fails: the first stays committed, the snapshot is refreshed.
+        script.fail_call.store(5, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        let r = store.change(
+            "INBOX",
+            Change::Flags(&uids, mailgw_core::store::Mode::Add, flags),
+        );
+        assert!(matches!(r, Err(store::Error::Partial)));
+        assert_eq!(sizes(3), [1000, 1000]);
+        assert!(script.snapshots.load(Ordering::SeqCst) > before);
+
+        // COPY: batch two fails; the retry carries the same three batch tickets.
+        script.mutations.lock().unwrap().clear();
+        script.fail_call.store(2, Ordering::SeqCst);
+        let r = store.change("INBOX", Change::Transfer(&uids, "Archive", false));
+        assert!(matches!(r, Err(store::Error::Partial)));
+        script.fail_call.store(0, Ordering::SeqCst);
+        let a = store
+            .change("INBOX", Change::Transfer(&uids, "Archive", false))
+            .unwrap();
+        assert_eq!(a.pairs.len(), 2500);
+        let log = script.mutations.lock().unwrap().clone();
+        let nonces: Vec<_> = log.iter().map(|m| m.2.clone().unwrap()).collect();
+        assert_eq!(
+            log.iter().map(|m| m.1.len()).collect::<Vec<_>>(),
+            [1000, 1000, 1000, 1000, 500]
+        );
+        assert_eq!(
+            nonces[..2],
+            nonces[2..4],
+            "a retry must reuse the batch tickets"
+        );
+        assert_ne!(nonces[2], nonces[3], "each batch has its own receipt");
+        // A new COPY after success gets a new ticket.
+        store
+            .change("INBOX", Change::Transfer(&uids[..1], "Archive", false))
+            .unwrap();
+        assert_ne!(
+            script.mutations.lock().unwrap().last().unwrap().2.as_ref(),
+            Some(&nonces[0])
+        );
+
+        // A plain EXPUNGE names the snapshot's UIDs instead of a NULL (whole folder) list.
+        script.mutations.lock().unwrap().clear();
+        store.change("INBOX", Change::Expunge(None)).unwrap();
+        assert_eq!(script.mutations.lock().unwrap()[0].1, [1]);
     }
 
     /// Found by gateway/tear (witness with one credential: B append Work, A append Work,

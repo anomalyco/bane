@@ -40,6 +40,10 @@ pub enum Error {
     Denied,
     #[error("[LIMIT] Inbox limit exceeded")]
     Limit,
+    /// A batched change stopped after some batches committed. The command reports what is
+    /// now true for its targets, then fails.
+    #[error("[UNAVAILABLE] Interrupted after part of the command was applied")]
+    Partial,
 }
 pub enum Change<'a> {
     Append {

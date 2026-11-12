@@ -595,7 +595,7 @@ impl Imap {
                     } => {
                         write()?;
                         let uids = sel.targets(sequence_set, *uid);
-                        s.change(
+                        let applied = s.change(
                             &p,
                             Change::Flags(
                                 &uids,
@@ -606,7 +606,13 @@ impl Imap {
                                 },
                                 flags.iter().map(ToString::to_string).collect(),
                             ),
-                        )?;
+                        );
+                        // A large STORE goes in batches. If it stops partway, report the
+                        // targets whose flags did change (their MODSEQ moved), then NO.
+                        let partial = matches!(applied, Err(Error::Partial));
+                        if !partial {
+                            applied?;
+                        }
                         let f = s.folder(&p)?;
                         sel.announce_flags(f, r, false);
                         for (i, (u, ms)) in sel.view.iter_mut().enumerate() {
@@ -617,7 +623,9 @@ impl Imap {
                                 // .SILENT leaves the recorded MODSEQ alone, so the next update
                                 // reports the merged flags, including another session's earlier
                                 // change (RFC 3501 6.4.6).
-                                if *response == StoreResponse::Answer {
+                                if *response == StoreResponse::Answer
+                                    && (!partial || e.modseq != *ms)
+                                {
                                     *ms = e.modseq;
                                     r.line(format!(
                                         "* {} FETCH ({}FLAGS ({}))",
@@ -631,6 +639,9 @@ impl Imap {
                                     ))
                                 }
                             }
+                        }
+                        if partial {
+                            return Err(Error::Partial);
                         }
                     }
                     C::Search {
@@ -816,10 +827,18 @@ impl Imap {
                             r.line(format!("{t} NO [TRYCREATE] No such mailbox"));
                             return Ok(None);
                         }
-                        let a = s.change(
+                        let a = match s.change(
                             &p,
                             Change::Transfer(&sel.targets(sequence_set, *uid), to, moving),
-                        )?;
+                        ) {
+                            // Batches committed before the failure: report them (EXISTS,
+                            // EXPUNGE), then NO. COPYUID belongs to a completed COPY only.
+                            Err(Error::Partial) => {
+                                self.merge(s, r);
+                                return Err(Error::Partial);
+                            }
+                            other => other?,
+                        };
                         if !a.pairs.is_empty() {
                             let csv = |dst: bool| {
                                 a.pairs
@@ -843,8 +862,12 @@ impl Imap {
                         } else {
                             None
                         };
-                        s.change(&p, Change::Expunge(uids.as_deref()))?;
-                        self.merge(s, r)
+                        // Batches that committed before a failure are reported, then NO.
+                        let applied = s.change(&p, Change::Expunge(uids.as_deref()));
+                        if matches!(applied, Ok(_) | Err(Error::Partial)) {
+                            self.merge(s, r);
+                        }
+                        applied?;
                     }
                     _ => return Err(Error::Denied),
                 }
@@ -931,6 +954,92 @@ mod tests {
             self.1 = true;
             r
         }
+    }
+
+    /// A batched change that stops halfway: half of the UIDs commit, then Partial.
+    struct Halfway(Memory);
+    impl MailStore for Halfway {
+        fn folders(&self) -> Vec<String> {
+            self.0.folders()
+        }
+        fn folder(&self, path: &str) -> Result<&Folder, Error> {
+            self.0.folder(path)
+        }
+        fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error> {
+            self.0.edit_folder(path, op)
+        }
+        fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
+            match change {
+                Change::Flags(uids, mode, flags) => {
+                    self.0
+                        .change(path, Change::Flags(&uids[..uids.len() / 2], mode, flags))?;
+                    Err(Error::Partial)
+                }
+                Change::Transfer(uids, to, moving) => {
+                    self.0
+                        .change(path, Change::Transfer(&uids[..uids.len() / 2], to, moving))?;
+                    Err(Error::Partial)
+                }
+                other => self.0.change(path, other),
+            }
+        }
+    }
+
+    /// Chunked mutations (gateway/tear, 1,000-UID batches): a STORE that stops partway
+    /// reports the messages whose flags changed, then NO; a COPY reports the new messages
+    /// (EXISTS), then NO without COPYUID.
+    #[test]
+    fn a_partial_batched_change_reports_what_committed_then_fails() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Halfway(Memory::default());
+        let now = Date::default();
+        for _ in 0..4 {
+            store
+                .0
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        imap.step(b"a SELECT INBOX\r\n", &account, &mut store, now);
+        let r = imap.step(
+            b"b STORE 1:4 +FLAGS (\\Flagged)\r\n",
+            &account,
+            &mut store,
+            now,
+        );
+        let text = String::from_utf8_lossy(&r.bytes);
+        assert_eq!(text.matches("FETCH").count(), 2, "{text}");
+        assert!(
+            text.contains("* 1 FETCH") && text.contains("* 2 FETCH"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "b NO [UNAVAILABLE] Interrupted after part of the command was applied\r\n"
+            ),
+            "{text}"
+        );
+        let r = imap.step(b"c COPY 1:4 INBOX\r\n", &account, &mut store, now);
+        let text = String::from_utf8_lossy(&r.bytes);
+        assert!(
+            text.contains("* 6 EXISTS") && !text.contains("COPYUID"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "c NO [UNAVAILABLE] Interrupted after part of the command was applied\r\n"
+            ),
+            "{text}"
+        );
     }
 
     /// Found by gateway/tear on the Remote store (witness: B create Work, A select Work,
