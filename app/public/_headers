@@ -5,8 +5,5 @@
   Referrer-Policy: no-referrer
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
   Strict-Transport-Security: max-age=31536000; includeSubDomains
-/assets/*
-  Cache-Control: public, max-age=31536000, immutable
-  Vary: Sec-Fetch-Dest
-/fonts/*
-  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+# No rule for /assets/* or /fonts/*: a path there with no file is answered with the dashboard shell, which must not be
+# kept. The build appends a cache rule for each file it has in those directories (asset-headers.ts).
