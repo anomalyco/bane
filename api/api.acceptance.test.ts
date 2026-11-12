@@ -5875,6 +5875,513 @@ describe('Campaign authorization and dispatch credentials', () => {
   });
 });
 
+// Package B (billing-build-spec §12.2). Stripe is a stateful in-memory fake behind STRIPE_API_BASE: customers, Checkout
+// sessions, invoices, payment and setup intents, refunds and credit notes, honouring idempotency keys, with switches for
+// declines, a 5xx before any effect, an answer lost after the effect, and refusals. No real key exists in this file.
+const STRIPE_TEST_BASE = 'https://stripe.test', STRIPE_TEST_WEBHOOK_SECRET = 'whsec_test';
+type FakeRule = { match: RegExp; times: number };
+function decodeStripeForm(form: URLSearchParams): Json {
+  const out: Json = {};
+  for (const [key, value] of form) {
+    const parts = key.replace(/\]/g, '').split('[');
+    let node = out;
+    parts.forEach((part, i) => { if (i === parts.length - 1) node[part] = value; else node = node[part] ??= {}; });
+  }
+  return out;
+}
+function fakeStripe(t: TestContext, inTransaction: () => boolean) {
+  let serial = 0;
+  const next = (prefix: string) => `${prefix}_fake${++serial}${randomUUID().slice(0, 8)}`;
+  const objects = new Map<string, Json>(), keys = new Map<string, { signature: string; status: number; body: Json }>();
+  const calls: { method: string; path: string; key: string | null; params: Json }[] = [];
+  const now = () => Math.floor(Date.now() / 1000);
+  const fake = {
+    objects, calls, violations: [] as string[],
+    /** The card every checkout or setup saves; a fresh fingerprint per fixture. */
+    card: { brand: 'visa', last4: '4242', exp_month: 12, exp_year: 2030, fingerprint: `fp_${randomUUID().slice(0, 12)}` },
+    taxRate: 0, refundStatus: 'succeeded',
+    decline: null as null | { code: string; decline_code?: string },
+    unavailable: [] as FakeRule[], lost: [] as FakeRule[], refused: [] as FakeRule[],
+    onRequest: undefined as undefined | ((method: string, path: string) => Promise<void>),
+    count: (pattern: RegExp) => calls.filter(c => pattern.test(`${c.method} ${c.path}`)).length,
+    invoices: () => [...objects.values()].filter(o => o.object === 'invoice'),
+    paymentMethod(customer: string | null) {
+      const pm = { id: next('pm'), object: 'payment_method', type: 'card', customer, card: { ...fake.card } };
+      objects.set(pm.id, pm); return pm;
+    },
+    charge(amount: number, customer: string | null, metadata: Json = {}) {
+      const pm = fake.paymentMethod(customer), pi = { id: next('pi'), object: 'payment_intent', amount, status: 'succeeded', customer, payment_method: pm.id, latest_charge: '', metadata };
+      const ch = { id: next('ch'), object: 'charge', amount, payment_intent: pi.id, receipt_url: `https://pay.stripe.test/receipts/${pi.id}` };
+      pi.latest_charge = ch.id; objects.set(pi.id, pi); objects.set(ch.id, ch); return pi;
+    },
+    /** A person paid on the Checkout page: the session completes with a PaymentIntent and Checkout's paid invoice. */
+    payCheckout(sessionId: string, options: { subtotal?: number } = {}) {
+      const s = objects.get(sessionId)!, subtotal = options.subtotal ?? Number(s.params.line_items['0'].price_data.unit_amount), tax = Math.round(subtotal * fake.taxRate);
+      const pi = fake.charge(subtotal + tax, s.customer, s.params.payment_intent_data?.metadata ?? {});
+      const invoice = { id: next('in'), object: 'invoice', status: 'paid', customer: s.customer, metadata: s.params.invoice_creation?.invoice_data?.metadata ?? {}, created: now(),
+        lines: { data: [{ id: next('il'), amount: subtotal }] }, subtotal, total: subtotal + tax, total_excluding_tax: subtotal, amount_paid: subtotal + tax,
+        hosted_invoice_url: 'https://invoice.stripe.test/i/' + sessionId, invoice_pdf: 'https://invoice.stripe.test/pdf/' + sessionId,
+        payments: { object: 'list', data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: pi.id } }] } };
+      objects.set(invoice.id, invoice);
+      Object.assign(s, { status: 'complete', payment_status: 'paid', payment_intent: pi.id, invoice: invoice.id, amount_subtotal: subtotal, amount_total: subtotal + tax, total_details: { amount_tax: tax } });
+      return s;
+    },
+    completeSetup(sessionId: string) {
+      const s = objects.get(sessionId)!, pm = fake.paymentMethod(s.customer), si = { id: next('seti'), object: 'setup_intent', status: 'succeeded', payment_method: pm.id };
+      objects.set(si.id, si); Object.assign(s, { status: 'complete', setup_intent: si.id }); return s;
+    },
+  };
+  const error = (status: number, type: string, code?: string, extra: Json = {}): [number, Json] => [status, { error: { type, code, message: `Synthetic ${code ?? type}.`, ...extra } }];
+  const missing = () => error(404, 'invalid_request_error', 'resource_missing');
+  const expand = (o: Json, fields: string[]) => {
+    const copy = { ...o };
+    for (const f of fields) if (typeof copy[f] === 'string' && objects.has(copy[f])) copy[f] = { ...objects.get(copy[f]) };
+    return copy;
+  };
+  const route = (method: string, path: string, p: Json, query: URLSearchParams): [number, Json] => {
+    const found = path.split('/').slice(2).map(decodeURIComponent).map(segment => objects.get(segment)).find(Boolean);
+    const fields = [...query.entries()].filter(([k]) => k.startsWith('expand')).map(([, v]) => v);
+    switch (true) {
+      case method === 'POST' && path === '/v1/customers': { const c = { id: next('cus'), object: 'customer', name: p.name, email: p.email, metadata: p.metadata, invoice_settings: {} }; objects.set(c.id, c); return [200, c]; }
+      case method === 'POST' && /^\/v1\/customers\/[^/]+$/.test(path): return found ? [200, Object.assign(found, { invoice_settings: p.invoice_settings })] : missing();
+      case method === 'POST' && path === '/v1/checkout/sessions': {
+        const s = { id: next('cs'), object: 'checkout.session', mode: p.mode, status: 'open', payment_status: 'unpaid', url: `https://checkout.stripe.test/c/${serial}`, expires_at: Number(p.expires_at),
+          customer: p.customer, client_reference_id: p.client_reference_id, metadata: p.metadata, amount_subtotal: Number(p.line_items?.['0']?.price_data?.unit_amount ?? 0), amount_total: null,
+          payment_intent: null, invoice: null, setup_intent: null, params: p };
+        objects.set(s.id, s); return [200, s];
+      }
+      case method === 'GET' && /^\/v1\/checkout\/sessions\/[^/]+$/.test(path): return found ? [200, found] : missing();
+      case method === 'POST' && /^\/v1\/checkout\/sessions\/[^/]+\/expire$/.test(path): return found ? [200, Object.assign(found, { status: 'expired' })] : missing();
+      case method === 'GET' && /^\/v1\/payment_intents\/[^/]+$/.test(path): return found ? [200, expand(found, fields)] : missing();
+      case method === 'GET' && /^\/v1\/setup_intents\/[^/]+$/.test(path): return found ? [200, expand(found, fields)] : missing();
+      case method === 'POST' && /^\/v1\/payment_methods\/[^/]+\/detach$/.test(path): return found ? [200, Object.assign(found, { customer: null })] : missing();
+      case method === 'POST' && path === '/v1/invoices': {
+        const i = { id: next('in'), object: 'invoice', status: 'draft', customer: p.customer, metadata: p.metadata, default_payment_method: p.default_payment_method, created: now(),
+          lines: { data: [] as Json[] }, subtotal: 0, total: 0, total_excluding_tax: 0, amount_paid: 0, hosted_invoice_url: null, invoice_pdf: null, payments: { object: 'list', data: [] } };
+        objects.set(i.id, i); return [200, i];
+      }
+      case method === 'GET' && path === '/v1/invoices/search': {
+        const wanted = /metadata\['bane_attempt'\]:'([^']+)'/.exec(query.get('query') ?? '')?.[1];
+        return [200, { object: 'search_result', data: fake.invoices().filter(i => i.metadata?.bane_attempt === wanted) }];
+      }
+      case method === 'POST' && path === '/v1/invoiceitems': {
+        const i = objects.get(p.invoice); if (!i) return missing();
+        if (i.status !== 'draft') return error(400, 'invalid_request_error', 'invoice_not_editable');
+        const amount = Number(p.amount), tax = Math.round(amount * fake.taxRate);
+        i.lines.data.push({ id: next('il'), amount }); Object.assign(i, { subtotal: i.subtotal + amount, total_excluding_tax: i.total_excluding_tax + amount, total: i.total + amount + tax });
+        return [200, { id: next('ii'), object: 'invoiceitem', invoice: i.id, amount }];
+      }
+      case method === 'GET' && /^\/v1\/invoices\/[^/]+$/.test(path): return found ? [200, found] : missing();
+      case method === 'DELETE' && /^\/v1\/invoices\/[^/]+$/.test(path): if (!found) return missing(); if (found.status !== 'draft') return error(400, 'invalid_request_error', 'invoice_not_draft'); objects.delete(found.id); return [200, { id: found.id, deleted: true }];
+      case method === 'POST' && /^\/v1\/invoices\/[^/]+\/finalize$/.test(path): if (!found) return missing(); if (found.status === 'draft') found.status = 'open'; return [200, found];
+      case method === 'POST' && /^\/v1\/invoices\/[^/]+\/void$/.test(path): if (!found) return missing(); if (found.status !== 'open') return error(400, 'invalid_request_error', 'invoice_not_open'); found.status = 'void'; return [200, found];
+      case method === 'POST' && /^\/v1\/invoices\/[^/]+\/pay$/.test(path): {
+        if (!found) return missing();
+        if (found.status === 'paid') return error(400, 'invalid_request_error', 'invoice_already_paid');
+        if (found.status !== 'open') return error(400, 'invalid_request_error', 'invoice_not_open');
+        if (fake.decline) return error(402, 'card_error', fake.decline.code, { decline_code: fake.decline.decline_code });
+        const pi = fake.charge(found.total, found.customer);
+        Object.assign(found, { status: 'paid', amount_paid: found.total, hosted_invoice_url: `https://invoice.stripe.test/i/${found.id}`, invoice_pdf: `https://invoice.stripe.test/pdf/${found.id}`,
+          payments: { object: 'list', data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: pi.id } }] } });
+        return [200, found];
+      }
+      case method === 'POST' && path === '/v1/refunds': {
+        const r = { id: next('re'), object: 'refund', status: fake.refundStatus, amount: Number(p.amount), payment_intent: p.payment_intent, metadata: p.metadata ?? {} };
+        objects.set(r.id, r); return [200, r];
+      }
+      case method === 'GET' && /^\/v1\/refunds\/[^/]+$/.test(path): return found ? [200, found] : missing();
+      case method === 'GET' && path === '/v1/credit_notes/preview': {
+        const amount = Number(query.get('lines[0][amount]')); return [200, { object: 'credit_note', total: amount + Math.round(amount * fake.taxRate) }];
+      }
+      case method === 'POST' && path === '/v1/credit_notes': {
+        const invoice = objects.get(p.invoice); if (!invoice) return missing();
+        const r = { id: next('re'), object: 'refund', status: fake.refundStatus, amount: Number(p.refund_amount), payment_intent: invoice.payments.data[0]?.payment.payment_intent, metadata: {} };
+        const note = { id: next('cn'), object: 'credit_note', invoice: invoice.id, total: r.amount, metadata: p.metadata, refunds: [{ refund: r.id, amount_refunded: r.amount }] };
+        objects.set(r.id, r); objects.set(note.id, note); return [200, note];
+      }
+      default: return error(404, 'invalid_request_error', 'unrecognized_url');
+    }
+  };
+  const take = (rules: FakeRule[], line: string) => { const rule = rules.find(r => r.times > 0 && r.match.test(line)); if (rule) rule.times--; return !!rule; };
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    if (url.origin !== STRIPE_TEST_BASE) throw new Error(`Network is forbidden in billing scenarios: ${url.origin}`);
+    const method = init?.method ?? 'GET', path = url.pathname, headers = new Headers(init?.headers);
+    if (inTransaction()) fake.violations.push(`${method} ${path}`);
+    assert.equal(headers.get('authorization'), 'Bearer sk_test_fake');
+    assert.match(headers.get('stripe-version') ?? '', /^\d{4}-\d{2}-\d{2}\.[a-z]+$/);
+    const body = typeof init?.body === 'string' ? init.body : '', params = decodeStripeForm(new URLSearchParams(body)), key = headers.get('idempotency-key');
+    calls.push({ method, path, key, params });
+    await fake.onRequest?.(method, path);
+    const line = `${method} ${path}`;
+    if (take(fake.unavailable, line)) return Response.json({ error: { type: 'api_error', message: 'Synthetic outage.' } }, { status: 500 });
+    let status: number, json: Json;
+    const prior = key ? keys.get(key) : undefined, signature = `${line}?${body}`;
+    if (prior) {
+      if (prior.signature !== signature) [status, json] = error(400, 'idempotency_error', 'idempotency_key_in_use');
+      else ({ status, body: json } = prior);
+    } else {
+      [status, json] = take(fake.refused, line) ? error(400, 'invalid_request_error', 'synthetic_refusal') : route(method, path, params, url.searchParams);
+      json = structuredClone(json);
+      if (key && status < 500) keys.set(key, { signature, status, body: json });
+    }
+    if (take(fake.lost, line)) throw new TypeError('fetch failed');
+    return Response.json(json, { status });
+  });
+  return fake;
+}
+async function signedStripeEvent(type: string, object: Json, options: { t?: number; secret?: string; livemode?: boolean; id?: string } = {}) {
+  const event = { id: options.id ?? `evt_${randomUUID().replaceAll('-', '')}`, object: 'event', type, livemode: options.livemode ?? false, created: Math.floor(Date.now() / 1000), data: { object } };
+  const body = JSON.stringify(event), t = options.t ?? Math.floor(Date.now() / 1000);
+  const v1 = createHmac('sha256', options.secret ?? STRIPE_TEST_WEBHOOK_SECRET).update(`${t}.${body}`).digest('hex');
+  return { id: event.id, body, signature: `t=${t},v1=${v1}` };
+}
+/** A Hosted runtime with Stripe test settings, one fresh workspace and the fake. Never wrapped in a transaction: the
+ * money paths commit, so the fixture records every Stripe call made inside runtime.db.transaction and fails on any. */
+async function stripeFixture(t: TestContext) {
+  assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Billing fixtures require an isolated local database.');
+  const [{ createApp }, { nodeRuntime }, { AsyncLocalStorage }, stripe, jobs] = await Promise.all([
+    import('./src/app.js'), import('./src/adapters/node.js'), import('node:async_hooks'), import('./src/billing/stripe.js'), import('./src/billing/stripe-jobs.js'),
+  ]);
+  const db = await fixtureDatabase(t);
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false',
+    STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: STRIPE_TEST_WEBHOOK_SECRET, STRIPE_API_BASE: STRIPE_TEST_BASE,
+    S3_BUCKET: 'synthetic-billing-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+  cleanup(t, instance.close);
+  const runtime = instance.runtime, scope = new AsyncLocalStorage<true>(), transaction = runtime.db.transaction.bind(runtime.db);
+  runtime.db.transaction = ((work: Parameters<typeof transaction>[0], config?: Parameters<typeof transaction>[1]) => transaction(tx => scope.run(true, () => work(tx)), config)) as typeof transaction;
+  const fake = fakeStripe(t, () => scope.getStore() === true);
+  const wid = `ws_${randomUUID().replaceAll('-', '')}`;
+  await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $1)', [wid, 'Billing\nfixture']);
+  // Money history outlives the workspace by design (no FK, append-only ledger); only the workspace and its jobs go.
+  cleanup(t, async () => { await db.query('DELETE FROM jobs WHERE workspace_id = $1', [wid]); await db.query('DELETE FROM workspaces WHERE id = $1', [wid]); });
+  t.after(() => assert.deepEqual(fake.violations, [], 'No Stripe request may run inside a database transaction.'));
+  const app = createApp();
+  const send = (body: string, signature?: string) => app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/billing/stripe`, { method: 'POST',
+    headers: { ...(signature ? { 'stripe-signature': signature } : {}), 'content-type': 'application/json' }, body }), runtime);
+  const deliver = async (type: string, object: Json, options: Parameters<typeof signedStripeEvent>[2] = {}) => {
+    const event = await signedStripeEvent(type, object, options), response = await send(event.body, event.signature);
+    return { status: response.status, body: await response.json() as Json, id: event.id };
+  };
+  const account = async (workspace = wid) => (await db.query('SELECT *, balance_uc::text AS balance, promo_uc::text AS promo FROM billing_accounts WHERE workspace_id = $1', [workspace])).rows[0];
+  const attempt = async (id: string) => (await db.query('SELECT *, amount_uc::text AS amount, refunded_uc::text AS refunded FROM billing_payment_attempts WHERE id = $1', [id])).rows[0];
+  const ledger = async (workspace = wid) => (await db.query('SELECT kind, source_id, paid_uc::text AS paid, promo_uc::text AS promo, balance_after_uc::text AS after FROM billing_ledger WHERE workspace_id = $1 ORDER BY id', [workspace])).rows;
+  const post = (kind: string, source: string, paid: bigint, promo = 0n, workspace = wid) => db.query('SELECT billing_post($1, $2, $3, $4, $5, $6, $7)', [workspace, kind, source, String(paid), String(promo), '{}', 'operator:fixture']);
+  const enforcement = async (mode: 'off' | 'shadow' | 'enforce') => {
+    const previous = (await db.query('SELECT mode FROM billing_config WHERE singleton')).rows[0].mode;
+    await db.query('UPDATE billing_config SET mode = $1 WHERE singleton', [mode]);
+    cleanup(t, async () => { await db.query('UPDATE billing_config SET mode = $1 WHERE singleton', [previous]); });
+  };
+  const backdate = (id: string, ageSeconds: number) => db.query(`UPDATE billing_payment_attempts SET created_at = now() - make_interval(secs => $2), updated_at = now() - interval '6 minutes' WHERE id = $1`, [id, ageSeconds]);
+  /** Saves a card through a setup Checkout, as the dashboard does. */
+  const saveCard = async () => {
+    const setup = await stripe.createCardSetup(runtime, { workspaceId: wid, actor: 'user:fixture', billingEmail: 'owner@example.com' });
+    const session = fake.objects.get((await attempt(setup.attemptId)).stripe_checkout_session)!;
+    assert.equal((await deliver('checkout.session.completed', fake.completeSetup(session.id))).status, 200);
+    return setup.attemptId;
+  };
+  const recharge = (workspace = wid) => jobs.rechargeJob(runtime, {}, { id: `billing.recharge:${workspace}`, attempts: 1, workspaceId: workspace });
+  return { runtime, db, fake, wid, deliver, send, account, attempt, ledger, post, enforcement, backdate, saveCard, recharge, stripe, jobs };
+}
+const UC = 1_000_000n;
+
+describe('Billing: Stripe', () => {
+  test('Checkout top-up: credited once from Stripe, a duplicate or late event changes nothing, and an amount mismatch credits nothing', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 1999, actor: 'user:fixture', billingEmail: null }), { status: 422, code: 'TOP_UP_AMOUNT_INVALID' });
+    await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 60_000, actor: 'user:fixture', billingEmail: null }), { status: 409, code: 'FIRST_TOP_UP_LIMIT' });
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: 'owner@example.com' });
+    assert.match(top.attemptId, /^bpa_[0-9a-f]{32}$/); assert.match(top.url, /^https:\/\/checkout\.stripe\.test\//);
+    const expiresIn = Date.parse(top.expiresAt) - Date.now(); assert.ok(expiresIn > 22.9 * 3600_000 && expiresIn <= 23 * 3600_000, top.expiresAt);
+    const created = fake.calls.find(c => c.path === '/v1/checkout/sessions')!;
+    assert.equal(created.key, `attempt:${top.attemptId}:checkout`);
+    assert.deepEqual({ mode: created.params.mode, amount: created.params.line_items['0'].price_data.unit_amount, tax: created.params.line_items['0'].price_data.tax_behavior,
+      future: created.params.payment_intent_data.setup_future_usage, invoice: created.params.invoice_creation.enabled, attempt: created.params.metadata.bane_attempt, workspace: created.params.metadata.bane_workspace, env: created.params.metadata.bane_env },
+      { mode: 'payment', amount: '5000', tax: 'exclusive', future: 'off_session', invoice: 'true', attempt: top.attemptId, workspace: wid, env: 'dev' });
+    assert.equal(created.params.automatic_tax, undefined, 'Tax stays off until STRIPE_AUTOMATIC_TAX is set.');
+    assert.equal([...fake.objects.values()].find(o => o.object === 'customer')!.name, 'Billing fixture', 'The customer name is one line.');
+    assert.equal((await attempt(top.attemptId)).status, 'pending');
+    assert.equal((await account())?.balance ?? '0', '0', 'Opening Checkout credits nothing.');
+
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session);
+    const first = await deliver('checkout.session.completed', session);
+    assert.deepEqual([first.status, first.body.outcome], [200, 'processed']);
+    const paid = await attempt(top.attemptId);
+    assert.deepEqual({ status: paid.status, charged: paid.charged_cents, tax: paid.tax_cents, last4: paid.card_last4, invoice: paid.invoice_url !== null, receipt: paid.receipt_url !== null },
+      { status: 'succeeded', charged: 5000, tax: 0, last4: '4242', invoice: true, receipt: true });
+    const saved = await account();
+    assert.equal(saved.balance, String(5000n * UC));
+    assert.deepEqual([saved.card_brand, saved.card_last4, saved.card_fingerprint], ['visa', '4242', fake.card.fingerprint], 'A paid Checkout saves its card for later top-ups.');
+    assert.equal(fake.objects.get(saved.stripe_customer)!.invoice_settings.default_payment_method, saved.stripe_payment_method);
+    // The same delivery again, a second event for the same payment, and Checkout's own invoice.paid: credited once.
+    const again = await deliver('checkout.session.completed', session, { id: first.id });
+    assert.deepEqual([again.status, again.body.outcome], [200, 'duplicate']);
+    assert.equal((await deliver('checkout.session.async_payment_succeeded', session)).body.outcome, 'processed');
+    assert.equal((await deliver('invoice.paid', fake.objects.get(session.invoice)!)).body.outcome, 'processed');
+    assert.equal((await deliver('payment_intent.payment_failed', { ...fake.objects.get(session.payment_intent)!, metadata: { bane_attempt: top.attemptId } })).body.outcome, 'processed');
+    assert.equal((await attempt(top.attemptId)).status, 'succeeded', 'A terminal attempt absorbs late events.');
+    assert.deepEqual((await ledger()).map(r => [r.kind, r.source_id, r.paid]), [['topup', `attempt:${top.attemptId}`, String(5000n * UC)]]);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_gateway_events WHERE stripe_event_id = $1', [first.id])).rows[0].n, 1);
+
+    // Stripe charged a different amount than the attempt: failed, logged, no credit and no saved card from it.
+    const mismatch = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2500, actor: 'user:fixture', billingEmail: null });
+    const short = fake.payCheckout((await attempt(mismatch.attemptId)).stripe_checkout_session, { subtotal: 2400 });
+    const errors = t.mock.method(console, 'error', () => {});
+    try { assert.equal((await deliver('checkout.session.completed', short)).status, 200); } finally { errors.mock.restore(); }
+    assert.ok(errors.mock.calls.some(c => String(c.arguments[0]).includes('BILLING_AMOUNT_MISMATCH')));
+    assert.deepEqual([(await attempt(mismatch.attemptId)).status, (await attempt(mismatch.attemptId)).failure_code], ['failed', 'amount_mismatch']);
+    assert.equal((await account()).balance, String(5000n * UC));
+    // A Checkout page that expired, then the hourly limit of five attempts.
+    const lapsed = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    const lapsedSession = Object.assign(fake.objects.get((await attempt(lapsed.attemptId)).stripe_checkout_session)!, { status: 'expired' });
+    await deliver('checkout.session.expired', lapsedSession);
+    assert.equal((await attempt(lapsed.attemptId)).status, 'expired');
+    await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null }), { status: 429, code: 'TOP_UP_RATE_LIMITED' });
+    assert.equal(fake.count(/^POST \/v1\/customers$/), 1, 'One Stripe customer per workspace.');
+    const listed = await stripe.listPayments(runtime.db, wid, null, 2);
+    assert.equal(listed.data.length, 2); assert.ok(listed.nextCursor);
+    const rest = await stripe.listPayments(runtime.db, wid, listed.nextCursor, 10);
+    assert.deepEqual(new Set([...listed.data, ...rest.data].map(p => p.id)).size, 5);
+    assert.deepEqual(await stripe.getPayment(runtime.db, wid, top.attemptId), { id: top.attemptId, at: paid.created_at.toISOString(), kind: 'checkout', status: 'succeeded', amountCents: 5000, taxCents: 0, totalCents: 5000,
+      card: { brand: 'visa', last4: '4242' }, invoiceUrl: paid.invoice_url, invoicePdf: paid.invoice_pdf, receiptUrl: paid.receipt_url, failure: null });
+    assert.equal(await stripe.getPayment(runtime.db, `ws_${randomUUID().replaceAll('-', '')}`, top.attemptId), null, 'Payments are read inside their workspace only.');
+  });
+
+  test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Bane\'s are ignored', async t => {
+    const { db, deliver, send } = await stripeFixture(t);
+    const object = { id: `cs_${randomUUID()}`, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {} };
+    for (const [options, code] of [[{ secret: 'whsec_other' }, 'STRIPE_SIGNATURE_INVALID'], [{ t: Math.floor(Date.now() / 1000) - 301 }, 'STRIPE_SIGNATURE_INVALID'],
+      [{ t: Math.floor(Date.now() / 1000) + 301 }, 'STRIPE_SIGNATURE_INVALID'], [{ livemode: true }, 'STRIPE_LIVEMODE_MISMATCH']] as const) {
+      const reply = await deliver('checkout.session.completed', object, options);
+      assert.deepEqual([reply.status, reply.body.error?.code], [400, code], JSON.stringify(options));
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_gateway_events WHERE stripe_event_id = $1', [reply.id])).rows[0].n, 0, 'A refused delivery records nothing.');
+    }
+    const signed = await signedStripeEvent('checkout.session.completed', object);
+    assert.equal((await send(signed.body.replace('"paid"', '"unpaid"'), signed.signature)).status, 400, 'The signature covers the exact body.');
+    assert.equal((await send(signed.body)).status, 400, 'The signature header is required.');
+    assert.equal((await send(signed.body, `${signed.signature.replace(/v1=.*/, 'v1=' + '0'.repeat(64))},${signed.signature.split(',')[1]}`)).status, 200, 'Any v1 may match (secret rotation).');
+    for (const [type, foreign] of [['checkout.session.completed', object], ['customer.created', { id: 'cus_other', object: 'customer' }], ['charge.dispute.created', { id: 'dp_other', payment_intent: 'pi_console', amount: 100 }]] as const) {
+      const reply = await deliver(type, foreign);
+      assert.deepEqual([reply.status, reply.body.outcome], [200, 'ignored'], type);
+      assert.equal((await db.query('SELECT status FROM billing_gateway_events WHERE stripe_event_id = $1', [reply.id])).rows[0].status, 'ignored');
+    }
+  });
+
+  test('Stripe webhook: a failed delivery answers 500 and is retried; a processed event never reopens', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 3000, actor: 'user:fixture', billingEmail: null });
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session);
+    // Stripe can't be read after the credit commits: the card isn't saved yet, so Stripe must deliver again.
+    fake.unavailable.push({ match: /^GET \/v1\/payment_intents\//, times: 3 });
+    const warnings = t.mock.method(console, 'warn', () => {});
+    const failed = await deliver('checkout.session.completed', session);
+    warnings.mock.restore();
+    assert.deepEqual([failed.status, failed.body.error?.code, failed.body.error?.retryable], [500, 'BILLING_WEBHOOK_FAILED', true]);
+    assert.deepEqual((await db.query('SELECT status, attempts FROM billing_gateway_events WHERE stripe_event_id = $1', [failed.id])).rows[0], { status: 'failed', attempts: 1 });
+    assert.equal((await account()).balance, String(3000n * UC), 'The credit committed before the follow-up read failed.');
+    assert.equal((await account()).card_last4, null);
+    const redelivered = await deliver('checkout.session.completed', session, { id: failed.id });
+    assert.deepEqual([redelivered.status, redelivered.body.outcome], [200, 'processed']);
+    assert.equal((await account()).card_last4, '4242');
+    // Stripe is unavailable again, but the event is processed: the redelivery is answered without touching anything.
+    fake.unavailable.push({ match: /./, times: 9 });
+    const calls = fake.calls.length, late = await deliver('checkout.session.completed', session, { id: failed.id });
+    assert.deepEqual([late.status, late.body.outcome, fake.calls.length], [200, 'duplicate', calls]);
+    assert.deepEqual((await db.query('SELECT status, attempts FROM billing_gateway_events WHERE stripe_event_id = $1', [failed.id])).rows[0], { status: 'processed', attempts: 1 });
+    assert.equal((await ledger()).length, 1);
+    // The fixture's detector itself: a Stripe request inside a transaction is caught.
+    await runtime.db.transaction(async () => { await fetch(`${STRIPE_TEST_BASE}/v1/customers/cus_none`, { headers: { authorization: 'Bearer sk_test_fake', 'stripe-version': '2026-10-28.endive' } }); });
+    assert.deepEqual(fake.violations.splice(0), ['GET /v1/customers/cus_none']);
+  });
+
+  test('Auto-recharge: one charge at a time and credit on success; a decline or 3DS turns it off with exactly one notice; the monthly limit holds', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, post, enforcement, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
+    await enforcement('enforce');
+    await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
+    const setup = await saveCard();
+    assert.equal((await attempt(setup)).status, 'succeeded'); assert.equal((await account()).card_last4, '4242');
+    await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 1999, monthlyCapCents: 5000 }), { status: 422 });
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 });
+    const recharges = async () => (await db.query("SELECT id, status, failure_code FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
+    // Five triggers at once with a $0 balance: one attempt, one invoice, one credit.
+    await Promise.all(Array.from({ length: 5 }, () => recharge()));
+    assert.deepEqual((await recharges()).map(r => r.status), ['succeeded']);
+    assert.deepEqual([fake.count(/^POST \/v1\/invoices$/), fake.count(/^POST \/v1\/invoices\/[^/]+\/pay$/)], [1, 1]);
+    let saved = await account();
+    assert.deepEqual([saved.balance, saved.recharge_pending_attempt, saved.recharge_month_total_uc], [String(2500n * UC), null, String(2500n * UC)]);
+    const pay = fake.calls.find(c => /\/pay$/.test(c.path))!;
+    const first = (await recharges())[0].id, charged = fake.invoices().find(i => i.metadata.bane_attempt === first)!;
+    assert.deepEqual([pay.params.off_session, charged.default_payment_method, charged.metadata.bane_workspace, pay.key], ['true', saved.stripe_payment_method, wid, `attempt:${first}:pay`]);
+    await recharge();
+    assert.equal((await recharges()).length, 1, 'Above the threshold nothing is charged.');
+    // Spend down: a second recharge fits the $50 month; a third would not.
+    await post('usage', `usage:${wid}:fixture-1`, -2000n * UC);
+    await recharge();
+    assert.deepEqual((await recharges()).map(r => r.status), ['succeeded', 'succeeded']);
+    await post('usage', `usage:${wid}:fixture-2`, -2600n * UC);
+    const info = t.mock.method(console, 'info', () => {});
+    await recharge();
+    info.mock.restore();
+    assert.equal((await recharges()).length, 2, 'The monthly limit stops a third recharge.');
+    await jobs.billingMinute(runtime);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id = $1', [`billing.recharge:${wid}`])).rows[0].n, 0, 'The sweep does not queue a capped account.');
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
+    await jobs.billingMinute(runtime);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id = $1', [`billing.recharge:${wid}`])).rows[0].n, 1, 'The minute sweep queues an eligible account.');
+    // A decline: failed, the invoice voided, auto-recharge off, exactly one notice even after Stripe's own failure event.
+    fake.decline = { code: 'card_declined', decline_code: 'insufficient_funds' };
+    const warnings = t.mock.method(console, 'warn', () => {});
+    await recharge();
+    const declined = (await recharges())[2];
+    assert.deepEqual([declined.status, declined.failure_code], ['failed', 'insufficient_funds']);
+    const voided = fake.invoices().find(i => i.metadata?.bane_attempt === declined.id)!;
+    assert.equal(voided.status, 'void');
+    saved = await account();
+    assert.deepEqual([saved.recharge_enabled, saved.recharge_disabled_reason, saved.recharge_pending_attempt], [false, 'insufficient_funds', null]);
+    assert.equal((await deliver('invoice.payment_failed', voided)).body.outcome, 'processed');
+    await recharge();
+    const notices = async () => (await db.query("SELECT dedupe_key, status, data FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed' ORDER BY created_at", [wid])).rows;
+    assert.deepEqual((await notices()).map(n => [n.dedupe_key, n.status, n.data.last4, n.data.code]), [[`recharge_failed:${declined.id}`, 'pending', '4242', 'insufficient_funds']]);
+    assert.equal((await recharges()).length, 3, 'No automatic retry after a decline.');
+    // Turned back on: the reason clears. A 3DS request (authentication_required) is a failure of its own, with its own notice.
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
+    assert.equal((await account()).recharge_disabled_reason, null);
+    fake.decline = { code: 'authentication_required', decline_code: 'authentication_required' };
+    await recharge();
+    warnings.mock.restore();
+    assert.deepEqual((await recharges()).map(r => r.failure_code).slice(2), ['insufficient_funds', 'authentication_required']);
+    assert.equal((await notices()).length, 2);
+    assert.equal((await account()).recharge_enabled, false);
+    assert.deepEqual((await ledger()).filter(r => r.kind === 'topup').length, 2);
+    // Removing the card detaches it at Stripe and keeps auto-recharge off.
+    const pm = (await account()).stripe_payment_method;
+    await stripe.removePaymentMethod(runtime, wid);
+    assert.equal(fake.objects.get(pm)!.customer, null);
+    assert.deepEqual([(await account()).stripe_payment_method, (await account()).card_last4, (await account()).recharge_enabled], [null, null, false]);
+  });
+
+  test('Reconciliation: lost answers are retried with the same keys and credited once; after 22 h Bane searches Stripe; a day-old recharge is canceled', async t => {
+    const { runtime, fake, wid, account, attempt, ledger, enforcement, backdate, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
+    await saveCard();
+    const warnings = t.mock.method(console, 'warn', () => {});
+    // The invoice was created but every answer was lost: the attempt has no invoice yet.
+    fake.lost.push({ match: /^POST \/v1\/invoices$/, times: 3 });
+    const lost = await stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 3000, actor: 'user:fixture' });
+    assert.deepEqual([lost.status, (await attempt(lost.attemptId)).stripe_invoice, fake.invoices().length], ['created', null, 1]);
+    await backdate(lost.attemptId, 600);
+    await jobs.reconcilePayments(runtime);
+    assert.equal((await attempt(lost.attemptId)).status, 'succeeded');
+    assert.equal(fake.invoices().length, 1, 'The retry reused the idempotency key: one invoice.');
+    assert.deepEqual([...new Set(fake.calls.filter(c => c.path === '/v1/invoices' && c.method === 'POST').map(c => c.key))], [`attempt:${lost.attemptId}:invoice`]);
+    // A Checkout whose webhook never arrived: reconciliation reads the session, credits it and saves the card.
+    const quiet = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    fake.payCheckout((await attempt(quiet.attemptId)).stripe_checkout_session);
+    await backdate(quiet.attemptId, 600);
+    assert.equal(await stripe.reconcileAttempt(runtime, quiet.attemptId), 'succeeded');
+    // Older than 22 h without a stored invoice: found by metadata and paid, so credited without re-running the charge.
+    fake.lost.push({ match: /^POST \/v1\/invoices$/, times: 3 });
+    const late = await stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture' });
+    Object.assign(fake.invoices().find(i => i.metadata.bane_attempt === late.attemptId)!, { status: 'paid', subtotal: 2000, total: 2000, total_excluding_tax: 2000, amount_paid: 2000 });
+    await backdate(late.attemptId, 23 * 3600);
+    assert.equal(await stripe.reconcileAttempt(runtime, late.attemptId), 'succeeded');
+    assert.equal(fake.count(/^GET \/v1\/invoices\/search$/), 1);
+    assert.equal(fake.calls.filter(c => c.key === `attempt:${late.attemptId}:item`).length, 0);
+    // Nothing at Stripe after 22 h: failed as lost (Console #5210), no credit.
+    fake.unavailable.push({ match: /^POST \/v1\/invoices$/, times: 3 });
+    const gone = await stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture' });
+    await backdate(gone.attemptId, 23 * 3600);
+    assert.equal(await stripe.reconcileAttempt(runtime, gone.attemptId), 'failed');
+    assert.equal((await attempt(gone.attemptId)).failure_code, 'lost');
+    assert.deepEqual((await ledger()).map(r => r.source_id), [`attempt:${lost.attemptId}`, `attempt:${quiet.attemptId}`, `attempt:${late.attemptId}`]);
+    // A recharge whose payment never answered, a day later: its invoice is voided and auto-recharge is free again.
+    await enforcement('enforce');
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 10_000, amountCents: 2500, monthlyCapCents: 100_000 });
+    fake.unavailable.push({ match: /\/pay$/, times: 3 });
+    await recharge();
+    const stuck = (await account()).recharge_pending_attempt;
+    assert.ok(stuck); assert.equal((await attempt(stuck)).status, 'pending');
+    await backdate(stuck, 25 * 3600);
+    assert.equal(await stripe.reconcileAttempt(runtime, stuck), 'canceled');
+    warnings.mock.restore();
+    assert.equal(fake.invoices().find(i => i.metadata.bane_attempt === stuck)!.status, 'void');
+    assert.deepEqual([(await account()).recharge_pending_attempt, (await account()).recharge_enabled], [null, true], 'A charge that never finished is not the card\'s fault.');
+    assert.equal((await account()).balance, String(7000n * UC));
+  });
+
+  test('Refund: the hold lands before Stripe is called, a refusal releases it, and only unspent paid credit is refundable', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, post, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
+    await post('usage', `usage:${wid}:spent`, -2000n * UC);
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, reason: 'Synthetic refund', operator: 'operator:fixture' });
+    await assert.rejects(refund(3001), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
+    let heldWhenCalled: string[] = [];
+    fake.onRequest = async (method, path) => { if (method === 'POST' && path === '/v1/credit_notes') heldWhenCalled = (await ledger()).map(r => r.kind); };
+    fake.refused.push({ match: /^POST \/v1\/credit_notes$/, times: 1 });
+    const warnings = t.mock.method(console, 'warn', () => {});
+    await assert.rejects(refund(1000), { status: 502, code: 'BILLING_PROVIDER_ERROR' });
+    warnings.mock.restore();
+    assert.deepEqual(heldWhenCalled, ['topup', 'usage', 'refund_hold'], 'The amount is held before Stripe is asked.');
+    assert.deepEqual((await ledger()).map(r => [r.kind, r.paid]).slice(2), [['refund_hold', String(-1000n * UC)], ['refund_release', String(1000n * UC)]]);
+    assert.equal((await account()).balance, String(3000n * UC));
+    // The whole refundable amount: a credit note for the invoice line, refunding its total (tax included in proportion).
+    const done = await refund();
+    assert.equal(done.status, 'succeeded');
+    const note = fake.calls.filter(c => c.path === '/v1/credit_notes' && c.method === 'POST').at(-1)!;
+    assert.deepEqual([note.params.lines['0'].amount, note.params.refund_amount, note.key], ['3000', '3000', `refund:${done.refundId}`]);
+    assert.deepEqual([(await account()).balance, (await attempt(top.attemptId)).refunded], ['0', String(3000n * UC)]);
+    assert.equal((await db.query('SELECT status FROM billing_refunds WHERE id = $1', [done.refundId])).rows[0].status, 'succeeded');
+    // Nothing paid is left; promotional credit is never refunded.
+    await post('grant', `grant:${randomUUID()}`, 0n, 1000n * UC);
+    await assert.rejects(refund(), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
+    // A refund Stripe settles later: its failure event returns the held amount.
+    const second = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2500, actor: 'user:fixture', billingEmail: null });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(second.attemptId)).stripe_checkout_session));
+    fake.refundStatus = 'pending';
+    const slow = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: second.attemptId, amountCents: 500, reason: 'Synthetic refund', operator: 'operator:fixture' });
+    assert.equal(slow.status, 'pending');
+    assert.equal((await account()).balance, String(2000n * UC));
+    const stripeRefund = (await db.query('SELECT stripe_refund FROM billing_refunds WHERE id = $1', [slow.refundId])).rows[0].stripe_refund;
+    assert.equal((await deliver('refund.updated', { ...fake.objects.get(stripeRefund)!, status: 'failed', failure_reason: 'expired_or_canceled_card' })).body.outcome, 'processed');
+    assert.equal((await db.query('SELECT status FROM billing_refunds WHERE id = $1', [slow.refundId])).rows[0].status, 'failed');
+    assert.deepEqual([(await account()).balance, (await attempt(second.attemptId)).refunded], [String(2500n * UC), '0']);
+  });
+
+  test('Dispute: the disputed credit is debited, the card blocked and auto-recharge stopped; a won dispute gives it back', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 4000, actor: 'user:fixture', billingEmail: null });
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session);
+    await deliver('checkout.session.completed', session);
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 });
+    const dispute = { id: `dp_${randomUUID().replaceAll('-', '')}`, object: 'dispute', amount: 4000, payment_intent: session.payment_intent, reason: 'fraudulent', status: 'needs_response' };
+    const errors = t.mock.method(console, 'error', () => {});
+    assert.equal((await deliver('charge.dispute.created', dispute)).body.outcome, 'processed');
+    assert.equal((await deliver('charge.dispute.created', dispute)).body.outcome, 'processed', 'A second event for the same dispute debits nothing more.');
+    assert.ok(errors.mock.calls.some(c => String(c.arguments[0]).includes('BILLING_DISPUTE_OPENED')));
+    assert.deepEqual((await ledger()).map(r => [r.kind, r.paid]), [['topup', String(4000n * UC)], ['dispute', String(-4000n * UC)]]);
+    const blocked = await account();
+    assert.deepEqual([blocked.balance, blocked.recharge_enabled, blocked.recharge_disabled_reason], ['0', false, 'dispute']);
+    assert.equal((await db.query('SELECT reason FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint])).rows[0]?.reason, 'dispute');
+    await assert.rejects(stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture' }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
+    await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
+    assert.equal((await deliver('charge.dispute.closed', { ...dispute, status: 'won' })).body.outcome, 'processed');
+    assert.equal((await deliver('charge.dispute.closed', { ...dispute, status: 'won' })).body.outcome, 'processed');
+    assert.deepEqual((await ledger()).map(r => r.kind), ['topup', 'dispute', 'dispute_reversal']);
+    assert.equal((await account()).balance, String(4000n * UC));
+    // Radar's early fraud warning blocks and stops auto-recharge too; a detached card is forgotten.
+    await db.query('DELETE FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint]);
+    assert.equal((await deliver('radar.early_fraud_warning.created', { id: `issfr_${randomUUID().slice(0, 8)}`, object: 'radar.early_fraud_warning', payment_intent: session.payment_intent, fraud_type: 'made_with_stolen_card' })).body.outcome, 'processed');
+    errors.mock.restore();
+    assert.equal((await db.query('SELECT reason FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint])).rows[0]?.reason, 'early_fraud_warning');
+    assert.equal((await account()).recharge_disabled_reason, 'early_fraud_warning');
+    assert.equal((await deliver('payment_method.detached', fake.objects.get((await account()).stripe_payment_method)!)).body.outcome, 'processed');
+    assert.deepEqual([(await account()).stripe_payment_method, (await account()).card_last4], [null, null]);
+    await db.query('DELETE FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint]);
+  });
+});
+
 describe('Hosted unsubscribe and dispatch-time consent', () => {
   test('punycode TLDs work for contact lookup, template replies, one-click and SES unsubscribeAll',async t=>{
     await simulatedSesFixture(t,async({runtime,local,request,db})=>{
