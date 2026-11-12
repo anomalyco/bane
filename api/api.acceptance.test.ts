@@ -60,6 +60,41 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('SDK release: extraction accepts one bounded regular package at a fixed path',async t=>{
+  const {mkdtempSync,mkdirSync,readFileSync,existsSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{execFileSync,spawnSync}=await import('node:child_process');
+  const workflow=await readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
+  const block=workflow.match(/python3 - <<'PY'\n([\s\S]*?)\n          PY/);
+  assert.ok(block,'The release archive reader must be exercised from the workflow.');
+  const reader=block[1]!.replace(/^          /gm,''),root=mkdtempSync(join(tmpdir(),'bane-release-'));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const version='0.4.2',name=`banemx-sdk-${version}.tgz`,bytes='synthetic package bytes';
+  for(const [label,entries,accept] of [
+    ['package',[[name,bytes,0]],true],
+    ['nested',[[`nested/${name}`,bytes,0]],false],
+    ['parent',[[`nested/../../${name}`,bytes,0]],false],
+    ['extra',[[name,bytes,0],['extra.txt',bytes,0]],false],
+    ['duplicate',[[name,bytes,0],[name,bytes,0]],false],
+    ['link',[[name,'../other',0o120777]],false],
+    ['large',[[name,'large',0]],false],
+    ['compression',[[name,bytes,0]],false],
+  ] as const){
+    const dir=join(root,label);mkdirSync(dir);
+    execFileSync('python3',['-c',`import sys,json,zipfile,warnings
+warnings.simplefilter('ignore',UserWarning)
+with zipfile.ZipFile(sys.argv[1],'w',compression=zipfile.ZIP_DEFLATED) as archive:
+    for name,data,mode in json.loads(sys.argv[2]):
+        entry=zipfile.ZipInfo(name)
+        entry.compress_type=zipfile.ZIP_BZIP2 if sys.argv[3]=='compression' else zipfile.ZIP_DEFLATED
+        if mode: entry.external_attr=mode<<16
+        archive.writestr(entry,'x'*(16*1024*1024+1) if data=='large' else data)
+`,join(dir,'sdk-artifact.zip'),JSON.stringify(entries),label],{timeout:5000});
+    const result=spawnSync('python3',['-c',reader],{env:{...process.env,RUNNER_TEMP:dir,VERSION:version},encoding:'utf8',timeout:5000});
+    assert.equal(result.status===0,accept,`${label}: ${result.stderr}`);
+    assert.equal(existsSync(join(root,name)),false,label);
+    if(accept)assert.equal(readFileSync(join(dir,'package','sdk.tgz'),'utf8'),bytes);
+    else assert.equal(existsSync(join(dir,'package','sdk.tgz')),false,label);
+  }
+});
 test('mail gateway: private admission binds the credential lane and append metadata',async()=>{
   const {gatewayLane}=await import('./src/protocol-admission.js');
   const key=randomUUID(),ts='1800000000',path='/internal/v1/mail';
