@@ -9436,6 +9436,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mail_endpoints SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND ref='forward:team'",[wid]);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
       });
+      await t.test('rituals: a forward queued by a reopened receipt sends mail first stored before any ritual ran',async()=>{
+        // tear/delivery witness: ingest m1 z, rituals forward, ingest m1 b+z, run K m1:F.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+        const hookId=(await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='forward:team' AND verified",[wid])).rows[0].hook_id;
+        await ingest('fwd-late',['late@receive.example']);
+        await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
+        try{
+          const m=await ingest('fwd-late',['late@receive.example',box.address]);
+          const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:'job_fwd_late',workspaceId:wid,attempts:1});
+          assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status:'delivered',last_error:null});
+          assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[m.id,hookId])).rowCount,1);
+        }finally{await call('PUT','/v1/rituals',{});}
+      });
       await t.test('delivery: an endpoint paused between the claim and the fence parks the delivery and posts nothing until resumed',async()=>{
         // tear/delivery witness: ingest m1 a, claim K m1:W, pause W, go K.
         const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{inboundHookClaim}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
