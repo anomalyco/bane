@@ -15,8 +15,10 @@ export function useSenderScore() { return useApiDef(queries.senderScore(), { int
 const whole = (value: number) => Math.round(value)
 
 export function SidebarScore() {
-  const { data: report } = useSenderScore()
+  const { data: report, isError } = useSenderScore()
   const shown = useTween(!report ? undefined : report.state === 'graded' ? report.score ?? 0 : report.emails.firstEmails)
+  // A failed read keeps the card's frame and says so, instead of an empty box.
+  if (!report && isError) return <Link to="/" className="gauge-card gauge-card--compact" aria-label="Sender score unavailable"><Texture /><span className="gauge-stack"><span className="gauge-eyebrow">Sender score</span><span className="gauge-readout"><b>—</b><small>&nbsp;unavailable</small></span></span></Link>
   if (!report) return <div className="gauge-card gauge-card--compact" aria-hidden="true"><span className="gauge-skeleton" /></div>
   const graded = report.state === 'graded'
   const label = graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Sender score: ${report.emails.firstEmails} of ${report.needed} emails before the first grade`
