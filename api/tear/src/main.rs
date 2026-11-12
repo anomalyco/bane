@@ -16,7 +16,7 @@ mod model;
 
 use model::{Cfg, Model, P, alphabet};
 use serde_json::{Value, json};
-use statecheck::{Error, Host, R, conformance, search, stdio::StdioFixture};
+use statecheck::{Error, Host, R, conformance, search, stdio::StdioFixture, temporal::{Monitor, Property}};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -32,13 +32,82 @@ fn model(v: &Value) -> R<Model> {
 
 /// Trace configurations: campaign recipients' provider behaviour, an optional daily cap, and a
 /// pending-cap seed two below the 10,000 floor.
+/// Configurations 4-6 put a small SES 24-hour quota (2, 3 or 4: one reserved for
+/// transactional mail, leaving 1-3 campaign credits, below the shard count at 2) under two
+/// dispatcher shards and a four-recipient campaign; they are checked as invariants.
 fn configs() -> Vec<Cfg> {
-    vec![
-        Cfg { seed: 0, pace: None, campaign: P::Ok },
-        Cfg { seed: 0, pace: Some(1), campaign: P::Ok },
-        Cfg { seed: 0, pace: None, campaign: P::Thr },
-        Cfg { seed: 9_998, pace: None, campaign: P::Unk },
-    ]
+    let exact = |seed, pace, campaign| Cfg { seed, pace, campaign, recipients: 2, quota: None };
+    let quota = |q| Cfg { seed: 0, pace: None, campaign: P::Ok, recipients: 4, quota: Some(q) };
+    vec![exact(0, None, P::Ok), exact(0, Some(1), P::Ok), exact(0, None, P::Thr), exact(9_998, None, P::Unk), quota(2), quota(3), quota(4)]
+}
+fn cfgs_for(profile: &str) -> Vec<usize> {
+    match profile {
+        "quota" => vec![4, 5, 6],
+        "admission" => vec![3],
+        "dispatch" => vec![0],
+        "campaign" => vec![0, 1, 2],
+        _ => vec![0, 1, 2, 3],
+    }
+}
+
+/// tear's temporal monitor over the host's log of provider calls and campaign releases,
+/// one stream per process run, per message and for the campaign's releases.
+#[derive(Default)]
+struct Temporal {
+    streams: BTreeMap<String, Monitor>,
+}
+impl Temporal {
+    fn monitor(kind: &str) -> Monitor {
+        let props = match kind {
+            // A throttled response holds that process's next provider call for a second.
+            // The host marks the moment the dispatcher has handled a throttled response; the
+            // first call after it starts at least a second after the throttled call.
+            // Two throttles handled in one turn leave two markers: the second carries the obligation on.
+            "proc" => vec![Property::next("brake: a throttled process waits 1 s", "/at", |f| f["out"] == "braked", |t, f| {
+                (f["out"] == "braked" && f["since"].as_u64() >= t["since"].as_u64()) || f["at"].as_u64() >= t["since"].as_u64().map(|a| a + 990)
+            })],
+            // A throttled row is retried no sooner than its 2 s backoff, never twice at once.
+            "mail" => vec![
+                Property::next("backoff: a throttled row waits 2 s", "/at", |f| f["out"] == "throttled", |t, f| f["at"].as_u64() >= t["at"].as_u64().map(|a| a + 1990)),
+                Property::next("once: a possibly accepted row is never resent", "/out", |f| matches!(f["out"].as_str(), Some("accepted" | "unknown")), |_, _| false),
+            ],
+            // A full daily window holds the next release until 24 h after the window opened.
+            _ => vec![
+                Property::always("pace: a window never exceeds its daily cap", "/windowN", |f| f["pace"].as_u64().is_none_or(|p| f["windowN"].as_u64().is_some_and(|n| n <= p))),
+                Property::next("pace: a full window holds until it ends", "/at", |f| f["pace"].as_u64().is_some_and(|p| f["windowN"].as_u64() >= Some(p)), |t, f| {
+                    f["at"].as_u64() >= t["windowStart"].as_u64().map(|w| w + 86_400_000)
+                }),
+            ],
+        };
+        Monitor::new(props).expect("valid temporal properties")
+    }
+    fn push(&mut self, log: &Value) -> R<()> {
+        for e in log.as_array().into_iter().flatten() {
+            let at = e["at"].as_u64().unwrap_or(0);
+            let keys = match (e["kind"].as_str(), e["out"].as_str()) {
+                (Some("send"), Some("braked")) => vec![("proc", format!("proc {}", e["proc"]))],
+                (Some("send"), _) => vec![("proc", format!("proc {}", e["proc"])), ("mail", format!("mail {}", e["mail"]))],
+                _ => vec![("release", "release".to_owned())],
+            };
+            for (kind, key) in keys {
+                self.streams.entry(key).or_insert_with(|| Temporal::monitor(kind)).push(at, e.clone())?;
+            }
+        }
+        Ok(())
+    }
+    fn violations(&self) -> Value {
+        let mut ids: Vec<String> = vec![];
+        for (key, m) in &self.streams {
+            for p in m.receipt()["properties"].as_array().into_iter().flatten() {
+                if p["status"] == "violation" {
+                    ids.push(format!("{} ({key})", p["id"].as_str().unwrap_or_default()));
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        json!(ids)
+    }
 }
 
 /// Conformance host: the model predicts, the Node host runs the real code.
@@ -47,6 +116,7 @@ struct Check {
     cfg: Cfg,
     at: u32,
     traces: u64,
+    temporal: Temporal,
 }
 impl Check {
     fn open() -> R<Check> {
@@ -55,7 +125,7 @@ impl Check {
         let mut command = Command::new("node");
         command.args(["--import", "tsx", "tear/host.ts"]).current_dir(api).env("TEAR_DATABASE_URL", url);
         let fixture = StdioFixture::open(&mut command, Duration::from_secs(60))?;
-        Ok(Check { fixture, cfg: configs()[0].clone(), at: 0, traces: 0 })
+        Ok(Check { fixture, cfg: configs()[0].clone(), at: 0, traces: 0, temporal: Temporal::default() })
     }
 }
 impl Host for Check {
@@ -72,11 +142,21 @@ impl Host for Check {
             }
             "open" => {
                 self.traces += 1;
+                self.temporal = Temporal::default();
                 let c = &self.cfg;
-                self.fixture.act(&json!({"reset": {"seed": c.seed, "pace": c.pace, "recipients": [c.campaign.name(), c.campaign.name()]}}))?;
+                let recipients: Vec<&str> = (0..c.recipients).map(|_| c.campaign.name()).collect();
+                self.fixture.act(&json!({"reset": {"seed": c.seed, "pace": c.pace, "recipients": recipients,
+                    "quota": c.quota.map_or(-1, i64::from), "shards": c.quota.is_some(), "invariants": c.quota.is_some()}}))?;
                 Value::Null
             }
-            "act" => self.fixture.act(&json!({"at": self.at, "action": args[1]}))?,
+            "act" => {
+                let mut observed = self.fixture.act(&json!({"at": self.at, "action": args[1]}))?;
+                if let Some(log) = observed.as_object_mut().and_then(|o| o.remove("log")) {
+                    self.temporal.push(&log)?;
+                }
+                observed["temporal"] = self.temporal.violations();
+                observed
+            }
             "close" => {
                 self.fixture.act(&json!({"end": true}))?;
                 Value::Null
@@ -164,6 +244,34 @@ fn walk(seed: u64, len: usize, labels: &[String], cfg: &Cfg) -> Vec<String> {
     }
     out
 }
+
+/// Hand-written traces for edge cases that random walks rarely reach: each must match the
+/// model and reach its checklist tag. (configuration, actions, tag)
+const SCENARIOS: &[(usize, &[&str], &str)] = &[
+    (2, &["launch", "jobs", "D1 step", "D1 step", "D1 step", "D1 step", "drain", "wait 4s", "drain", "wait 1m", "wait 1m", "wait 1m", "wait 1s", "recover", "D1 step"], "late refusal reopens a done campaign"),
+    (0, &["send ok", "D1 step", "D1 step", "D1 step", "D1 step", "wait 1m", "wait 1m", "wait 1m", "wait 1s", "recover", "D1 step"], "record after the sweep"),
+    (0, &["send ok", "D1 step", "D1 step", "D1 step", "D1 step", "D1 crash", "wait 1m", "wait 1m", "wait 1m", "wait 1s", "recover", "drain"], "crash after the provider accepted"),
+    (0, &["send ok", "D1 step", "D1 step", "D1 crash", "wait 1m", "wait 59s", "D2 step", "D2 step"], "lease -1 s still held"),
+    (0, &["send ok", "D1 step", "D1 step", "D1 crash", "wait 1m", "wait 59s", "wait 1s", "wait 1s", "D2 step", "D2 step"], "expired lease (+1 s) taken by another lease"),
+    (0, &["send ok", "D1 step", "D1 step", "D1 step", "D1 crash", "wait 1m", "wait 1m", "wait 59s", "recover"], "sweep at attempt +3 min -1 s leaves it"),
+    (0, &["send ok", "D1 step", "D1 step", "D1 step", "D1 crash", "wait 1m", "wait 1m", "wait 1m", "wait 1s", "recover", "drain"], "sweep at attempt +3 min +1 s"),
+    (0, &["send thr", "drain", "wait 1s", "drain"], "backoff -1 s still waiting"),
+    (0, &["send thr", "drain", "wait 1s", "wait 1s", "wait 1s", "drain"], "backoff +1 s retried"),
+    (0, &["send ok", "D1 step", "D1 step", "wait 4s", "D1 step", "D1 step"], "pre-send deadline -1 s"),
+    (0, &["send ok", "D1 step", "D1 step", "wait 4s", "wait 1s", "wait 1s", "D1 step", "D1 step", "D1 step"], "pre-send deadline +1 s"),
+    // A row in flight at cancel is throttled, comes back queued, and the next claim cancels it.
+    (2, &["launch", "jobs", "D1 step", "D1 step", "D1 step", "cancel", "D1 step", "D1 step", "D1 step", "wait 4s", "D1 step", "D1 step", "D1 step"], "cancel between lease and claim"),
+    (0, &["launch", "jobs", "D1 step", "D1 step", "D1 step", "cancel", "D1 step", "D1 step"], "in-flight send after cancel"),
+    (1, &["launch", "jobs", "pause", "drain", "resume", "jobs", "wait 1d", "wait 1s", "jobs", "drain"], "queued campaign mail dispatches while paused"),
+    (1, &["launch", "jobs", "wait 1d", "wait 1s", "jobs", "drain"], "next window +1 s releases"),
+    (0, &["schedule", "jobs", "wait 59s", "jobs"], "run job -1 s not yet due"),
+    (0, &["schedule", "jobs", "wait 1m", "wait 1s", "jobs", "drain"], "schedule +1 s releases"),
+    (0, &["schedule", "jobs", "pause", "resume", "wait 1m", "wait 1s", "jobs", "drain"], "resume to scheduled"),
+    (3, &["send ok", "send ok", "send ok"], "pending cap +1 refused"),
+    (3, &["send ok", "send ok", "sendk k1 ok", "drain", "sendk k1 ok", "sendk k1 rej"], "refused admission releases its key"),
+    (0, &["dupk k2 ok", "sendk k2 ok", "sendk k2 rej"], "two concurrent sends with one key"),
+    (0, &["send thr", "send thr", "send ok", "drain", "wait 4s", "drain"], "throttle brake delays the next send"),
+];
 
 /// Group key: the action verb plus the mismatching field, or the first safety violation.
 fn signature(run: &Value) -> String {
@@ -293,6 +401,25 @@ fn edges(depth: u64, max_states: u64, labels: Vec<String>, cfg: &Cfg) -> R<(Valu
     Ok((info, traces))
 }
 
+fn scenarios(check: &mut Check) -> R<Value> {
+    let cfgs = configs();
+    let mut failed = vec![];
+    for (cfg, actions, tag) in SCENARIOS {
+        check.cfg = cfgs[*cfg].clone();
+        let run = conformance::dispatch("runTrace", &json!({"actions": actions}), check)?;
+        let trace: Vec<String> = actions.iter().map(|a| (*a).to_owned()).collect();
+        let mut reached = BTreeMap::new();
+        coverage(&trace, &cfgs[*cfg], &mut reached);
+        if run["status"] != "match" || !reached.contains_key(tag) {
+            let at = run["mismatch"]["index"].as_u64().unwrap_or(0) as usize;
+            let path = run["mismatch"]["path"].as_str().unwrap_or_default();
+            failed.push(json!({"tag": tag, "status": run["status"], "reached": reached.contains_key(tag), "mismatch": run["mismatch"], "disabled": run["disabled"], "error": run["error"],
+                "failingStep": if path.is_empty() { Value::Null } else { focus(&run["steps"][at], path) }}));
+        }
+    }
+    Ok(json!({"campaign": "scenarios", "traces": SCENARIOS.len(), "matched": SCENARIOS.len() - failed.len(), "mismatched": failed.len(), "errors": [], "steps": 0, "checkMs": 0, "witnesses": failed}))
+}
+
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
@@ -334,13 +461,8 @@ fn main() -> R<()> {
         Some("edges") => {
             let (depth, max) = (nums.first().copied().unwrap_or(4), nums.get(1).copied().unwrap_or(50_000));
             let mut reports = vec![];
-            for (i, cfg) in configs().iter().enumerate() {
-                if profile == "admission" && cfg.seed == 0 || profile != "admission" && cfg.seed != 0 {
-                    continue;
-                }
-                if profile == "dispatch" && i > 0 {
-                    continue;
-                }
+            for i in cfgs_for(&profile) {
+                let cfg = &configs()[i];
                 let (info, traces) = edges(depth, max, alphabet(&profile), cfg)?;
                 let mut r = campaign(&mut check, &format!("edges {profile} cfg {i}"), traces.into_iter().map(|t| (i, t)).collect(), budget)?;
                 r["model"] = info;
@@ -348,24 +470,35 @@ fn main() -> R<()> {
             }
             json!(reports)
         }
+        Some("scenarios") => scenarios(&mut check)?,
         Some("ci") => {
-            // The pull-request run: seeded random walks over every profile and configuration,
-            // then exhaustive edges of the dispatch profile at depth 4, each time-bounded.
-            let labels = alphabet("all");
-            let n = configs().len();
-            let walks = (0..120).map(|s| ((s as usize) % n, walk(s, 24, &labels, &configs()[(s as usize) % n]))).collect();
-            let random = campaign(&mut check, "ci random 120x24", walks, Some(Instant::now() + Duration::from_secs(30)))?;
-            let (info, traces) = edges(3, 20_000, alphabet("dispatch"), &configs()[0])?;
-            let mut edge = campaign(&mut check, "ci edges dispatch depth 3", traces.into_iter().map(|t| (0, t)).collect(), Some(Instant::now() + Duration::from_secs(25)))?;
+            // The pull-request run (about 50 s): the scenarios, seeded random walks over the
+            // exact configurations and over the quota profile, then every edge of the dispatch
+            // profile's model graph to depth 3, each time-bounded.
+            let cfgs = configs();
+            let walks = |profile: &str, n: u64, len: usize| -> Vec<(usize, Vec<String>)> {
+                let (labels, pool) = (alphabet(profile), cfgs_for(profile));
+                (0..n).map(|s| (pool[s as usize % pool.len()], walk(s, len, &labels, &cfgs[pool[s as usize % pool.len()]]))).collect()
+            };
+            let scenarios = scenarios(&mut check)?;
+            let random = campaign(&mut check, "ci random 100x24", walks("all", 100, 24), Some(Instant::now() + Duration::from_secs(22)))?;
+            let quota = campaign(&mut check, "ci quota 30x24", walks("quota", 30, 24), Some(Instant::now() + Duration::from_secs(8)))?;
+            let (info, traces) = edges(3, 20_000, alphabet("dispatch"), &cfgs[0])?;
+            let mut edge = campaign(&mut check, "ci edges dispatch depth 3", traces.into_iter().map(|t| (0, t)).collect(), Some(Instant::now() + Duration::from_secs(18)))?;
             edge["model"] = info;
-            json!([random, edge])
+            json!([scenarios, random, quota, edge])
         }
         _ => {
             let (n, len) = (nums.first().copied().unwrap_or(500), nums.get(1).copied().unwrap_or(30));
             let base = flag(&args, "--seed").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let labels = alphabet(&profile);
-            let cfgs = configs();
-            let traces = (base..base + n).map(|s| ((s as usize) % cfgs.len(), walk(s, len as usize, &labels, &cfgs[(s as usize) % cfgs.len()]))).collect();
+            let (cfgs, pool) = (configs(), cfgs_for(&profile));
+            let traces = (base..base + n)
+                .map(|s| {
+                    let i = pool[(s as usize) % pool.len()];
+                    (i, walk(s, len as usize, &labels, &cfgs[i]))
+                })
+                .collect();
             campaign(&mut check, &format!("random {profile} {n}x{len} seed {base}"), traces, budget)?
         }
     };

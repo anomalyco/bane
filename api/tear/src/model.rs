@@ -1,16 +1,21 @@
 //! # Edge cases (checklist)
 //!
-//! Status: [x] reached by the action set and checked; [~] partly; [ ] not reached (why).
+//! [x] reached and checked (by random walks, the breadth-first edge map or a SCENARIOS trace in
+//! main.rs; `coverage` in every report counts each tag); [~] partly; [ ] not reached, and why.
 //!
 //! Concurrency and interleavings
 //! - [x] Two dispatcher processes lease, claim, send and record the same queue (D1, D2 step).
 //! - [x] A claim after another process claimed or requeued the row (lost claim, version fence).
 //! - [x] A record after the sweep marked the attempt interrupted (accepted / refused / unknown).
-//! - [x] Cancel between a lease and its claim (the claim cancels the row, no provider call).
+//! - [x] Cancel before a leased row's claim (cancel's own page cancels it, the claim loses), and a
+//!       row in flight at cancel that is throttled, requeued and then canceled by the next claim.
 //! - [x] Cancel between a claim and its send (in flight: sent, reported as inFlight).
 //! - [x] Pause with rows queued (they still dispatch) and with rows unreleased (held).
 //! - [x] Two concurrent sends with one Idempotency-Key (dupk: one row, both get its receipt).
 //! - [x] The runner's whole-lease drain interleaved with stepped processes.
+//! - [~] Statement-level races inside one transaction (e.g. cancelPage's SKIP LOCKED against a
+//!       claim holding the row): actions are whole statements; the interleaving points are
+//!       lease, claim, provider call and record.
 //!
 //! Crashes and aborts mid-operation
 //! - [x] Crash before the lease, after the lease (lease held until expiry), after the claim
@@ -20,8 +25,9 @@
 //!
 //! Retries and duplicates
 //! - [x] Throttled (429): requeued at version+1 with 2 s backoff, retried once, then accepted.
-//! - [x] Throttle brake: the same process waits 1 s before its next send.
-//! - [x] 5xx / unknown: acceptance_unknown, never retried automatically.
+//! - [x] Throttle brake: the process's next provider call waits 1 s (temporal, per process).
+//! - [x] 5xx / unknown: acceptance_unknown, never retried; a possibly accepted row is never
+//!       called again (temporal, per message, and the host's double-send check).
 //! - [x] Permanent refusal: rejected, never retried.
 //! - [x] A late definitive refusal after the sweep requeues the row and reopens a done campaign.
 //! - [x] Same key and body replays; same key, different body is 409; a refused admission (429)
@@ -29,21 +35,28 @@
 //!
 //! Lease or lock expiry
 //! - [x] Lease expiry (2 min, ±1 s) while the leasing process stalls; another process takes the row.
-//! - [x] A claimed send that cannot start within 5 s of its claim is deferred, not sent.
-//! - [x] Job leases: the campaign run job's deferral to its schedule and pacing window.
+//! - [x] A claimed send that cannot start within 5 s of its claim is deferred, not sent (±1 s).
+//! - [x] The campaign run job's deferral to its schedule and its pacing window.
 //!
 //! Clock skew and time boundaries
-//! - [x] Every deadline is probed one second either side (lease, sweep, backoff, schedule,
-//!       pacing window, pre-send). Virtual time is shared by JS and PostgreSQL.
-//! - [ ] The exact instant of a deadline: the host's events land 500-950 ms into their second, so
+//! - [x] Every deadline one second either side: lease, sweep, backoff, schedule, run job, pre-send;
+//!       the pacing window +1 s. Virtual time is shared by JS and PostgreSQL.
+//! - [~] The pacing window -1 s: not reachable with the wait alphabet (1 s, 4 s, 59 s, 1 min, 1 d);
+//!       its run job's due check is reached at -1 s through the schedule.
+//! - [ ] The exact instant of a deadline: the host's events land 50-990 ms into their second, so
 //!       equality is a genuine race in the real system too; the model disables reads then.
 //! - [ ] Skew between two processes' clocks: one virtual clock serves all of them.
 //!
 //! Limits and caps at the boundary, ±1
-//! - [x] Pending cap: 10,000 queued direct rows admitted, 10,001st refused (seeded to 9,998).
-//! - [x] Campaign daily cap 1 of 2 recipients: one release per window, the next at +24 h ±1 s.
+//! - [x] Pending cap: 10,000 queued direct rows admitted, the 10,001st refused (seeded to 9,998).
+//! - [x] Campaign daily cap 1 of 2 recipients: one release per window, the next at +24 h +1 s;
+//!       temporal: a full window holds the next release until it ends, never over the cap.
+//! - [x] SES 24-hour quota 2, 3 and 4 with two shards (1-3 campaign credits, fewer than the shard
+//!       count at 2: the tail claim): campaign mail never spends the transactional reserve, and
+//!       every row settles within a simulated week (quota profile, invariants).
+//! - [~] Provider rate pacing: the brake is checked; the 1,000/s rate itself is not lowered,
+//!       because lower rates make every action wait in real time.
 //! - [ ] Hosted per-minute and daily send caps: multi-tenant hosted only (not this host).
-//! - [ ] SES 24-hour quota and shard shares: see the quota profile below when added.
 //!
 //! Empty, zero and huge inputs
 //! - [x] An empty queue: leases, drains and sweeps with nothing due.
@@ -52,15 +65,15 @@
 //!       sizes are fixed to keep runs fast; acceptance tests cover the paging.
 //!
 //! Revocation or deletion racing in-flight work; permissions per actor type
-//! - [ ] Key revocation and origin checks at claim: covered by the access-control tear area.
+//! - [ ] Key revocation and origin checks at claim: the access-control tear area.
 //!
 //! Old and new Worker overlap during deploys
-//! - [x] Two processes with independent gates on one queue (D1 and D2 are the old and new
-//!       process of a deploy, or a Node runner next to a Durable Object).
+//! - [x] Two processes with independent gates on one queue (D1 and D2: the old and new process
+//!       of a deploy, or a restarted runner), and two shards splitting one SES quota.
 //!
 //! Partial failures of external calls
-//! - [x] SES: accept, throttle, permanent refusal, 5xx, a call that never returns (crash at
-//!       the provider call), a response that is lost (crash before the record).
+//! - [x] SES: accept, throttle, permanent refusal, 5xx, a call that never returns (crash at the
+//!       provider call), a response that is lost (crash before the record), a daily-quota refusal.
 //! - [ ] R2 attachments and webhooks: no attachments or webhooks in these traces.
 //!
 //! Reference model of Bane's send path: admission (with Idempotency-Key and the pending cap),
@@ -72,7 +85,7 @@
 //! have been accepted is never repeated, pause stops releases but not queued mail, cancel stops
 //! every unclaimed row, and every admitted row settles.
 //!
-//! Time is in whole seconds. A host event happens 500-950 ms into its second, so a deadline set
+//! Time is in whole seconds. A host event happens 50-990 ms into its second, so a deadline set
 //! D >= 1 s after an event is racy exactly at its second; the model never reads time-dependent
 //! state at such an instant (`racy`), and only `wait` is enabled then.
 use serde::{Deserialize, Serialize};
@@ -241,8 +254,12 @@ pub struct Cfg {
     pub seed: u32,
     /// Campaign daily cap (pace_per_day), set below the API's 100 minimum to reach it.
     pub pace: Option<u8>,
-    /// Behaviour of every campaign recipient.
+    /// Behaviour of every campaign recipient, and how many there are.
     pub campaign: P,
+    pub recipients: u8,
+    /// SES 24-hour quota with two dispatcher shards. These traces are checked as invariants over
+    /// the real state (the reserve, no stuck mail, the temporal properties), not predicted.
+    pub quota: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +271,8 @@ pub struct Model {
     /// Idempotency keys: (key, persona of the first body, mail index).
     pub keys: Vec<(String, P, usize)>,
     pub runner_next_send: u32,
+    /// A throttled response also turns off the runner's early transactional slot for 10 s.
+    pub runner_brake_until: u32,
     pub d: [Inst; 2],
     pub directs: u8,
     /// Coverage tags of the last action (not part of the state).
@@ -272,13 +291,14 @@ fn off() -> Inst {
 
 impl Model {
     pub fn initial(cfg: Cfg) -> Model {
+        let total = cfg.recipients;
         Model {
             t: 0,
             cfg,
             mails: vec![],
             camp: Camp {
                 st: Cs::Draft,
-                total: 2,
+                total,
                 prepared: 0,
                 expanded: 0,
                 window: None,
@@ -289,6 +309,7 @@ impl Model {
             },
             keys: vec![],
             runner_next_send: 0,
+            runner_brake_until: 0,
             d: [off(), off()],
             directs: 0,
             cov: vec![],
@@ -304,6 +325,7 @@ impl Model {
                 || m.lease == Some(t)
                 || (m.st == St::Attempting && m.attempt.map(|a| a + RECOVER) == Some(t))
         }) || (self.camp.job_racy && self.camp.job == Some(t))
+            || (self.runner_brake_until > 0 && self.runner_brake_until == t)
             || self.camp.sched == Some(t)
             || self.camp.window.map(|w| w + DAY) == Some(t)
             || self
@@ -476,11 +498,11 @@ impl Model {
         if self.d.iter().any(|i| i.ph != Ph::Off) {
             self.cov.push("runner drain interleaved with a stepped process");
         }
+        self.lease_boundaries(&rows);
         if rows.is_empty() {
             self.cov.push("empty drain");
             return;
         }
-        self.lease_boundaries(&rows);
         let prep = self.t;
         let mut claimed = vec![];
         for &i in &rows {
@@ -493,8 +515,15 @@ impl Model {
         // Sends start in lease order; a throttled response holds the next send for 1 s, and a
         // send that cannot start within 5 s of its claim is deferred without a provider call.
         let mut outcomes = vec![];
-        for (i, ver) in claimed {
-            let start = self.t.max(self.runner_next_send);
+        let mut first_start = None;
+        for (idx, (i, ver)) in claimed.into_iter().enumerate() {
+            // The first send of a turn starts at its slot; a transactional second one may take
+            // the next slot at once (unless braked), so it is in flight before the first's response.
+            let early = idx == 1 && !self.mails[i].campaign && first_start.is_some_and(|s| self.runner_brake_until <= s);
+            let start = if early { first_start.unwrap() } else { self.t.max(self.runner_next_send) };
+            if idx == 0 {
+                first_start = Some(start);
+            }
             if start > self.t {
                 self.cov.push("throttle brake delays the next send");
             }
@@ -502,12 +531,13 @@ impl Model {
                 outcomes.push((i, Out::Deferred, ver, start));
                 continue;
             }
-            self.t = start;
+            self.t = self.t.max(start);
             let out = self.provider(i);
             if out == Out::Throttled {
-                self.runner_next_send = self.t + 1;
+                self.runner_next_send = self.runner_next_send.max(start + 1);
+                self.runner_brake_until = start + 10;
             }
-            outcomes.push((i, out, ver, self.t));
+            outcomes.push((i, out, ver, start));
         }
         let mut finishing = false;
         for (i, out, ver, at) in outcomes {
@@ -532,6 +562,7 @@ impl Model {
             }
             Ph::Lease => match self.due_order().first().copied() {
                 None => {
+                    self.lease_boundaries(&[]);
                     self.cov.push("lease finds nothing due");
                     // The run ends; it settles campaigns it moved rows for.
                     if self.d[k].finishing {
@@ -754,6 +785,9 @@ impl Model {
     /// The campaign's run job, when it is due.
     fn jobs(&mut self) {
         if !self.camp.job.is_some_and(|at| at <= self.t) {
+            if self.camp.job == Some(self.t + 1) {
+                self.cov.push("run job -1 s not yet due");
+            }
             return;
         }
         self.camp.job = None;
@@ -827,6 +861,9 @@ impl Model {
 
     // ---- actions ------------------------------------------------------------------------------
     pub fn enabled(&self, a: &str) -> bool {
+        if self.cfg.quota.is_some() {
+            return true; // Invariants hold in every interleaving, racy instants included.
+        }
         let words: Vec<&str> = a.split(' ').collect();
         let reads_time = match words[0] {
             "wait" | "send" | "sendk" | "dupk" | "pause" | "cancel" => false,
@@ -851,16 +888,18 @@ impl Model {
     pub fn step_action(&mut self, a: &str) -> Value {
         self.cov.clear();
         let words: Vec<&str> = a.split(' ').collect();
+        if self.cfg.quota.is_some() {
+            // Only the clock is modeled; the host checks the properties on the real state.
+            match words[0] {
+                "wait" => self.t += parse_wait(words[1]),
+                "settle" => self.t += 7 * (DAY + 60),
+                _ => {}
+            }
+            return Value::Null;
+        }
         let mut r = Value::Null;
         match words[0] {
-            "wait" => {
-                self.t += match words[1] {
-                    "1s" => 1,
-                    "1m" => 60,
-                    "1d" => DAY,
-                    other => other.trim_end_matches('s').parse().unwrap_or(1),
-                }
-            }
+            "wait" => self.t += parse_wait(words[1]),
             "send" => r = json!([self.admit(P::parse(words[1]).unwrap())]),
             "sendk" => r = json!([self.admit_key(words[1], P::parse(words[2]).unwrap())]),
             "dupk" => {
@@ -904,6 +943,9 @@ impl Model {
     }
 
     pub fn expected(&self, r: Value) -> Value {
+        if self.cfg.quota.is_some() {
+            return json!({"safety": [], "temporal": []});
+        }
         let mut mail = serde_json::Map::new();
         for m in &self.mails {
             mail.insert(m.name.clone(), json!([m.st.name(), m.calls]));
@@ -925,9 +967,17 @@ impl Model {
         }
         let c = &self.camp;
         json!({
-            "r": r, "mail": mail, "d": d, "safety": [],
+            "r": r, "mail": mail, "d": d, "safety": [], "temporal": [],
             "campaign": [c.st.name(), c.expanded, c.window_n],
         })
+    }
+}
+
+fn parse_wait(w: &str) -> u32 {
+    match w {
+        "1m" => 60,
+        "1d" => DAY,
+        other => other.trim_end_matches('s').parse().unwrap_or(1),
     }
 }
 
@@ -937,7 +987,9 @@ pub fn alphabet(profile: &str) -> Vec<String> {
     let dispatch = ["send ok", "send thr", "send rej", "send unk", "D1 step", "D1 crash", "D2 step", "D2 crash", "recover", "drain", "wait 4s", "wait 59s"];
     let campaign = ["launch", "schedule", "pause", "resume", "cancel", "jobs", "drain", "D1 step", "D1 crash", "recover", "wait 59s", "wait 1d"];
     let admission = ["send ok", "sendk k1 ok", "sendk k1 rej", "dupk k2 ok", "drain"];
+    let quota = ["send ok", "send unk", "launch", "jobs", "D1 step", "D2 step", "D1 crash", "D2 crash", "recover", "wait 1d", "settle"];
     let pick: Vec<&str> = match profile {
+        "quota" => quota.to_vec(),
         "dispatch" => dispatch.to_vec(),
         "campaign" => campaign.to_vec(),
         "admission" => admission.to_vec(),
