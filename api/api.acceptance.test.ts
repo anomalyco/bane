@@ -4349,6 +4349,246 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
   });
 });
 
+describe('Billing: metering, gate and settlement', () => {
+  // A Hosted (shared pool) workspace that sends live (not installation-simulated), so its recipients are billed.
+  async function billingFixture(runtime: import('./src/core.js').Runtime, db: pg.Client, local: (method: string, path: string, body?: Json) => Promise<Reply>, request: typeof http) {
+    const wid = runtime.config.workspaceId, pool = '222233334444', domain = 'billing.example', from = `hello@${domain}`;
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','bane-billing-fixture')`, [wid, REGION, pool]);
+    await db.query(`UPDATE provider_connection_regions SET tenant_state='ready' WHERE connection_id=$1`, [wid]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]); // No daily cap in the way.
+    const key = ok(await local('POST', '/v1/api-keys', { name: 'Billing sender', permissions: ['read', 'send'] }), 201); secrets.add(key.secret);
+    ok(await request('GET', '/v1/me', key.secret)); // A key's first use records it; admission is measured after that.
+    let n = 0;
+    return {
+      wid, from,
+      send: (recipients = 1) => request('POST', '/v1/emails/send', key.secret, { from, to: Array.from({ length: recipients }, () => `reader-${n++}@example.net`), subject: 'Billing fixture', text: 'Fixture.' }),
+      mode: (mode: 'off' | 'shadow' | 'enforce', extra = '') => db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]),
+      freeUsed: (used: number) => db.query(`INSERT INTO billing_accounts(workspace_id,free_emails_used) VALUES ($1,$2) ON CONFLICT (workspace_id) DO UPDATE SET free_emails_used=$2,free_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date`, [wid, used]),
+      post: async (kind: string, source: string, paid: bigint, promo = 0n) => (await db.query(`SELECT billing_post($1,$2,$3,$4,$5,'{}','system') AS r`, [wid, kind, source, paid.toString(), promo.toString()])).rows[0].r,
+      position: async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p,
+      open: async (meter: string) => Number((await db.query(`SELECT coalesce(sum(quantity-settled_quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND meter=$2`, [wid, meter])).rows[0].n),
+      account: async () => (await db.query('SELECT * FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0],
+    };
+  }
+  const settle = async (db: pg.Client, wid: string, cutoff = "date_trunc('hour', now(), 'UTC')") => (await db.query(`SELECT billing_settle($1, ${cutoff}) AS s`, [wid])).rows[0].s;
+  const captureLogs = (t: TestContext) => { const logs: Json[] = []; for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} }); return logs; };
+
+  test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt, invoiced and the platform pass, debt blocks free sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
+      // Off (the migration default): sends are metered from the first one, recipients counted, in the same statement.
+      await meter('billing-off-admitted', async () => ok(await f.send(2), 202), 1);
+      assert.equal(await f.open('send'), 2);
+      // Enforce, nothing paid and the free 3,000 used: refused in the same single statement, before anything else.
+      await f.mode('enforce'); await f.freeUsed(3000);
+      const denied = await meter('billing-enforce-denied', async () => error(await f.send(), 402, 'BALANCE_EXHAUSTED'), 1);
+      assert.equal(denied.retryable, true); assert.match(denied.message, /settings#billing/);
+      assert.equal(await f.open('send'), 2, 'A refused send is not metered.');
+      // Shadow: the same shortfall is allowed and logged as the would-be denial.
+      await f.mode('shadow');
+      const logs = captureLogs(t);
+      ok(await f.send(), 202);
+      assert.ok(logs.some(l => l.code === 'BILLING_SHADOW_DENY' && l.workspaceId === f.wid && l.requiredUc === '20000'), 'Shadow logs BILLING_SHADOW_DENY.');
+      // Enforce with exactly ten emails' worth beyond the 3 already open: 20 concurrent one-recipient sends admit exactly 10.
+      await f.mode('enforce');
+      await f.post('topup', `attempt:${unique('fixture')}`, 13n * 20000n);
+      const results = await Promise.all(Array.from({ length: 20 }, () => f.send()));
+      assert.deepEqual([results.filter(r => r.status === 202).length, results.filter(r => r.status === 402 && r.body.error.code === 'BALANCE_EXHAUSTED').length], [10, 10]);
+      assert.equal((await f.position()).availableUc, '0');
+      // Exempt and invoiced accounts are never gated; neither is the platform's own workspace.
+      for (const mode of ['exempt', 'invoiced']) { await db.query('UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1', [f.wid, mode]); ok(await f.send(), 202); }
+      await db.query(`UPDATE billing_accounts SET mode='prepaid' WHERE workspace_id=$1`, [f.wid]);
+      error(await f.send(), 402, 'BALANCE_EXHAUSTED');
+      runtime.config.platformDomainWorkspace = f.wid;
+      try { ok(await f.send(), 202); } finally { runtime.config.platformDomainWorkspace = undefined; }
+      // A debt blocks even sends the free allowance would cover.
+      await db.query(`UPDATE billing_accounts SET free_emails_used=0 WHERE workspace_id=$1`, [f.wid]);
+      await f.post('adjustment', `adjustment:${unique('debt')}`, -1_000_000n);
+      assert.ok((await f.position()).freeEmailsLeft > 0);
+      error(await f.send(), 402, 'BALANCE_EXHAUSTED');
+      // Off again: nothing is gated.
+      await f.mode('off'); ok(await f.send(), 202);
+    });
+  });
+
+  test('settlement prices closed hours once, applies the combined free tier, rolls the month, and shadow or exempt post $0', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const wid = unique('billing-settle'), at = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
+      const usage = (meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1, ${at(hours)}, $2, $3)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, q]);
+      const ledger = async () => (await db.query(`SELECT kind,paid_uc::text,promo_uc::text,detail FROM billing_ledger WHERE workspace_id=$1 ORDER BY id`, [wid])).rows;
+      const account = async () => (await db.query('SELECT * FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      await db.query(`UPDATE billing_config SET mode='shadow'`);
+      // 2,000 sent and 1,000 received use the free 3,000; then one more send costs 20,000 µ¢ and 7 Omens 70,000 µ¢.
+      await usage('send', 3, 2000); await usage('receive', 3, 1000); await usage('send', 2, 1); await usage('omen', 2, 7); await usage('byo_send', 2, 5);
+      await usage('send', 0, 4); // The current hour is still open: never settled.
+      const first = await settle(db, wid);
+      assert.deepEqual([first.entries, first.costUc, first.charged], [5, '90000', false]);
+      const [row] = await ledger();
+      assert.deepEqual([row.kind, row.paid_uc, row.promo_uc, row.detail.costUc, row.detail.meters.send.payable, row.detail.meters.byo_send.costUc], ['usage', '0', '0', '90000', 1, 0], 'Shadow posts a $0 usage row with the would-be cost.');
+      assert.deepEqual([(await account()).free_emails_used, (await account()).month_spend_uc, (await account()).balance_uc], [3001, '90000', '0']);
+      // Idempotent: a second run finds nothing; a late write into a settled hour settles with the next run.
+      assert.deepEqual(await settle(db, wid), { entries: 0 });
+      await usage('send', 3, 5);
+      assert.equal((await settle(db, wid)).costUc, '100000');
+      // The gate counts the open hour against what's left of the free tier.
+      assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.openUc, '80000');
+      // Enforce: promo first, then paid; the account goes into debt and unpaid_since starts; a top-up collects it.
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      await db.query(`SELECT billing_post($1,'grant','grant:fixture',0,50000,'{}','operator:fixture')`, [wid]);
+      await usage('send', 1, 10);
+      const charged = await settle(db, wid);
+      assert.deepEqual([charged.costUc, charged.charged], ['200000', true]);
+      const debt = await account();
+      assert.deepEqual([debt.promo_uc, debt.balance_uc, debt.unpaid_since !== null], ['0', '-150000', true]);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused' AND status='pending'`, [wid])).rows[0].n, 1);
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-collect',170000,0,'{}','stripe')`, [wid]);
+      const paid = await account();
+      assert.deepEqual([paid.balance_uc, paid.unpaid_since, paid.empty_since], ['20000', null, null], 'A top-up collects the debt and ends the episode.');
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`billing.restored:${wid}`])).rows[0].status, 'pending');
+      // A write-off settles the books but leaves unpaid_since (and so a receive hold) until a top-up.
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:fixture-debt',-500000,0,'{}','operator:fixture')`, [wid]);
+      await db.query(`SELECT billing_post($1,'write_off','write_off:fixture',480000,0,'{}','system')`, [wid]);
+      const written = await account();
+      assert.deepEqual([written.balance_uc, written.unpaid_since !== null], ['0', true]);
+      // Exempt accounts settle at $0 under enforce too, with the would-be cost recorded.
+      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [wid]);
+      await usage('omen', 1, 3);
+      assert.deepEqual([(await settle(db, wid)).charged, (await ledger()).at(-1).detail.costUc], [false, '30000']);
+      // Month roll: last month's used free tier doesn't carry over; this month's first emails are free again.
+      const roll = unique('billing-roll');
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_emails_used,month_spend_uc) VALUES ($1,'2026-09-01',3000,123)`, [roll]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-09-30 23:00Z','send',2),($1,'2026-10-01 05:00Z','send',10)`, [roll]);
+      const rolled = await settle(db, roll, "'2026-10-02 00:00Z'::timestamptz");
+      const after = (await db.query('SELECT free_month::text,free_emails_used,month_spend_uc::text FROM billing_accounts WHERE workspace_id=$1', [roll])).rows[0];
+      assert.deepEqual([rolled.costUc, after], ['40000', { free_month: '2026-10-01', free_emails_used: 10, month_spend_uc: '0' }]);
+      // Drift: every balance equals the sum of its ledger rows.
+      assert.deepEqual((await db.query(`SELECT a.workspace_id FROM billing_accounts a WHERE a.workspace_id=ANY($1) AND (a.balance_uc,a.promo_uc)<>(SELECT coalesce(sum(paid_uc),0),coalesce(sum(promo_uc),0) FROM billing_ledger l WHERE l.workspace_id=a.workspace_id)`, [[wid, roll]])).rows, []);
+      await db.query('SAVEPOINT ledger_append_only');
+      await assert.rejects(db.query(`UPDATE billing_ledger SET paid_uc=0 WHERE workspace_id=$1`, [wid]), /append-only/);
+      await db.query('ROLLBACK TO SAVEPOINT ledger_append_only');
+    });
+  });
+
+  test('meters: pre-SES refunds land in the current hour, spam rejections stay charged, receives, Omens and storage count once', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const usage = async () => Object.fromEntries((await db.query(`SELECT meter,sum(quantity)::int AS q FROM billing_usage_hourly WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC') GROUP BY 1`, [f.wid])).rows.map(r => [r.meter, r.q]));
+      // Two days after admission, a pre-SES rejection refunds its three recipients into the current hour.
+      const old = unique('billing-old');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        VALUES ($1,$2,$3,'fixture',$4,'["a@example.net","b@example.net"]','["c@example.net"]','[]','Old','{}',false,now()-interval '2 days')`, [old, f.wid, REGION, f.from]);
+      assert.equal((await usage()).send, 3);
+      await db.query(`UPDATE billing_config SET mode='shadow'`); await settle(db, f.wid, "now() + interval '1 hour'");
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
+      assert.equal((await usage()).send, 0, 'The refund is an unsettled −3 in the current hour.');
+      assert.equal((await db.query(`SELECT quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=date_trunc('hour',now(),'UTC')`, [f.wid])).rows[0].d, '-3');
+      // A spam-screen rejection stays charged.
+      const spam = unique('billing-spam');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated) VALUES ($1,$2,$3,'fixture',$4,'["s@example.net"]','[]','[]','Spam','{}',false)`, [spam, f.wid, REGION, f.from]);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='CONTENT_REJECTED_SPAM' WHERE id=$1`, [spam]);
+      assert.equal((await usage()).send, 1);
+      // Receives: one per message with an SES message ID (spam included), Omens from verdicts.omenCalls, stored bytes per day.
+      const thread = unique('thread');
+      await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)`, [thread, f.wid]);
+      const message = (id: string, ses: string | null, extra: { spam?: boolean; omen?: number; bytes?: number; days?: number } = {}) => db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,spam,verdicts,size_bytes,received_at)
+        VALUES ($1,$2,'inbound',$3,$4,$5,$6,$7,now()-make_interval(days=>$8))`, [id, f.wid, thread, ses, !!extra.spam, JSON.stringify(extra.omen ? { omenCalls: extra.omen } : {}), extra.bytes ?? 1000, extra.days ?? 0]);
+      await message(unique('msg'), unique('ses'), { omen: 2, bytes: 5000 });
+      await message(unique('msg'), unique('ses'), { spam: true });
+      await message(unique('msg'), null, { bytes: 700 }); // IMAP APPEND or a sandbox copy: stored, never a receive.
+      assert.deepEqual([(await usage()).receive, (await usage()).omen], [2, 2]);
+      const today = Number((await db.query(`SELECT bytes FROM mail_storage_days WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date`, [f.wid])).rows[0].bytes);
+      assert.equal(today, 6700);
+      // Storage: bytes older than 90 days roll into the aged sum, which is metered beyond the free 1 GB, at $0 until storage_billing_from.
+      const aged = unique('msg');
+      await message(aged, unique('ses'), { bytes: 1_500_000_000, days: 120 });
+      const day = (await db.query(`SELECT billing_storage_day((now() AT TIME ZONE 'UTC')::date - 1) AS d`)).rows[0].d;
+      assert.ok(day.metered >= 1);
+      const storage = (await db.query(`SELECT quantity::text, billing_rate_uc('storage',1::smallint,hour)::text AS rate FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='storage'`, [f.wid])).rows[0];
+      assert.deepEqual(storage, { quantity: '500000000', rate: '0' });
+      assert.deepEqual((await db.query(`SELECT billing_storage_day((now() AT TIME ZONE 'UTC')::date - 1) AS d`)).rows[0].d.aged, 0, 'Rerunning a day is a no-op.');
+      await db.query(`UPDATE billing_config SET storage_billing_from=now()::date - 30`);
+      assert.ok(Number((await db.query(`SELECT billing_rate_uc('storage',1::smallint,date_trunc('hour',now(),'UTC')) AS r`)).rows[0].r) > 0);
+      // Deleting aged mail takes its bytes off the aged sum.
+      await db.query(`DELETE FROM mail_messages WHERE id=$1`, [aged]);
+      assert.equal((await db.query(`SELECT aged_bytes::text FROM mail_storage_aged WHERE workspace_id=$1`, [f.wid])).rows[0].aged_bytes, '0');
+    });
+  });
+
+  test('a campaign waits on balance, then a top-up wakes it through billing.restored', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const list = ok(await local('POST', '/v1/lists', { name: 'Billing' }), 201);
+      await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'billing-contact-'||n,$1,'reader'||n||'@example.net','subscribed' FROM generate_series(1,3) n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`, [f.wid, list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: 'Billing', from: f.from, subject: 'Balance', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201);
+      await f.mode('enforce'); await f.freeUsed(3000);
+      // Launch refuses with 402 while nothing can be paid for.
+      error(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 402, 'BALANCE_EXHAUSTED');
+      await f.post('topup', 'attempt:fixture-one', 20000n);
+      ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+      const released = async () => Number((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1`, [c.id])).rows[0].n);
+      for (let i = 0; i < 4 && await released() < 1; i++) await run('campaign.run');
+      assert.equal(await released(), 1, 'Only the one affordable recipient is released.');
+      await run('campaign.run');
+      const waiting = ok(await local('GET', `/v1/campaigns/${c.id}`));
+      assert.equal(waiting.delivery.waiting.reason, 'balance');
+      await f.post('topup', 'attempt:fixture-two', 100000n);
+      const { restoreJob } = await import('./src/billing/restore.js');
+      await restoreJob(runtime, {}, { id: `billing.restored:${f.wid}`, attempts: 1, workspaceId: f.wid });
+      await run('campaign.run');
+      assert.equal(await released(), 3);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${c.id}`)).delivery.waiting, null);
+    });
+  });
+
+  test('receive hold: unpaid for 7 days under enforce holds new mail; a credit that clears the debt releases it to ingest', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, { restoreJob } = await import('./src/billing/restore.js');
+      const position = async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p;
+      const mid = unique('held');
+      await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
+        VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [wid, mid, REGION, 'held/' + mid]);
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:fixture-hold',-100000,0,'{}','operator:fixture')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [wid]);
+      assert.equal((await position()).receiveHeld, false, 'Off (and shadow) never hold.');
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      assert.equal((await position()).receiveHeld, false, 'receive_hold stays off until the held/ IAM is in place.');
+      await db.query(`UPDATE billing_config SET receive_hold=true`);
+      assert.equal((await position()).receiveHeld, true);
+      // The daily scan says so once per episode; billing holds are invisible to the 3-day budget-hold expiry.
+      const scan = (await db.query('SELECT billing_unpaid_scan() AS s')).rows[0].s;
+      assert.ok(scan.receiveHeld >= 1 && scan.receiveHoldSoon >= 1);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind IN ('receive_hold_soon','receive_held')`, [wid])).rows[0].n, 2);
+      await db.query(`SELECT release_receive_budget_holds($1)`, [wid]);
+      const receipt = async () => (await db.query('SELECT status,error,object_key FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2', [wid, mid])).rows[0];
+      assert.deepEqual(await receipt(), { status: 'held', error: 'BILLING_HOLD', object_key: 'held/' + mid });
+      const job = { id: `billing.restored:${wid}`, attempts: 1, workspaceId: wid };
+      // A credit that leaves the debt keeps the hold.
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-partial',50000,0,'{}','stripe')`, [wid]);
+      await restoreJob(runtime, {}, job);
+      assert.equal((await receipt()).status, 'held');
+      // Paying the debt releases the receipt to ingest, which reads it from held/.
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-clear',2000000,0,'{}','stripe')`, [wid]);
+      assert.equal((await position()).receiveHeld, false);
+      await restoreJob(runtime, {}, job);
+      assert.deepEqual(await receipt(), { status: 'pending', error: null, object_key: 'held/' + mid });
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2`, [wid, mid])).rows[0].n, 1);
+    });
+  });
+  test('244 removed the per-inbox IMAP charge; password revocation still notifies open sessions', async t => {
+    const db = await fixtureDatabase(t);
+    const gone = (await db.query(`SELECT to_regprocedure('inbox_protocol_daily_usage(date)') AS f, to_regclass('inbox_protocol_periods') AS t`)).rows[0];
+    assert.deepEqual(gone, { f: null, t: null });
+    const body = (await db.query(`SELECT prosrc FROM pg_proc WHERE proname='inbox_protocol_meter'`)).rows[0].prosrc;
+    assert.match(body, /pg_notify\('bane_protocol_auth'/); assert.doesNotMatch(body, /inbox_protocol_periods/);
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname IN ('protocol_meter','protocol_end')`)).rows[0].n, 2);
+  });
+});
+
 describe('Private attachment assets and campaign revisions', () => {
   test('uploads persist safe metadata, reject unsafe/oversized inputs, and share access within the workspace', async t => {
     const key = await keyFixture(t);
@@ -11543,7 +11783,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
         assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
         ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
-        assert.equal((await db.query("SELECT cents FROM inbox_protocol_daily_usage((now() AT TIME ZONE 'UTC')::date) WHERE inbox_id=$1",[p.id])).rows[0]?.cents,100);
+        // Protocol access is free (migration 244): issuing a password starts no charge period.
+        assert.equal((await db.query("SELECT to_regclass('inbox_protocol_periods') AS t")).rows[0].t,null);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
         assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
         const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
