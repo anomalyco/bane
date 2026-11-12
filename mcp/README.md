@@ -118,3 +118,11 @@ A typical run: `createInbox` → give the address to the sign-up form → `waitF
 ### Receiving consent
 
 To manage receiving, request `bane:manage` and explicitly approve receiving on the human OAuth screen. Old approvals do not silently acquire these tools. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).
+
+## External authorization server (cutover preview)
+
+Set `ACCOUNT_ISSUER` to the HTTPS issuer that signs access tokens for this installation. Resource discovery is available at `${PUBLIC_URL}/.well-known/oauth-protected-resource/mcp`. The resource indicator is the absolute `${PUBLIC_URL}/mcp` URI, including `/mcp`. Clients discover and request authorization at the issuer. During cutover each user authorizes their client again; existing Bane-issued grants cannot be exchanged at the new issuer.
+
+`bane:read`, `bane:send` and `bane:manage` request the corresponding Bane permissions. The resource verifies the JWT signature and audience, requires a matching Bane `(issuer, subject)` identity, and checks live workspace membership. Members cannot acquire `manage`. A token whose user belongs to several workspaces needs an explicit workspace binding; until that binding is available, access is denied. A sender-constrained access token requires its matching DPoP proof on every request.
+
+For hosted Bane, the resource identifiers are `https://dev.bane.mx/mcp` and `https://bane.mx/mcp`. Configure the appropriate resource and allowed scopes for **each MCP client** on its stage's issuer. Register a URL client ID in advance on issuers that require preregistration. The issuer must expose a subject Bane can resolve for this resource; a third-party client's pairwise subject can differ from the subject Bane sees on dashboard sign-in.

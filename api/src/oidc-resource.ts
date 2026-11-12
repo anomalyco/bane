@@ -48,10 +48,8 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   let claims: oauth.JWTAccessTokenClaims;
   try {
     const as = await authority(runtime.config.accountIssuer!);
-    // The public resource URI is configured, independent of proxy headers and
-    // internal Worker URLs. oauth4webapi verifies typ, exp, iss, aud, signature,
-    // and (for cnf.jkt) the proof key, ath, htm, htu, iat and proof signature.
-    claims = await oauth.validateJwtAccessToken(as, new Request(resource, {method: request.method, headers: request.headers}), resource,
+    // The audience is configured; htm and htu must match the actual HTTP request.
+    claims = await oauth.validateJwtAccessToken(as, request, resource,
       { signingAlgorithms: ['ES256','RS256'], [oauth.clockTolerance]: 0, signal: AbortSignal.timeout(5000) });
   } catch { return denied(401); }
   if (claims.aud !== resource && !(Array.isArray(claims.aud) && claims.aud.length === 1 && claims.aud[0] === resource)) return denied(401);
