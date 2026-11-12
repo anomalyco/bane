@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, and, eq } from 'drizzle-orm';
-import { ApiError, digest, errors, id, json, randomSecret, response, security, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, digest, errors, id, json, randomSecret, response, security, webhookUrlHint, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type Runtime } from './core.js';
 import { claimSends } from './states.js';
 import { mailboxes, mailMessages, mailboxWebhooks, retainedMail } from './db/mailbox.js';
 import { ritualAdmin, ownReceiving } from './rituals.js';
@@ -26,7 +26,7 @@ export const Endpoint = z.object({
   type: z.enum(types),
   status: Status,
   call: z.string().describe('How a ritual calls it.'),
-  target: z.string().describe('Where it delivers. Chat credentials are masked; they are write-only.'),
+  target: z.string().describe('Where it delivers. Slack, Discord and webhook URLs are write-only; only the last four characters are shown.'),
   policy: Policy,
   expiresAt: z.string().nullable().describe('When a pending forward confirmation link expires.'),
   nextStep: z.string().describe('What to do next, for people and agents.'),
@@ -94,7 +94,7 @@ async function endpointRows(db: DbExecutor, w: string, q: { name?: string; curso
 async function view(runtime: Runtime, w: string, r: Row): Promise<z.infer<typeof Endpoint>> {
   const policy = endpointPolicy(r.type, r), call = endpointCall(r.name);
   const value = r.encrypted_value ? await decrypt(runtime, r.encrypted_value, w + ':endpoint:' + r.hook_id) : null;
-  const target = r.type === 'webhook' ? r.url! : r.type === 'forward' ? value! : `${r.type === 'slack' ? 'Slack incoming webhook' : 'Discord webhook'} ••••${value!.slice(-4)}`;
+  const target = r.type === 'webhook' ? webhookUrlHint(r.url!) : r.type === 'forward' ? value! : `${r.type === 'slack' ? 'Slack incoming webhook' : 'Discord webhook'} ${webhookUrlHint(value!)}`;
   const expired = r.type === 'forward' && !r.verified && !r.declined_at && r.expires_at !== null && new Date(r.expires_at).getTime() <= Date.now();
   const status = r.paused ? 'paused' : r.declined_at ? 'declined' : r.verified ? 'ready' : expired ? 'expired' : 'pending';
   const payload = endpointPayloads[r.type].signature(r.name).replace(/^endpoints\.[^(]+/, call);

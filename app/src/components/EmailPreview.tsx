@@ -43,6 +43,29 @@ export function ReceivedEmailPreview(props: Omit<EmailPreviewProps, 'remoteImage
   return <>{remote && !load && <Alert tone="info">Remote images are hidden so the sender can’t tell when you open this message. <Button variant="ghost" size="sm" onClick={() => setLoadedFor(props.html)}>Load images</Button></Alert>}<EmailPreview {...props} remoteImages={load} /></>;
 }
 
+// The sandboxed frame can't fetch, so it gets Inter as data: URLs, read once per file per session: the Latin files
+// (the dashboard's own, app/src/styles/tokens.css), the other-scripts file only for email text that needs it, and the
+// italic only for email that uses it. Sent mail itself links the full files.
+const LATIN_RANGE = 'U+0000-017F, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0300-0304, U+0308, U+0329, U+2000-206F, U+20A0-20CF, U+2100-214F, U+2190-23FF, U+25A0-25FF, U+2713-2717, U+FEFF, U+FFFD';
+const EXT_RANGE = 'U+0180-02BA, U+02BD-02C5, U+02C7-02D9, U+02DB, U+02DD-02FF, U+0306-0307, U+0309-0328, U+032C-052F, U+0E3F, U+1D00-1FFE, U+2070-209C, U+20DB-20F0, U+2150-2189, U+2423-2468, U+24B6-24EA, U+2600-26A0, U+2756-2788, U+27EF-27FA, U+2913, U+2A38, U+2B06-2B24, U+2C7C-2C7F, U+2DFF-2E18, U+A69F, U+A7FF, U+A92E, U+E000-E163, U+E1C3-E2DC, U+EE01-EEE1, U+F6C3, U+1F12F-1F16B, U+1F850-1F852';
+const OTHER_SCRIPTS = /[\u0180-\u02BA\u0370-\u052F\u0E3F\u1D00-\u1FFE\u2070-\u209C\u2150-\u2189]/;
+const ITALIC = /<(?:em|i|cite|var|dfn)\b|italic/i;
+const fontData = new Map<string, Promise<string>>();
+function fontSource(path: string) {
+  let source = fontData.get(path);
+  if (!source) {
+    source = fetch(path).then(response => { if (!response.ok) throw new Error('Font unavailable'); return response.blob(); }).then(blob => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(new Blob([blob], { type: 'font/woff2' }));
+    }));
+    source.catch(() => fontData.delete(path));
+    fontData.set(path, source);
+  }
+  return source;
+}
+
 /** inlineImages maps a received message's Content-IDs to its signed https attachment links. */
 export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; attachmentApi?: AttachmentApi; respectStyles?: boolean; remoteImages?: boolean; inlineImages?: Record<string, string> };
 export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false, inlineImages }: EmailPreviewProps) {
@@ -51,19 +74,15 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: AttachmentApi | undefined; sources: Map<string, string>} | null>(null);
   const [error, setError] = useState('');
-  const [fonts, setFonts] = useState<string[]>([]);
+  const [fontFaces, setFontFaces] = useState('');
+  const italic = ITALIC.test(html.replace(/<style data-(?:bane|opensend)-fonts>[\s\S]*?<\/style>/g, '')), otherScripts = OTHER_SCRIPTS.test(html);
   useEffect(() => {
-    const controller = new AbortController();
-    Promise.all(['/fonts/inter-variable.woff2', '/fonts/inter-variable-italic.woff2'].map(async path => {
-      const response = await fetch(path, { signal: controller.signal });
-      if (!response.ok) throw new Error('Font unavailable');
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      let binary = '';
-      for (const byte of bytes) binary += String.fromCharCode(byte);
-      return `data:font/woff2;base64,${btoa(binary)}`;
-    })).then(sources => { if (!controller.signal.aborted) setFonts(sources); }).catch(() => { /* Use the font stack's fallback if local fonts are unavailable. */ });
-    return () => controller.abort();
-  }, []);
+    let live = true;
+    const faces = (italic ? [['normal', 'inter'], ['italic', 'inter-italic']] : [['normal', 'inter']]).flatMap(([style, file]) => [[style, `/fonts/${file}-latin.woff2`, LATIN_RANGE], ...(otherScripts ? [[style, `/fonts/${file}-ext.woff2`, EXT_RANGE]] : [])]);
+    Promise.all(faces.map(async ([style, path, range]) => `@font-face { font-family: 'Inter'; src: url('${await fontSource(path)}') format('woff2'); font-style: ${style}; font-weight: 100 900; font-display: swap; unicode-range: ${range}; }`))
+      .then(css => { if (live) setFontFaces(css.join(' ')); }).catch(() => { /* Use the font stack's fallback if local fonts are unavailable. */ });
+    return () => { live = false; };
+  }, [italic, otherScripts]);
   // Content-ID → signed link, applied only to exact img[src] matches after sanitizing (L15).
   const inlineKey = JSON.stringify(inlineImages ?? {});
   const inline = useMemo(() => new Map(Object.entries(JSON.parse(inlineKey) as Record<string, string>).flatMap(([id, url]): [string, URL][] => {
@@ -76,7 +95,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     loadInlineAttachments(attachmentApi, attachmentKey ? attachmentKey.split('\0') : [], needed, controller.signal).then(result => {
       if (controller.signal.aborted) return;
       setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
-      if (result.sources.size < needed.size) setError('Some inline images could not be resolved from this message’s attachments.');
+      if (result.sources.size < needed.size) setError('Couldn’t resolve some inline images from this message’s attachments.');
     }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Inline image preview is unavailable.'); });
     return () => controller.abort();
   }, [html, attachmentKey, attachmentApi, needed]);
@@ -114,11 +133,10 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     const tokens = getComputedStyle(document.documentElement);
     const style = email.createElement('style');
     // Reuse the browser's cached font files without opening network access inside the sandbox.
-    const fontFaces = fonts.map((source, index) => `@font-face { font-family: 'Inter'; src: url('${source}') format('woff2'); font-style: ${index === 0 ? 'normal' : 'italic'}; font-weight: 100 900; font-display: swap; }`).join(' ');
     style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'} :where(img) { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
-  }, [html, sources, fonts, respectStyles, remoteImages, inline]);
+  }, [html, sources, fontFaces, respectStyles, remoteImages, inline]);
   return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
 }
 export default EmailPreview;

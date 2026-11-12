@@ -208,7 +208,10 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, gate:GateState, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }): Promise<Leased[]> {
+// Recipients an envelope may still have to be affordable, per stream (at most 50 per envelope).
+type Allowance = { transactional: number; marketing: number };
+const MAX_ENVELOPE = 50;
+async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, gate:GateState, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }, allowance?: Allowance): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
@@ -222,6 +225,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     -- A boolean range is an index condition on 061's expression. Equality to true is
     -- simplified to a text comparison and can scan the kind index over delivered mail.
     ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
+    ${allowance && (allowance.transactional < MAX_ENVELOPE || allowance.marketing < MAX_ENVELOPE) ? sql`AND ${cost} <= CASE WHEN ${transactional} THEN ${allowance.transactional}::int ELSE ${allowance.marketing}::int END` : sql``}
     ${deferred.length ? sql`AND ${transactional} BETWEEN (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='marketing').map(d=>d.workspace_id))}::text[])) AND NOT (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='transactional').map(d=>d.workspace_id))}::text[]))` : sql``}`;
   // Look up each due stream separately: the immediate ordered index contains no future mail,
   // and the scheduled index can stop at this statement's cutoff. Merge only bounded pages.
@@ -328,7 +332,10 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
     LEFT JOIN reviews r ON r.carrier = leased.id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
-    RIGHT JOIN (SELECT max(workspace_id) FILTER(WHERE step=${limit}) AS cursor FROM queued_owners) meta ON true
+    -- Keep the cursor only if an owner has queued mail after it: otherwise the next lease starts
+    -- from the first owner instead of finding nothing past the last one.
+    RIGHT JOIN (SELECT CASE WHEN EXISTS (${seek(sql`m.cursor`)}) THEN m.cursor END AS cursor
+      FROM (SELECT max(workspace_id) FILTER(WHERE step=${limit}) AS cursor FROM queued_owners) m) meta ON true
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
   gate.ownerCursor=result.rows[0]?.cursor as string || undefined;
   for(const d of (result.rows[0]?.blocked_streams??[]) as DeferredStream[]) deferBurst(deferred,d.workspace_id,d.stream);
@@ -745,7 +752,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { attachmentBytes:number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { attachmentBytes:number; advanced: number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -849,6 +856,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   // The fused singleton claim already decided there is nothing to send. Leave the stale
   // sample and its one provisional batch available for a subsequent deliverable message.
   const status = ready[0]!.claimStatus;
+  if (status) lane.advanced++; // The fused lease already ran the claim.
   if (status && status !== 'attempting') {
     if(status==='queued') deferBurst(lane.deferred,ready[0]!.mail.workspaceId,ready[0]!.mail.snapshot.kind);
     counters.skipped++;
@@ -936,9 +944,9 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
         if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
           gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
         }
-        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); return;
+        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); lane.advanced++; return;
       }
-      counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error);
+      counters.skipped++; lane.advanced++; await rejectPreflight(item.owner.runtime, item.mail, error);
     }
   };
   const streamPage=async(items:typeof ready,coalesce=false)=>{
@@ -1077,6 +1085,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       }
       return checkMcp ? base.db.transaction(tx => claim(group, tx)) : claim(group, base.db);
     });
+    lane.advanced += group.length;
     if (webhooks) pendingRecords.push(wakeWebhooks(base,webhooks));
     for(const item of group) if(statuses.get(item.mail.id)==='queued') deferBurst(lane.deferred,item.mail.workspaceId,item.snapshot.kind);
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
@@ -1142,7 +1151,28 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
   const held = { recipients: 0 };
   const runClients = new Map<string, SESv2Client>();
-  const lane: Lane = { attachmentBytes:0,deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
+  const lane: Lane = { attachmentBytes:0,advanced:0,deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
+  // The owner cursor rotates where each lease starts, so every owner gets a turn, but a lease
+  // never wraps past the last owner. One that started after the cursor and reached the end
+  // empty-handed has not looked at the owners before it: with exactly a lease's worth of owners
+  // (or a cursor left by the previous run) the run used to stop and report idle with mail due.
+  // Look there at once, but only if the pass since the last wrap advanced durable work (a claim,
+  // a preflight rejection or deferral). Leasing alone is not progress: rows the local allowance
+  // cannot afford are released unchanged, and leasing them again would spin until the run's
+  // budget. Without progress the run ends; its quotaRetryAt holds it until the sample changes.
+  // The first pass of a run may wrap once, for a cursor the previous run left behind.
+  let passStart = -1, passAllowance: Allowance | undefined;
+  // What the gate's current sample still affords, per stream, net of envelopes held in claim
+  // groups; unknown until the run has a fresh sample. A lease skips the envelopes it cannot
+  // afford, one by one: an owner's oversized head never hides the affordable mail behind it.
+  const headroom = runtime.config.dispatch.dailyHeadroomPercent;
+  const allowance = (): Allowance | undefined => gate.quota && Date.now() < (gate.refreshAt ?? 0) ? {
+    transactional: Math.floor(Math.min(MAX_ENVELOPE, Math.max(0, dailyRemaining(gate) - held.recipients))),
+    marketing: Math.floor(Math.min(MAX_ENVELOPE, Math.max(0, dailyRemaining(gate, headroom, options.shard) - held.recipients))),
+  } : undefined;
+  // The allowance became known or smaller: rows a lease returned unaffordable are now skipped.
+  const tighter = (now: Allowance | undefined, before: Allowance | undefined) => !!now && (!before || now.marketing < before.marketing || now.transactional < before.transactional);
+  const leaseAllowance = new WeakMap<Leased[], Allowance | undefined>();
   const lease = async (priorityOnly = false, first = false) => {
     const now = Date.now();
     if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
@@ -1154,17 +1184,31 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     }
     const inline = first && runtime.config.multiTenant && !gate.dailyBlockedUntil && gate.nextAllowedAt <= now && (gate.brakeUntil ?? 0) <= now
       ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs), margin: provisionalMargin(gate.sentSinceRefresh, 1, options.shard) } : undefined;
-    return phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
+    const caps = allowance();
+    // Mail the allowance skips waits for a new sample: an idle run still wakes when it can change.
+    if (caps && (caps.transactional < MAX_ENVELOPE || caps.marketing < MAX_ENVELOPE)) counters.quotaRetryAt ??= quotaRetry(gate, lane.options.quotaRefreshMs);
+    const leaseOnce = () => phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline, caps));
+    const fromCursor = gate.ownerCursor !== undefined;
+    if (!fromCursor) { passStart = lane.advanced; passAllowance = caps; }
+    let rows = await leaseOnce();
+    if (fromCursor && !rows.length && gate.ownerCursor === undefined && (passStart < 0 || lane.advanced > passStart || tighter(caps, passAllowance))) { passStart = lane.advanced; passAllowance = caps; rows = await leaseOnce(); }
+    leaseAllowance.set(rows, caps);
+    return rows;
   };
   let blocked = false;
   const drainLane = async (batch: Leased[]) => {
     for (;;) {
+      const advanced = lane.advanced, caps = leaseAllowance.get(batch);
       const { processed, blocked: exhausted } = await dispatchBatch(runtime, lane, batch);
       counters.batches++;
       if (exhausted) blocked = true;
       if (processed || gate.ownerCursor) await options.onGate?.(gate);
+      // A batch that advanced nothing (every row released unchanged) would come back from the
+      // next lease as it was, unless the owner cursor moves on to other owners or the allowance
+      // now skips what it could not afford. Whatever the batch size or owner count, end there.
+      const stalled = batch.length > 0 && lane.advanced === advanced && !gate.ownerCursor && !tighter(allowance(), caps);
       // A short batch means the queue is draining: settle completed campaigns before this lane stops.
-      if (blocked || batch.length < lane.options.batchSize && (!gate.ownerCursor || gate.nextAllowedAt>=Date.now()+MAX_PRE_SEND_MS || dailyRemaining(gate)<=0)) { await flushFinishing(runtime, lane); return; }
+      if (blocked || stalled || batch.length < lane.options.batchSize && (!gate.ownerCursor || gate.nextAllowedAt>=Date.now()+MAX_PRE_SEND_MS || dailyRemaining(gate)<=0)) { await flushFinishing(runtime, lane); return; }
       if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; await flushFinishing(runtime, lane); return; }
       batch = await lease();
     }

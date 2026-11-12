@@ -55,7 +55,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   if (!response.ok) {
     const error = data?.error
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
-    const message = typeof error?.message === 'string' ? error.message : 'The request could not be completed.'
+    const message = typeof error?.message === 'string' ? error.message : 'Couldn’t complete the request.'
     if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('bane:unauthorized'))
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
     if (Array.isArray(error?.details)) failure.details = error.details
@@ -311,7 +311,7 @@ export function createLiveApi(): BaneApi {
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},
       get: async (id, signal) => { const [row, history] = await Promise.all([call(`/webhooks/${idPath(id)}`, 'GET', undefined, signal), deliveries(id)]); return {...mapWebhook(row), deliveries: history.items, nextCursor: history.nextCursor} },
-      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url, ...(input.regionIds === undefined ? {} : {regions: input.regionIds === 'all' ? null : input.regionIds}), eventTypes: input.events, headers: input.headers}, signal)),
+      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url || undefined, ...(input.regionIds === undefined ? {} : {regions: input.regionIds === 'all' ? null : input.regionIds}), eventTypes: input.events, headers: input.headers}, signal)),
       setStatus: async (id, status, signal) => mapWebhook(await call(`/webhooks/${idPath(id)}`, 'PATCH', {paused: status === 'paused'}, signal)),
       test: async (id, signal) => { const queued = await call(`/webhooks/${idPath(id)}/test`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(queued.id)}`, 'GET', undefined, signal)) },
       retry: async (id, deliveryId, signal) => { await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}/retry`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}`, 'GET', undefined, signal)) },

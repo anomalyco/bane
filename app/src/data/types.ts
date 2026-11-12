@@ -78,7 +78,7 @@ export type DnsRecordPurpose = 'sending' | 'receiving' | 'mail_from' | 'dmarc'
 type Dmarc = { status: 'missing' | 'invalid' | 'none' | 'quarantine' | 'reject'; record: string | null; source: string | null; adkim: 'r' | 's'; aspf: 'r' | 's'; alignment: { dkim: boolean; spf: boolean } }
 export interface DnsRecord { id: string; type: 'TXT' | 'CNAME' | 'MX'; name: string; value: string; status: 'verified' | 'pending' | 'not_checked'; purpose?: DnsRecordPurpose; note?: string }
 // Why receiving at `host` needs attention, from the API's DNS checks. Blocking issues can't work until DNS or the choice changes.
-export interface ReceivingIssue { code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx'; host: string; blocking: boolean; message: string; provider?: string | null; target?: string | null; suggestion?: string | null }
+export interface ReceivingIssue { code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale'; host: string; blocking: boolean; message: string; provider?: string | null; target?: string | null; suggestion?: string | null }
 export interface Domain { receivingIssue?: ReceivingIssue | null; releasesAt?: string | null; dmarc?: Dmarc | null; dnsStatus?: 'available' | 'unavailable'; dnsUnavailableReason?: string | null; id: string; regionId: RegionId; name: string; status: 'verified' | 'pending' | 'issue'; verified?: boolean; dkimStatus?: 'verified' | 'pending' | 'failed'; mailFromDomain?: string | null; mailFromStatus: 'verified' | 'pending' | 'not_configured' | 'failed'; sending?: 'pending' | 'verified'; receiving?: 'pending' | 'verified'; records: DnsRecord[]; createdAt: ISODate }
 export type MailboxDomainStatus = 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed'
 export interface MailboxDomain {
@@ -88,7 +88,7 @@ export interface MailboxDomain {
   lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; addressCount: number
   subdomains?: { enabled: boolean; count: number; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
 }
-export interface Mailbox { id: string; key?: string | null; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null }
+export interface Mailbox { id: string; key?: string | null; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null; kind?: 'address' | 'inbox' }
 export interface MailAddress { name: string | null; address: string }
 export type MailboxPermission = 'read' | 'send' | 'modify'
 export const inboundEventTypes = ['message.received', 'message.junk', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted', 'inbox.created', 'inbox.deleted', 'message.held', 'inbox.quota_exceeded'] as const

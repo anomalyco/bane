@@ -133,7 +133,8 @@ function inboundThread(state: DemoState, row: MailboxThreadDetail, addressId?: s
   if (!last) return null
   return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
 }
-const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => ({ ...webhook, headers: webhook.headers ?? [] })
+const webhookView = <T extends { url: string; headers: Webhook['headers'] }>(webhook: T) => ({ ...webhook, url: '••••' + webhook.url.slice(-4), headers: webhook.headers ?? [] })
+const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => webhookView(webhook)
 // Like the API, the demo keeps only names and masked hints; header values are never stored or returned.
 function headerViews(headers: WebhookHeaderInput[]): WebhookHeaderView[] {
   if (!Array.isArray(headers)) invalid('headers', 'Headers must be a list.')
@@ -1076,12 +1077,12 @@ export function createMockApi(): BaneApi {
       }),
     },
     webhooks: {
-      list: signal => run(signal, false, s => s.webhooks.map(webhook => ({ ...webhook, headers: webhook.headers ?? [] }))),
-      get: (webhookId, signal) => run(signal, false, s => { const webhook = find(s.webhooks, webhookId, 'Webhook'); return { ...webhook, headers: webhook.headers ?? [] } }),
+      list: signal => run(signal, false, s => s.webhooks.map(webhookView)),
+      get: (webhookId, signal) => run(signal, false, s => webhookView(find(s.webhooks, webhookId, 'Webhook'))),
       save: (input, signal) => run(signal, true, s => {
         const existing = input.id ? find(s.webhooks, input.id, 'Webhook') : undefined
         const name = text(input.name, 'name')
-        const url = text(input.url, 'url', 2048)
+        const url = text(input.url || existing?.url, 'url', 2048)
         try { const parsed = new URL(url); if (parsed.protocol !== 'https:' || !parsed.hostname.includes('.') || parsed.username || parsed.password || parsed.hash) invalid('url', 'Enter an HTTPS endpoint without credentials or a fragment.') } catch { invalid('url', 'Enter a valid HTTPS webhook URL.') }
         if (!Array.isArray(input.events) || input.events.length === 0 || input.events.length > EVENTS.length || !input.events.every(event => EVENTS.includes(event))) invalid('events', 'Select between one and six supported webhook events.')
         const events = [...new Set(input.events)]
@@ -1095,13 +1096,13 @@ export function createMockApi(): BaneApi {
         const webhook: Webhook = { id: existing?.id ?? id('wh'), name, url, events, regionIds, status: existing?.status ?? 'active', secretHint: existing?.secretHint ?? `demo_wh_…${crypto.randomUUID().slice(0, 8)}`, headers, deliveries: existing?.deliveries ?? [] }
         if (existing) Object.assign(existing, webhook)
         else s.webhooks.push(webhook)
-        return webhook
+        return webhookView(webhook)
       }),
       setStatus: (webhookId, status, signal) => run(signal, true, s => {
         const webhook = find(s.webhooks, webhookId, 'Webhook')
         if (status !== 'active' && status !== 'paused') invalid('status', 'Choose active or paused.')
         webhook.status = status
-        return webhook
+        return webhookView(webhook)
       }),
       test: (webhookId, signal) => run(signal, true, s => {
         const webhook = find(s.webhooks, webhookId, 'Webhook')

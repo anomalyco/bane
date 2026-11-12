@@ -81,6 +81,13 @@ test('mail gateway: receipt parser distinguishes readable forwards from unparsed
   assert.ok(await parseInboundMime(Buffer.from(forward+base)));
   assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
 });
+test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
+  const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
+  const host = 'inbox.example.com';
+  assert.equal(receivingIssueTitle('proof_stale', host), `Recheck ownership of ${host}`);
+  assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
+  for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
+});
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
   const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';
@@ -91,7 +98,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
-  for(const name of ['listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
+  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
@@ -288,8 +295,8 @@ test('mail gateway: preview migration yields to writers and validates in a separ
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
   for(const client of [writer,ddl])await client.query(`SET search_path TO ${schema}`);
   await writer.query('CREATE TABLE mail_messages(id text PRIMARY KEY)');
-  const install=await readFile(new URL('./migrations/158_protocol_preview.sql',import.meta.url),'utf8');
-  const validate=await readFile(new URL('./migrations/159_validate_protocol_preview.sql',import.meta.url),'utf8');
+  const install=await readFile(new URL('./migrations/178_protocol_preview.sql',import.meta.url),'utf8');
+  const validate=await readFile(new URL('./migrations/179_validate_protocol_preview.sql',import.meta.url),'utf8');
   await writer.query("BEGIN; INSERT INTO mail_messages VALUES('one')");
   await ddl.query('BEGIN');await assert.rejects(ddl.query(install),{code:'55P03'});await ddl.query('ROLLBACK');
   await writer.query('COMMIT');await ddl.query('BEGIN');await ddl.query(install);await ddl.query('COMMIT');
@@ -2542,7 +2549,7 @@ describe('Hosted MCP OAuth and tools', () => {
       for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
       const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
       error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
-      assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,url);ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+      assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,'••••'+url.slice(-4));ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
     });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
@@ -2641,6 +2648,82 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.ok((await dry()).labels.includes('extra'));
       ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
       assert.equal((await dry()).dropped,true,'Only the grant-owned addition disappears; the original first guard still blocks.');
+    });
+  });
+
+  // tear witnesses (2 steps): mint grant2; probe grant2 code -> a member's read+send grant listed createContactList, createApiKey,
+  // createAgentToken and listApiKeys; mint grant; probe grant code -> listMcpConnections. REST refuses all of them.
+  test('MCP listings offer only what REST authorizes: permission, member role and dashboard-only administration',async t=>{
+    await simulatedSesFixture(t,async({db,request,runtime})=>{
+      const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
+      runtime.config.multiTenant=true;
+      try{
+        const {token,consentId}=await oauthGrant(t,db,'bane:read bane:send offline_access',request);
+        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
+          return new Set(codemode?tools.map(x=>x.name as string):tools.flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`)!).filter(Boolean)));};
+        for(const codemode of [true,false]){
+          const ops=await listed(codemode);
+          for(const name of ['getCurrentIdentity','sendEmail','sendCampaign','createAgentToken','listDomains'])assert.ok(ops.has(name),`${name} codemode=${codemode}`);
+          for(const name of ['createContactList','createApiKey','listApiKeys','listMcpConnections','revokeMcpConnection'])assert.ok(!ops.has(name),`${name} codemode=${codemode}`);
+        }
+        const hidden=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'hidden',permissions:['read']}}}},rpcHeaders)).result;
+        assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
+        // tear witness (recheck of #51): with receiving consent but no manage, mailbox administration was listed although
+        // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
+        await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+        const receiving=await listed(true);
+        for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
+        assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
+        const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
+        const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
+        const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId))!;assert.ok(grantActor);
+        const dummy=(schema:Json|undefined)=>schema?.enum?.[0]??(schema?.format==='email'?'tear@example.com':[schema?.type].flat().includes('integer')?'1':String(schema?.pattern??'').includes('\\d')?'us-east-1':'tear-missing');
+        let gets=0;
+        for(const [name,op] of buildMcpCatalog(api)){
+          if(op.method!=='get')continue;gets++;
+          const path=op.path.replace(/\{([^}]+)\}/g,(_,field:string)=>encodeURIComponent(dummy((spec.paths[op.path].get.parameters??[]).find((p:Json)=>p.in==='path'&&p.name===field)?.schema)));
+          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor)).status;
+          assert.equal(receiving.has(name),status!==401&&status!==403,`${name}: listed=${receiving.has(name)}, REST ${status}`);
+        }
+        assert.ok(gets>=80,String(gets));
+        // As a workspace member the same approval also loses the owner and admin areas.
+        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[runtime.config.workspaceId,consentId]);
+        for(const codemode of [true,false]){
+          const ops=await listed(codemode);assert.ok(ops.has('sendEmail')&&ops.has('getCurrentIdentity'),`codemode=${codemode}`);
+          for(const name of ['sendCampaign','createAgentToken','listDomains','createContactList'])assert.ok(!ops.has(name),`member ${name} codemode=${codemode}`);
+        }
+      }finally{runtime.config.multiTenant=false;}
+    });
+  });
+
+  // tear witness (recheck 2 of #51): mint g-s; probe g-s code|plain -> getCurrentIdentity missing; probe g-s call -> TOOL_UNAVAILABLE.
+  test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
+      const {token}=await oauthGrant(t,db,'bane:send offline_access',request);
+      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
+      const code=new Set((ok(await rpc(true,'tools/list')).result.tools as Json[]).map(x=>x.name as string));
+      const plain=new Set((ok(await rpc(false,'tools/list')).result.tools as Json[]).flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`))));
+      for(const ops of [code,plain]){assert.ok(ops.has('getCurrentIdentity'));assert.ok(ops.has('sendEmail'));assert.ok(!ops.has('listContacts'),'read-level reads need read');}
+      const me=ok(await rpc(true,'tools/call',{name:'getCurrentIdentity',arguments:{}})).result;
+      assert.equal(me.isError,false,redact(me));assert.equal(me._meta.status,200);assert.deepEqual(me.structuredContent.permissions,['send']);
+    });
+  });
+
+  // tear witness (7 steps): mint grant; A begin apikey grant k1; A step; A step; revoke grant; A step; A step -> 500 INTERNAL_ERROR.
+  test('a grant-derived key create racing the approval revoke is refused as unauthorized, not a 500',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {token,consentId}=await oauthGrant(t,db,writableScope,request);
+      const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let revoked=false;
+      // The revoke commits between this request's authorization and the row that ties the new key to the approval.
+      const wire=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+        const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM oauth_consent WHERE id=$1',[consentId]).then(()=>query.apply(this,args));}
+        return query.apply(this,args);} as typeof pg.Client.prototype.query);
+      let result:Json;
+      try{result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,idempotencyKey:'race-revoke-1',body:{name:'tear raced key',permissions:['read']}}}},rpcHeaders)).result;}finally{wire.mock.restore();}
+      assert.equal(revoked,true);assert.equal(result.isError,true,redact(result));assert.equal(result._meta.status,401);assert.equal(result.structuredContent.error.code,'AUTH_INVALID');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM api_keys WHERE name='tear raced key'")).rows[0].n,0);
     });
   });
 
@@ -2830,7 +2913,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x=>x.Name==='bane_email_id')!.Value!;sent.set(id,cmd.input);return { MessageId:`ses-${id}` };
       });
       const base = '/v1/inbound', get = (p:string, h?:Record<string,string>) => local('GET',base+p,undefined,'live',h), post = (p:string, body:Json, h?:Record<string,string>) => local('POST',base+p,body,'live',h);
-      const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp?toolsets=all',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
+      const mcp = async (method:string, params:Json, endpoint='/mcp?toolsets=all') => ok(await local('POST',endpoint,{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
       const tool = (name:string, args:Json) => mcp('tools/call',{name,arguments:args});
       const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent; };
       const catalog = (await mcp('tools/list',{})).tools;
@@ -2910,6 +2993,26 @@ describe('Hosted MCP OAuth and tools', () => {
       const reviewed={threadId,idempotencyKey:'confirmed-reply',confirm:true,body:{addressId:a.id,replyToMessageId:shared,text:'This is the approved answer',expectedRecipients:{to:['reply@example.net'],cc:[],bcc:[]}}};
       const mismatched=await tool('replyToInboundThread',{...reviewed,body:{...reviewed.body,expectedRecipients:{to:['reply@example.net'],cc:['extra@example.net'],bcc:[]}}});assert.equal(mismatched.structuredContent.error.code,'INBOUND_RECIPIENTS_CHANGED');
       const confirmed=await success('replyToInboundThread',reviewed);assert.deepEqual(confirmed.to.map((x:Json)=>x.address),['reply@example.net']);
+      for (const [name, action, args] of [
+        ['listEmails', 'list', { search: confirmed.emailId }], ['listLogs', 'all', { direction: 'sent', search: confirmed.emailId }],
+        ['getEmailContent', 'content', { emailId: confirmed.emailId }], ['getEmailDetail', 'detail', { emailId: confirmed.emailId }], ['getEmail', 'get', { emailId: confirmed.emailId }],
+      ] as const) {
+        for (const result of [await tool(name, args), await mcp('tools/call', { name: 'logs', arguments: { action, ...args } }, '/mcp')]) {
+          assert.equal(result.isError, false, redact(result)); assert.match(result.content[0].text, /^Untrusted email.*received subject or quoted message/);
+        }
+      }
+      assert.equal((await tool('getEmailContent', { emailId: first.emailId })).content.length, 1, 'An original outbound message is not a quoted reply.');
+      // Retained legacy reply after inbox erasure: no MIME parent, mailbox row, or provenance field survives.
+      const legacyId = unique('email');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated)
+        SELECT $2,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,
+          (snapshot - 'replyAuthors' - 'untrustedContent') || '{"headers":[]}'::jsonb,'delivered',true FROM sending_emails WHERE id=$1`, [confirmed.emailId, legacyId]);
+      for (const [name, args] of [['getEmailContent', { emailId: legacyId }], ['listEmails', { search: legacyId }], ['listLogs', { search: legacyId, direction: 'sent' }]] as const) {
+        const result = await tool(name, args);
+        assert.equal(result.isError, false, redact(result));
+        assert.equal((result.structuredContent.data?.[0] ?? result.structuredContent).untrustedContent, true);
+        assert.match(result.content[0].text, /^Untrusted email/);
+      }
       const newId=unique('msg');await deliver(newId,[a.id],'Fresh inbound',new Date(Date.now()+3000).toISOString());
       assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('replyToInboundThread',reviewed)).id,confirmed.id);
       await dispatchDue(runtime, REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
@@ -2938,17 +3041,30 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
+  test('hosted MCP read-only OAuth hides state changes except read-only delegation, offers REST read operations, and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
-    assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
+    // The one state change a read grant may make is read-only delegation, which REST allows too.
+    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['createAgentToken']);
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
-    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'queryAudience'));
+    // REST lets a read credential run AudienceQL reads and segment previews (POSTs that change nothing): no confirm argument.
+    for (const name of ['queryAudience', 'previewSegment']) {
+      const tool = catalog.tools.find((x: Json) => x.name === name);
+      assert.ok(tool, name); assert.equal(tool.annotations.readOnlyHint, true, name); assert.equal(tool.inputSchema.properties.confirm, undefined, name);
+    }
+    await callTool(token, 'queryAudience', { body: { statement: 'SELECT count(*) FROM contacts' } });
+    const unconfirmed = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } } });
+    assert.equal(unconfirmed.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(unconfirmed));
+    const delegated = await callTool(token, 'createAgentToken', { confirm: true, body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } }, 201);
+    secrets.add(delegated.token); assert.deepEqual(delegated.permissions, ['read']);
+    assert.equal((await http('GET', '/v1/me', delegated.token)).status, 200);
+    const escalation = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { confirm: true, body: { permissions: ['read', 'send'], expiresInSeconds: 60, purpose: 'escalation' } } });
+    assert.equal(escalation._meta.status, 403, redact(escalation));
     // One HTTP request is one JSON-RPC call: batches and unbounded non-JSON bodies never reach the SDK.
     const batch = await http('POST', '/mcp', token, Array.from({ length: 500 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'tools/list', params: {} })), rpcHeaders);
     assert.equal(batch.status, 400, diagnostic(batch));
@@ -2999,9 +3115,10 @@ describe('Hosted MCP OAuth and tools', () => {
     await t.test('L1: read-only descriptions omit contact writes, credential creation and inbound keys', () => {
       assert.match(contacts.description, /list contacts/i);
       assert.doesNotMatch(contacts.description, /manage|create|update|delete/i);
+      // A read grant's only credential action is read-only delegation: no API keys, inbound keys, listing or revocation.
       const keys = plainTools.find((tool:Json)=>tool.name==='keys');
-      assert.match(keys.description, /list agent tokens/i);
-      assert.doesNotMatch(keys.description, /manage|create|revoke|secret|inbound/i);
+      assert.deepEqual(keys.inputSchema.properties.action.enum, ['createToken']);
+      assert.doesNotMatch(keys.description, /api key|inbound|revoke|secret|manage/i);
     });
     const mergedDenied = await rpc(token, 'tools/call', { name:'contacts', arguments:{ action:'create', confirm:true, body:{ email:address() } } }, '/mcp');
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
@@ -3012,6 +3129,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revoked.status, 401, diagnostic(revoked));
     assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+    assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
     const fallback = await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(fallback.status, 401, 'Hosted MCP must not fall back to API-key authentication.');
@@ -4020,7 +4138,7 @@ describe('Dashboard API capabilities', () => {
     error(await http('PATCH', `/v1/campaigns/${unique('missing')}/archive`, key.secret, { archived: true }), 404, 'NOT_FOUND');
     for (const archived of [true, false]) {
       error(await http('PATCH', `${path}/archive`, reader.secret, { archived }), 403, 'PERMISSION_DENIED');
-      error(await http('PATCH', `${path}/archive`, restricted.secret, { archived }), 403, 'SENDER_DOMAIN_FORBIDDEN');
+      error(await http('PATCH', `${path}/archive`, restricted.secret, { archived }), 404, 'NOT_FOUND');
 
     }
     assert.deepEqual(ok(await http('GET', path, key.secret)), campaign, 'Invalid or unauthorized requests must not change the campaign.');
@@ -4387,7 +4505,7 @@ describe('Dashboard API capabilities', () => {
       const wid = runtime.config.workspaceId, at = (seconds: number) => new Date(Date.parse('2026-01-05T10:00:00Z') + seconds * 1000).toISOString();
       const sent = async (id: string, seconds: number, from: string, to: string, subject: string, kind: string, status: string) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
-         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
+         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text, 'testCampaignId', null), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
       const [s1, s2, r1, r2, out, box, thread] = ['s1', 's2', 'r1', 'r2', 'out', 'box', 'thread'].map(name => unique(`logs-${name}-`));
       await sent(s1, 1, 'hello@logs.example', 'ada@example.net', 'Logs one', 'transactional', 'delivered');
       await sent(s2, 3, 'hello@other.example', 'grace@example.net', 'Logs two', 'marketing', 'bounced');
@@ -4446,6 +4564,14 @@ describe('Dashboard API capabilities', () => {
       assert.equal(subjectOf(ok(await request('GET', '/v1/emails', reader.secret))), 'Logs one [redacted]');
       assert.equal(ok(await request('GET', `/v1/emails/${s1}`, reader.secret)).subject, 'Logs one [redacted]');
       assert.equal(subjectOf(ok(await request('GET', '/v1/logs', manager_.secret))), `Logs one ${token}`);
+      // A retained campaign delivery has a workspace audience recipient even when From matches the key.
+      const campaignId = unique('campaign');
+      await db.query('UPDATE sending_emails SET campaign_id=$2 WHERE id=$1', [s1, campaignId]);
+      for (const path of ['/v1/logs', '/v1/emails']) {
+        assert.deepEqual(ids(ok(await request('GET', `${path}?campaignId=${campaignId}`, scoped.secret))), []);
+        assert.deepEqual(ids(ok(await request('GET', `${path}?campaignId=${campaignId}`, reader.secret))), [s1]);
+      }
+      for (const suffix of ['', '/detail', '/content', '/events']) error(await request('GET', `/v1/emails/${s1}${suffix}`, scoped.secret), 404, 'NOT_FOUND');
       // Delivery details of received mail: owner/admin sessions and manage API keys only, never MCP grants or agent tokens.
       const { readsDelivery } = await import('./src/inbound-threads.js');
       const admin = { keyId: 'k', workspaceId: wid, admin: true, mailboxIds: null, permissions: ['read' as const] };
@@ -4547,19 +4673,90 @@ describe('Personalization context boundaries', () => {
 });
 
 describe('Campaign authorization and dispatch credentials', () => {
-  test('domain-restricted send keys cannot retarget, delete or cancel another sender domain’s campaign', async t => {
+  test('campaign test deliveries, legacy tests and their private attachments are not domain-key mail', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, db }) => {
+      const files = new Map<string, {body: Uint8Array; contentType: string}>();
+      runtime.storage = { async put(k, body, contentType) { files.set(k, {body, contentType}); }, async get(k) { return files.get(k) ?? null; }, async delete(k) { files.delete(k); } };
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped', domains: ['sender.example'], permissions: ['read', 'send'] }), 201); secrets.add(scoped.secret);
+      const file = { filename: 'fixture.txt', content: 'YQ==' }, asset = ok(await local('POST', '/v1/attachments', file), 201);
+      const list = ok(await local('POST', '/v1/lists', { name: 'Fixture' }), 201);
+      const from = 'a@sub.sender.example', subject = 'Private test subject';
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Fixture', from, subject, html: '<p>Fixture</p>', audience: { listId: list.id }, attachments: [asset.id] }), 201);
+      const receipt = ok(await local('POST', `/v1/campaigns/${campaign.id}/test`, { to: 'fixture@example.invalid' }), 202);
+      const stored = (await db.query('SELECT campaign_id, snapshot FROM sending_emails WHERE id=$1', [receipt.id])).rows[0];
+      assert.equal(stored.campaign_id, null, 'test mail does not advance live campaign delivery counts');
+      assert.equal(stored.snapshot.testCampaignId, campaign.id);
+      const assertHidden = async () => {
+        for (const path of ['/v1/emails', '/v1/logs']) {
+          const listPath = `${path}?search=${receipt.id}`;
+          assert.equal(ok(await local('GET', listPath)).data[0].id, receipt.id);
+          assert.deepEqual(ok(await request('GET', listPath, scoped.secret)).data, []);
+        }
+        for (const suffix of ['', '/detail', '/content', '/events']) error(await request('GET', `/v1/emails/${receipt.id}${suffix}`, scoped.secret), 404, 'NOT_FOUND');
+        for (const suffix of ['', '/content']) error(await request('GET', `/v1/attachments/${asset.id}${suffix}`, scoped.secret), 404, 'ATTACHMENT_NOT_FOUND');
+      };
+      assert.deepEqual(ok(await local('GET', `/v1/emails/${receipt.id}/content`)).attachments, [asset.id]);
+      await assertHidden();
+      await db.query("UPDATE sending_emails SET snapshot=snapshot-'testCampaignId' WHERE id=$1", [receipt.id]);
+      await assertHidden();
+      const direct = mail({ from, attachments: [asset.id] });
+      error(await request('POST', '/v1/emails/send', scoped.secret, direct), 404, 'ATTACHMENT_NOT_FOUND');
+      // An independent visible direct delivery, not knowledge of the ID, grants access.
+      const directReceipt = ok(await local('POST', '/v1/emails/send', direct), 202);
+      assert.equal(ok(await request('GET', `/v1/emails/${directReceipt.id}`, scoped.secret)).id, directReceipt.id);
+      assert.equal(ok(await request('GET', `/v1/attachments/${asset.id}/content`, scoped.secret)).content, file.content);
+      const own = ok(await request('POST', '/v1/attachments', scoped.secret, file), 201);
+      ok(await request('GET', `/v1/attachments/${own.id}`, scoped.secret));
+      // Hosted API-key admission loads its credential and assets in one statement. It must use
+      // the same attachment rule as the ordinary send path without adding a round trip.
+      const privateFile = ok(await local('POST', '/v1/attachments', file), 201);
+      const wid = runtime.config.workspaceId, acct = '112223330000';
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')`, [REGION, acct]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('sub.sender.example',$1,$1,'verified')`, [wid]);
+      const meter = await queryBudget(t, db);
+      await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
+    });
+  });
+  test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
     const owner = await keyFixture(t);
-    const restricted = await keyFixture(t, { permissions: ['send'], domains: ['allowed.example.com'] });
+    const restricted = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
     const list = await resource(t, owner.secret, '/v1/lists', { name: unique('domain-authorization') });
     const contact = await resource(t, owner.secret, '/v1/contacts', { email: address() });
     ok(await consent(owner.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, owner.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
+    const group = unique('domain-list');
+    const own = await campaignFixture(t, owner.secret, {}, { name: group, from: 'sender@sub.allowed.example.com' });
+    const targeted = await campaignFixture(t, owner.secret, { listId: list.id }, { name: group, from: own.draft.from });
+    await campaignFixture(t, owner.secret, {}, { name: group, from: 'sender@notallowed.example.com' });
+    await campaignFixture(t, owner.secret, {}, { name: group, from: '' });
+    const shown = ok(await http('GET', `/v1/campaigns?search=${group}&limit=1`, restricted.secret));
+    assert.deepEqual(shown.data.map((row: Json) => row.id), [own.id]); assert.equal(shown.nextCursor, null);
+    ok(await http('GET', `/v1/campaigns/${own.id}/preview`, restricted.secret));
+    error(await http('PATCH', `/v1/campaigns/${own.id}`, restricted.secret, { revision: own.revision, draft: { ...own.draft, from: '' } }), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    for (const hidden of [campaign, targeted]) for (const suffix of ['', '/state', '/preview', '/preview-image']) error(await http('GET', `/v1/campaigns/${hidden.id}${suffix}`, restricted.secret), 404, 'NOT_FOUND');
+    for (const suffix of ['/audience', '/stats']) error(await http('GET', `/v1/campaigns/${targeted.id}${suffix}`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    for (const [action, body] of [['test', { to: address() }], ['send', { revision: 1 }], ['schedule', { revision: 1, scheduledAt: new Date(Date.now()+3600000).toISOString() }]] as const) {
+      error(await http('POST', `/v1/campaigns/${targeted.id}/${action}`, restricted.secret, body), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    }
+    error(await http('POST', '/v1/campaigns', restricted.secret, { name: group, from: own.draft.from, audience: { listId: list.id } }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('PATCH', `/v1/campaigns/${own.id}`, restricted.secret, { revision: own.revision, draft: { ...own.draft, audience: { segmentId: 'seg_fixture' } } }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    for (const path of ['/contacts', `/contacts/${contact.id}`, `/contacts/${contact.id}/consent`, '/lists', `/lists/${list.id}/members`, '/segments', '/contact-imports', '/contact-imports/example']) error(await http('GET', '/v1' + path, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('POST', '/v1/audience-query/query', restricted.secret, { statement: 'SELECT id FROM contacts LIMIT 1' }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    const createBody = { name: group, from: 'sender@allowed.example.com' }, idem = { 'Idempotency-Key': unique('campaign-replay') };
+    const created = ok(await http('POST', '/v1/campaigns', restricted.secret, createBody, idem), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/campaigns/${created.id}`, owner.secret)); });
+    ok(await http('PATCH', `/v1/campaigns/${created.id}`, owner.secret, { revision: created.revision, draft: { ...created.draft, from: 'sender@elsewhere.example' } }));
+    error(await http('POST', '/v1/campaigns', restricted.secret, createBody, idem), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/send`, restricted.secret, { revision: campaign.revision }), 403, 'UNRESTRICTED_KEY_REQUIRED');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, restricted.secret, {
       revision: campaign.revision, draft: { ...campaign.draft, from: 'sender@allowed.example.com' },
-    }), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    }), 404, 'NOT_FOUND');
+    error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
     assert.equal(unchanged.state, 'draft');
     assert.equal(unchanged.revision, campaign.revision);
@@ -4568,8 +4765,8 @@ describe('Campaign authorization and dispatch credentials', () => {
       revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
     }), 202);
     await poll(`/v1/campaigns/${campaign.id}`, owner.secret, row => row.state === 'scheduled');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unchangedScheduled = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
     assert.equal(unchangedScheduled.state, 'scheduled');
     assert.equal(unchangedScheduled.delivery.total, 1, 'Unauthorized cancellation must not release the scheduled recipient reservation.');
@@ -4750,6 +4947,9 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     await poll(`/v1/emails/${queued.id}`, manager.secret, body => body.status === 'delivered');
     const deliveredEvents = page(await http('GET', `/v1/emails/${queued.id}/events`, manager.secret)) as { id: string }[];
     const deliveredDetail = ok(await http('GET', `/v1/emails/${queued.id}/detail`, manager.secret));
+    const domainReader = await keyFixture(t, { permissions: ['read'], domains: [deliveredDetail.email.from.split('@')[1]] });
+    assert.equal(deliveredDetail.contact.id, contact.id);
+    assert.equal(ok(await http('GET', `/v1/emails/${queued.id}/detail`, domainReader.secret)).contact, null);
     assert.ok(deliveredEvents.length > 0);
     assert.deepEqual((deliveredDetail.events.data as { id: string }[]).map(e => e.id), deliveredEvents.map(e => e.id), 'Detail must return the delivered email’s own events.');
     const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, manager.secret));
@@ -4759,7 +4959,8 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     const token = new URL(capabilityUrl).pathname.split('/').at(-1)!;
     secrets.add(token);
     assert.ok(/^u_[0-9a-f]{64}$/.test(token), 'Fixture capability must have the application-owned token format.');
-    const endpoint = await resource(t, manager.secret, '/v1/webhooks', { url: `https://example.com/hooks/${unique('redaction')}`, paused: true });
+    const endpointUrl = `https://example.com/hooks/${unique('redaction')}`;
+    const endpoint = await resource(t, manager.secret, '/v1/webhooks', { url: endpointUrl, paused: true });
     // Before any SQL writes, prove that this DB contains the exact HTTP-created
     // test email, its originating key, and our paused endpoint in the same scope.
     const matched = await db.query(`SELECT e.id FROM sending_emails e
@@ -4767,7 +4968,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
       JOIN operation_webhooks w ON w.workspace_id = e.workspace_id
       WHERE e.id = $1 AND e.workspace_id = $2 AND e.actor_key_id = $3
         AND w.id = $4 AND w.paused = true AND w.url = $5`,
-    [queued.id, contact.workspaceId, manager.id, endpoint.id, endpoint.url]);
+    [queued.id, contact.workspaceId, manager.id, endpoint.id, endpointUrl]);
     assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created email/key/paused endpoint; no synthetic rows were inserted.');
     const eventId = unique('acceptance-click');
     const operationId = unique('acceptance-operation');
@@ -4967,8 +5168,16 @@ describe('Operational configuration and public event boundaries', () => {
     finally { resolver.mock.restore(); }
     // No host allowlist and no port rule: any public HTTPS endpoint, including a custom port, is accepted.
     const portUrl = `https://hooks.${unique('port')}.example.org:8443/mail`;
-    assert.equal((await resource(t, key.secret, '/v1/webhooks', { url: portUrl, paused: true })).url, portUrl);
-    await resource(t, key.secret, '/v1/inbound/webhooks', { url: `https://hooks.${unique('inbound')}.example.org:8443/mail`, paused: true });
+    for (const path of ['/v1/webhooks', '/v1/inbound/webhooks']) {
+      const hook = await resource(t, key.secret, path, { url: portUrl, paused: true, ...(path.includes('inbound') ? { key: 'masked-fixture' } : {}) });
+      assert.equal(hook.url, '••••mail');
+      assert.equal(ok(await http('PATCH', `${path}/${hook.id}`, key.secret, { description: 'Keep the saved URL' })).url, '••••mail');
+      const changed = ok(await http('PATCH', `${path}/${hook.id}`, key.secret, { url: 'https://example.com/new-token' }));
+      assert.equal(changed.url, '••••oken');
+      assert.equal(ok(await http('GET', `${path}/${hook.id}`, reader.secret)).url, changed.url);
+      assert.equal(ok(await http('GET', path, reader.secret)).data.find((row: Json) => row.id === hook.id).url, changed.url);
+      if (path.includes('inbound')) assert.equal(ok(await http('GET', '/v1/endpoints/masked-fixture', key.secret)).target, changed.url);
+    }
     const reveal = await http('GET', `/v1/webhooks/${endpoint.id}/secret`, key.secret);
     const firstSecret = ok(reveal).secret;
     assert.ok(typeof firstSecret === 'string' && /^whsec_[A-Za-z0-9+/]+={0,2}$/.test(firstSecret), 'Explicit reveal must return a whsec_ credential with a standard-base64 suffix.');
@@ -5402,6 +5611,43 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
+
+// Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
+// node-postgres lets query parameters redirect it, and never established that the database was
+// disposable. tear/disposable.ts is the rule every tear host imports.
+test('a tear host refuses redirecting URLs, databases not marked disposable and databases holding foreign data', async t => {
+  const { disposableUrl, assertDisposable, DISPOSABLE } = await import('./tear/disposable.js');
+  const { execFile } = await import('node:child_process'), { fileURLToPath } = await import('node:url');
+  for (const url of ['postgresql://tear:x@127.0.0.1/tear?host=192.0.2.1&port=5432', 'postgresql://tear:x@127.0.0.1:1/tear?hostaddr=192.0.2.1',
+    'postgresql://tear:x@127.0.0.1/tear?options=-c%20search_path%3Dpublic', 'postgresql://tear:x@127.0.0.1/tear?', 'postgresql://tear:x@192.0.2.1:5432/tear',
+    'postgresql://tear:x@localhost.example.com/tear', 'mysql://tear:x@127.0.0.1/tear', 'not a url', undefined]) assert.throws(() => disposableUrl(url), /^Error: tear host:/, String(url));
+  for (const url of ['postgresql://tear:x@127.0.0.1:5432/tear', 'postgres://tear:x@localhost/tear', 'postgresql://tear:x@[::1]:5432/tear']) assert.equal(disposableUrl(url), url);
+  const client = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+  await client.connect(); cleanup(t, () => client.end());
+  const check = () => assertDisposable(text => client.query(text));
+  // The acceptance database is shared by every scenario and carries no marker.
+  await assert.rejects(check(), /not marked disposable/);
+  // Marked, but holding a workspace tear did not create: still refused. Rolled back.
+  await client.query('BEGIN');
+  try {
+    await client.query(`DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), '${DISPOSABLE}'); END $$`);
+    await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
+    await assert.rejects(check(), /holds [1-9]\d* workspaces/);
+  } finally { await client.query('ROLLBACK'); }
+  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
+  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
+      (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
+    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
+  });
+  const unmarked = await host(FIXTURE_DATABASE_URL!);
+  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
+  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
+  const refused = await host(redirected.toString());
+  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+});
 
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
   const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
@@ -5866,6 +6112,220 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         while (pending.length) await Promise.all(pending.splice(0));
       } } finally { globalThis.fetch = previousFetch; }
       assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
+    });
+  });
+  // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
+  // lease, claim, send, record and the next lease, which found nothing and ended the run.
+  test('a dispatcher lease that passes the last owner wraps to the first, so a run never stops with mail due', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      // A region of its own: this workspace is its only owner, so a one-row lease's cursor is
+      // the last owner, exactly as with 24 owners and the normal 24-row lease.
+      const region = 'te-cursor-1', status = async (ids: string[]) => (await db.query('SELECT status FROM sending_emails WHERE id=ANY($1) ORDER BY id', [ids])).rows.map(r => r.status);
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=ANY($1)', [ids, region]);
+      const gate = initialGate();
+      const report = await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate });
+      assert.deepEqual(await status(ids), ['accepted', 'accepted', 'accepted'], 'One run drains every due row.');
+      assert.equal(report.sent, 3);
+      // A cursor left by the previous run must not end the next run before it reaches the first owner.
+      const later = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=$1', [later, region]);
+      gate.ownerCursor = runtime.config.workspaceId;
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, gate })).sent, 1);
+      assert.deepEqual(await status([later]), ['accepted']);
+      // With every remaining row leased elsewhere the run still ends after one pass.
+      const held = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query("UPDATE sending_emails SET region=$2, lease_until=now()+interval '2 minutes' WHERE id=$1", [held, region]);
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate })).claimed, 0);
+      assert.deepEqual(await status([held]), ['queued']);
+    });
+  });
+  // Review of #52 (P1): the wrap above counted a lease as progress even when the local
+  // marketing allowance released every row it leased, so 24 unaffordable owners were leased
+  // and released until the run's time budget (237 leases in 500 ms, then a non-idle report
+  // that re-armed the Durable Object at once).
+  test('a lease the marketing allowance cannot afford ends the run as a quota hold in a bounded number of statements', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const region = 'te-allowance-1', w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent;
+      // 24 owners (one lease's worth), each with one two-recipient marketing envelope.
+      const owners = Array.from({ length: 24 }, (_, i) => `${w}-o${String(i).padStart(2, '0')}`), later = `${w}-o24`;
+      const pair = ok(await local('POST', '/v1/emails/send', mail({ to: [address(), address()] })), 202).id;
+      const single = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [[...owners, later]]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+        SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [[...owners, later], region]);
+      const clone = (ids: string[], template: string) => db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||md5(o||e.id),o,e.actor_key_id,$2,e.from_address,e.to_addresses,'[]','[]',e.subject,jsonb_set(jsonb_set(e.snapshot,'{kind}','"marketing"'),'{region}',to_jsonb($2::text)),e.simulated
+        FROM sending_emails e,unnest($1::text[]) o WHERE e.id=$3`, [ids, region, template]);
+      await clone(owners, pair);
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // One campaign credit left (a cached, current sample): every envelope needs two.
+      const max = 100, gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const queued = async (o: string[]) => (await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=ANY($1) AND region=$2 AND status='queued' AND lease_until IS NULL`, [o, region])).rows[0].n;
+      for (const lanes of [1, 2]) {
+        const run = counted(), started = Date.now();
+        const report = await runDispatcher(run.runtime, { region, lanes, batchSize: 24, gate: gate(1), until: Date.now() + 5000 });
+        assert.equal(report.sent, 0);
+        assert.equal(report.idle, true, 'An unaffordable pass is an idle hold, not unfinished work that re-arms at once.');
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, 'It retries when the quota sample can change.');
+        // Per lane: the page, its release, and the lease past the last owner; nothing more.
+        t.diagnostic(`ALLOWANCE-HOLD lanes ${lanes}: ${run.statements()} statements in ${Date.now() - started} ms`);
+        assert.ok(run.statements() <= 3 * lanes, `${run.statements()} statements with ${lanes} lane(s)`);
+        assert.equal(await queued(owners), 24, 'Nothing was claimed, and no lease is left behind.');
+      }
+      // Four concurrent shards splitting four credits (one each): the same bound on every shard.
+      const shards = [0, 1, 2, 3].map(() => counted());
+      const reports = await Promise.all(shards.map((run, index) => runDispatcher(run.runtime, { region, lanes: 1, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 })));
+      t.diagnostic(`ALLOWANCE-HOLD shards: ${shards.map(run => run.statements()).join(',')} statements`);
+      for (const [index, report] of reports.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(shards[index]!.statements() <= 3, `shard ${index}: ${shards[index]!.statements()} statements`);
+      }
+      assert.equal(await queued(owners), 24);
+      // A later owner's affordable one-recipient envelope is still reached and sent.
+      await clone([later], single);
+      // Its own send key, so the claim's origin check passes for that owner.
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'later',$1,'bane_later','["send"]','[]')`, [`${later}-key`, later]);
+      await db.query('UPDATE sending_emails SET actor_key_id=$2 WHERE workspace_id=$1', [later, `${later}-key`]);
+      const [{ email }] = (await db.query('SELECT to_addresses->>0 AS email FROM sending_emails WHERE workspace_id=$1', [later])).rows;
+      await db.query("INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ($1,$2,$3,'subscribed')", [`${later}-contact`, later, email]);
+      const run = counted();
+      const report = await runDispatcher(run.runtime, { region, lanes: 1, batchSize: 24, gate: gate(1), until: Date.now() + 5000 });
+      assert.equal(report.sent, 1);
+      assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE workspace_id=$1', [later])).rows, [{ status: 'accepted' }]);
+      assert.equal(await queued(owners), 24);
+      t.diagnostic(`ALLOWANCE-HOLD later owner: ${run.statements()} statements`);
+      assert.ok(run.statements() <= 8, `${run.statements()} statements`);
+    });
+  });
+  // Recheck of #52 (P1): one owner's full page set no owner cursor, so the no-progress check
+  // never ran (24 two-recipient envelopes and one credit: 133 leases / 266 statements in 500 ms,
+  // idle false). (P2): the fair page took every owner's oversized head, so the hold starved the
+  // affordable mail behind it (24 one-recipient followers left queued, idle). The lease now skips
+  // the specific envelopes the allowance cannot afford, and a batch that advanced nothing ends.
+  test('the allowance skips specific unaffordable envelopes: one owner\'s full page holds, and mail behind oversized heads sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent, max = 100;
+      const template = ok(await local('POST', '/v1/emails/send', mail()), 202).id, contacts = [address(), address()];
+      // Owners with their own send key and two subscribed contacts; each owner's envelopes are
+      // queued oldest first with the given recipient counts and streams.
+      const seed = async (region: string, owners: string[], envelopes: { cost: number; kind?: string }[]) => {
+        await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [owners]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+          SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [owners, region]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT o||'-key',o,'owner',o||'-key','bane_owner','["send"]','[]' FROM unnest($1::text[]) o`, [owners]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT o||'-c'||n,o,($2::text[])[n],'subscribed' FROM unnest($1::text[]) o,generate_series(1,2) n`, [owners, contacts]);
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+          SELECT 'email_'||md5(o||x.n),o,o||'-key',$2,e.from_address,x.dest,'[]','[]',e.subject,
+            jsonb_set(jsonb_set(jsonb_set(e.snapshot,'{kind}',to_jsonb(x.kind)),'{region}',to_jsonb($2::text)),'{to}',x.dest),e.simulated,clock_timestamp()-interval '1 hour'+x.n*interval '1 second'
+          FROM sending_emails e,unnest($1::text[]) o,jsonb_to_recordset($4::jsonb) x(n int,kind text,dest jsonb) WHERE e.id=$3`,
+          [owners, region, template, JSON.stringify(envelopes.map((v, n) => ({ n, kind: v.kind ?? 'marketing', dest: contacts.slice(0, v.cost) })))]);
+      };
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // `credits` marketing recipients left in a cached, current sample.
+      const gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const state = async (region: string) => (await db.query(`SELECT count(*) FILTER (WHERE status='queued' AND lease_until IS NULL)::int AS free,
+        count(*) FILTER (WHERE status='queued')::int AS queued, count(*) FILTER (WHERE status='accepted')::int AS accepted,
+        count(*) FILTER (WHERE status='accepted' AND jsonb_array_length(to_addresses)>1)::int AS oversized FROM sending_emails WHERE region=$1`, [region])).rows[0];
+      const run = async (label: string, region: string, credits: number | 'blind', options: { lanes?: number } = {}) => {
+        const counter = counted(), started = Date.now();
+        const report = await runDispatcher(counter.runtime, { region, lanes: options.lanes ?? 1, batchSize: 24, gate: credits === 'blind' ? initialGate() : gate(credits), until: Date.now() + 5000 });
+        t.diagnostic(`ALLOWANCE-SKIP ${label}: sent ${report.sent}, ${counter.statements()} statements in ${Date.now() - started} ms, idle ${report.idle}`);
+        assert.equal(report.idle, true, `${label}: a quota hold is idle, not unfinished work that re-arms at once`);
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, `${label}: it retries when the quota sample can change`);
+        return { report, statements: counter.statements() };
+      };
+
+      // P1: one owner, 24 two-recipient envelopes (a full page), one credit.
+      const solo = 'te-allowance-2', soloOwner = [`${w}-solo`];
+      await seed(solo, soloOwner, Array.from({ length: 24 }, () => ({ cost: 2 })));
+      for (const lanes of [1, 2]) {
+        const { report, statements } = await run(`one owner, ${lanes} lane(s)`, solo, 1, { lanes });
+        assert.equal(report.sent, 0);
+        assert.ok(statements <= 2 * lanes, `${statements} statements with ${lanes} lane(s)`);
+        assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      }
+      // Leased before the allowance is known (a fresh database sample, no gate yet): the page
+      // comes back unaffordable once, the next lease skips it, and the run ends.
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at) VALUES ($1,$2,1000,$3,$4,clock_timestamp())`,
+        [soloOwner[0], solo, max, max - sesDailyReserve(max, percent) - 1]);
+      const blind = await run('one owner, blind first lease', solo, 'blind');
+      assert.equal(blind.report.sent, 0); assert.ok(blind.statements <= 4, `${blind.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      // Four shards, two lanes each, splitting four credits: the same bound on every shard.
+      const shards = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: solo, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP one owner, four shards: ${shards.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of shards.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 4, `shard ${index}: ${statements} statements`);
+      }
+      // The same owner's affordable envelope behind the 24 is reached and sent.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT 'email_'||md5(e.id||'follower'),e.workspace_id,e.actor_key_id,e.region,e.from_address,$2,'[]','[]',e.subject,jsonb_set(e.snapshot,'{to}',$2),e.simulated,clock_timestamp()
+        FROM sending_emails e WHERE e.workspace_id=$1 ORDER BY e.created_at LIMIT 1`, [soloOwner[0], JSON.stringify(contacts.slice(0, 1))]);
+      const follower = await run('one owner, follower', solo, 1);
+      assert.equal(follower.report.sent, 1); assert.ok(follower.statements <= 8, `${follower.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 1, oversized: 0 });
+
+      // P2: 24 owners (one lease's worth), each with an older two-recipient head and a
+      // one-recipient follower. Each new sample's credit sends one follower; no head is sent.
+      const deep = 'te-allowance-3', owners = Array.from({ length: 24 }, (_, i) => `${w}-h${String(i).padStart(2, '0')}`);
+      await seed(deep, owners, [{ cost: 2 }, { cost: 1 }]);
+      let sent = 0;
+      for (const [label, lanes] of [['heads', 1], ['heads, next idle cycle', 1], ['heads, two lanes', 2]] as const) {
+        const { report, statements } = await run(label, deep, 1, { lanes });
+        assert.equal(report.sent, 1, `${label}: the credit sends an affordable follower`); sent += 1;
+        assert.ok(statements <= 8 * lanes, `${label}: ${statements} statements`);
+        assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+      }
+      // Four shards, one credit each: no shard sends more than its share or spins, and the mail
+      // one shard held while a sibling leased is released for the next run.
+      const parallel = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: deep, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP heads, four shards: sent ${parallel.map(s => s.report.sent).join(',')}; ${parallel.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of parallel.entries()) {
+        assert.ok(report.sent <= 1, `shard ${index} sent ${report.sent}`); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 16, `shard ${index}: ${statements} statements`);
+      }
+      const shardSent = parallel.reduce((n, s) => n + s.report.sent, 0); sent += shardSent;
+      assert.ok(shardSent >= 1, 'The shards send affordable followers');
+      assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+
+      // The reserve: transactional followers behind oversized marketing heads spend the 11
+      // recipients the account has left; the marketing heads, needing two of one credit, wait.
+      const reserve = 'te-allowance-4', tx = Array.from({ length: 24 }, (_, i) => `${w}-t${String(i).padStart(2, '0')}`);
+      await seed(reserve, tx, [{ cost: 2 }, { cost: 1, kind: 'transactional' }]);
+      const priority = await run('transactional behind heads', reserve, 1);
+      assert.equal(priority.report.sent, sesDailyReserve(max, percent) + 1);
+      assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
@@ -8092,6 +8552,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, attempts: 1 }); } finally { runtime.webhookFetch = transport; }
       assert.equal(event?.threadId, sent.threadId); assert.equal(event?.addressId, support.id); assert.equal(event?.type, 'message.received');
       const reply = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: event!.messageId, text: 'You are welcome' }, 'live', agent), 202);
+      for (const [emailId, marked] of [[reply.emailId, true], [sent.id, false]] as const) {
+        for (const path of [`/v1/emails/${emailId}`, `/v1/emails/${emailId}/content`]) assert.equal(ok(await local('GET', path)).untrustedContent, marked);
+        for (const path of ['/v1/emails', '/v1/logs']) assert.equal(ok(await local('GET', `${path}?search=${emailId}`)).data[0].untrustedContent, marked);
+      }
       await dispatchDue(runtime, REGION);
       assert.equal(reply.threadId, sent.threadId); assert.deepEqual(sends.get(reply.emailId).Destination.ToAddresses, ['customer@example.net']);
       assert.deepEqual(sends.get(reply.emailId).Content.Simple.Headers, [{ Name: 'In-Reply-To', Value: `<${inboundId}>` }, { Name: 'References', Value: `<${wire}> <${inboundId}>` }]);
@@ -8525,6 +8989,47 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(ok(await http('GET',`/v1/inboxes/${bids[1]}/messages/${mid}`,tokens[1]!)).id,mid);
     assert.deepEqual((await peer.query("SELECT total,uid_next::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bids[0]])).rows,[{total:0,uid_next:2}]);
   });
+  // tear (api/tear) witness: accept, store, W delete, V flag, W commit.
+  test('inbox delete: a flag change queued on the inbox row behind the deletion fails and changes nothing',async t=>{
+    const writer=await fixtureDatabase(t),peer=await fixtureDatabase(t),w=unique('qdel'),bid=unique('mbx'),mid=unique('msg'),tid=unique('thr');
+    await writer.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'qdel.invalid',$3,'active','store')",[bid,w,REGION]);
+    await writer.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'qdel@qdel.invalid','inbox','forever')",[bid,w]);
+    await writer.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await writer.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);await writer.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'outbound','kept')",[mid,w,tid]);
+    await writer.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read) VALUES($1,$2,$3,$4,'outbound',now(),true)",[w,bid,mid,tid]);
+    const state=()=>peer.query('SELECT s.modseq::int,l.flags,l.modseq::int AS member FROM inbox_state s JOIN mailbox_messages l ON l.mailbox_id=s.inbox_id WHERE s.inbox_id=$1',[bid]).then(r=>r.rows[0]);
+    const before=await state(),pid=(await peer.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    await writer.query('BEGIN');try{
+      await writer.query('SELECT inbox_end($1,$2)',[w,bid]);
+      const queued=peer.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}') r`,[w,bid,mid]);
+      // Commit only once the change waits on the inbox row: it must then see the deletion.
+      let waiting=false;
+      for(let i=0;i<400&&!waiting;i++){waiting=(await writer.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+      assert.ok(waiting,'the flag change must queue behind the deletion');
+      await writer.query('COMMIT');
+      assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
+    }finally{await writer.query('ROLLBACK');}
+    assert.deepEqual(await state(),before);
+  });
+  // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
+  test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
+    const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'fence.invalid',$3,'active','store')",[bid,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,quota_messages) VALUES($1,$2,$1,'fence@fence.invalid','inbox','forever',1)",[bid,w]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);
+    for(const [i,id] of ids.entries()){
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','kept')",[id,w,tid]);
+      await db.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read,held_reason) VALUES($1,$2,$3,$4,'inbound',now(),false,$5)",[w,bid,id,tid,i?'quota':null]);
+    }
+    await db.query('INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at) VALUES($1,$2,$3,1,1,now())',[bid,tid,w]);
+    const summary=()=>db.query('SELECT message_count,unread_count FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]).then(r=>r.rows[0]);
+    // The old patchThread left read unchanged, then recounted unread inbound mail, held mail included.
+    await assert.rejects(db.query("UPDATE mailbox_threads SET unread_count=(SELECT count(*) FROM mailbox_messages WHERE mailbox_id=$1 AND thread_id=$2 AND NOT read AND direction='inbound') WHERE mailbox_id=$1 AND thread_id=$2",[bid,tid]),{code:'40001'});
+    assert.deepEqual(await summary(),{message_count:1,unread_count:1});
+    // A delivery still updates the summary: it changes the message count with the unread count.
+    await db.query('UPDATE mailbox_threads SET message_count=message_count+1,unread_count=unread_count+1 WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]);
+    assert.deepEqual(await summary(),{message_count:2,unread_count:2});
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
@@ -8798,7 +9303,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,jobs,local,fetch:rawFetch})=>{
+    await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
       const wid=runtime.config.workspaceId,bucket=unique('bucket'),topic=`arn:aws:sns:${REGION}:111122223333:inbound`,domain=unique('mdom');
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
@@ -9241,9 +9746,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const importer=runtime.importPublicImage;let imports=0;
         runtime.importPublicImage=async()=>{if(++imports===1)throw Error('Synthetic importer failure');return {data:Uint8Array.of(2),contentType:'image/png'};};
         try {
-          const attempt=()=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},'import-after-500');
-          assert.equal((await attempt()).status,500);const created=ok(await attempt(),201);
-          assert.equal(ok(await attempt(),201).id,created.id);assert.equal(imports,2);
+          const attempt=(key='import-after-500')=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},key);
+          assert.equal((await attempt()).status,500);
+          // The handler charged its render budget (a write) before the importer failed, so the outcome is unknown: the key never runs it again.
+          error(await attempt(),409,'IDEMPOTENCY_OUTCOME_UNKNOWN');assert.equal(imports,1);
+          const created=ok(await attempt('import-after-500-new-key'),201);
+          assert.equal(ok(await attempt('import-after-500-new-key'),201).id,created.id);assert.equal(imports,2);
         } finally {runtime.importPublicImage=importer;}
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
@@ -9260,6 +9768,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/bane_mbx_/);
         error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/bane_mbx_/);
         assert.deepEqual(await call('DELETE','/v1/endpoints/replay-hook'),{name:'replay-hook',deleted:true});await call('DELETE',`/v1/routing/routes/${route.body.id}`);
+      });
+      // tear witness (api/tear): mint key, lost list key k1 b1, create list key k1 b1 created a second list.
+      await t.test('create idempotency: a lost commit acknowledgement keeps the key, so the retry never creates twice',async st=>{
+        const post=(key:string)=>local('POST','/v1/lists',{name:'tear lost ack'},'live',{'idempotency-key':key});
+        const count=async()=>(await db.query("SELECT count(*)::int AS n FROM audience_lists WHERE workspace_id=$1 AND name='tear lost ack'",[runtime.config.workspaceId])).rows[0].n;
+        // Mock the prototype (as later tests do): an instance mock would leave an own property behind.
+        const query=pg.Client.prototype.query as (...args:unknown[])=>unknown;let lose=true;
+        // The INSERT commits on the server; the client sees the connection drop before the reply.
+        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+          if(this!==db||!lose||!/^insert into "audience_lists"/i.test(text))return query.apply(this,args);
+          lose=false;return (query.apply(this,args) as Promise<unknown>).then(()=>{throw Object.assign(new Error('Connection terminated unexpectedly'),{code:'ECONNRESET'});});} as typeof pg.Client.prototype.query);
+        try{error(await post('lost-ack-1'),503,'DATABASE_UNAVAILABLE');}finally{wire.mock.restore();}
+        assert.equal(await count(),1);
+        assert.match(error(await post('lost-ack-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN').message,/may have committed/);
+        assert.equal(await count(),1);
+      });
+      // tear witness: mint key, mint ikey, create inbox ikey k1, create inbox ikey k1 answered 409 IDEMPOTENCY_CONFLICT.
+      await t.test('create idempotency: a provisioning inbox key replays its own inbox create',async()=>{
+        const key=ok(await local('POST','/v1/inbound/keys',{name:'tear provisioning',permissions:['read','create'],addressIds:[]}),201);secrets.add(key.secret);
+        const create=()=>request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'tear provisioned'},{'idempotency-key':'provision-1'});
+        const first=ok(await create(),201),again=await create();
+        // Its visible inbox set now includes the new inbox; the retry is still the same request.
+        assert.equal(again.status,201,diagnostic(again));assert.equal(again.body.id,first.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
+        error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
+        ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
+      });
+      // tear witness (9 steps): two requests on one key; the holder fails and releases between the other's claim and lookup -> IDEMPOTENCY_CONFLICT.
+      await t.test('create idempotency: a duplicate whose holder failed and released the key gets a retryable answer',async st=>{
+        const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let stage=0;
+        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+          if(this!==db)return query.apply(this,args);
+          // A concurrent holder claims the key first; this request's claim then conflicts with it.
+          if(stage===0&&/^insert into "sending_idempotency"/i.test(text)){stage=1;return query.apply(this,args).then(()=>query.apply(this,args));}
+          // The holder is refused (4xx) and releases the key just before this request reads it.
+          if(stage===1&&/^select .*from "sending_idempotency"/i.test(text)){stage=2;return query.call(this,"DELETE FROM sending_idempotency WHERE request_key='released-1'").then(()=>query.apply(this,args));}
+          return query.apply(this,args);} as typeof pg.Client.prototype.query);
+        const post=()=>local('POST','/v1/lists',{name:'tear released'},'live',{'idempotency-key':'released-1'});
+        let reply:Reply;try{reply=await post();}finally{wire.mock.restore();}
+        assert.equal(stage,2);assert.equal(error(reply,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(reply.headers.get('retry-after'),'1');
+        assert.equal(ok(await post(),201).name,'tear released');
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),
@@ -9852,7 +10402,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (const path of previews) error(await request('GET', path, reader.secret), 403, 'PERMISSION_DENIED');
       // A key restricted to sender domains previews only drafts that send from one of them (this draft has no sender yet).
       const restricted = ok(await local('POST', '/v1/api-keys', { name: 'Preview', permissions: ['send'], domains: ['restricted.example.com'] }), 201);
-      error(await request('GET', previews[1]!, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+      error(await request('GET', previews[1]!, restricted.secret), 404, 'NOT_FOUND');
       const importImage = () => local('POST', '/v1/template-assets/import', { url: 'https://example.com/logo.png' });
       ok(await importImage(), 201);
       for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret));

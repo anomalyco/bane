@@ -16,7 +16,7 @@ type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean }
 function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Scope): QueryDef<unknown>[] {
   const scoped = multiTenant || Boolean(regionId)
   switch (path) {
-    case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore()] : []
+    case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ direction: 'all', page: 1, pageSize: 7 })] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
     // Receiving domains and inbound webhooks are admin-only reads.
     case '/receiving': return [queries.inboundAddressOptions(), ...(canAdminister ? [queries.inboundDomains(), queries.inboundWebhooks()] : [])]
@@ -34,6 +34,13 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
 
 export function prefetchQueries(cache: QueryClient, api: BaneApi, defs: QueryDef<unknown>[]) {
   return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['bane', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
+}
+
+// Warms a few queries for the current API (GET only; anything fresh or in flight is skipped).
+export function usePrefetchQueries() {
+  const cache = useQueryClient()
+  const api = useApi()
+  return useCallback((defs: QueryDef<unknown>[]) => api.mode === 'live' ? prefetchQueries(cache, api, defs) : Promise.resolve([]), [cache, api])
 }
 
 // Loads a sidebar page's code and warms its first-screen queries. GET only; queries already fresh or in flight are skipped.

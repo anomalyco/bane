@@ -1,5 +1,5 @@
 import {
-  Button, ControlSkeleton, Input, LoadingRegion, PageHeader, SectionHeader,
+  Button, ControlSkeleton, Input, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import { CampaignsHeader } from './header'
@@ -8,8 +8,8 @@ import './campaigns.css'
 export const campaignColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Campaign', width: '35%', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div> },
   { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} /> },
-  { key: 'recipients', label: 'Recipients', skeleton: <SkeletonText width={45} /> },
-  { key: 'delivered', label: 'Delivered', skeleton: <SkeletonText width={42} /> },
+  { key: 'recipients', label: 'Recipients', align: 'right', skeleton: <SkeletonText width={45} /> },
+  { key: 'delivered', label: 'Delivered', align: 'right', skeleton: <SkeletonText width={42} /> },
   { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" /> },
   { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span /> },
 ]
@@ -53,7 +53,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     const templates = kind === 'templates'
     return <>
       <CampaignsHeader actions={<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button>} />
-      <div className="data-toolbar"><div className="cluster"><Input className={templates ? 'template-search' : 'campaign-search'} aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} type="search" disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
+      <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
       <TableSkeleton columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
     </>
   }

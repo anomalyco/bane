@@ -6,6 +6,8 @@ import { boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, s
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
 export type CampaignEditor = { format: 'react-email'; version: 1; document: Record<string, unknown> };
 export type EmailSnapshot = {
+  /** Null: known non-test send. A campaign ID: test of that campaign. Missing: legacy/unknown. */
+  testCampaignId?: string | null;
   binding?: SendingBinding;
   from: string; fromName?: string; previewText?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string;
   kind: 'transactional' | 'marketing'; subject: string; html?: string; text?: string;
@@ -15,6 +17,8 @@ export type EmailSnapshot = {
   deferredCampaign?: boolean;
   /** Present only on mailbox replies; recipients who actually wrote to this mailbox in this thread. */
   replyAuthors?: string[];
+  /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */
+  untrustedContent?: boolean;
   /** Live transactional only: ask the content classifier (Jev) before dispatch. */
   screen?: boolean;
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
@@ -51,6 +55,7 @@ export const emailEvents = pgTable('sending_email_events', {
   externalId: text('external_id'), data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}), simulated: boolean('simulated').notNull(), createdAt: time('created_at').notNull().defaultNow(),
 }, t => [index('sending_events_page').on(t.workspaceId, t.emailId, t.id), uniqueIndex('sending_events_external').on(t.workspaceId, t.externalId), index('sending_email_events_retention').on(t.workspaceId, t.createdAt)]);
 export const attachments = pgTable('sending_attachments', {
+  uploadedBy: text('uploaded_by'),
   id: text('id').primaryKey(), ...scope(), filename: text('filename').notNull(), contentType: text('content_type').notNull(), size: integer('size').notNull(),
   disposition: text('disposition').$type<'attachment' | 'inline'>().notNull(), contentId: text('content_id'), storageKey: text('storage_key').notNull(), checksum: text('checksum').notNull(), sourceTemplateAssetId: text('source_template_asset_id'),
   createdAt: time('created_at').notNull().defaultNow(),
