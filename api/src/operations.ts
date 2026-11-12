@@ -1573,39 +1573,91 @@ async function quarantineFeedback(runtime: Runtime, item: FeedbackItem, workspac
   } catch { return {ok:false,error:'FEEDBACK_PERSIST_FAILED'}; }
 }
 
-const UNTAGGED_QUARANTINE_CAP = 10000, UNTAGGED_PAYLOAD_CAP = 65536;
+const UNTAGGED_QUARANTINE_CAP = 10000, UNTAGGED_PAYLOAD_CAP = 65536, RECOVERY_PAYLOAD_CAP = 1024 * 1024;
+type QueueRecoveryReason = 'FEEDBACK_UNTAGGED' | 'FEEDBACK_LEGACY_RECOVERY';
+function recoverableJson(body: unknown): string | undefined {
+  const seen = new Set<object>();
+  const valid = (value: unknown): boolean => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+    if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0);
+    if (!value || typeof value !== 'object' || seen.has(value)) return false;
+    if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
+    seen.add(value);
+    const entries = Object.entries(value);
+    const ok = (!Array.isArray(value) || entries.length === value.length && entries.every(([key], index) => key === String(index))) && entries.every(([, v]) => valid(v));
+    seen.delete(value); return ok;
+  };
+  try { return valid(body) ? JSON.stringify(body) : undefined; } catch { return undefined; }
+}
+async function retainQueueFeedback(runtime: Runtime, lane: string, body: unknown, reason: QueueRecoveryReason): Promise<string | undefined> {
+  // JSON is the provider-feedback format. Never replace an unrepresentable body with a preview and ack it.
+  const text = recoverableJson(body); if (text === undefined) return;
+  if (Buffer.byteLength(text) > RECOVERY_PAYLOAD_CAP) return;
+  const key = `${reason === 'FEEDBACK_UNTAGGED' ? 'untagged' : 'legacy'}:${await digest(`${lane}\n${text}`)}`;
+  const topic = (body as { topicArn?: unknown; body?: { topicArn?: unknown } } | null)?.topicArn ?? (body as { body?: { topicArn?: unknown } } | null)?.body?.topicArn;
+  const chunks: string[] = [];
+  if (text.length > UNTAGGED_PAYLOAD_CAP) {
+    // Split on Unicode code points: passing a lone surrogate to PostgreSQL would destroy that byte sequence.
+    const points = Array.from(text);
+    for (let i = 0; i < points.length; i += 16384) chunks.push(points.slice(i, i + 16384).join(''));
+  }
+  return runtime.db.transaction(async tx => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('bane:feedback-recovery-cap'))`);
+    const result = await tx.execute(sql`INSERT INTO operation_feedback_failures(id,payload,topic_arn,reason,payload_chunk_count)
+      SELECT ${key},${chunks.length ? '' : text},${typeof topic === 'string' && topic.length <= 512 ? topic : null},${reason},${chunks.length}
+      WHERE EXISTS (SELECT 1 FROM operation_feedback_failures WHERE id=${key}) OR
+        (SELECT count(*) FROM operation_feedback_failures WHERE reason IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY')) < ${UNTAGGED_QUARANTINE_CAP}
+      ON CONFLICT (id) DO UPDATE SET reason=EXCLUDED.reason RETURNING id`);
+    if (result.rowCount !== 1) return;
+    if (chunks.length) await tx.execute(sql`INSERT INTO operation_feedback_failure_chunks(failure_id,ordinal,payload)
+      SELECT ${key},ordinality-1,payload FROM unnest(${sql.param(chunks)}::text[]) WITH ORDINALITY AS c(payload,ordinality) ON CONFLICT DO NOTHING`);
+    return key;
+  });
+}
 /**
  * Keeps an untagged item from the legacy feedback queue for operator review. The body is untrusted:
  * it is stored as bounded text under a content digest, its workspace is never taken from it, and the
  * quarantine holds at most UNTAGGED_QUARANTINE_CAP such rows (false means the caller dead-letters).
  */
 export async function quarantineUntaggedFeedback(runtime: Runtime, lane: string, body: unknown): Promise<boolean> {
-  let text: string; try { text = JSON.stringify(body) ?? 'null'; } catch { text = JSON.stringify({ unserializable: String(body).slice(0, 256) }); }
-  if (text.length > UNTAGGED_PAYLOAD_CAP) text = JSON.stringify({ truncated: true, head: text.slice(0, UNTAGGED_PAYLOAD_CAP) });
-  const topic = (body as { topicArn?: unknown } | null)?.topicArn, key = `untagged:${await digest(`${lane}\n${text}`)}`;
-  const result = await runtime.db.execute(sql`INSERT INTO operation_feedback_failures(id,payload,topic_arn,reason)
-    SELECT ${key},${text},${typeof topic === 'string' && topic.length <= 512 ? topic : null},'FEEDBACK_UNTAGGED'
-    WHERE (SELECT count(*) FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED') < ${UNTAGGED_QUARANTINE_CAP}
-    ON CONFLICT (id) DO UPDATE SET reason=EXCLUDED.reason RETURNING id`);
-  return result.rowCount === 1;
+  return !!await retainQueueFeedback(runtime, lane, body, 'FEEDBACK_UNTAGGED');
+}
+export async function retainLegacyFeedback(runtime: Runtime, body: import('./adapters/feedback-queue.js').LegacyFeedbackRecovery): Promise<void> {
+  if (!await retainQueueFeedback(runtime, body.source.queue, body, 'FEEDBACK_LEGACY_RECOVERY')) throw new Error('Feedback recovery storage is full');
+}
+export async function completeLegacyFeedback(runtime: Runtime, body: import('./adapters/feedback-queue.js').LegacyFeedbackRecovery): Promise<void> {
+  const id = `legacy:${await digest(`${body.source.queue}\n${JSON.stringify(body)}`)}`;
+  await runtime.db.execute(sql`DELETE FROM operation_feedback_failures WHERE id=${id} AND reason='FEEDBACK_LEGACY_RECOVERY'`);
+}
+export async function readFeedbackQuarantine(runtime: Runtime, ids?: string[]) {
+  const rows = (await runtime.db.execute<{ id: string; reason: string; payload: string; topic_arn: string | null; created_at: string; payload_chunk_count: number; actual_chunks: number }>(sql`
+    SELECT f.id,f.reason,CASE WHEN f.payload_chunk_count=0 THEN f.payload ELSE c.payload END AS payload,
+      f.topic_arn,f.created_at::text,f.payload_chunk_count,coalesce(c.n,0)::int AS actual_chunks
+    FROM operation_feedback_failures f LEFT JOIN LATERAL
+      (SELECT string_agg(payload,'' ORDER BY ordinal) AS payload,count(*) AS n FROM operation_feedback_failure_chunks WHERE failure_id=f.id) c ON true
+    WHERE f.reason IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY') ${ids ? sql`AND f.id = ANY(${sql.param(ids)}::text[])` : sql``}
+    ORDER BY f.created_at LIMIT 500`)).rows;
+  for (const row of rows) if (row.payload_chunk_count !== row.actual_chunks) throw new Error(`Incomplete feedback recovery ${row.id}`);
+  return rows;
 }
 /** Replays only authenticated quarantine rows. An operator's selection is not provider provenance. */
 export async function replayQuarantinedFeedback(runtime: Runtime, ids: string[]): Promise<{ id: string; ok: boolean; error?: string }[]> {
   if (!ids.length) return [];
-  const { authenticFeedback } = await import('./adapters/feedback-queue.js');
-  const rows = (await runtime.db.execute<{ id: string; payload: string }>(sql`SELECT id,payload FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND id = ANY(${sql.param(ids)}::text[])`)).rows;
+  const { authenticatedFeedbackItem } = await import('./adapters/feedback-queue.js');
+  const rows = await readFeedbackQuarantine(runtime, ids);
   const items: { id: string; item?: FeedbackItem; error?: string }[] = rows.map(row => {
     try {
-      const value = JSON.parse(row.payload) as Partial<FeedbackItem> | null;
+      const raw = JSON.parse(row.payload), authenticated = authenticatedFeedbackItem(runtime.config, raw);
+      const value = authenticated ?? raw as Partial<FeedbackItem> | null;
       if (!value || typeof value !== 'object' || typeof value.region !== 'string' || typeof value.topicArn !== 'string' || typeof value.messageId !== 'string' || !value.message || typeof value.message !== 'object') return { id: row.id, error: 'FEEDBACK_INVALID' };
-      if (!authenticFeedback(runtime.config, value)) return { id: row.id, error: 'FEEDBACK_UNAUTHENTICATED' };
-      return { id: row.id, item: value };
+      if (!authenticated) return { id: row.id, error: 'FEEDBACK_UNAUTHENTICATED' };
+      return { id: row.id, item: authenticated };
     } catch { return { id: row.id, error: 'FEEDBACK_INVALID' }; }
   });
   const outcomes = await ingestFeedbackBatch(runtime, items.flatMap(entry => entry.item ? [entry.item] : []));
   const results = items.map(entry => entry.item ? { id: entry.id, ...outcomes.shift()! } : { id: entry.id, ok: false, error: entry.error });
   const done = results.filter(r => r.ok).map(r => r.id);
-  if (done.length) await runtime.db.execute(sql`DELETE FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND id = ANY(${sql.param(done)}::text[])`);
+  if (done.length) await runtime.db.execute(sql`DELETE FROM operation_feedback_failures WHERE reason IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY') AND id = ANY(${sql.param(done)}::text[])`);
   return results;
 }
 

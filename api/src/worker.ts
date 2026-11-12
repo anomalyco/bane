@@ -197,17 +197,22 @@ export default {
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy' : undefined;
     if (feedbackLane) {
-      const { ingestFeedbackBatch, quarantineUntaggedFeedback } = await core.wrapModuleLoad(() => import('./operations.js'));
+      const { ingestFeedbackBatch, quarantineUntaggedFeedback, retainLegacyFeedback, completeLegacyFeedback } = await core.wrapModuleLoad(() => import('./operations.js'));
       // Each message is one verified callback; acknowledge and retry individually so one bad
       // payload never blocks a batch of routine deliveries. Only items this installation tagged at
       // /v1/events/ses are ingested. Only platform-dated, pre-cutover legacy items may drain unsigned;
       // newer ones are quarantined for review. Every replay is evaluated again.
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
-        const settled = await settleFeedbackBatch({ secrets: runtime.config, lane: feedbackLane, messages,
+        const settled = await settleFeedbackBatch({ secrets: runtime.config, lane: feedbackLane, sourceQueue: batch.queue, messages,
           legacyCutover: legacyFeedbackCutover('LEGACY_FEEDBACK_CUTOVER' in env ? env.LEGACY_FEEDBACK_CUTOVER : undefined),
           ingest: items => ingestFeedbackBatch(runtime, items), quarantine: body => quarantineUntaggedFeedback(runtime, feedbackLane, body),
-          deadLetter: async item => { await (feedbackLane === 'tagged' ? env.FEEDBACK_DLQ : env.LEGACY_FEEDBACK_DLQ).send(item); } });
+          promoteLegacy: async item => {
+            await retainLegacyFeedback(runtime, item);
+            try { await env.FEEDBACK_QUEUE.send(item); }
+            catch { core.log('warn', { code: 'FEEDBACK_LEGACY_RECOVERY_PENDING', sourceQueue: item.source.queue, sourceId: item.source.id }); }
+          }, completeLegacy: item => completeLegacyFeedback(runtime, item),
+          deadLetter: async item => { await (feedbackLane === 'tagged' ? env.FEEDBACK_DLQ : env.LEGACY_FEEDBACK_DLQ).send(item, { contentType: 'v8' }); } });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
       });
