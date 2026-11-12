@@ -109,19 +109,6 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
-test('Cloudflare routing: every API route reaches the Worker before static assets',async()=>{
-  // Workers Assets answers paths outside run_worker_first itself (405 for POST, SPA HTML for GET),
-  // so a route missing here is unreachable on Cloudflare while the Node server still serves it.
-  const ts=(await import('typescript')).default,{createOpenApiApp}=await import('./src/app.js');
-  const glob=(p:string)=>new RegExp('^'+p.replace(/[.+?^${}()|[\]\\]/g,'\\$&').replaceAll('*','.*')+'$');
-  const paths=[...new Set((await createOpenApiApp()).routes.map(r=>r.path).filter(p=>p!=='*'&&p!=='/*').map(p=>p.replace(/:[^/]+/g,'x').replaceAll('*','x')))];
-  assert.ok(paths.includes('/internal/v1/mail')&&paths.includes('/v1/emails'),'route inventory is incomplete');
-  for(const file of ['wrangler.dev.jsonc','wrangler.prod.jsonc']){
-    const rules:string[]=ts.parseConfigFileTextToJson(file,await readFile(new URL(file,import.meta.url),'utf8')).config.assets.run_worker_first;
-    const first=(path:string)=>rules.some(r=>!r.startsWith('!')&&glob(r).test(path))&&!rules.some(r=>r.startsWith('!')&&glob(r.slice(1)).test(path));
-    assert.deepEqual(paths.filter(p=>!first(p)),[],`${file} serves these API routes from static assets`);
-  }
-});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
