@@ -1,5 +1,5 @@
 import { sql, eq, and } from 'drizzle-orm';
-import PostalMime from 'postal-mime';
+import {parseInboundMime} from './mailbox-ingest.js';
 import { ApiError, id, type Actor, type Ctx } from './core.js';
 import { mailboxes } from './db/mailbox.js';
 import { principal } from './mail-gateway.js';
@@ -41,7 +41,9 @@ export async function contentWrite(c: Ctx, p: Content) {
   const input = Buffer.from(p.content, 'base64'),
     raw = sending ? scrub(input) : input;
   if (raw.length > (sending ? 16 : 40) * 1024 * 1024) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
-  const m = await PostalMime.parse(raw),
+  const m=await parseInboundMime(raw);
+  if(!m && sending)throw new ApiError(422,'MIME_LIMIT','Message could not be safely parsed.');
+  const
     mid = id('msg'),
     tid = id('thr'),
     bucket = boundMailBucket(rt) ?? (!rt.config.multiTenant ? 'local:' : null);
@@ -68,8 +70,9 @@ export async function contentWrite(c: Ctx, p: Content) {
       )
     ).rows[0];
     if (!box || !active) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
-    const stamp = m.messageId?.trim() ?? null;
+    const stamp = m?.messageId?.trim() ?? null;
     if (p.op === 'submit') {
+      if(!m)throw new ApiError(422,'MIME_LIMIT','Message could not be safely parsed.');
       const owned = (
         await tx.execute<{ address: string }>(
           sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${who.w} AND mailbox_id=${who.b}`,
@@ -154,7 +157,7 @@ export async function contentWrite(c: Ctx, p: Content) {
     }
     const r = (
       await tx.execute<{ r: { pairs: [number, number][]; validity: number; error?: string } }>(
-        sql`SELECT mailgw_append(${who.w},${who.b},${p.folder},${mid},${tid},${stamp},${m.subject ?? ''},${m.from?.address ?? ''},${m.text?.slice(0, 65536) ?? ''},${p.date}::timestamptz,${raw.length},${bucket},${key},${JSON.stringify(index)}::jsonb,${sql.param(p.flags)}::text[]) r`,
+        sql`SELECT mailgw_append(${who.w},${who.b},${p.folder},${mid},${tid},${stamp},${m?.subject ?? ''},${m?.from?.address ?? ''},${m?.text?.slice(0, 65536) ?? ''},${p.date}::timestamptz,${raw.length},${bucket},${key},${JSON.stringify(index)}::jsonb,${sql.param(p.flags)}::text[]) r`,
       )
     ).rows[0]!.r;
     if (r.error) throw new ApiError(409, 'APPEND_REFUSED', 'Append refused.');

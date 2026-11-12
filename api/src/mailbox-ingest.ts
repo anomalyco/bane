@@ -393,7 +393,7 @@ export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
       attachmentEncoding: 'arraybuffer', maxHeadersSize: HEADER_LIMIT, maxNestingDepth: MIME_DEPTH,
       maxRfc822NestingDepth: 4, maxPartCount: 200, maxForwardedAddresses: 256,
     }));
-    return performance.now() < budget.deadline ? mail : null;
+    return performance.now() < budget.deadline && !mail.attachments.some(a=>a.rfc822DepthExceeded) ? mail : null;
   }
   catch { return null; }
 }

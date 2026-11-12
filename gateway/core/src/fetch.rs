@@ -1,6 +1,6 @@
 use crate::store::{Entry, Flags};
 use imap_codec::imap_types::fetch::{MessageDataItemName as Item, Part, Section};
-use mail_parser::{Address, Message, MessageParser, MimeHeaders, PartType};
+use mail_parser::{Address, Message, MessageParser};
 use std::borrow::Cow;
 
 pub fn quoted(s: &str) -> String {
@@ -95,59 +95,57 @@ fn envelope(m: Option<&Message<'_>>) -> String {
         .join(" ")
     )
 }
-fn structure(m: &Message<'_>, id: usize, depth: usize) -> String {
-    let default = "(\"APPLICATION\" \"OCTET-STREAM\" NIL NIL NIL \"7BIT\" 0)";
-    let Some(p) = m.parts.get(id).filter(|_| depth < 32) else {
-        return default.into();
-    };
+// The full parser stores parts/messages in flat arenas. Limits apply inside its
+// parser, not to a second classifier or just to the rendering traversal.
+fn index(raw: &[u8]) -> Option<mime_index::Message<'_>> {
+    let m = mime_index::MessageParser::new()
+        .max_depth(16)
+        .max_parts(200)
+        .max_encoded_nesting(2)
+        .parse(raw)?;
+    let limited = m
+        .parts()
+        .any(|p| p.flags().contains(mime_index::PartFlags::LIMIT_REACHED));
+    (!limited).then_some(m)
+}
+fn structure(p: mime_index::MessagePart<'_>) -> String {
     let ct = p.content_type();
-    let sub = ct.and_then(|c| c.c_subtype.as_deref()).unwrap_or("PLAIN");
-    if let PartType::Multipart(ids) = &p.body
-        && !ids.is_empty()
-    {
-        let parts = ids
-            .iter()
-            .map(|id| structure(m, *id as usize, depth + 1))
-            .collect::<String>();
-        return format!("({parts} {})", quoted(sub));
+    let sub = ct.as_ref().and_then(|c| c.subtype()).unwrap_or("PLAIN");
+    if p.is_multipart() && p.children().len() > 0 {
+        return format!(
+            "({} {})",
+            p.children().map(structure).collect::<String>(),
+            quoted(sub)
+        );
     }
-    let ty = ct.map_or("TEXT", |c| &c.c_type);
-    let attrs = ct
-        .and_then(|c| c.attributes.as_ref())
-        .map(|a| {
-            format!(
-                "({})",
-                a.iter()
-                    .map(|x| format!("{} {}", quoted(&x.name), quoted(&x.value)))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        })
-        .unwrap_or_else(|| {
-            if ty.eq_ignore_ascii_case("TEXT") {
-                "(\"CHARSET\" \"US-ASCII\")".into()
-            } else {
-                "NIL".into()
-            }
-        });
-    let body = m
-        .raw_message
-        .get(p.offset_body as usize..p.offset_end as usize)
-        .unwrap_or_default();
+    let ty = ct.as_ref().map_or("TEXT", |c| c.ctype());
+    let attrs: Vec<_> = ct
+        .into_iter()
+        .flat_map(|c| c.attributes())
+        .map(|(k, v)| format!("{} {}", quoted(k), quoted(v)))
+        .collect();
+    let params = if !attrs.is_empty() {
+        format!("({})", attrs.join(" "))
+    } else if ty.eq_ignore_ascii_case("text") {
+        r#"("CHARSET" "US-ASCII")"#.into()
+    } else {
+        "NIL".into()
+    };
+    let body = p.raw_body();
     let lines = body.iter().filter(|&&b| b == b'\n').count();
     let ext = if ty.eq_ignore_ascii_case("text") {
         format!(" {lines}")
-    } else if let PartType::Message(n) = &p.body {
+    } else if let Some(n) = p.nested() {
         format!(
             " {} {} {lines}",
-            envelope(Some(n)),
-            structure(n, 0, depth + 1)
+            envelope(MessageParser::default().parse_headers(n.raw()).as_ref()),
+            structure(n.root_part())
         )
     } else {
         String::new()
     };
     format!(
-        "({} {} {attrs} {} {} {} {}{ext})",
+        "({} {} {params} {} {} {} {}{ext})",
         quoted(ty),
         quoted(sub),
         ns(p.content_id()),
@@ -156,31 +154,25 @@ fn structure(m: &Message<'_>, id: usize, depth: usize) -> String {
         body.len()
     )
 }
-fn resolve<'a>(
-    mut m: &'a Message<'_>,
-    part: &Part,
-) -> Option<(&'a Message<'a>, &'a mail_parser::MessagePart<'a>)> {
-    let mut node = m.parts.first()?;
+fn resolve<'a>(m: &'a mime_index::Message<'_>, part: &Part) -> Option<mime_index::MessagePart<'a>> {
+    let mut node = m.root_part();
     for (i, n) in part.0.as_ref().iter().enumerate() {
-        let nested = i != 0 && matches!(node.body, PartType::Message(_));
-        if nested && let PartType::Message(inner) = &node.body {
-            m = inner;
-            node = m.parts.first()?;
+        let inner = if i == 0 { None } else { node.nested() };
+        if let Some(inner) = inner {
+            node = inner.root_part()
         }
-        match &node.body {
-            PartType::Multipart(ids) => {
-                node = m.parts.get(*ids.get(n.get() as usize - 1)? as usize)?
-            }
-            _ if (i == 0 || nested) && n.get() == 1 => (),
-            _ => return None,
+        if node.is_multipart() {
+            node = node.children().nth(n.get() as usize - 1)?
+        } else if n.get() != 1 || (i != 0 && inner.is_none()) {
+            return None;
         }
     }
-    Some((m, node))
+    Some(node)
 }
 fn section<'a>(
     s: Option<&Section<'_>>,
     raw: &'a [u8],
-    m: Option<&'a Message<'_>>,
+    m: Option<&'a mime_index::Message<'_>>,
 ) -> (String, Option<Cow<'a, [u8]>>) {
     let Some(s) = s else {
         return (String::new(), Some(raw.into()));
@@ -209,27 +201,17 @@ fn section<'a>(
     let mut slice = raw;
     let mut end = header_end(raw);
     if let Some(p) = part {
-        let Some((mut owner, mut p)) = m.and_then(|m| resolve(m, p)) else {
+        let Some(p) = m.and_then(|m| resolve(m, p)) else {
             return (name, None);
         };
-        let mut limit = p.offset_end;
+        slice = p.raw();
+        end = p.raw_headers().len();
         if !matches!(s, Section::Part(_) | Section::Mime(_))
-            && let PartType::Message(inner) = &p.body
-            && let Some(root) = inner.parts.first()
+            && let Some(n) = p.nested()
         {
-            // Nested multipart parsers may end the root part at the closing boundary.
-            // The wire body also includes the encapsulated message's epilogue.
-            if owner.raw_message.as_ptr() != inner.raw_message.as_ptr() {
-                limit = inner.raw_message.len() as u32;
-            }
-            owner = inner;
-            p = root;
+            slice = p.raw_body();
+            end = n.root_part().raw_headers().len().min(slice.len());
         }
-        slice = owner
-            .raw_message
-            .get(p.offset_header as usize..limit as usize)
-            .unwrap_or_default();
-        end = (p.offset_body.saturating_sub(p.offset_header) as usize).min(slice.len());
     }
     match s {
         Section::HeaderFields(_, f) | Section::HeaderFieldsNot(_, f) => {
@@ -293,26 +275,25 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
             Item::Uid => format!("UID {}", e.uid),
             Item::Rfc822Size => format!("RFC822.SIZE {}", e.size),
             Item::InternalDate => format!("INTERNALDATE \"{}\"", e.date.format("%d-%b-%Y %T %z")),
-            Item::Envelope | Item::Body | Item::BodyStructure => {
-                let m = mime
-                    .get_or_insert_with(|| MessageParser::default().parse(&*e.raw))
-                    .as_ref();
-                if matches!(item, Item::Envelope) {
-                    format!("ENVELOPE {}", envelope(m))
-                } else {
-                    format!(
-                        "{} {}",
-                        if matches!(item, Item::Body) {
-                            "BODY"
-                        } else {
-                            "BODYSTRUCTURE"
-                        },
-                        m.map(|m| structure(m, 0, 0)).unwrap_or_else(|| format!(
-                            "(\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" {} 0)",
+            Item::Envelope => format!(
+                "ENVELOPE {}",
+                envelope(MessageParser::default().parse_headers(&*e.raw).as_ref())
+            ),
+            Item::Body | Item::BodyStructure => {
+                let m = mime.get_or_insert_with(|| index(&e.raw)).as_ref();
+                format!(
+                    "{} {}",
+                    if matches!(item, Item::Body) {
+                        "BODY"
+                    } else {
+                        "BODYSTRUCTURE"
+                    },
+                    m.map(|m| structure(m.root_part()))
+                        .unwrap_or_else(|| format!(
+                            "(\"APPLICATION\" \"OCTET-STREAM\" NIL NIL NIL \"8BIT\" {})",
                             e.raw.len()
                         ))
-                    )
-                }
+                )
             }
             Item::BodyExt { .. } | Item::Rfc822 | Item::Rfc822Text | Item::Rfc822Header => {
                 let (key, bytes, partial) = match item {
@@ -321,9 +302,16 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
                         partial,
                         ..
                     } => {
-                        let m = if s.is_some() {
-                            mime.get_or_insert_with(|| MessageParser::default().parse(&*e.raw))
-                                .as_ref()
+                        let m = if s.as_ref().is_some_and(|v| {
+                            !matches!(
+                                v,
+                                Section::Header(None)
+                                    | Section::Text(None)
+                                    | Section::HeaderFields(None, _)
+                                    | Section::HeaderFieldsNot(None, _)
+                            )
+                        }) {
+                            mime.get_or_insert_with(|| index(&e.raw)).as_ref()
                         } else {
                             None
                         };
@@ -370,4 +358,26 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
     }
     out.extend(b")\r\n");
     Ok(())
+}
+
+/// Exercises the same bounded arena and renderer as FETCH, without a socket.
+pub fn inspect_structure(raw: &[u8]) -> Option<String> {
+    index(raw).map(|m| structure(m.root_part()))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nesting_policy() {
+        let raw = include_bytes!("../../fixtures/forwarded.eml");
+        assert!(inspect_structure(raw).is_some());
+        let m = mime_index::MessageParser::new()
+            .max_depth(1)
+            .parse(raw)
+            .unwrap();
+        assert!(
+            m.parts()
+                .any(|p| p.flags().contains(mime_index::PartFlags::LIMIT_REACHED))
+        );
+    }
 }
