@@ -4370,7 +4370,7 @@ describe('Dashboard API capabilities', () => {
       const wid = runtime.config.workspaceId, at = (seconds: number) => new Date(Date.parse('2026-01-05T10:00:00Z') + seconds * 1000).toISOString();
       const sent = async (id: string, seconds: number, from: string, to: string, subject: string, kind: string, status: string) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
-         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
+         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text, 'testCampaignId', null), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
       const [s1, s2, r1, r2, out, box, thread] = ['s1', 's2', 'r1', 'r2', 'out', 'box', 'thread'].map(name => unique(`logs-${name}-`));
       await sent(s1, 1, 'hello@logs.example', 'ada@example.net', 'Logs one', 'transactional', 'delivered');
       await sent(s2, 3, 'hello@other.example', 'grace@example.net', 'Logs two', 'marketing', 'bounced');
@@ -4538,6 +4538,53 @@ describe('Personalization context boundaries', () => {
 });
 
 describe('Campaign authorization and dispatch credentials', () => {
+  test('campaign test deliveries, legacy tests and their private attachments are not domain-key mail', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, db }) => {
+      const files = new Map<string, {body: Uint8Array; contentType: string}>();
+      runtime.storage = { async put(k, body, contentType) { files.set(k, {body, contentType}); }, async get(k) { return files.get(k) ?? null; }, async delete(k) { files.delete(k); } };
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped', domains: ['sender.example'], permissions: ['read', 'send'] }), 201); secrets.add(scoped.secret);
+      const file = { filename: 'fixture.txt', content: 'YQ==' }, asset = ok(await local('POST', '/v1/attachments', file), 201);
+      const list = ok(await local('POST', '/v1/lists', { name: 'Fixture' }), 201);
+      const from = 'a@sub.sender.example', subject = 'Private test subject';
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Fixture', from, subject, html: '<p>Fixture</p>', audience: { listId: list.id }, attachments: [asset.id] }), 201);
+      const receipt = ok(await local('POST', `/v1/campaigns/${campaign.id}/test`, { to: 'fixture@example.invalid' }), 202);
+      const stored = (await db.query('SELECT campaign_id, snapshot FROM sending_emails WHERE id=$1', [receipt.id])).rows[0];
+      assert.equal(stored.campaign_id, null, 'test mail does not advance live campaign delivery counts');
+      assert.equal(stored.snapshot.testCampaignId, campaign.id);
+      const assertHidden = async () => {
+        for (const path of ['/v1/emails', '/v1/logs']) {
+          const listPath = `${path}?search=${receipt.id}`;
+          assert.equal(ok(await local('GET', listPath)).data[0].id, receipt.id);
+          assert.deepEqual(ok(await request('GET', listPath, scoped.secret)).data, []);
+        }
+        for (const suffix of ['', '/detail', '/content', '/events']) error(await request('GET', `/v1/emails/${receipt.id}${suffix}`, scoped.secret), 404, 'NOT_FOUND');
+        for (const suffix of ['', '/content']) error(await request('GET', `/v1/attachments/${asset.id}${suffix}`, scoped.secret), 404, 'ATTACHMENT_NOT_FOUND');
+      };
+      assert.deepEqual(ok(await local('GET', `/v1/emails/${receipt.id}/content`)).attachments, [asset.id]);
+      await assertHidden();
+      await db.query("UPDATE sending_emails SET snapshot=snapshot-'testCampaignId' WHERE id=$1", [receipt.id]);
+      await assertHidden();
+      const direct = mail({ from, attachments: [asset.id] });
+      error(await request('POST', '/v1/emails/send', scoped.secret, direct), 404, 'ATTACHMENT_NOT_FOUND');
+      // An independent visible direct delivery, not knowledge of the ID, grants access.
+      const directReceipt = ok(await local('POST', '/v1/emails/send', direct), 202);
+      assert.equal(ok(await request('GET', `/v1/emails/${directReceipt.id}`, scoped.secret)).id, directReceipt.id);
+      assert.equal(ok(await request('GET', `/v1/attachments/${asset.id}/content`, scoped.secret)).content, file.content);
+      const own = ok(await request('POST', '/v1/attachments', scoped.secret, file), 201);
+      ok(await request('GET', `/v1/attachments/${own.id}`, scoped.secret));
+      // Hosted API-key admission loads its credential and assets in one statement. It must use
+      // the same attachment rule as the ordinary send path without adding a round trip.
+      const privateFile = ok(await local('POST', '/v1/attachments', file), 201);
+      const wid = runtime.config.workspaceId, acct = '112223330000';
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')`, [REGION, acct]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('sub.sender.example',$1,$1,'verified')`, [wid]);
+      const meter = await queryBudget(t, db);
+      await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
+    });
+  });
   test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
     const owner = await keyFixture(t);
     const restricted = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
