@@ -349,7 +349,7 @@ function DraftAudienceLine({ campaign, listId, segmentId, segmentName }: { campa
   const fix = data && data.unsubscribed > 0 ? <> · {number(data.unsubscribed)} not subscribed · <Link to={`/audience/lists/${encodeURIComponent(listId)}?status=unknown`}>Why?</Link></> : null
   const text = !listId ? <>Choose a list. Only contacts who agreed to marketing email receive campaigns.</>
     : !data ? <span role="status">{query.isError ? 'Couldn’t count recipients.' : 'Counting recipients…'}</span>
-    : data.matched === 0 ? <>No contacts {segmentName ? `match ${segmentName} in this list` : 'in this list yet'}. <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>Add contacts</Link></>
+    : data.matched === 0 ? segmentId ? <>Nobody in this list matches {segmentName ?? 'this segment'}. <Link to={`/audience/segments/${encodeURIComponent(segmentId)}`}>Review the segment</Link></> : <>No contacts in this list yet. <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>Add contacts</Link></>
     : <>{number(data.eligible)} of {number(data.matched)} {data.matched === 1 ? 'contact' : 'contacts'}{segmentName ? ` in ${segmentName}` : ''} can receive this campaign{fix}{data.suppressed > 0 ? ` · ${number(data.suppressed)} suppressed` : ''}</>
   return <div className="campaign-compose-row campaign-audience-line"><span aria-hidden="true" /><span className="campaign-audience-line__text">{text}</span></div>
 }
