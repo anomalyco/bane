@@ -116,6 +116,9 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // A pause committed between the claim and the fence: the paused endpoint still received the POST.
     (1, &["ingest m1 a", "claim K m1:W", "pause W", "go K"]),
     (1, &["ingest m1 a", "claim K m1:W", "pause W", "go K", "unpause W", "run K m1:W", "reply K 200"]),
+    // retryAttempts 0: after a lost first attempt the lease expiry re-claimed it and sent it again.
+    (0, &["ingest m1 z", "run K m1:V", "expire m1:V", "run L m1:V"]),
+    (0, &["ingest m1 z", "run K m1:V", "crash K", "expire m1:V", "run L m1:V"]),
 ];
 
 fn model(v: &Value) -> R<Model> {

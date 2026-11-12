@@ -10189,6 +10189,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a lost delivery attempt counts toward the endpoint retry budget: retryAttempts 0 is never sent twice',async t=>{
+    // tear/delivery witness (retryAttempts 0): ingest m1 z, run K m1:V, crash K, expire m1:V, run L m1:V.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'once',url:'https://example.com/once',retryAttempts:0}),201);
+      ok(await local('PATCH','/v1/endpoints/once',{idempotent:true}));
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='once'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_lost_once',wid,hook,{id:'mev_lost_once',type:'message.received',messageId:'msg_lost_once',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_lost_once','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_lost_once\"}')",[wid]);
+      // The request leaves, then the runner is lost: nothing after it is recorded.
+      const lost={on:false},transport=runtime.webhookFetch;let posts=0;
+      const gone=new Proxy(runtime.db,{get(target,p){const v=Reflect.get(target,p);return typeof v==='function'?(...a:unknown[])=>{if(lost.on)throw new Error('Synthetic lost runner');return v.apply(target,a);}:v;}});
+      try{
+        runtime.webhookFetch=async()=>{posts++;lost.on=true;return {status:204};};
+        await assert.rejects(processJobs({...runtime,db:gone},mailboxEventJobs,1,1,20000,'webhooks'));
+        assert.deepEqual((await db.query("SELECT status,attempts,(payload->>'maxAttempts')::int AS max FROM jobs WHERE id='job_lost_once'")).rows[0],{status:'running',attempts:1,max:1});
+        // Its lease expires: that was the endpoint's only attempt, so it is dead-lettered, not sent again.
+        await db.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id='job_lost_once'");
+        runtime.webhookFetch=async()=>{posts++;return {status:204};};
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,1);
+        assert.deepEqual((await db.query("SELECT status,last_error FROM jobs WHERE id='job_lost_once'")).rows[0],{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'});
+        assert.deepEqual((await db.query("SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id='mwd_lost_once'")).rows[0],{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
     await simulatedSesFixture(t,async({runtime,local,db})=>{
       const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');

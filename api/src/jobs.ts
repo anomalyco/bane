@@ -228,7 +228,10 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           j.available_at, j.id LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
-      ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes'
+      ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes',
+          -- An attempt whose runner is lost settles nothing. Record the endpoint's attempt budget at
+          -- its first claim, so the lease expiry after its last attempt dead-letters it.
+          payload = CASE WHEN jobs.type='mailbox.webhook' AND NOT jobs.payload ? 'maxAttempts' THEN jobs.payload||jsonb_build_object('maxAttempts',1+coalesce((SELECT h.retry_attempts FROM mailbox_webhook_deliveries d JOIN mailbox_webhooks h ON h.id=d.webhook_id WHERE d.workspace_id=jobs.workspace_id AND d.id=jobs.payload->>'deliveryId'),${WEBHOOK_ATTEMPTS - 1}::int)) ELSE jobs.payload END
         FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest'
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
