@@ -2652,6 +2652,44 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // PR #55 review P2 (both): the overview was missing from receivingConsentRoute, so credentials minted by a management
+  // approval without receiving consent could read it over REST; and a read grant with consent was offered a tool REST
+  // refuses. It is now gated by core.ts's shared predicates (mailboxRoute, receivingConsentRoute), which REST and both MCP
+  // listings use.
+  test('inbound overview: REST and both MCP listings require manage and explicit receiving consent', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      const { resourceInventory } = await import('./src/mcp-resources.js'); const actions = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
+      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', `/mcp?codemode=${codemode}`, token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
+        return new Set(codemode ? tools.map(x => x.name as string) : tools.flatMap(x => ((x.inputSchema?.properties?.action?.enum ?? []) as string[]).map(a => actions.get(`${x.name}.${a}`)!).filter(Boolean))); };
+      const offered = async (token: string) => [await listed(token, true), await listed(token, false)].map(set => set.has('getInboundOverview'));
+      const mint = async (token: string, name: 'createApiKey' | 'createAgentToken') => {
+        const args = name === 'createApiKey' ? { confirm: true, body: { name: 'overview fixture', permissions: ['manage'] } } : { confirm: true, body: { permissions: ['read', 'manage'], expiresInSeconds: 120, domains: [], purpose: 'overview fixture' } };
+        const out = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result.structuredContent;
+        const secret = out.secret ?? out.token; assert.ok(secret, JSON.stringify(Object.keys(out))); secrets.add(secret); return secret as string;
+      };
+      // A management approval without receiving consent: neither catalog offers it, and what it mints is refused like the other receiving reads.
+      const manage = await oauthGrant(t, db, writableScope, request);
+      assert.deepEqual(await offered(manage.token), [false, false]);
+      const minted = [await mint(manage.token, 'createApiKey'), await mint(manage.token, 'createAgentToken')];
+      for (const secret of minted) {
+        error(await request('GET', '/v1/inbound/overview', secret), 403, 'ADMIN_REQUIRED');
+        error(await request('GET', '/v1/inbound/addresses', secret), 403, 'ADMIN_REQUIRED');
+      }
+      // With receiving consent the same credentials read it, and both catalogs offer it.
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [manage.consentId]);
+      assert.deepEqual(await offered(manage.token), [true, true]);
+      for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
+      // A read approval with receiving consent: REST refuses it (mailboxAuth needs a manage credential), so it is not offered.
+      const read = await oauthGrant(t, db, 'bane:read offline_access', request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [read.consentId]);
+      assert.deepEqual(await offered(read.token), [false, false]);
+      const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
+      const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId))!; assert.ok(reader?.receivingConsent);
+      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader);
+      assert.equal(refused.status, 403);
+    });
+  });
+
   // tear witness (recheck 2 of #51): mint g-s; probe g-s code|plain -> getCurrentIdentity missing; probe g-s call -> TOOL_UNAVAILABLE.
   test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
     await simulatedSesFixture(t,async({db,request})=>{
