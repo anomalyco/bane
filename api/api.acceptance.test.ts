@@ -151,6 +151,31 @@ test('mail gateway: receipt parser distinguishes readable forwards from unparsed
   assert.ok(await parseInboundMime(Buffer.from(forward+base)));
   assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
 });
+test('review PR #84 P2: examples use the server’s canonical origin, never the page’s Host', async () => {
+  // P2: the dashboard's origin comes from /v1/me or /health (PUBLIC_URL). A page served under another Host is flagged
+  // (Docs then shows no examples), and an unknown origin is null (callers wait) rather than the page's own address.
+  const { canonicalOrigin, originOf } = await import('../app/src/lib/public-origin.js');
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', demo: false, page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
+  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', demo: false, page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: false, page: 'https://attacker.example' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', demo: false, page: 'https://bane.mx' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
+  assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
+});
+test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
+  // A bearer in a shell command stays in shell history and the process list.
+  const { mcpClients, mcpClientSteps, mcpSnippet, claudeAddCommand } = await import('./src/mcp-clients.js');
+  const url = 'https://bane.mx/mcp', bearer = 'bane_mbx_' + 'f'.repeat(64);
+  for (const client of mcpClients) {
+    const snippet = mcpSnippet(client, url, { bearer });
+    assert.doesNotMatch(snippet, /^\s*(?:claude|opencode|npx|curl)\b/, `${client} key setup must not be a command`);
+    assert.equal(JSON.stringify(JSON.parse(snippet)).includes(`Bearer ${bearer}`), true);
+    for (const step of mcpClientSteps(client, 'key')) assert.doesNotMatch(step, /\bterminal\b|\brun this\b/i, `${client}: ${step}`);
+  }
+  assert.equal(JSON.parse(mcpSnippet('claude', url, { bearer })).mcpServers.bane.headers.Authorization, `Bearer ${bearer}`);
+  assert.equal(mcpSnippet('claude', url, {}), claudeAddCommand(url));
+  assert.doesNotMatch(claudeAddCommand(url), /Bearer|Authorization/);
+});
 test('S3 fixture: object round trips and reserved part headers keep the service available',async t=>{
   const {createRequire}=await import('node:module'),{spawn}=await import('node:child_process'),{once}=await import('node:events');
   const {mkdtemp,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
@@ -976,6 +1001,12 @@ describe('Public contract and authentication', () => {
     assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(healthReply.headers.get('referrer-policy'), 'no-referrer');
     assert.match(healthReply.headers.get('permissions-policy') ?? '', /camera=\(\)/);
+    // Review PR #84 P2: Docs builds every copyable example from this origin, so it must be PUBLIC_URL's, never the Host a
+    // proxy or default virtual host forwarded. A request naming an attacker's Host still gets the canonical origin.
+    assert.equal(health.origin, PUBLIC_ORIGIN);
+    const { request: rawRequest } = await import('node:http');
+    const spoofed = await new Promise<Json>((done, fail) => { const target = new URL('/health', BASE); rawRequest({ host: target.hostname, port: target.port, path: target.pathname, headers: { Host: 'attacker.example', 'X-Forwarded-Host': 'attacker.example', Accept: 'application/json' } }, res => { let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; }); res.on('end', () => { try { done(JSON.parse(body)); } catch (error) { fail(error); } }); }).on('error', fail).end(); });
+    assert.equal(spoofed.origin, PUBLIC_ORIGIN);
     const { publicFailureBucket, admissionPeer } = await import('./src/core.js');
     assert.equal(admissionPeer('2001:0db8:0:0::3'),admissionPeer('2001:db8::ffff:abcd'));
     assert.notEqual(admissionPeer('2001:db8:0:1::3'),admissionPeer('2001:db8::3'));
@@ -3337,6 +3368,8 @@ describe('Hosted MCP OAuth and tools', () => {
       await deliver(hidden,[b.id],'billing-private-needle',new Date(Date.now()+2000).toISOString());
       assert.equal((await success('listInboundThreads',{q:'invoice'})).data.length,1);
       const support=ok(await get(path,h));assert.deepEqual(support.messages.map((m:Json)=>m.id),[first.id,shared]);assert.equal(support.snippet,'Shared invoice');assert.deepEqual(support.addressIds,[a.id]);assert.ok(!JSON.stringify(support).includes(hidden));
+      // A conversation names who wrote its newest visible message, in the list and the thread alike.
+      assert.deepEqual(support.from,{name:null,address:'sender@example.net'});assert.deepEqual(ok(await get('/threads',h)).data.find((t:Json)=>t.id===threadId).from,{name:null,address:'sender@example.net'});
       assert.deepEqual(ok(await get('/threads?q=billing-private-needle',h)).data,[]);error(await get(`/messages/${hidden}`,h),404);error(await post(`${path}/reply`,{replyToMessageId:hidden,text:'hidden'},h),404);
       assert.equal((await success('getInboundMessage',{messageId:shared})).text,'Shared invoice');
       assert.deepEqual(ok(await get('/messages?q=billing-private-needle',h)).data,[]);
@@ -10622,6 +10655,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
         const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);
+        // One config builder (mcp-clients.ts) for the API, the dashboard and Docs: plain /mcp, the key as a bearer header, and keys
+        // named for the inbox and client so several connections stay apart. OpenCode gets its V2 shape (mcp.servers).
+        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer bane_mbx_/);
+        assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
+        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
+        assert.deepEqual(opencode.config.mcp.servers.bane,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.bane,undefined);
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer bane_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
@@ -15049,6 +15089,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           const healthRes = await worker.fetch(new Request('https://dev.bane.mx/%68ealth'), {...env,ENABLE_LIVE_SES:'true',get HYPERDRIVE(){throw Error('liveness opened DB')}});
           assert.equal(healthRes.status, 200);
           assert.equal((await healthRes.json()).service, 'bane');
+          // Review PR #84 P2: the zero-dependency path also answers with PUBLIC_URL's origin, not the request's host.
+          assert.equal((await (await worker.fetch(new Request('https://attacker.example/health'), env)).json()).origin, 'https://dev.bane.mx');
           assert.equal([...loadedModules].some(u => /\\/src\\/app\\.[jt]s$/.test(u)), false, 'Encoded /health must take the zero-dep fast path.');
           admissionAllowed=false;assert.equal((await worker.fetch(new Request('https://dev.bane.mx/health/receiving'),env)).status,429);admissionAllowed=true;
 
@@ -15086,6 +15128,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             body: '{}',
           }), env);
           assert.ok([400,422].includes(exemptSns.status));
+
+          // 5) Cloudflare gives every cross-zone Worker subrequest the client address 2a06:98c0:3600::103 and names the
+          // calling zone in CF-Worker. One zone's failures or burst must not throttle another zone's Worker (Console).
+          admissionAllowed = true;
+          const limited = [];
+          const zoneEnv = { ...env, ADMISSION: { async limit({ key }) { limited.push(key); return { success: true }; } } };
+          const fromWorker = (zone, ip = '2a06:98c0:3600::103') => worker.fetch(new Request('https://dev.bane.mx/v1/domains', {
+            headers: { 'CF-Connecting-IP': ip, 'CF-Worker': zone, authorization: 'Bearer bane_malformed' },
+          }), zoneEnv);
+          for (let n = 0; n < 40; n++) assert.equal((await fromWorker('noisy.example')).status, 401);
+          const noisy = await fromWorker('noisy.example');
+          assert.equal(noisy.status, 429);
+          assert.equal((await noisy.json()).error?.code, 'PUBLIC_RATE_LIMITED');
+          const other = await fromWorker('console.example');
+          assert.equal(other.status, 401, 'Another zone\\'s Worker keeps its own failure budget.');
+          assert.equal((await other.json()).error?.code, 'AUTH_INVALID');
+          assert.notEqual(limited[0], limited.at(-1), 'Each calling zone has its own admission bucket.');
+          // A client that is not Cloudflare's Worker egress cannot pick a bucket by sending CF-Worker.
+          limited.length = 0;
+          await fromWorker('noisy.example', '198.51.100.7'); await fromWorker('console.example', '198.51.100.7');
+          assert.equal(limited[0], limited[1]);
         } finally {
           await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
           await setup.end();

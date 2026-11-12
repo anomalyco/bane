@@ -11,7 +11,7 @@
       },
       {
         "title": "Create an API key",
-        "text": "In Settings → API keys. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as BANE_API_KEY on your server and never ship it to a browser."
+        "text": "In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as BANE_API_KEY on your server and never ship it to a browser."
       },
       {
         "title": "Send",
@@ -20,7 +20,7 @@
       },
       {
         "title": "Receive (optional)",
-        "text": "Publish the receiving MX record from the domain page. Hosted Bane suggests a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
+        "text": "Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
       },
       {
         "title": "Reply",
@@ -9727,6 +9727,25 @@
           "lastMessageAt": {
             "type": "string"
           },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ],
+            "description": "Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address."
+          },
           "addressIds": {
             "type": "array",
             "items": {
@@ -9743,6 +9762,7 @@
           "subject",
           "snippet",
           "lastMessageAt",
+          "from",
           "addressIds",
           "messageCount"
         ]
@@ -37368,8 +37388,10 @@
                     "enum": [
                       "opencode",
                       "claude",
+                      "cursor",
                       "generic"
-                    ]
+                    ],
+                    "description": "opencode, claude (Claude Code), cursor, or generic for any other MCP client."
                   },
                   "auth": {
                     "type": "string",

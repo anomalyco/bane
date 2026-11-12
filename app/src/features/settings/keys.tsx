@@ -11,6 +11,11 @@ import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './cre
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
 import { AddressList } from '../../components/PrivateAddress'
+import { ConnectAgentButton } from '../docs/connect-agent'
+import { guides } from '../inbound/concepts'
+import { Link } from 'react-router'
+
+import { credentials } from '../docs/credentials'
 
 type KeyRow = { kind: 'api'; key: ApiKey } | { kind: 'inbound'; key: MailboxKey }
 type ConnectedRow = { kind: 'token'; item: AgentTokenSummary } | { kind: 'mcp'; item: McpConnection }
@@ -18,6 +23,8 @@ const lastUsed = (value: string | null) => value ? date(value) : 'Never'
 const tokenInactive = (token: AgentTokenSummary) => token.revokedAt !== null || Date.parse(token.expiresAt) <= Date.now()
 
 export function ApiKeysPage() {
+  // /api-keys?connect=1 (from Overview and Docs) opens Connect an agent.
+  const [connectLink] = useState(() => new URLSearchParams(window.location.search).has('connect'))
   const [showRevoked, setShowRevoked] = useState(false)
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
@@ -36,6 +43,7 @@ export function ApiKeysPage() {
   const [revokeToken, setRevokeToken] = useState<AgentTokenSummary | null>(null)
   const [revokeConnection, setRevokeConnection] = useState<McpConnection | null>(null)
   const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
+  const inboxOf = (id: string) => addresses.data?.find(item => item.id === id && item.kind === 'inbox')
 
   // Inbound keys aren't paginated, so they join the first page of API keys, newest first.
   const firstPage = !cursor
@@ -49,11 +57,16 @@ export function ApiKeysPage() {
     .sort((a, b) => b.key.createdAt.localeCompare(a.key.createdAt))
   const connected: ConnectedRow[] = [...(mcpConnections.data ?? []).map(item => ({ kind: 'mcp' as const, item })), ...(agentTokens.data ?? []).map(item => ({ kind: 'token' as const, item }))]
   const connectedError = agentTokens.error ?? mcpConnections.error
-  const showConnected = !listLoading && !agentTokens.isPending && !mcpConnections.isPending && (connected.length > 0 || connectedError)
+  // Always shown once known, empty or not: where agents you connect appear, and how to connect one.
+  const showConnected = !listLoading && !agentTokens.isPending && !mcpConnections.isPending
   const connectionName = (grantId: string) => mcpConnections.data?.find(connection => connection.id === grantId)?.name
 
   return <div className="stack">
-    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
+    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><ConnectAgentButton initiallyOpen={connectLink} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
+    <section className="keys-guide" aria-labelledby="keys-guide">
+      <h2 id="keys-guide">Which key do I need? <Link className="guide-link" to={guides.keys}>Guide</Link></h2>
+      <dl>{credentials.map(kind => <div key={kind.name}><dt>{kind.name}</dt><dd>{kind.line} <span className="keys-guide__where">{kind.where}</span></dd></div>)}</dl>
+    </section>
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
@@ -62,8 +75,8 @@ export function ApiKeysPage() {
             { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} />, cardRender: row => row.key.name },
             { ...settingsColumns.keys[1], render: row => row.kind === 'api'
               ? <TwoLines first={accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} second={domainScope(row.key.domains)} />
-              : <TwoLines first={<>Inbound: {row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</>} second={permissionList(row.key.permissions)} />,
-              cardRender: row => row.kind === 'api' ? `${accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} · ${domainScope(row.key.domains)}` : <>Inbound: {row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</> },
+              : <TwoLines first={<>{row.key.addressIds?.length === 1 && inboxOf(row.key.addressIds[0]!) ? 'Inbox key: ' : 'Inbound key: '}{row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</>} second={permissionList(row.key.permissions)} />,
+              cardRender: row => row.kind === 'api' ? `${accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} · ${domainScope(row.key.domains)}` : <>{row.key.addressIds?.length === 1 && inboxOf(row.key.addressIds[0]!) ? 'Inbox key: ' : 'Inbound key: '}{row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</> },
             { ...settingsColumns.keys[2], render: row => <code>{row.key.prefix}</code> },
             { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt), cardRender: row => row.key.revokedAt ? 'Revoked' : row.key.lastUsedAt ? `Used ${date(row.key.lastUsedAt)}` : 'Never used' },
             { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button>,
@@ -75,10 +88,11 @@ export function ApiKeysPage() {
       </section>
       {showConnected && <section className="section stack">
         <div className="keys-head">
-          <SectionHeader title="Connected apps & agents" />
-          <p className="muted">Signed in through MCP. Agent tokens are short-lived keys they create.</p>
+          <SectionHeader title="Connected agents" actions={<ConnectAgentButton size="sm" />} />
+          <p className="muted">Agents signed in as someone in this workspace over MCP, and the short-lived agent tokens they made. Revoking a sign-in also revokes its tokens.</p>
         </div>
-        {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id} columns={[
+        {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id}
+          empty={<EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with a Revoke button." />} columns={[
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
             ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.status === 'active' && row.item.workspaceId === null ? 'Choose a workspace in Settings' : row.item.clientId} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
