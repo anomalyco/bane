@@ -4545,6 +4545,40 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
+  test('receive hold: unpaid for 7 days under enforce holds new mail; a credit that clears the debt releases it to ingest', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, { restoreJob } = await import('./src/billing/restore.js');
+      const position = async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p;
+      const mid = unique('held');
+      await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
+        VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [wid, mid, REGION, 'held/' + mid]);
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:fixture-hold',-100000,0,'{}','operator:fixture')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [wid]);
+      assert.equal((await position()).receiveHeld, false, 'Off (and shadow) never hold.');
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      assert.equal((await position()).receiveHeld, false, 'receive_hold stays off until the held/ IAM is in place.');
+      await db.query(`UPDATE billing_config SET receive_hold=true`);
+      assert.equal((await position()).receiveHeld, true);
+      // The daily scan says so once per episode; billing holds are invisible to the 3-day budget-hold expiry.
+      const scan = (await db.query('SELECT billing_unpaid_scan() AS s')).rows[0].s;
+      assert.ok(scan.receiveHeld >= 1 && scan.receiveHoldSoon >= 1);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind IN ('receive_hold_soon','receive_held')`, [wid])).rows[0].n, 2);
+      await db.query(`SELECT release_receive_budget_holds($1)`, [wid]);
+      const receipt = async () => (await db.query('SELECT status,error,object_key FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2', [wid, mid])).rows[0];
+      assert.deepEqual(await receipt(), { status: 'held', error: 'BILLING_HOLD', object_key: 'held/' + mid });
+      const job = { id: `billing.restored:${wid}`, attempts: 1, workspaceId: wid };
+      // A credit that leaves the debt keeps the hold.
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-partial',50000,0,'{}','stripe')`, [wid]);
+      await restoreJob(runtime, {}, job);
+      assert.equal((await receipt()).status, 'held');
+      // Paying the debt releases the receipt to ingest, which reads it from held/.
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-clear',2000000,0,'{}','stripe')`, [wid]);
+      assert.equal((await position()).receiveHeld, false);
+      await restoreJob(runtime, {}, job);
+      assert.deepEqual(await receipt(), { status: 'pending', error: null, object_key: 'held/' + mid });
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2`, [wid, mid])).rows[0].n, 1);
+    });
+  });
   test('244 removed the per-inbox IMAP charge; password revocation still notifies open sessions', async t => {
     const db = await fixtureDatabase(t);
     const gone = (await db.query(`SELECT to_regprocedure('inbox_protocol_daily_usage(date)') AS f, to_regclass('inbox_protocol_periods') AS t`)).rows[0];

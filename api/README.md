@@ -417,6 +417,25 @@ Postgres request/resource budgets bound major amplification paths. Authenticated
 
 Coarse admission runs before DB access: 6,000 requests/minute per IPv4 or IPv6 /64 per Node process or Cloudflare location (approximate). SNS has a separate Cloudflare lane at the same limit, and its signature is verified before looking up the topic. An isolate/process reserves up to 40 public credential attempts per peer per minute before dispatch; successful authentication refunds the reservation. Public auth entry points have their own 40/minute lane. Node does not trust forwarded-IP headers. Use correctly configured proxy/WAF controls for distributed abuse. Cloudflare invocation URL logs/traces are disabled; review every external log sink independently.
 
+## Billing modes
+
+Hosted installations (`MULTI_TENANT=true`) bill a prepaid USD balance per workspace; self-hosted installations have no billing. Money is integer micro-cents (µ¢: 1¢ = 1,000,000 µ¢). Rate version 1: $0.20 per 1,000 emails sent (per recipient) or received (per message), $0.10 per 1,000 Omen evaluations, $0.25 per GB-month of received mail older than 90 days. Each UTC month includes 3,000 emails (sent and received combined) and 1 GB of that storage. IMAP/SMTP access is free, with a fair-use download limit of 5 GB a day and 30 GB a month per inbox (override per inbox with `inbox_state.egress_daily_bytes` / `egress_monthly_bytes`). BYO workspaces are metered at $0.
+
+`billing_config.mode` is a database row, so switching needs no deploy and rolls back instantly:
+
+| Mode | Meters | Settlement | 402 gate, campaign waits, notices, auto-recharge |
+| --- | --- | --- | --- |
+| `off` (migration default) | record | none | none |
+| `shadow` | record | hourly; usage rows post $0 with the would-be cost in `detail.costUc` | would-be denials log `BILLING_SHADOW_DENY`; notices are not sent |
+| `enforce` | record | hourly; usage is taken from promotional credit, then paid credit | live |
+
+- Metering adds no round trip: statement triggers on `sending_emails` (sends, pre-SES refunds into the current hour) and `mail_messages` (receives, `verdicts.omenCalls`, stored bytes per day). Admission stays one statement; ingest stays two (three with files).
+- The hourly job (`billing/cron.ts`) settles closed hours per workspace (`billing_settle`) and once a UTC day runs the storage day, the unpaid scan, the drift check (`BILLING_DRIFT`) and the BYO fair-use report. `BILLING_SETTLE_LAG` logs an error when unsettled usage is older than 3 hours.
+- With an empty balance under `enforce`: the API returns `402 BALANCE_EXHAUSTED`, campaigns wait with `waiting_reason='balance'` until a credit, SMTP submission gets `451 4.7.1`, and Omens return their `onError` value without calling Jev. Received mail is accepted (and billed) for 7 days, then held under `held/` in the pool bucket when `billing_config.receive_hold` is on; a top-up releases it. A debt older than 60 days is written off, but the hold stays until a top-up.
+- `billing_accounts.mode`: `prepaid` (default), `invoiced` (charged into a negative balance, never gated or held) or `exempt` (settled at $0). `BANE_PLATFORM_DOMAIN_WORKSPACE` is never gated; set Anomaly's workspaces to `exempt` before `shadow`.
+- `billing_config.storage_billing_from` prices storage at $0 before that date (the 90 days' notice). `bill_simulated` meters installation-simulated sends (dev and E2E only).
+- Turning on `receive_hold` needs `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject` on `arn:aws:s3:::<pool bucket>/held/*` for the Worker's pool role, and no lifecycle rule on `held/`.
+
 ## Secret rotation and upgrades
 
 A normal `bun run migrate` needs only `DATABASE_URL` and the intended `DEFAULT_SES_REGION` on first setup. Without rotation inputs it does not re-encrypt webhooks. If `BETTER_AUTH_SECRET` is supplied, it first decrypts one stored webhook signing secret read-only; `KEY_ROTATION_REQUIRED` means the sample could not be decrypted and nothing was written. No stored webhook is required, and secretless CI skips this probe. Only explicit rotation requires the new root and previous key as described below.
