@@ -354,6 +354,8 @@ pub struct Store {
     selected: Option<String>,
     pub stamp: Instant,
     checkpoint: Option<(u32, u64)>,
+    /// A committed change whose refresh failed: the next command refreshes first.
+    dirty: bool,
     pub deadline: Instant,
 }
 impl Store {
@@ -419,6 +421,7 @@ impl Store {
             selected: None,
             stamp: Instant::now(),
             checkpoint: None,
+            dirty: false,
             deadline: Instant::now() + Duration::from_secs(5),
         };
         s.install(meta);
@@ -486,6 +489,15 @@ impl Store {
     pub fn refresh(&mut self) -> Result<(), store::Error> {
         self.reload(false)
     }
+    /// After the internal API committed a change. A failed refresh must not turn the
+    /// committed command into a failure (RFC 3501 6.4.7: a client told NO retries the COPY
+    /// or APPEND that already happened); the snapshot stays as it was and the next command
+    /// refreshes it.
+    fn settle(&mut self) {
+        if self.refresh().is_err() {
+            self.dirty = true
+        }
+    }
     /// One IMAP command on a logged-in connection. A snapshot marked stale by a change
     /// hint, or older than 240 s, is refreshed first; SELECT and EXAMINE load their own.
     pub fn imap(
@@ -499,7 +511,7 @@ impl Store {
         let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
             w.eq_ignore_ascii_case(b"SELECT") || w.eq_ignore_ascii_case(b"EXAMINE")
         });
-        if !selects && (*stale || self.stamp.elapsed() > Duration::from_secs(240)) {
+        if !selects && (*stale || self.dirty || self.stamp.elapsed() > Duration::from_secs(240)) {
             self.refresh()?;
             *stale = false
         }
@@ -667,6 +679,7 @@ impl Store {
             }
         }
         self.stamp = Instant::now();
+        self.dirty = false;
         Ok(())
     }
 }
@@ -826,7 +839,8 @@ impl MailStore for Store {
             FolderOp::Subscribe(b) => ("subscribe", None, Some(b)),
         };
         self.api.json::<Value>(json!({"op":"edit","kid":self.principal.kid,"folder":self.keys.get(p).map_or("",String::as_str),"action":action,"path":path,"sub":sub}))?;
-        self.refresh()
+        self.settle();
+        Ok(())
     }
     fn change(&mut self, p: &str, c: Change<'_>) -> Result<Applied, store::Error> {
         let folder = self.keys.get(p).ok_or(store::Error::Missing)?;
@@ -931,7 +945,7 @@ impl MailStore for Store {
                     })?;
                     let a: AppliedWire =
                         serde_json::from_value(a).map_err(|_| store::Error::Unavailable)?;
-                    self.refresh()?;
+                    self.settle();
                     return Ok(Applied {
                         pairs: a.pairs,
                         validity: a.validity,
@@ -967,7 +981,7 @@ impl MailStore for Store {
             out.validity = a.validity;
             out.pairs = a.pairs
         }
-        self.refresh()?;
+        self.settle();
         if arg_is_copy {
             self.pending_copy = None;
         }
@@ -1117,5 +1131,140 @@ mod auth_tests {
         assert!(r.current("two", t, after));
         r.record(None, after);
         assert!(!r.current("two", t, after));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mailgw_core::store::{Change, MailStore};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A scripted internal API: INBOX holds UID 1; snapshots fail while `down` is set.
+    struct Script {
+        down: AtomicBool,
+        snapshots: AtomicUsize,
+    }
+    fn reply(script: &Script, body: &[u8]) -> (u16, String) {
+        let p: Value = serde_json::from_slice(body).unwrap_or_default();
+        let meta = |next: u32, highest: u64| {
+            json!([{"key":"inbox","path":"INBOX","validity":1,"next":next,"highest":highest,"subscribed":true,"total":1,"unseen":1},
+                   {"key":"archive","path":"Archive","validity":4,"next":2,"highest":3,"subscribed":true,"total":1,"unseen":1}])
+        };
+        match p["op"].as_str() {
+            Some("snapshot") => {
+                script.snapshots.fetch_add(1, Ordering::SeqCst);
+                if script.down.load(Ordering::SeqCst) {
+                    return (503, "{}".into());
+                }
+                let entries = if p["path"] == "INBOX" && p["since"] == 0 {
+                    json!([{"uid":1,"modseq":2,"date":"2026-01-01T00:00:00+00:00","size":5,"flags":[],"handle":"h"}])
+                } else {
+                    json!([])
+                };
+                let body = json!({"folders": meta(2, 2), "entries": entries, "gone": [], "floor": 0, "more": null});
+                (200, body.to_string())
+            }
+            Some("mutate") => (200, json!({"pairs": [[1, 1]], "validity": 4}).to_string()),
+            _ => (422, "{}".into()),
+        }
+    }
+    async fn serve(l: tokio::net::TcpListener, script: Arc<Script>) {
+        while let Ok((mut s, _)) = l.accept().await {
+            let script = script.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![];
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let Ok(n) = s.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() < end + 4 + len {
+                        continue;
+                    }
+                    let body: Vec<u8> = buf.drain(..end + 4 + len).skip(end + 4).collect();
+                    let (status, text) = reply(&script, &body);
+                    let out = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{text}",
+                        text.len()
+                    );
+                    if s.write_all(out.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    }
+    fn principal() -> Principal {
+        serde_json::from_value(json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","addresses":["x@example.invalid"],
+            "folders":[{"key":"inbox","path":"INBOX","validity":1,"next":2,"highest":2,"subscribed":true,"total":1,"unseen":1},
+                       {"key":"archive","path":"Archive","validity":4,"next":1,"highest":1,"subscribed":true,"total":0,"unseen":0}]}))
+        .unwrap()
+    }
+
+    /// Found by gateway/tear (witness: deliver, hint, A noop, fail-snapshot, A copy 1 Archive):
+    /// the API committed the COPY, the refresh after it failed, and the client was told NO.
+    #[test]
+    fn a_committed_change_survives_a_failed_refresh() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+        });
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        store.select("INBOX").unwrap();
+        assert_eq!(store.folder("INBOX").unwrap().entries.len(), 1);
+
+        script.down.store(true, Ordering::SeqCst);
+        let applied = store
+            .change("INBOX", Change::Transfer(&[1], "Archive", false))
+            .expect("a committed COPY must not report failure");
+        assert_eq!(applied.pairs, vec![(1, 1)]);
+        assert_eq!(applied.validity, 4);
+
+        // The next command refreshes the snapshot it could not refresh before.
+        script.down.store(false, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let mut stale = false;
+        let r = store
+            .imap(
+                &mut core,
+                b"a NOOP\r\n",
+                &account,
+                &mut stale,
+                store::Date::default(),
+            )
+            .unwrap();
+        assert!(r.bytes.ends_with(b"a OK Completed\r\n"));
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
+        assert_eq!(store.folder("Archive").unwrap().next, 2);
     }
 }
