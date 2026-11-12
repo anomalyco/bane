@@ -1183,8 +1183,19 @@ impl Send {
                 self.email_hour.insert(l.clone(), self.h);
                 self.emails.insert(l, e);
             }
+            // Only the columns the operator wrote: clean history and connection age move meanwhile.
             if let Some((x, w)) = t.ws {
-                self.ws[x] = w;
+                let cur = &mut self.ws[x];
+                match t.words[0].as_str() {
+                    "limits" => (cur.send_cap, cur.pend_cap) = (w.send_cap, w.pend_cap),
+                    "exempt" => cur.exempt = w.exempt,
+                    _ => {
+                        cur.paused = w.paused;
+                        if t.words[0] == "resume" {
+                            cur.history = 0;
+                        }
+                    }
+                }
             }
         }
         let mut woke = BTreeMap::new();

@@ -437,6 +437,18 @@ const BOUNDARIES: &[(&str, usize, &[&str])] = &[
             "W commit",
         ],
     ),
+    // An operator change in flight keeps the clean history recorded meanwhile (second-week cap 3).
+    (
+        "send",
+        0,
+        &[
+            "V limits 1 default 1",
+            "history 1 900",
+            "V commit",
+            "week",
+            "send 1 3 t",
+        ],
+    ),
     // Warm-up tiers: probation, second week (100 clean, 7 days) and mature (1,000, 14 days); a
     // resume starts a new health epoch.
     (
