@@ -98,6 +98,13 @@ export function DnsRecordTable({ domain, records, status }: { domain: string; re
   ]} />
 }
 
+// What the two alignments mean together: DMARC passes when either one aligns, so one "not aligned" is often fine.
+function dmarcVerdict(dkim: boolean, spf: boolean) {
+  if (dkim && spf) return 'Both align, so mail from this domain passes DMARC. Nothing to do.'
+  if (dkim) return 'DMARC passes through DKIM, so this is fine. To align SPF as well, set a custom MAIL FROM domain under Advanced.'
+  if (spf) return 'DMARC passes through SPF. Publish the DKIM records above to align DKIM as well.'
+  return 'Neither aligns, so DMARC fails: publish the DKIM records above, then check again.'
+}
 function DmarcRecords({ domain }: { domain: Domain }) {
   const policy = domain.dmarc, recommendation = recordsFor(domain, 'dmarc')[0]
   if (!policy && !recommendation) return null // Nothing to show until the first background check.
@@ -108,7 +115,8 @@ function DmarcRecords({ domain }: { domain: Domain }) {
   const row: DnsRecord = recommendation ?? { id: 'policy', type: 'TXT', name: `_dmarc.${policy?.source ?? domain.name}`, value: policy?.record ?? '', status: 'not_checked' }
   return <div className="stack domain-group">
     <div className="ui-section-header"><div className="domain-group-title"><h3>DMARC <span className="muted">· {policy?.status ?? 'not checked'}</span></h3>
-      <p className="muted dmarc-alignment"><span>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p></div></div>
+      <p className="muted dmarc-alignment"><span title={policy ? `${mode(policy.adkim)}: ${policy.adkim === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span title={policy ? `${mode(policy.aspf)}: ${policy.aspf === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p>
+      {policy && <p className="muted">{dmarcVerdict(policy.alignment.dkim, policy.alignment.spf)}</p>}</div></div>
     <DnsRecordTable domain={domain.name} records={[row]} status={recommendation ? 'Recommended' : !policy ? 'Not checked' : policy.status === 'invalid' ? 'Invalid' : policy.source && policy.source !== domain.name ? 'Inherited' : policy.record ? 'Published' : 'Missing'} />
   </div>
 }

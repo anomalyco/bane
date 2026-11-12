@@ -255,7 +255,7 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
-        <span className="onboarding-option-body">Send through SES in your own account. A short AWS setup connects it.</span>
+        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account. A guided setup creates one CloudFormation stack there.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
@@ -434,7 +434,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
     <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided setup={dns.setup} /></div>
     <div className="onb-rise" style={rise(2)}><DnsWaitNote domain={current} /></div>
     <div className="onboarding-actions">
-      <p className="muted">{verified ? 'All set.' : 'Records can take a few minutes to show up.'}</p>
+      <p className="muted">{verified ? 'All set.' : 'Checking automatically.'}</p>
       <Button variant="primary" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
     </div>
   </div>

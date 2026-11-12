@@ -99,8 +99,8 @@ function SendingRows() {
   const current = connection.data, kind = current?.kind ?? summary?.kind, region = current?.region ?? summary?.region
   return <>
     <div className="settings-rows">
-      <Row title="Connection">{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
-      {region && <Row title="Region"><code>{region}</code></Row>}
+      <Row title="Connection" hint={kind === 'byo' ? 'Amazon SES in your AWS account' : 'Sent through Bane’s Amazon SES'}>{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
+      {region && <Row title="Region" hint="The AWS region your mail is sent from"><code>{region}</code></Row>}
       {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
       <ScoreRow />
       {limit && limit.cap !== null && <Row title="Daily limit" hint="Recipients in the last 24 hours"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
@@ -119,8 +119,9 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
   const [confirming, setConfirming] = useState(false)
   const sync = useConnectionCache()
   if (!kind) return null
-  return <div className="settings-rows settings-danger"><Row title="Disconnect sending" hint="Sending stops until you connect again."><Button variant="danger" onClick={() => setConfirming(true)}>Disconnect</Button></Row>
-    <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={kind === 'byo' ? 'Sending stops until you connect again. AWS resources stay in your account; delete the Bane stack in AWS to revoke access.' : 'Sending stops until you connect again.'} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
+  const keeps = 'Domains, DNS records, API keys and received mail stay. It isn’t possible while emails or campaigns are still sending.'
+  return <div className="settings-rows settings-danger"><Row title="Disconnect sending" hint="Sending stops until you connect again"><Button variant="danger" onClick={() => setConfirming(true)}>Disconnect</Button></Row>
+    <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={kind === 'byo' ? `Sending stops until you connect again. ${keeps} AWS resources stay in your account; delete the Bane stack in AWS to revoke access.` : `Sending stops until you connect again. ${keeps}`} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
   </div>
 }
 function AccountRows() {

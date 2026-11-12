@@ -115,7 +115,7 @@ export function useNextSteps(report: SenderScore | undefined): { items: NextItem
   if (candidate && !list.some(d => d.receiving === 'verified')) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
   if (setup.data?.webhooks?.total === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
   const pending = setup.data?.invitations?.pending ?? 0
-  if (pending) items.push({ key: 'invite', text: `${number(pending)} ${pending === 1 ? 'invitation' : 'invitations'} pending`, to: '/settings#members' })
+  if (pending) items.push({ key: 'invite', text: pending === 1 ? 'Share your pending invitation link' : `Share ${number(pending)} pending invitation links`, to: '/settings#members' })
   return { items: items.slice(0, 3), ready }
 }
 export function NextSteps({ items }: { items: NextItem[] }) {
