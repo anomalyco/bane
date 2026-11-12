@@ -2,7 +2,7 @@ import { useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { Check } from 'lucide-react'
-import { useApi, useApiDef, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import type { Identity, SendingLimit } from '../../data/types'
@@ -40,31 +40,29 @@ export function SendingLimitRow() {
 export type SetupStep = { key: string; done: boolean; title: string; detail: ReactNode; action?: ReactNode; optional?: boolean }
 
 // Hosted admins until the first email is sent: each step read from server state, not from this browser.
-// `loading` is true until the three reads settle, so the page can hold its layout until it knows.
+// `loading` is true until the setup read (shared with the next steps) settles, so the page can hold its layout until it knows.
 export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep } {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
-  const domains = useApiDef(queries.domainSummary(), { enabled })
-  const keys = useApiDef(queries.keys(undefined, false), { enabled }) // the API keys page's own first screen
-  const emails = useApiQuery(['emails', 'setup-card'], (api, signal) => api.emails.list({ page: 1, pageSize: 1 }, signal), { enabled })
+  const setup = useApiDef(queries.overviewSetup(), { enabled })
   // A test sent from the steps keeps them up, with its result, until the next visit.
   const [testId, setTestId] = useState<string | null>(null)
   if (!enabled) return { loading: false, steps: null }
-  if (domains.isPending || keys.isPending || emails.isPending) return { loading: true, steps: null }
-  if (domains.error || keys.error || emails.error) return { loading: false, steps: null }
-  const items = domains.data.items
+  if (setup.isPending) return { loading: true, steps: null }
+  if (setup.error || !setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
+  const items = setup.data.domains, keyed = setup.data.apiKeys.active > 0
   const verified = items.find(domain => domain.status === 'verified')
   const pending = items.find(domain => domain.status !== 'verified')
   const receiving = items.find(domain => domain.receiving === 'verified')
-  const sent = emails.data.items.length > 0 || !!testId
-  if (verified && keys.data.length > 0 && sent && !testId) return { loading: false, steps: null }
+  const sent = setup.data.emails.any || !!testId
+  if (verified && keyed && sent && !testId) return { loading: false, steps: null }
   const steps: SetupStep[] = [
     { key: 'domain', done: !!verified, title: 'Verify a domain',
       detail: verified ? `${verified.name} can send.` : pending ? `${pending.name} is waiting for its DNS records.` : 'Add the domain you send from and publish its DNS records.',
       action: !verified && <Link className="ui-button ui-button--secondary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
-    { key: 'key', done: keys.data.length > 0, title: 'Create an API key', detail: keys.data.length > 0 ? 'Your app or agent can authenticate.' : 'A Send only key restricted to your domain is enough.',
-      action: keys.data.length === 0 && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Create key</Link> },
+    { key: 'key', done: keyed, title: 'Create an API key', detail: keyed ? 'Your app or agent can authenticate.' : 'A Send only key restricted to your domain is enough.',
+      action: !keyed && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Create key</Link> },
     { key: 'send', done: sent, title: 'Send your first email', detail: testId ? <>Test email queued to {identity?.email}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : sent ? 'It’s in Logs.' : verified ? <>Send a test to yourself, or use the examples in <Link to="/docs">Docs</Link>.</> : 'Possible once a domain is verified.',
       action: !sent && verified && <TestSend domain={verified} onSent={setTestId} /> },
     { key: 'receive', done: !!receiving, optional: true, title: 'Receive email', detail: receiving ? `${receiving.name} receives mail.` : 'Add the receiving MX record from a domain’s page.',

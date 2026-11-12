@@ -37,7 +37,7 @@ pub enum Check {
     MailboxOwnReceiving,
 }
 
-/// (operationId, method, OpenAPI path, check), for the 201 operations of the hosted MCP catalog.
+/// (operationId, method, OpenAPI path, check), for the 202 operations of the hosted MCP catalog.
 pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("addListMembers", "post", "/v1/lists/{id}/members", Check::Manage),
     ("applyAudiencePlan", "post", "/v1/audience-query/apply", Check::Manage),
@@ -120,6 +120,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("getInboxChanges", "get", "/v1/inboxes/{id}/changes", Check::MailboxAccess("read")),
     ("getInboxMessage", "get", "/v1/inboxes/{id}/messages/{messageId}", Check::MailboxAccess("read")),
     ("getMetrics", "get", "/v1/metrics", Check::Read),
+    ("getOverviewSetup", "get", "/v1/overview/setup", Check::Read),
     ("getRitual", "get", "/v1/rituals/scripts/{key}", Check::RitualRead),
     ("getRitualTypings", "get", "/v1/rituals/typings", Check::RitualRead),
     ("getRituals", "get", "/v1/rituals", Check::RitualRead),

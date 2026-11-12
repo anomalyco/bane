@@ -1,4 +1,4 @@
-import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 type Json = Record<string, any>
@@ -166,7 +166,9 @@ export function createLiveApi(): BaneApi {
         points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
       }
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points, streams: [{name: 'transactional', sent: metrics.streams.transactional.emails}, {name: 'marketing', sent: metrics.streams.marketing.emails}], recentCampaigns: campaigns.items }
-    } },
+    },
+    // One read for Overview's setup and next steps; each part is null where its own list would refuse this session.
+    setup: async signal => { const r = await call<Omit<OverviewSetup, 'domains'> & { domains: { data: Json[] } | null }>('/overview/setup', 'GET', undefined, signal); return { ...r, domains: r.domains ? r.domains.data.map(mapDomain) : null } } },
     logs: {
       list: (input, signal) => page('/logs', input, mapLog, { direction: input.direction === 'all' ? undefined : input.direction, region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search }, signal),
     },

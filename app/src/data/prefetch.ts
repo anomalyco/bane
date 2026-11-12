@@ -17,7 +17,7 @@ type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean }
 function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Scope): QueryDef<unknown>[] {
   const scoped = multiTenant || Boolean(regionId)
   switch (path) {
-    case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ direction: 'all', page: 1, pageSize: 7 })] : []
+    case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ direction: 'all', page: 1, pageSize: 7 }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
     // Receiving is one read: routes, counts, rituals, endpoints and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]

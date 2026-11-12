@@ -94,19 +94,18 @@ function bestStep(report: SenderScore | undefined, domains: Domain[]) {
   return { key: 'score', ...target, meta: `+${whole(gain)} pts` }
 }
 export type NextItem = { key: string; text: string; meta?: string; to: string }
+// Domains, webhooks and invitations come from Overview's one setup read, shared with the setup steps.
 export function useNextSteps(report: SenderScore | undefined): { items: NextItem[]; ready: boolean } {
   const { canAdminister } = useWorkspaceAccess()
-  const domains = useApiDef(queries.domainSummary(), { enabled: canAdminister })
-  const invitations = useApiDef(queries.workspaceInvitations(), { enabled: canAdminister })
-  const webhooks = useApiDef(queries.webhooks(), { enabled: canAdminister })
+  const setup = useApiDef(queries.overviewSetup(), { enabled: canAdminister })
   if (!canAdminister) return { items: [], ready: true }
-  const ready = !domains.isPending && !invitations.isPending && !webhooks.isPending
-  const list = domains.data?.items ?? [], items: NextItem[] = []
+  const ready = !setup.isPending
+  const list = setup.data?.domains ?? [], items: NextItem[] = []
   const step = bestStep(report, list); if (step) items.push(step)
   const candidate = list.find(d => d.status === 'verified')
   if (candidate && !list.some(d => d.receiving === 'verified')) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
-  if (webhooks.data && webhooks.data.length === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
-  const pending = invitations.data?.length ?? 0
+  if (setup.data?.webhooks?.total === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
+  const pending = setup.data?.invitations?.pending ?? 0
   if (pending) items.push({ key: 'invite', text: `${number(pending)} ${pending === 1 ? 'invitation' : 'invitations'} pending`, to: '/settings#members' })
   return { items: items.slice(0, 3), ready }
 }

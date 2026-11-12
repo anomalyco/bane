@@ -29,8 +29,8 @@ export const queries = {
     const page = await api.lists.list({ pageSize: 100, search, cursor, counts: false }, signal)
     return Object.assign(page.items, { nextCursor: page.nextCursor ?? null })
   }),
-  // Overview's setup steps and next steps read the same cheap first page (no SES refresh): one request for both.
-  domainSummary: () => def(['domains', 'summary'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal)),
+  // Overview's setup steps and next steps: domains, key, webhook and invitation counts and whether mail exists, in one request.
+  overviewSetup: () => def(['overview-setup'], (api, signal) => api.overview.setup(signal)),
   domains: (regionId: string, page: number) => def(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal)),
   keys: (cursor: string | undefined, showRevoked: boolean) => def(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked)),
   agentTokens: (showRevoked: boolean) => def(['agent-tokens', showRevoked], (api, signal) => api.credentials.agentTokens(showRevoked, signal)),
