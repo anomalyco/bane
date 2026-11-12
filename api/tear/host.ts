@@ -216,6 +216,13 @@ async function close() {
   fx = null;
 }
 
+// Every MCP grant shape the model mints (src/model.rs SHAPES): who approves it and its scopes.
+const SHAPES: Record<string, ['owner' | 'member', string]> = {
+  grant: ['owner', 'bane:read bane:send bane:manage'], grant2: ['member', 'bane:read bane:send'], grant3: ['owner', 'bane:read'],
+  'g-s': ['owner', 'bane:send'], 'g-m': ['owner', 'bane:manage'], 'g-rm': ['owner', 'bane:read bane:manage'], 'g-sm': ['owner', 'bane:send bane:manage'],
+  'm-r': ['member', 'bane:read'], 'm-s': ['member', 'bane:send'],
+};
+
 // ---------- requests ----------
 type Reply = { status: number; body: any; headers: Headers };
 function newSlot(name: string, gating: boolean, fault: Slot['fault'] = null): Slot {
@@ -387,9 +394,10 @@ async function act(action: string): Promise<Obs> {
         return { status: r.status };
       }
       case 'legacy': { f.creds.set('legacy', await legacyKey()); return { status: 201 }; }
-      case 'grant': return mintGrant('grant', f.owner, 'bane:read bane:send bane:manage offline_access');
-      case 'grant2': return mintGrant('grant2', f.member, 'bane:read bane:send offline_access');
-      case 'grant3': return mintGrant('grant3', f.owner, 'bane:read offline_access');
+      case 'grant': case 'grant2': case 'grant3': case 'g-s': case 'g-m': case 'g-rm': case 'g-sm': case 'm-r': case 'm-s': {
+        const [by, scopes] = SHAPES[a1]!;
+        return mintGrant(a1, by === 'member' ? f.member : f.owner, `${scopes} offline_access`);
+      }
       case 'token': {
         const o = await callTool('grant', 'createAgentToken', { confirm: true, body: { permissions: ['read', 'send', 'manage'], expiresInSeconds: 60, purpose: 'tear' } });
         if (o.status === 201) { f.creds.set('token', { id: o.body.id, secret: o.body.token }); }
@@ -420,7 +428,7 @@ async function act(action: string): Promise<Obs> {
     case 'revoke': switch (a1) {
       case 'key': case 'dkey': case 'legacy': case 'gkey': return revokeKey(a1);
       case 'token': case 'token3': return { status: (await send(null, 'POST', `/v1/agent-tokens/${f.creds.get(a1)!.id}/revoke`, owner())).status };
-      case 'grant': case 'grant2': case 'grant3': return { status: (await send(null, 'POST', `/v1/mcp-connections/${f.grants.get(a1)!.keyId}/revoke`, owner())).status };
+      case 'grant': case 'grant2': case 'grant3': case 'g-s': case 'g-m': case 'g-rm': case 'g-sm': case 'm-r': case 'm-s': return { status: (await send(null, 'POST', `/v1/mcp-connections/${f.grants.get(a1)!.keyId}/revoke`, owner())).status };
       case 'ikey': case 'gikey': return { status: (await send(null, 'POST', `/v1/inbound/keys/${f.creds.get(a1)!.id}/revoke`, owner())).status };
     } break;
     case 'delete': return { status: (await send(null, 'DELETE', `/v1/inboxes/${f.box}`, owner())).status };
@@ -431,7 +439,7 @@ async function act(action: string): Promise<Obs> {
     case 'probe': {
       const [, who, how] = w;
       if (how === 'audit') return audit(who!);
-      if (who === 'grant' || who === 'grant2' || who === 'grant3') {
+      if (f.grants.has(who!)) {
         const g = f.grants.get(who)!;
         if (how === 'call') { const o = await callTool(who, 'getCurrentIdentity', {}); return { status: o.status, code: o.code }; }
         // Read-level operations: read-only delegation and an AudienceQL read.

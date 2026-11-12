@@ -8,7 +8,7 @@
 /// The authorization check a handler performs for a workspace credential (after the path guards).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
-    /// No permission check (getCurrentIdentity).
+    /// No permission check at all (getCurrentIdentity): any authenticated actor.
     Any,
     /// actor(c), actor(c, 'read'), workspaceActor(c), region reads.
     Read,
@@ -287,7 +287,9 @@ pub fn grant_allows(g: &Grant, method: &str, path: &str, check: Check) -> bool {
         return false;
     }
     match check {
-        Check::Any | Check::Read | Check::Delegate => has("read"),
+        // GET /v1/me reads c.get('actor'): any authenticated actor, whatever its permissions.
+        Check::Any => true,
+        Check::Read | Check::Delegate => has("read"),
         Check::Send => has("send"),
         Check::Manage => g.manage,
         Check::Dashboard => false,

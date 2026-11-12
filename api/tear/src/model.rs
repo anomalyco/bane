@@ -176,6 +176,24 @@ pub enum Alphabet {
 
 const REST_CREDS: [&str; 6] = ["key", "dkey", "legacy", "gkey", "token", "token3"];
 
+/// Every MCP grant shape: (name, read, send, manage, approved by the member user). An owner may
+/// approve any non-empty scope set; a member cannot request manage. `grant`, `grant2` and
+/// `grant3` take part in the core graph; the others in random walks and CI witnesses.
+pub const SHAPES: &[(&str, bool, bool, bool, bool)] = &[
+    ("grant", true, true, true, false),
+    ("grant2", true, true, false, true),
+    ("grant3", true, false, false, false),
+    ("g-s", false, true, false, false),
+    ("g-m", false, false, true, false),
+    ("g-rm", true, false, true, false),
+    ("g-sm", false, true, true, false),
+    ("m-r", true, false, false, true),
+    ("m-s", false, true, false, true),
+];
+pub fn shape(name: &str) -> Option<(bool, bool, bool, bool)> {
+    SHAPES.iter().find(|s| s.0 == name).map(|s| (s.1, s.2, s.3, s.4))
+}
+
 impl Model {
     pub fn initial() -> Self {
         Model {
@@ -188,7 +206,7 @@ impl Model {
     }
     /// The grant's authority: its consent exists and its user is still a member.
     fn grant_live(&self, g: &str) -> bool {
-        self.grants.get(g).is_some_and(|x| !x.revoked) && (g != "grant2" || self.member != "removed")
+        self.grants.get(g).is_some_and(|x| !x.revoked) && (!shape(g).is_some_and(|s| s.3) || self.member != "removed")
     }
     fn access_ok(&self, g: &str) -> bool {
         self.grant_live(g) && self.t < self.grants[g].at
@@ -220,8 +238,8 @@ impl Model {
         };
         let grant = inbox.is_none().then(|| {
             let g = &self.grants[who];
-            // Scopes: grant read+send+manage, grant2 read+send, grant3 read.
-            rest::Grant { read: true, send: who != "grant3", manage: who == "grant", member: g.role == "member", receiving: g.receiving }
+            let (read, send, manage, _) = shape(who).unwrap();
+            rest::Grant { read, send, manage, member: g.role == "member", receiving: g.receiving }
         });
         rest::OPS
             .iter()
@@ -249,7 +267,8 @@ impl Model {
                     Some(perms) => rest::inbox_key_allows(perms, path, *check),
                     None => {
                         let g = &self.grants[who];
-                        rest::grant_allows(&rest::Grant { read: true, send: who != "grant3", manage: who == "grant", member: g.role == "member", receiving: g.receiving }, method, path, *check)
+                        let (read, send, manage, _) = shape(who).unwrap();
+                        rest::grant_allows(&rest::Grant { read, send, manage, member: g.role == "member", receiving: g.receiving }, method, path, *check)
                     }
                 };
                 (name.to_string(), allowed)
@@ -368,6 +387,25 @@ impl Model {
             push("refresh grant3".into());
             for how in ["code", "plain", "call", "delegate", "query"] {
                 push(format!("probe grant3 {how}"));
+            }
+        }
+        // Every other grant shape (single permissions and the remaining combinations): random walks.
+        if full {
+            for &(g, _, _, _, by_member) in &SHAPES[3..] {
+                if !self.grants.contains_key(g) {
+                    if !by_member || self.member != "removed" {
+                        push(format!("mint {g}"));
+                    }
+                    continue;
+                }
+                push(format!("revoke {g}"));
+                push(format!("refresh {g}"));
+                for how in ["code", "plain", "call", "delegate", "query", "audit"] {
+                    push(format!("probe {g} {how}"));
+                }
+                if !self.grants[g].receiving {
+                    push(format!("receiving {g}"));
+                }
             }
         }
         // Receiving consent on the read+send and read-only grants too (owner/admin reads, never manage).
@@ -503,7 +541,7 @@ impl Model {
     /// Whether the host holds a secret for this credential (it was minted).
     fn can_use(&self, c: &str) -> bool {
         match c {
-            "grant" | "grant2" | "grant3" => self.grants.contains_key(c),
+            c if shape(c).is_some() => self.grants.contains_key(c),
             _ => self.minted(c),
         }
     }
@@ -614,8 +652,8 @@ impl Model {
                 self.keys += 1;
                 json!({"status": 201})
             }
-            "grant" | "grant2" | "grant3" => {
-                let role = if c == "grant2" { self.member.clone() } else { "owner".to_string() };
+            c if shape(c).is_some() => {
+                let role = if shape(c).unwrap().3 { self.member.clone() } else { "owner".to_string() };
                 self.grants.insert(c.into(), Grant { revoked: false, at: Self::access_exp(t), role, replaced: false, receiving: false });
                 json!({"status": "ok"})
             }
@@ -666,7 +704,7 @@ impl Model {
 
     fn revoke(&mut self, c: &str) -> Value {
         match c {
-            "grant" | "grant2" | "grant3" => {
+            c if shape(c).is_some() => {
                 let g = self.grants.get_mut(c).unwrap();
                 let status = if g.revoked { 404 } else { 200 };
                 g.revoked = true;
@@ -692,7 +730,7 @@ impl Model {
 
     fn probe(&self, who: &str, how: &str) -> Value {
         match (who, how) {
-            ("grant" | "grant2" | "grant3", "call" | "delegate" | "query") => {
+            (g, "call" | "delegate" | "query") if shape(g).is_some() => {
                 let (op, status) = match how { "call" => ("getCurrentIdentity", 200), "delegate" => ("createAgentToken", 201), _ => ("queryAudience", 200) };
                 if !self.access_ok(who) {
                     json!({"status": 401, "code": null})
@@ -702,10 +740,10 @@ impl Model {
                     json!({"status": null, "code": "TOOL_UNAVAILABLE"})
                 }
             }
-            ("grant" | "grant2" | "grant3", "audit") => {
+            (g, "audit") if shape(g).is_some() => {
                 if self.grant_live(who) { json!({"status": 200, "rest": self.rest_gets(who)}) } else { json!({"status": 401}) }
             }
-            ("grant" | "grant2" | "grant3", _) => {
+            (g, _) if shape(g).is_some() => {
                 if self.access_ok(who) { json!({"status": 200, "visible": self.visible(who)}) } else { json!({"status": 401}) }
             }
             (_, "mcp") if REST_CREDS.contains(&who) => json!({"status": 401}),
