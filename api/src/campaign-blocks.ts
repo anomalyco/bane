@@ -3,7 +3,8 @@
 // and write this form; the server validates it on save and renders the styled email
 // (and a plain-text alternative) at review/test/send time. Styling lives in the
 // renderer, never in the stored content.
-import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
+import type { DefaultTreeAdapterMap } from 'parse5';
+import { boundedHtmlFragment } from './bounded-html.js';
 import { sanitizeBlockStyle } from './block-style.js';
 
 type Node = DefaultTreeAdapterMap['node'];
@@ -118,6 +119,11 @@ workflow requires browser automation.`;
 export class BlockContentError extends Error {}
 
 function fail(message: string): never { throw new BlockContentError(`${message} Email content is block HTML; call getContentGuide in MCP or GET /v1/campaign-content-guide for the vocabulary.`); }
+function blockFragment(html: string) {
+  const fragment = boundedHtmlFragment(html);
+  if (!fragment) fail('Content exceeds the HTML complexity limit. Simplify its nesting, elements or attributes.');
+  return fragment;
+}
 const describe = (element: Element) => `<${element.tagName}>`;
 const isElement = (node: Node): node is Element => 'tagName' in node;
 const isText = (node: Node): node is DefaultTreeAdapterMap['textNode'] => node.nodeName === '#text';
@@ -235,9 +241,17 @@ function checkBlock(node: Node, inColumn: boolean) {
  */
 export function validateBlockHtml(html: string, options: { complete?: boolean } = {}): void {
   if (/<\s*(?:!doctype|\/?(?:html|head|body)\b)/i.test(html)) fail('Send content blocks only, without <!doctype>, <html>, <head> or <body> wrappers.');
-  const fragment = parseFragment(html);
+  const fragment = blockFragment(html);
   for (const node of fragment.childNodes) checkBlock(node, false);
-  if (options.complete && /<a\b[^>]*\bhref\s*=\s*["']#["']/i.test(html)) fail('A link or button still has the # placeholder; set its URL.');
+  if (options.complete) {
+    const pending: Node[] = [...fragment.childNodes];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (!isElement(node)) continue;
+      if (node.tagName === 'a' && attribute(node, 'href')?.trim() === '#') fail('A link or button still has the # placeholder; set its URL.');
+      pending.push(...node.childNodes);
+    }
+  }
 }
 
 // ----- Rendering -----------------------------------------------------------------
@@ -338,7 +352,7 @@ function renderBlock(node: Node): string {
 
 /** Renders validated block HTML as a complete, inline-styled email document. */
 export function renderBlockHtml(html: string, options: { fontBase?: string; title?: string } = {}): string {
-  const fragment = parseFragment(html);
+  const fragment = blockFragment(html);
   const body = fragment.childNodes.map(renderBlock).join('\n');
   const fonts = options.fontBase ? `<style data-bane-fonts>@font-face{font-family:Inter;src:url('${escape(options.fontBase)}inter-variable.woff2') format('woff2');font-style:normal;font-weight:100 900}@font-face{font-family:Inter;src:url('${escape(options.fontBase)}inter-variable-italic.woff2') format('woff2');font-style:italic;font-weight:100 900}</style>` : '';
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>${escape(options.title ?? '')}</title>${fonts}<style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style></head><body style="margin:0;padding:0;background-color:#ffffff;${BASE}font-size:16px;-webkit-text-size-adjust:100%"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;background-color:#ffffff"><tr><td align="center" style="padding:0"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:100%;max-width:600px"><tr><td style="padding:24px;text-align:left">\n${body}\n</td></tr></table></td></tr></table></body></html>`;
@@ -382,6 +396,6 @@ function textBlock(node: Node, indent = ''): string {
 
 /** Plain-text alternative derived from block HTML; placeholders are left intact. */
 export function renderBlockText(html: string): string {
-  const fragment = parseFragment(html);
+  const fragment = blockFragment(html);
   return fragment.childNodes.map(node => textBlock(node)).join('').replace(/\n{3,}/g, '\n\n').trim();
 }
