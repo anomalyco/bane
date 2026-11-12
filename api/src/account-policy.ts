@@ -5,9 +5,9 @@ import type { Config } from './core.js';
 // verified address that the method used to sign in never vouched for (a GitHub-made account that later links a
 // personal Google account signs in with acr=google and its GitHub-verified work address).
 //
-// The account service is adding a claim that describes the provider identity behind this sign-in. Its name is
-// provisional until the account service publishes it; everything that reads it goes through providerIdentity().
-export const PROVIDER_IDENTITY_CLAIM = 'provider_identity';
+// Anomaly account's claim for the provider identity behind this sign-in: {provider, sub, email, email_verified, hd?}
+// from the provider used for this sign-in, omitted when there is none. Requested as an essential ID-token claim.
+export const PROVIDER_IDENTITY_CLAIM = 'https://account.anoma.ly/claims/upstream';
 
 export type ProviderIdentity = { provider: string; sub: string; email: string | null; emailVerified: boolean; hd: string | null };
 
@@ -18,11 +18,12 @@ export function providerIdentity(source: Record<string, unknown> | null | undefi
   const p = value as Record<string, unknown>;
   if (typeof p.provider !== 'string' || typeof p.sub !== 'string' || !p.provider || !p.sub) return null;
   return { provider: p.provider, sub: p.sub, email: typeof p.email === 'string' ? p.email : null, emailVerified: p.email_verified === true,
-    hd: typeof p.hd === 'string' && p.hd ? p.hd.toLowerCase() : null };
+    hd: typeof p.hd === 'string' && p.hd ? p.hd : null };
 }
 
-/** Hosted staff: this sign-in used Google, and the Google account belongs to a staff Google Workspace domain (hd). */
-export function isStaffSignIn(config: Pick<Config, 'multiTenant' | 'accountRequiredAcr' | 'staffGoogleDomains'>, acr: unknown, provider: ProviderIdentity | null) {
+/** Hosted staff, exactly as the account service defines it: a Google sign-in whose Google account has a verified
+ * address and belongs to a staff Google Workspace domain (hd, compared exactly). */
+export function isStaffSignIn(config: Pick<Config, 'multiTenant' | 'accountRequiredAcr' | 'staffGoogleDomains'>, acr: unknown, upstream: ProviderIdentity | null) {
   return config.multiTenant && config.accountRequiredAcr === GOOGLE_ACR && acr === GOOGLE_ACR
-    && provider?.provider === 'google' && !!provider.hd && config.staffGoogleDomains.includes(provider.hd);
+    && upstream?.provider === 'google' && upstream.emailVerified === true && !!upstream.hd && config.staffGoogleDomains.includes(upstream.hd);
 }

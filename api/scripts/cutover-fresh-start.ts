@@ -9,7 +9,7 @@
 // no workspace_id), so a table added later cannot be missed. Every person and every credential or approval tied to a
 // person is wiped (users, sessions, memberships, invitations, legacy OAuth clients/consents/tokens/keys, bane_agent_
 // tokens, MCP approvals). The kept workspace's API keys, inbox keys, app passwords, routes and endpoints stay.
-// Finally one owner is bound BY SUBJECT, never by address: the subject of a refused Google sign-in at ACCOUNT_ISSUER
+// Finally one owner is bound BY SUBJECT, never by address: the subject of a recorded Google sign-in at ACCOUNT_ISSUER
 // (scripts/list-signin-attempts.ts; confirm it with the person) becomes the kept workspace's only member, as owner.
 //
 // Env: DATABASE_URL (the migrator role: it owns the tables), ACCOUNT_ISSUER (the issuer the subject belongs to).
@@ -84,10 +84,10 @@ export async function inspect(db: pg.Client, ownerSubject: string, issuer: strin
   const { rows: [marker] } = await db.query<{ at: string }>("SELECT at::text FROM hosted_operator_audit WHERE action=$1 ORDER BY at LIMIT 1", [MARKER]);
   if (marker) return { anchor: { id: '', name: '' }, domains: {}, victims: [], kept: [], keptConnections: [], people: {}, rows: {}, keys: [],
     owner: { subject: ownerSubject, issuer, acr: null, email: null, name: null, last_at: '' }, appliedAt: marker.at };
-  // The owner is bound by subject: it must be a verified, Google-authenticated sign-in Bane refused at this issuer.
+  // The owner is bound by subject: it must be a recorded, verified, Google-authenticated sign-in at this issuer.
   const { rows: [owner] } = await db.query<Owner>(`SELECT subject,issuer,acr,email,name,last_at::text FROM bane_signin_attempts
     WHERE issuer=$1 AND subject=$2`, [issuer, ownerSubject]);
-  if (!owner) throw new Error(`Refusing: no refused sign-in by subject ${ownerSubject} at ${issuer}. Have the owner sign in once, then read the subject with scripts/list-signin-attempts.ts.`);
+  if (!owner) throw new Error(`Refusing: no recorded sign-in by subject ${ownerSubject} at ${issuer}. Have the owner sign in once, then read the subject with scripts/list-signin-attempts.ts.`);
   if (owner.acr !== GOOGLE_ACR) throw new Error(`Refusing: subject ${ownerSubject} last signed in with ${owner.acr ?? 'no acr'}, not ${GOOGLE_ACR}.`);
   const name = (d: string) => d.toLowerCase();
   const ownersOf = async (domain: string) => (await db.query<{ workspace_id: string }>(`
@@ -157,7 +157,7 @@ export function describe(plan: Plan) {
   out.push(`Workspace data to delete (${plan.keys.length} keyed tables scanned):`);
   for (const [key, n] of Object.entries(plan.rows)) out.push(`  ${key}: ${n}`);
   const o = plan.owner;
-  out.push(`Owner (bound by subject): ${o.subject} at ${o.issuer}, refused Google sign-in at ${o.last_at.slice(0, 19)}; shown, not verified: ${o.name ?? '-'} <${o.email ?? '-'}>.`);
+  out.push(`Owner (bound by subject): ${o.subject} at ${o.issuer}, Google sign-in at ${o.last_at.slice(0, 19)}; shown, not verified: ${o.name ?? '-'} <${o.email ?? '-'}>.`);
   out.push(`  becomes the only member (owner) of ${plan.anchor.id}. Confirm the subject and time with the person before --apply.`);
   return out.join('\n');
 }

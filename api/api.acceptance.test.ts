@@ -488,8 +488,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
   let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false;
   // The provider identity behind the sign-in (Google Workspace domain); email never admits anyone.
-  let providerName = 'google', providerHd: string | null = 'example.org';
-  const upstream = () => providerHd ? {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:'g-'+subject,email,email_verified:true,hd:providerHd}} : {};
+  let providerName = 'google', providerHd: string | null = 'example.org', providerVerified = true;
+  const upstream = () => providerHd ? {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:'g-'+subject,email,email_verified:providerVerified,hd:providerHd}} : {};
   // The first half exercises an installation without a required context; hosted config always sets one.
   runtime.config.accountClient!.requiredAcr=undefined;
   const googleAcr = 'urn:anomaly:acr:google';
@@ -502,7 +502,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
         pushed = new URLSearchParams(String(init?.body));
         assert.equal(pushed.get('client_id'),'dashboard');
         assert.ok(pushed.get('client_assertion'));
-        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{acr:{essential:true,values:[googleAcr]}}});
+        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{acr:{essential:true,values:[googleAcr]},[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
         assert.equal(pushed.get('scope'),'openid profile email');
         assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
         return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
@@ -524,7 +524,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
     assert.equal(start.status,200); const front=new URL((await start.json() as {url:string}).url).searchParams;
     if (runtime.config.accountClient?.requiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
-    else assert.equal(front.has('claims'),false);
+    else assert.deepEqual(JSON.parse(front.get('claims')!),{id_token:{[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
     const params = pushed ?? front;
     nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
     const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({...(authorizationError?{error:authorizationError}:{code:'fixture'}),state:params.get('state')!,iss:issuer});
@@ -538,14 +538,16 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM bane_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
   // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
   // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
-  for (const [name,hd] of [['google',null],['github','example.org'],['google','other.example']] as const) {
-    providerName=name;providerHd=hd;
-    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}`);
+  // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
+  for (const [name,hd,googleVerified] of [['google',null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
+    providerName=name;providerHd=hd;providerVerified=googleVerified;
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}/${googleVerified}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
   }
   // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
-  providerName='google';providerHd='example.org';verified=false;
+  providerName='google';providerHd='example.org';providerVerified=true;verified=false;
   const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
   assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
   verified=true;
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ApiError, digest, log, type Actor, type Ctx, type Runtime } from './core.js';
 import { getCookie, setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
-import { isStaffSignIn, providerIdentity, type ProviderIdentity } from './account-policy.js';
+import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -45,7 +45,11 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   let params = new URLSearchParams({ client_id:client.client_id, response_type:'code', scope:'openid profile email', redirect_uri:callback,
     state, nonce, code_challenge_method:'S256', code_challenge:await oidc.calculatePKCECodeChallenge(verifier) });
   const requiredAcr = runtime.config.accountClient?.requiredAcr;
-  if (requiredAcr) params.set('claims', JSON.stringify({id_token:{acr:{essential:true, values:[requiredAcr]}}}));
+  // The required authentication context, and the provider identity behind the sign-in when staff sign-up is on.
+  const idToken: Record<string, unknown> = {};
+  if (requiredAcr) idToken.acr = {essential:true, values:[requiredAcr]};
+  if (runtime.config.staffGoogleDomains.length) idToken[PROVIDER_IDENTITY_CLAIM] = {essential:true};
+  if (Object.keys(idToken).length) params.set('claims', JSON.stringify({id_token:idToken}));
   if (metadata.pushed_authorization_request_endpoint) {
     const response = await oidc.pushedAuthorizationRequest(metadata, client, authentication, params, options);
     const pushed = await oidc.processPushedAuthorizationResponse(metadata, client, response);
@@ -59,11 +63,12 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   return { url:url.href, binding };
 }
 
-// A refused, otherwise verified sign-in: one row per subject for the operator (scripts/list-signin-attempts.ts),
-// who may then admit that subject explicitly. The address and name are shown, never trusted.
+// Every verified sign-in, refused or admitted: one row per subject for the operator (scripts/list-signin-attempts.ts),
+// who may then bind that subject explicitly. The address and name are shown, never trusted.
 async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string) {
   const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
-  log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
+  if (outcome.startsWith('signed_in')) log('info', { code: 'SIGN_IN', outcome, subject: claims.sub, acr });
+  else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
   await runtime.db.execute(sql`INSERT INTO bane_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome)
     VALUES(${claims.iss},${claims.sub},${acr},${upstream?.provider ?? null},${upstream?.hd ?? null},${address},${name},${outcome})
     ON CONFLICT(issuer,subject) DO UPDATE SET acr=excluded.acr,provider=excluded.provider,provider_hd=excluded.provider_hd,email=excluded.email,
@@ -102,6 +107,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   // and never links a subject to an existing user.
   const staff = isStaffSignIn(runtime.config, claims.acr, upstream);
   const session = oidc.generateRandomState();
+  let admitted = 'signed_in';
   try {
     await runtime.db.transaction(async db => {
       await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([claims.iss,claims.sub])},83062))`);
@@ -122,7 +128,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) VALUES(${userId},${name},${address}::text,
           ${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${address}::text)))`);
         await db.execute(sql`INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
-        log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: staff ? 'staff' : invited ? 'invitation' : 'subject' });
+        admitted = `signed_in:${staff ? 'staff' : invited ? 'invitation' : 'subject'}`;
+        log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
         if (runtime.config.multiTenant) {
           if (!await onboardNewUser(db,{id:userId,email:emailAtLogin,name},staff,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
         } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
@@ -146,6 +153,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     await recordAttempt(runtime, claims, upstream, address, error.reason);
     throw loginFailed();
   }
+  await recordAttempt(runtime, claims, upstream, address, admitted);
   return {session, returnUrl:returnUrl.href};
 }
 

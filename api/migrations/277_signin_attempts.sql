@@ -1,5 +1,5 @@
 SET LOCAL lock_timeout='2s';
--- Refused sign-ins, one row per verified subject, so an operator can admit a person by subject
+-- Verified sign-ins, refused or admitted, one row per subject, so an operator can bind a person by subject
 -- (scripts/list-signin-attempts.ts, scripts/cutover-fresh-start.ts --owner-sub). Email and name are
 -- shown to the operator only; they never admit or link anyone. Rows older than 30 days are pruned.
 CREATE TABLE bane_signin_attempts (

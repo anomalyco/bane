@@ -1,9 +1,9 @@
-// Operator-only (no API endpoint): refused sign-ins, newest first, so a person can be admitted by subject.
+// Operator-only (no API endpoint): verified sign-ins, refused or admitted, newest first, so a person can be bound by subject.
 //
 //   node --import tsx scripts/list-signin-attempts.ts [--hours 24] [--json]
 //
 // Env: DATABASE_URL; ACCOUNT_ISSUER (optional) limits the list to that issuer.
-// Identity is (issuer, subject). The address and name come from the refused sign-in and are shown only to help the
+// Identity is (issuer, subject). The address and name come from the sign-in and are shown only to help the
 // operator tell attempts apart: confirm with the person, out of band, which subject and time are theirs before
 // using it (for example `scripts/cutover-fresh-start.ts --owner-sub <subject>`). An address never proves who it is.
 import { parseArgs } from 'node:util';
@@ -29,7 +29,7 @@ if (import.meta.main) {
   try {
     const rows = await listSigninAttempts(db, hours, process.env.ACCOUNT_ISSUER || undefined);
     if (values.json) console.log(JSON.stringify(rows, null, 2));
-    else if (!rows.length) console.log(`No refused sign-ins in the last ${hours} hour(s).`);
+    else if (!rows.length) console.log(`No sign-ins in the last ${hours} hour(s).`);
     else for (const r of rows) console.log([r.last_at.slice(0, 19), r.issuer, `sub=${r.subject}`, `acr=${r.acr ?? '-'}`,
       `provider=${r.provider ?? '-'}${r.provider_hd ? `/${r.provider_hd}` : ''}`, `outcome=${r.outcome}`, `x${r.attempts}`,
       `(shown, not verified: ${r.name ?? '-'} <${r.email ?? '-'}>)`].join('  '));
