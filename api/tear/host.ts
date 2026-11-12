@@ -34,6 +34,11 @@ globalThis.Date = FrozenDate as DateConstructor;
 for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) console[level] = process.env.TEAR_HOST_LOG === '1' ? (...a: unknown[]) => process.stderr.write(a.map(String).join(' ') + '\n') : () => {};
 const url = process.env.DATABASE_URL;
 if (!url || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname)) throw new Error('tear host: DATABASE_URL must point at an isolated loopback database.');
+// Loopback is not proof of a disposable database: an SSH tunnel or a proxy to a real one also
+// listens there. The database must carry this exact COMMENT ON DATABASE, which whoever creates the
+// disposable database sets (tear never sets it), and hold no workspace or user tear did not create.
+// Both are checked at startup and before every fixture.
+const DISPOSABLE = 'bane-tear: disposable test database, every row may be changed or deleted';
 const PUBLIC = 'http://127.0.0.1:8799';
 const env: Record<string, string> = {
   DATABASE_URL: url, BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? randomBytes(36).toString('hex'), PUBLIC_URL: PUBLIC, API_BASE_URL: PUBLIC,
@@ -135,6 +140,15 @@ class GatedPool extends pg.Pool {
 const pool = new GatedPool({ connectionString: url, max: 20, idleTimeoutMillis: 30000 });
 pool.on('error', () => {});
 const admin = new pg.Pool({ connectionString: url, max: 4 });
+async function assertDisposable() {
+  const { rows: [r] } = await admin.query(`SELECT shobj_description(d.oid, 'pg_database') AS marker, current_database() AS name,
+    (SELECT count(*)::int FROM workspaces WHERE id <> 'default' AND id NOT LIKE 'tear\\_%') AS workspaces,
+    (SELECT count(*)::int FROM auth_user WHERE id NOT LIKE 'tear-user-%') AS users
+    FROM pg_database d WHERE d.datname = current_database()`);
+  if (r?.marker !== DISPOSABLE) throw new Error(`tear host: refusing database ${r?.name ?? '(unknown)'}: it is not marked disposable. Create a dedicated, migrated database and mark it with COMMENT ON DATABASE ... IS '${DISPOSABLE}' (see tear/README.md).`);
+  if (r.workspaces || r.users) throw new Error(`tear host: refusing database ${r.name}: it holds ${r.workspaces} workspaces and ${r.users} users that tear did not create.`);
+}
+await assertDisposable();
 // The claim was stamped by the DB clock; restamp it with the Worker clock so both agree exactly.
 async function stampClaim(args: any[]) {
   const values = (args[0]?.values ?? args[1]) as unknown[] | undefined;
@@ -177,6 +191,7 @@ async function seedUser(w: string, role: 'owner' | 'member'): Promise<User> {
   return { id, memberId, cookie: `bane.session_token=${encodeURIComponent(`${token}.${await makeSignature(token, env.BETTER_AUTH_SECRET!)}`)}` };
 }
 async function open() {
+  await assertDisposable();
   const w = `tear_${randomBytes(8).toString('hex')}`;
   clock = Math.floor(RealDate.now() / 1000) * 1000;
   await admin.query('INSERT INTO workspaces (id,name,slug) VALUES ($1,$1,$1)', [w]);

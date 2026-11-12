@@ -8,7 +8,13 @@ A model checker for the API's idempotency reservations, grant revocation and own
 
 ## Run
 
-Run from `api/` with `bun install` done and `DATABASE_URL` set to an isolated, migrated, loopback database (never production). The CI acceptance service or the local harness's Postgres both work.
+Run from `api/` with `bun install` done and `DATABASE_URL` set to a dedicated, migrated, loopback database (never production). The host refuses any database that lacks this marker, and any database holding a workspace or user it did not create. It checks both at startup and before every fixture. Loopback alone is not proof, because a tunnel to a real database also listens there.
+
+Whoever creates the disposable database marks it once. This needs the database owner, and tear never sets the marker itself:
+
+```sh
+psql "$DATABASE_URL" -c "DO \$\$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), 'bane-tear: disposable test database, every row may be changed or deleted'); END \$\$"
+```
 
 ```sh
 cargo build --release --manifest-path tear/Cargo.toml

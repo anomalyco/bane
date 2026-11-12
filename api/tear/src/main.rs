@@ -63,12 +63,13 @@ struct HostProc {
 }
 impl HostProc {
     fn spawn() -> R<Self> {
-        let log = std::env::var("TEAR_HOST_LOG").is_ok_and(|v| v == "1");
+        // The host silences API logs unless TEAR_HOST_LOG=1, so its stderr carries only real
+        // failures (such as refusing a database that is not marked disposable).
         let mut child = Command::new(std::env::var("BUN").unwrap_or_else(|_| "bun".into()))
             .arg("tear/host.ts")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(if log { Stdio::inherit() } else { Stdio::null() })
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| Error::new(format!("spawn bun tear/host.ts (run from api/): {e}")))?;
         let stdin = BufWriter::new(child.stdin.take().unwrap());
