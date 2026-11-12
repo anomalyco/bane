@@ -67,7 +67,8 @@
 //! - [x] r.replay / r.replay-race: held envelopes for an unrouted host (`stash`) replay through
 //!   the same route statement, also while a normal reopen of the message is in flight; both take
 //!   the window row before the receipt.
-//! - [x] r.legacy-fail: the previous Worker's terminal failure write (`legacy-fail`, no claim, no
+//! - [x] r.fail: the current handler's final failure fails the receipt it claimed, naming its job
+//!   and lease. r.legacy-fail: the previous Worker's terminal failure write (`legacy-fail`, no claim, no
 //!   recipient fence) reaches a pending receipt, also one reopened after that Worker's lease was
 //!   retired: the settle fence drops it.
 //! - [x] r.release-fair: a release that finds a workspace's rows locked moves the hold ten seconds
@@ -383,6 +384,9 @@ const REGRESSIONS: &[(&str, usize, &[&str])] = &[
 
 /// Deterministic traces that reach the rare checklist items exactly at their boundaries.
 const BOUNDARIES: &[(&str, usize, &[&str])] = &[
+    // The current handler's final failure settles its own claim; the previous Worker's is dropped.
+    ("recv", 0, &["accept m1 a", "claim A m1", "fail A m1"]),
+    ("recv", 0, &["accept m1 a", "claim A m1", "legacy-fail A m1", "fail A m1"]),
     // Lost-receipt recovery re-queues a receipt whose job ended without settling it, and fails it on
     // the fourth pass.
     (
@@ -1136,6 +1140,9 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                 if verb == "claim" && v == &json!(0) {
                     add("r.claim-race");
                 }
+                if verb == "fail" && v == &json!(1) {
+                    add("r.fail");
+                }
                 if verb == "legacy-fail" {
                     let x = if w[1] == "A" { 0 } else { 1 };
                     if prev[["A", "B"][x]]["receipts"][w[2].as_str()][0] == "pending" {
@@ -1540,6 +1547,7 @@ const CHECKLIST: &[&str] = &[
     "r.replay-race",
     "r.release-fair",
     "r.legacy-fail",
+    "r.fail",
     "r.huge",
     "r.empty",
     "r.abort",

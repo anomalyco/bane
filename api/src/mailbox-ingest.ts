@@ -403,8 +403,10 @@ export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submissi
 
 // A terminal write settles the receipt only as this attempt claimed it: still pending, with the same
 // recipients. A reopen while the job ran holds the receipt until the job ends (155), and a stale or
-// lapsed attempt must not retire the newer recipients.
+// lapsed attempt must not retire the newer recipients. A failure also names the claim (settled_by):
+// the database fails a pending receipt only for its running job on that lease (164).
 const claimedBy=(recipients:string[])=>sql`${mailReceipts.status}='pending' AND ${mailReceipts.recipients}=${JSON.stringify(recipients)}::jsonb`;
+const claimToken=(job:Parameters<JobHandler>[2])=>`${job.id}|${job.leaseFence??''}`;
 const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void,claim:{recipients?:string[]}) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
@@ -424,7 +426,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       const {CopyObjectCommand}=await loadIngestS3();
       await s3.send(new CopyObjectCommand({Bucket:receipt.bucket,Key:'quarantine/'+sesMessageId,CopySource:`${receipt.bucket}/${sourceKey}`,CopySourceIfMatch:receipt.notification.stagingEtag as string|undefined,TaggingDirective:'REPLACE'}));
       log('warn',{code:quarantine,workspaceId:scope.workspaceId,virus:verdicts.virus??'missing',spam:verdicts.spam??'missing'});
-      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),claimedBy(receipt.recipients)));
+      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString(),settledBy:claimToken(job)}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),claimedBy(receipt.recipients)));
       return;
     } finally {s3.destroy();}
   }
@@ -621,7 +623,7 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'m
       if (error.status>=500 || error.status===429) throw new ApiError(503,error.code,'Mailbox ingestion temporarily unavailable.',undefined,true);
     }
     const code=error instanceof ApiError ? (error.code==='MAILBOX_ATTACHMENT_UPLOAD_FAILED'?'ATTACHMENT_UPLOAD_FAILED':error.code) : 'MAILBOX_INGEST_FAILED';
-    await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),claim.recipients?claimedBy(claim.recipients):eq(mailReceipts.status,'pending')));
+    await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString(),settledBy:claimToken(job)}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),claim.recipients?claimedBy(claim.recipients):eq(mailReceipts.status,'pending')));
     log('error',{code,workspaceId:job.workspaceId,jobId:job.id});
   } finally { mimeBytes-=reserved;inProgress.delete(key); }
 } };

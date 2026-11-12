@@ -164,13 +164,13 @@ async function reset(p: 'recv' | 'send' | 'upload', c: Json) {
 // shared pool, with the configured limits. Recipients a and c (and the numbered h001...h101) are
 // A's, b is B's, so one message can create receipts in both.
 let hosts: string[] = [];
-const claims = new Map<string, string>();
+const claims = new Map<string, string>(), fences = new Map<string, string>();
 async function resetRecv() {
   const base = 'tear_adm_' + hex(12);
   ws = [`${base}_a`, `${base}_b`];
   Object.assign(runtime.config, structuredClone(baseConfig), { workspaceId: ws[0], multiTenant: true });
   hosts = ws.map(w => `${w.replaceAll('_', '-')}.invalid`);
-  claims.clear();
+  claims.clear(); fences.clear();
   const c = auto.client;
   await c.query('BEGIN');
   await c.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier,legacy_names,inbound_topic_arn,inbound_bucket,receiving_state)
@@ -466,9 +466,9 @@ async function autoAct(words: string[]): Promise<unknown> {
       const w = wsOf(a), mid = sesId(b);
       const { rows } = await auto.client.query(`WITH j AS (SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='pending' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED)
         UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '10 minutes' FROM j WHERE jobs.id=j.id
-        RETURNING jobs.id,(SELECT recipients FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2) AS recipients`, [w, mid]);
+        RETURNING jobs.id,jobs.lease_until::text AS fence,(SELECT recipients FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2) AS recipients`, [w, mid]);
       if (!rows[0]) return 0;
-      claims.set(rows[0].id, JSON.stringify(rows[0].recipients));
+      claims.set(rows[0].id, JSON.stringify(rows[0].recipients)); fences.set(rows[0].id, rows[0].fence);
       return 1;
     });
     case 'fail': case 'lose': return autoTxn(async () => {
@@ -478,7 +478,8 @@ async function autoAct(words: string[]): Promise<unknown> {
       const w = wsOf(a), mid = sesId(b);
       const job = (await auto.client.query(`SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='running' ORDER BY created_at,id LIMIT 1`, [w, mid])).rows[0];
       if (!job) return 'e:no-running-job';
-      const failed = verb === 'fail' ? (await auto.client.query("UPDATE mail_receipts SET status='failed',error='MAILBOX_INGEST_FAILED',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending' AND recipients=$3::jsonb", [w, mid, claims.get(job.id)])).rowCount : 0;
+      // The current handler's write names its claim (job id and lease) for the settle fence (164).
+      const failed = verb === 'fail' ? (await auto.client.query("UPDATE mail_receipts SET status='failed',error='MAILBOX_INGEST_FAILED',processed_at=now(),settled_by=$4 WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending' AND recipients=$3::jsonb", [w, mid, claims.get(job.id), `${job.id}|${fences.get(job.id) ?? ''}`])).rowCount : 0;
       await auto.client.query(`UPDATE jobs SET status=$2 WHERE id=$1`, [job.id, verb === 'fail' ? 'failed' : 'completed']);
       return failed;
     });

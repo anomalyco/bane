@@ -2077,8 +2077,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await runtime.db.transaction(async tx=>{
             const scoped={...runtime,db:tx};
             assert.equal(await acceptInboundNotification(scoped,{topicArn:r.arn,region,message}),1);
-            const ingest=()=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts:1,workspaceId:wid});
-            const first=ingest(); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
+            // The first attempt runs the receipt's claimed job: only that claim may fail the receipt (164).
+            const {sql}=await import('drizzle-orm'),claimed=(await tx.execute<{id:string}>(sql`UPDATE jobs SET status='running' WHERE workspace_id=${wid} AND type='mailbox.ingest' AND payload->>'sesMessageId'=${oversized} AND status='pending' RETURNING id`)).rows[0]!.id;
+            const ingest=(id=unique('job'))=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id,attempts:1,workspaceId:wid});
+            const first=ingest(claimed); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
             const deferredAt=Date.now();
             try { await assert.rejects(ingest(),e=>e instanceof JobDeferred && Date.parse(e.availableAt)>=deferredAt+1_500 && Date.parse(e.availableAt)<=Date.now()+2_500); } finally {releaseHead(); await first;}
             await ingest();
@@ -9542,6 +9544,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
     assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
   });
+  // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
+  // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
+  // in the database, but the old invocation keeps running and still issues that write.
+  test('receive backlog: a previous Worker whose lease was retired cannot fail the reopened receipt',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+      const {wid,notify,state}=await inboundRoute(runtime,db,'overlap-lease',{messages:10,backlog:2});
+      const input=async(mid:string)=>(await runtime.db.execute<{input:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS input`)).rows[0]!.input as import('./src/mailbox-ingest-input.js').IngestInput;
+      // A previous Worker claims m1's job for its last attempt; its lease runs out while it still works.
+      assert.equal(await notify('m1',['a']),1);
+      const old=(await db.query("UPDATE jobs SET status='running',attempts=$2,lease_until=now()-interval '1 second' WHERE workspace_id=$1 AND payload->>'sesMessageId'='m1' RETURNING id",[wid,MAX_ATTEMPTS])).rows[0].id;
+      assert.equal(await notify('m1',['a','b']),0);
+      assert.deepEqual(await state('m1'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:2,active:1,jobs:1});
+      // The claim retires the exhausted lease (its failed CTE); the job end admits the reopen with a new job.
+      await db.query("UPDATE jobs SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL WHERE id=$1",[old]);
+      assert.deepEqual(await state('m1'),{status:'pending',error:null,n:2,active:1,jobs:1});
+      // The old invocation finishes with a permanent error: bane/dev's exact terminal write changes nothing.
+      const stale=await db.query('update "mail_receipts" set "status" = $1, "error" = $2, "processed_at" = $3 where ("mail_receipts"."workspace_id" = $4 and "mail_receipts"."ses_message_id" = $5 and "mail_receipts"."status" = $6)',
+        ['failed','MAILBOX_INGEST_FAILED',new Date().toISOString(),wid,'m1','pending']);
+      assert.equal(stale.rowCount,0);
+      assert.deepEqual(await state('m1'),{status:'pending',error:null,n:2,active:1,jobs:1});
+      // Nor can the current Worker's code acting for the retired claim; the replacement's own final failure settles it.
+      await assert.doesNotReject(mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:'m1'},{id:old,workspaceId:wid,attempts:MAX_ATTEMPTS,ingest:await input('m1')}));
+      assert.equal((await state('m1')).status,'pending');
+      const claimed=await input('m1');
+      const next=(await db.query("UPDATE jobs SET status='running',attempts=$2,lease_until=now()+interval '3 minutes' WHERE workspace_id=$1 AND payload->>'sesMessageId'='m1' AND status='pending' RETURNING id,lease_until::text AS fence",[wid,MAX_ATTEMPTS])).rows[0];
+      await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:'m1'},{id:next.id,workspaceId:wid,attempts:MAX_ATTEMPTS,leaseFence:next.fence,ingest:claimed});
+      assert.deepEqual((await db.query("SELECT status,error,jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='m1'",[wid])).rows,[{status:'failed',error:'AWS_NOT_CONFIGURED',n:2}]);
+    });
+  });
   // Recheck of #57, R4 (tear witness, 5 steps: accept m1 a, accept m2 a, hour, W accept m3 a, release -> the busy
   // workspace's hold was skipped uncounted). Due holds of a busy workspace stayed first in line on every pass.
   test('receive release: holds of a busy workspace do not starve the due holds behind them',async t=>{
@@ -9932,7 +9964,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')",[domain,wid,REGION]);
       const submit=(mid:string,recipients:string[],subject='Subject',scans:Json=cleanScans)=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{...scans,timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
-      const run=(type:string,p:Json,attempts=1)=>mailboxIngestJobs[type]!(runtime,p,{id:unique('job'),workspaceId:wid,attempts});
+      // An ingest run claims the receipt's job while the handler runs (only that claim may fail the receipt, 164),
+      // then leaves it pending as before.
+      const run=async(type:string,p:Json,attempts=1)=>{
+        const job=type==='mailbox.ingest'?(await db.query("UPDATE jobs SET status='running' WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='pending' RETURNING id",[wid,p.sesMessageId])).rows[0]?.id:undefined;
+        try { return await mailboxIngestJobs[type]!(runtime,p,{id:job??unique('job'),workspaceId:wid,attempts}); }
+        finally { if(job)await db.query("UPDATE jobs SET status='pending' WHERE id=$1 AND status='running'",[job]); }
+      };
       const raw=new Map<string,Buffer>(),quarantined:string[]=[],parts:Json[]=[],largeReads:string[]=[];let page=0,stageError='',quarantineDenied=false,interruptCopy=false,onTag:(()=>Promise<void>)|undefined,onGet:((mid:string)=>Promise<void>)|undefined;
       const old=new Date(Date.now()-2*3600_000),listed=(mid:string)=>({Key:'staging/'+mid,ETag:'"fixture"',LastModified:old});
       t.mock.method(S3Client.prototype,'send',async(cmd:any)=>{
