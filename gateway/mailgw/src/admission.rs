@@ -8,7 +8,8 @@ use tokio::time::Instant;
 
 #[derive(Default)]
 pub struct Limits {
-    ips: HashMap<IpAddr, u32>,
+    ips: HashMap<IpAddr, (u32, Arc<tokio::sync::Semaphore>)>,
+    anonymous: u32,
     failures: HashMap<(IpAddr, u64), Failures>,
     accepts: HashMap<IpAddr, Bucket>,
 }
@@ -81,6 +82,7 @@ impl Bucket {
 }
 pub struct Slot {
     pub after: Instant,
+    pub tls: Arc<tokio::sync::Semaphore>,
     ip: IpAddr,
     limits: Arc<Mutex<Limits>>,
 }
@@ -94,11 +96,19 @@ impl Slot {
                 return None;
             }
         }
-        let count = l.ips.entry(ip).or_default();
+        if l.anonymous >= 128 {
+            return None;
+        }
+        let (count, tls) = l
+            .ips
+            .entry(ip)
+            .or_insert_with(|| (0, Arc::new(tokio::sync::Semaphore::new(4))));
         if *count >= 20 {
             return None;
         }
         *count += 1;
+        let tls = tls.clone();
+        l.anonymous += 1;
         let b = l
             .accepts
             .entry(ip)
@@ -113,13 +123,19 @@ impl Slot {
             at
         };
         drop(l);
-        Some(Self { ip, limits, after })
+        Some(Self {
+            ip,
+            limits,
+            after,
+            tls,
+        })
     }
 }
 impl Drop for Slot {
     fn drop(&mut self) {
         let mut l = self.limits.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(n) = l.ips.get_mut(&self.ip) {
+        l.anonymous -= 1;
+        if let Some((n, _)) = l.ips.get_mut(&self.ip) {
             *n -= 1;
             if *n == 0 {
                 l.ips.remove(&self.ip);
@@ -130,6 +146,18 @@ impl Drop for Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn peer_handshake_share_is_distinct_from_other_peers_and_global_slots() {
+        let limits = Arc::new(Mutex::new(Limits::default()));
+        let t = Instant::now();
+        let ip = "127.0.0.1".parse().unwrap();
+        let a = Slot::take(limits.clone(), ip, t).unwrap();
+        let b = Slot::take(limits.clone(), ip, t).unwrap();
+        let _held = a.tls.try_acquire_many(4).unwrap();
+        assert!(b.tls.try_acquire().is_err());
+        let other = Slot::take(limits, "127.0.0.2".parse().unwrap(), t).unwrap();
+        assert!(other.tls.try_acquire().is_ok());
+    }
     #[test]
     fn lockout_expires_without_extending_on_probe() {
         let mut a = Limits::default();

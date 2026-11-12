@@ -90,8 +90,15 @@ impl Gateway {
         }
         Ok(r)
     }
-    async fn accept_tls(&self, stream: Stream, deadline: Instant) -> Result<Stream> {
-        let _permit = self.handshakes.try_acquire().context("handshake limit")?;
+    async fn accept_tls(
+        &self,
+        stream: Stream,
+        deadline: Instant,
+        peer: &Semaphore,
+    ) -> Result<Stream> {
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(4));
+        let _peer = timeout_at(deadline, peer.acquire()).await??;
+        let _permit = timeout_at(deadline, self.handshakes.acquire()).await??;
         Ok(Box::new(
             timeout_at(deadline, self.tls.accept(stream)).await??,
         ))
@@ -102,9 +109,21 @@ impl Gateway {
         let auth_deadline = start + self.preauth;
         timeout_at(auth_deadline, tokio::time::sleep_until(slot.after)).await?;
         tcp.set_nodelay(true)?;
+        if port.implicit {
+            let mut prefix = [0];
+            anyhow::ensure!(
+                timeout_at(
+                    auth_deadline.min(Instant::now() + Duration::from_secs(4)),
+                    tcp.peek(&mut prefix)
+                )
+                .await??
+                    > 0,
+                "closed before TLS"
+            );
+        }
         let mut stream: Stream = Box::new(tcp);
         if port.implicit {
-            stream = self.accept_tls(stream, auth_deadline).await?
+            stream = self.accept_tls(stream, auth_deadline, &slot.tls).await?
         }
         let mut core = Core::new(port.protocol, port.implicit);
         let greeting = match &core {
@@ -390,7 +409,13 @@ impl Gateway {
                     if !src.is_empty() {
                         return Ok(());
                     }
-                    stream = self.accept_tls(stream, auth_deadline).await?;
+                    stream = self
+                        .accept_tls(
+                            stream,
+                            auth_deadline,
+                            &slot.as_ref().context("missing preauth slot")?.tls,
+                        )
+                        .await?;
                     core = Core::new(port.protocol, true);
                 }
                 deadline = if login.is_some() {
