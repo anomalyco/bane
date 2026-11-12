@@ -328,6 +328,45 @@ test('S3 fixture: object round trips and reserved part headers keep the service 
   for(const Key of [key,'copy.txt'])await client.send(new DeleteObjectCommand({Bucket:'fixture',Key}));
   assert.equal((await client.send(new ListObjectsV2Command({Bucket:'fixture'}))).KeyCount,0);
 });
+// PR #144 review: a contact property is free text. Every run of non-space characters with an @ in it is masked whole,
+// with any quoted string or comment it touches (app/src/lib/private-address.ts addressParts, components/AddressText.tsx).
+test('dashboard addresses in free text: every run holding an @ is masked whole, with the quoted string or comment it touches', async () => {
+  const { addressParts, maskedParts } = await import('../app/src/lib/private-address.js');
+  const shown = (text: string) => addressParts(text).map(part => part.address ? `[${part.text}]` : part.text).join('');
+  const cases: [string, string][] = [
+    // Round 3: a comment before the @, and a local part no parser reads.
+    ['bob(comment)@example.net', '[bob(comment)@example.net]'],
+    ['Reach bob(my work comment)@example.net now', 'Reach [bob(my work comment)@example.net] now'],
+    ['bob\\local@example.net', '[bob\\local@example.net]'],
+    // Earlier rounds.
+    ['Reach "mary smith"@example.net now', 'Reach ["mary smith"@example.net] now'],
+    ['Reach "a@b \\" c"@example.net', 'Reach ["a@b \\" c"@example.net]'],
+    ['Reach person@例子.公司 now', 'Reach [person@例子.公司] now'],
+    ['first/last@example.net', '[first/last@example.net]'],
+    ["o'connor@example.net", "[o'connor@example.net]"],
+    ['dörte@münchen.example', '[dörte@münchen.example]'],
+    // Over-masking is fine: the punctuation a run carries goes with it.
+    ['Reply to second-person@example.net.', 'Reply to [second-person@example.net.]'],
+    ['mailto:bob@example.net, <ada@example.net> (cc lin@example.net)', '[mailto:bob@example.net,] [<ada@example.net>] [(cc lin@example.net)]'],
+    ['bob@example.net(Bob Smith) after', '[bob@example.net(Bob Smith)] after'],
+    ['"mary smith"@x.example" tail', '["mary smith"@x.example"] tail'],
+    ['"a@b.example y"@c.example tail', '["a@b.example y"@c.example] tail'],
+    ['cut off: bob@', 'cut off: [bob@]'],
+    // No mailbox in the run: handles, domains and catch-all patterns stay readable.
+    ['@team ping *@bane.mx bane.mx', '@team ping *@bane.mx bane.mx'],
+    ['plain prose, no address', 'plain prose, no address'],
+  ];
+  for (const [text, expected] of cases) {
+    assert.equal(shown(text), expected, text);
+    // Every readable piece is free of any @ that belongs to a mailbox; the pieces join back to the text.
+    assert.equal(addressParts(text).map(part => part.text).join(''), text);
+    for (const part of addressParts(text)) if (part.address) assert.ok(maskedParts(part.text), part.text);
+  }
+  // Fast on long text whatever it holds.
+  const started = performance.now();
+  addressParts('x@'.repeat(100_000) + ' ' + '"('.repeat(50_000) + '@'); addressParts('a "b" (c) d@e '.repeat(5_000));
+  assert.ok(performance.now() - started < 1000, 'long text is split quickly');
+});
 test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
   const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
   const host = 'inbox.example.com';
