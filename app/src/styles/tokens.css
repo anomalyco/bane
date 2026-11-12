@@ -65,6 +65,28 @@
   descent-override: 24.1%;
   line-gap-override: 0%;
 }
+/* Inter's tabular figures (body sets tabular-nums) are 115.9% as wide as Arial's at every weight, wider than the
+   letters' 107.2%: the digits get their own fallback faces (declared last, so they win for 0–9). */
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial'), local('ArialMT'), local('Helvetica');
+  font-weight: 400;
+  unicode-range: U+0030-0039;
+  size-adjust: 115.9%;
+  ascent-override: 90.4%;
+  descent-override: 22.5%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial Bold'), local('Arial-BoldMT'), local('Helvetica Bold');
+  font-weight: 700;
+  unicode-range: U+0030-0039;
+  size-adjust: 115.9%;
+  ascent-override: 96.6%;
+  descent-override: 24.1%;
+  line-gap-override: 0%;
+}
 @font-face {
   font-family: 'OpenTUI Mono Fallback';
   src: local('Menlo'), local('Courier New');
