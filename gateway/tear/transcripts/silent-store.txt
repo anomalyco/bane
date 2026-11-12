@@ -1,0 +1,8 @@
+# Synthetic. NeoMutt (A) marks a message read with +FLAGS.SILENT while a phone (B) flags it.
+# Before 5ff8f00, A's NOOP never reported B's \Flagged: A's cache stayed wrong until reselect.
+S: deliver
+A: a1 NOOP
+B: b1 NOOP
+B: b2 STORE 1 +FLAGS (\Flagged)
+A: a2 STORE 1 +FLAGS.SILENT (\Seen)
+A: a3 NOOP

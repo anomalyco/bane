@@ -491,19 +491,21 @@ function registerAddresses(app: App) {
 
 import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
+import {registerMailGateway} from './mail-gateway.js';
 export function registerMailbox(app: App) {
   registerRouting(app);
   registerRituals(app);
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
   // mailboxRoute and receivingConsentRoute (core.ts) are the rules the MCP listing applies too.
   app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? mailboxAuth(c, next) : next());
-  app.use('/v1/inbound/*', (c, next) => receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
+  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) && receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inbound/*', mailboxCreates);
   app.use('/v1/inboxes/*', mailboxCreates);
   registerInboxes(app, access);
   registerMailObjects(app);
+  registerMailGateway(app);
   app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address for reuse (workspace admin)',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
     const v=admin(c);await c.env.db.execute(sql`DELETE FROM mail_retired_addresses WHERE workspace_id=${v.workspaceId} AND address=${c.req.valid('param').address.toLowerCase()}`);return c.json({ok:true as const},200);
   });

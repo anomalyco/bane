@@ -1,3 +1,4 @@
+import {gatewayLane} from './protocol-admission.js';
 import { getPath } from 'hono/utils/url';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
@@ -149,7 +150,7 @@ export default {
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(pathname)) {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
@@ -162,7 +163,8 @@ export default {
       // SNS shares egress IPs across subscriptions. This byte-bounded route
       // verifies the signature before looking up a topic or queuing feedback.
       const feedbackIngress = pathname === '/v1/events/ses' && request.method === 'POST';
-      if (!feedbackIngress && !(await env.ADMISSION.limit({ key: `bane:default:${peer}` })).success) return core.admissionDenied();
+      const lane = gatewayLane(request.method,pathname,request.headers,'MAILGW_API_TOKEN' in env ? env.MAILGW_API_TOKEN : undefined);
+      if (!feedbackIngress && !(await env.ADMISSION.limit({ key: lane ?? `bane:default:${peer}` })).success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
       headers.delete('x-opensend-client-ip');

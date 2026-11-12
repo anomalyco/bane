@@ -1,0 +1,7 @@
+Subject: forwarded fixture
+Content-Type: message/rfc822
+
+Subject: nested fixture
+Content-Type: text/plain
+
+Hello.

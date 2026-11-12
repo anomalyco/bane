@@ -84,7 +84,7 @@ export function mailGateway(stage: "dev" | "production", account: string, cloudf
     // ECS can't scope DeregisterTaskDefinition by family. Leave old revisions for operator cleanup.
     skipDestroy: true, taskRoleArn: task.arn, executionRoleArn: execution.arn, tags,
     containerDefinitions: pulumi.jsonStringify([{ name, essential: true, image: image ?? pulumi.interpolate`${repo.repositoryUrl}:unpublished`,
-      portMappings: targetPorts.map(containerPort => ({ containerPort, protocol: "tcp" })), stopTimeout: 120, secrets,
+      ulimits: [{ name: "nofile", softLimit: 8192, hardLimit: 8192 }], portMappings: targetPorts.map(containerPort => ({ containerPort, protocol: "tcp" })), stopTimeout: 120, secrets,
       logConfiguration: { logDriver: "awslogs", options: { "awslogs-group": log.name, "awslogs-region": "us-east-2", "awslogs-stream-prefix": "gateway" } },
     }]),
   }, { provider: ohio });

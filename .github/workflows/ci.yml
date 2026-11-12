@@ -111,6 +111,50 @@ jobs:
             echo "::group::bun audit $pkg"; (cd "$pkg" && bun audit "${args[@]}"); echo '::endgroup::'
           done
 
+  gateway:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gateway/target
+            gateway/tear/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('gateway/Cargo.lock', 'gateway/tear/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Format, lint and unit tests
+        run: cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+      # gateway/tear: tear model checks (shrunk bug witnesses, depth-4 edge coverage, random walks
+      # over the Memory and Remote stores and SMTP). Well under a minute after the build.
+      # tear (anomalyco/tear) is private: TEAR_READ_TOKEN is a read-only token for it.
+      - name: tear model checks
+        working-directory: gateway/tear
+        env:
+          TEAR_READ_TOKEN: ${{ secrets.TEAR_READ_TOKEN }}
+        run: |
+          if [[ -z $TEAR_READ_TOKEN ]]; then
+            echo "::warning::TEAR_READ_TOKEN is not set (read access to anomalyco/tear); skipping gateway/tear. The nightly run and local CI still check it."
+            echo "gateway/tear skipped: TEAR_READ_TOKEN not set" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${TEAR_READ_TOKEN}@github.com/anomalyco/tear".insteadOf https://github.com/anomalyco/tear
+          cargo build --release --locked
+          set +e
+          ./target/release/mailgw-tear ci > "$RUNNER_TEMP/tear-ci.json"
+          status=$?
+          set -e
+          jq '{verdict, mismatched, errors, totalMs, unreached: [.checklist[] | select(.reached | not) | .id],
+               failures: [.runs[] | select(.mismatched > 0) | {campaign, witnesses}]}' "$RUNNER_TEMP/tear-ci.json"
+          exit $status
+
   acceptance:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

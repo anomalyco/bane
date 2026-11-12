@@ -60,6 +60,40 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('mail gateway: private admission binds the credential lane and append metadata',async()=>{
+  const {gatewayLane}=await import('./src/protocol-admission.js');
+  const key=randomUUID(),ts='1800000000',path='/internal/v1/mail';
+  const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+  const h=new Headers({'x-bane-timestamp':ts,'x-bane-content':hash('mail'),'x-bane-scope':hash('app_test'),'x-bane-append':'fixture'});
+  h.set('x-bane-signature',createHmac('sha256',key).update(['POST',path,ts,hash('mail'),hash('app_test'),hash('fixture')].join('\n')).digest('hex'));
+  const lane=()=>gatewayLane('POST',path,h,key,Number(ts)*1000);
+  assert.equal(lane(),`bane:protocol:${hash('app_test')}`);
+  assert.equal(gatewayLane('POST',path,h,key,(Number(ts)+61)*1000),null);
+  h.set('x-bane-scope',hash('other'));assert.equal(lane(),null);
+  h.set('x-bane-scope',hash('app_test'));h.delete('x-bane-append');assert.equal(lane(),null);
+  const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
+  assert.equal(response.status,403);
+});
+test('Cloudflare routing: every API route reaches the Worker before static assets',async()=>{
+  // Workers Assets answers paths outside run_worker_first itself (405 for POST, SPA HTML for GET),
+  // so a route missing here is unreachable on Cloudflare while the Node server still serves it.
+  const ts=(await import('typescript')).default,{createOpenApiApp}=await import('./src/app.js');
+  const glob=(p:string)=>new RegExp('^'+p.replace(/[.+?^${}()|[\]\\]/g,'\\$&').replaceAll('*','.*')+'$');
+  const paths=[...new Set((await createOpenApiApp()).routes.map(r=>r.path).filter(p=>p!=='*'&&p!=='/*').map(p=>p.replace(/:[^/]+/g,'x').replaceAll('*','x')))];
+  assert.ok(paths.includes('/internal/v1/mail')&&paths.includes('/v1/emails'),'route inventory is incomplete');
+  for(const file of ['wrangler.dev.jsonc','wrangler.prod.jsonc']){
+    const rules:string[]=ts.parseConfigFileTextToJson(file,await readFile(new URL(file,import.meta.url),'utf8')).config.assets.run_worker_first;
+    const first=(path:string)=>rules.some(r=>!r.startsWith('!')&&glob(r).test(path))&&!rules.some(r=>r.startsWith('!')&&glob(r.slice(1)).test(path));
+    assert.deepEqual(paths.filter(p=>!first(p)),[],`${file} serves these API routes from static assets`);
+  }
+});
+test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
+  const {parseInboundMime}=await import('./src/mailbox-ingest.js');
+  const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
+  const forward='Subject: forwarded\r\nContent-Type: message/rfc822\r\n\r\n';
+  assert.ok(await parseInboundMime(Buffer.from(forward+base)));
+  assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
+});
 test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
   const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
   const host = 'inbox.example.com';
@@ -269,6 +303,29 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
+  const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
+  await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
+  for(const client of [writer,ddl])await client.query(`SET search_path TO ${schema}`);
+  await writer.query('CREATE TABLE mail_messages(id text PRIMARY KEY)');
+  const install=await readFile(new URL('./migrations/178_protocol_preview.sql',import.meta.url),'utf8');
+  const validate=await readFile(new URL('./migrations/179_validate_protocol_preview.sql',import.meta.url),'utf8');
+  await writer.query("BEGIN; INSERT INTO mail_messages VALUES('one')");
+  await ddl.query('BEGIN');await assert.rejects(ddl.query(install),{code:'55P03'});await ddl.query('ROLLBACK');
+  await writer.query('COMMIT');await ddl.query('BEGIN');await ddl.query(install);await ddl.query('COMMIT');
+  const valid=async()=>(await ddl.query("SELECT convalidated FROM pg_constraint WHERE conrelid='mailgw_previews'::regclass AND contype='f'")).rows[0].convalidated;
+  assert.equal(await valid(),false);
+  await writer.query("BEGIN; INSERT INTO mail_messages VALUES('two')");
+  await ddl.query('BEGIN');await ddl.query(validate);await ddl.query('COMMIT');assert.equal(await valid(),true);
+});
+test('mail gateway: exact wire projections distinguish complete objects from header-only data',async(t)=>{
+  const {previewPage}=await import('./src/protocol-preview.js');
+  const runtime=fixtureWorker?.runtime;if(!runtime)return t.skip('requires disposable loopback object storage');
+  const raw=Buffer.from('Subject: One\r\n\tfold\r\n\r\n','ascii').toString('base64');
+  const row={uid:1,mid:'fixture',key:'fixture',bucket:'local:',region:'',size:5000,header:22,raw,complete:false};
+  assert.deepEqual(await previewPage(runtime,'default',[row,{...row,uid:2,complete:true}],(await import('drizzle-orm')).sql`SELECT 1`),[{uid:1,raw,complete:false},{uid:2,raw,complete:true}]);
+});
+
 async function resource(t: TestContext, key: string, path: string, body: Json): Promise<Json> {
   const created = ok(await http('POST', path, key, body), 201);
   assert.equal(typeof created.id, 'string');
@@ -2518,6 +2575,10 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     const grantKeys:string[]=[];
     await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async t=>{
+      const passwords=['listInboxAppPasswords','createInboxAppPassword','revokeInboxAppPassword'];
+      const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
+      let tools=await listing();assert.ok(passwords.every(op=>!tools.has(op)));
+      error(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token),403,'ADMIN_REQUIRED');
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getCurrentIdentity'||x.name==='applyRituals'||x.name==='createAgentToken'));
       const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
@@ -2541,6 +2602,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(refused.structuredContent.error.code,'EPHEMERAL_REPLY_ONLY');
       }
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
+      tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
@@ -9159,6 +9221,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
+    const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwdel.invalid',$3,'active','store')",[bid,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'box@gwdel.invalid','inbox','forever')",[bid,w]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+    const key=randomUUID(),path='/internal/v1/mail',raw=JSON.stringify({op:'edit',kid,action:'subscribe',folder:'inbox',path:null,sub:false});
+    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
+    const app=(await import('./src/app.js')).createApp(),send=()=>app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers,body:raw}),{...rt,config:{...rt.config,mailGatewayToken:key}});
+    const active=await send();assert.equal(active.status,200,await active.text());
+    await db.query("UPDATE inbox_folders SET subscribed=true WHERE inbox_id=$1 AND role='inbox'",[bid]);
+    await db.query('BEGIN');try{
+      await db.query('SELECT inbox_end($1,$2)',[w,bid]);
+      const response=send();
+      for(const start=Date.now();!(await db.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;){
+        assert.ok(Date.now()-start<5000,'signed writer did not reach the fence');await new Promise(r=>setTimeout(r,5));
+      }
+      await db.query('COMMIT');assert.equal((await response).status,403);
+      assert.equal((await db.query("SELECT subscribed FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bid])).rows[0].subscribed,true);
+    }finally{await db.query('ROLLBACK');}
+  });
   // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
   test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
     const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
@@ -9691,7 +9775,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
         const rpc=(method:string,params:Json,path='/mcp?codemode=true&toolsets=inboxes')=>request('POST',path,key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['createInboxFolder','updateInboxFolder','deleteInboxFolder','listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
         const read=ok(await charged(2,()=>rpc('tools/call',{name:'getInboxMessage',arguments:{inboxId:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
         const plain = ok(await rpc('tools/list',{},'/mcp')).result.tools;
         assert.deepEqual(plain.map((tool:Json)=>tool.name).sort(),['attachments','describe_tool','inboxes','messages']);
@@ -9727,11 +9811,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(p.expiresAt,null);assert.equal(p.deleteAfter,null);assert.equal(p.retention.mode,'forever');
         const token=p.credential.secret,base=`${root}/${p.id}`,folders=()=>request('GET',base+'/folders',token),initial=ok(await folders());
         assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','inbox','junk','sent','trash']);
+        assert.deepEqual(initial.additionalFolders.map((f:Json)=>f.role),['drafts']);
+        const custom=ok(await local('POST',base+'/folders',{path:'Work'}),201),fp=base+'/folders/'+custom.id;
+        ok(await local('PATCH',fp,{subscribed:true}));ok(await local('PATCH',fp,{path:'Renamed'}));
+        const before=ok(await folders()).additionalFolders.find((f:Json)=>f.id===custom.id);assert.equal(before.path,'Renamed');assert.equal(before.subscribed,true);
+        ok(await local('DELETE',fp));const recreated=ok(await local('POST',base+'/folders',{path:'Renamed'}),201);
+        assert.notEqual(ok(await folders()).additionalFolders.find((f:Json)=>f.id===recreated.id).uidValidity,before.uidValidity);
+        error(await request('POST',base+'/app-passwords',token,{name:'denied',protocols:['smtp']}),403);
+        const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
+        assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
+        ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
+        assert.equal((await db.query("SELECT cents FROM inbox_protocol_daily_usage((now() AT TIME ZONE 'UTC')::date) WHERE inbox_id=$1",[p.id])).rows[0]?.cents,100);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
         assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
         const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
         const url=`${base}/messages/${m.id}`,v=(await page('inbox'))[0];assert.equal(v.uid,1);assert.equal(v.uidValidity,initial.data.find((f:Json)=>f.role==='inbox').uidValidity);
         const post=(action:string,body:Json)=>request('POST',`${url}/${action}`,token,body);
+        const copy=ok(await post('copy',{folder:recreated.id,source:'inbox',uid:1}));
+        const detail=ok(await request('GET',url,token));assert.deepEqual(detail.folders.map((f:Json)=>f.folder),['inbox']);assert.deepEqual(detail.additionalFolders.map((f:Json)=>f.folder),[recreated.id]);
+        ok(await request('DELETE',`${url}?permanent=true&source=${recreated.id}&uid=${copy.uid}`,token));
         const c1=ok(await charged(2,()=>post('copy',{folder:'archive',source:'inbox',uid:1})));assert.equal(c1.uid,1);
         const c2=ok(await post('copy',{folder:'archive',source:'inbox',uid:1}));assert.equal(c2.uid,2);assert.deepEqual((await page('archive')).map((x:Json)=>x.uid),[1,2]);
         error(await request('PATCH',url,token,{read:true,ifModseq:v.modseq}),409,'MODIFIED');
@@ -10411,6 +10509,176 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mail_endpoints SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND ref='forward:team'",[wid]);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
       });
+      await t.test('rituals: a forward queued by a reopened receipt sends mail first stored before any ritual ran',async()=>{
+        // tear/delivery witness: ingest m1 z, rituals forward, ingest m1 b+z, run K m1:F.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+        const hookId=(await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='forward:team' AND verified",[wid])).rows[0].hook_id;
+        await ingest('fwd-late',['late@receive.example']);
+        await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
+        try{
+          const m=await ingest('fwd-late',['late@receive.example',box.address]);
+          const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:'job_fwd_late',workspaceId:wid,attempts:1});
+          assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status:'delivered',last_error:null});
+          assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[m.id,hookId])).rowCount,1);
+        }finally{await call('PUT','/v1/rituals',{});}
+      });
+      await t.test('rituals: mail stored before forward verdicts existed is forwarded when safe and refused when looped',async()=>{
+        // tear/delivery witnesses: ingest m1 z, strip m1, rituals forward, ingest m1 b+z, run K m1:F (and the loop variant).
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+        const hookId=(await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='forward:team' AND verified",[wid])).rows[0].hook_id;
+        const first=async(mid:string,extra:string)=>{raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\n${extra}Subject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));await submit(mid,['late@receive.example'],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
+          // As stored by a deployment that did not record the verdicts yet.
+          await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardSafe'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=$2",[wid,mid]);};
+        await first('fwd-old','');await first('fwd-old-loop','X-Bane-Loop: v1.1.synthetic\r\n');
+        await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
+        try{
+          for(const [mid,status,error] of [['fwd-old','delivered',null],['fwd-old-loop','failed','FORWARD_BLOCKED']] as const){
+            await submit(mid,['late@receive.example',box.address],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
+            const m=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
+            const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
+            await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:unique('job'),workspaceId:wid,attempts:1}).catch(()=>{});
+            assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status,last_error:error},mid);
+          }
+        }finally{await call('PUT','/v1/rituals',{});}
+      });
+      await t.test('delivery: an endpoint paused between the claim and the fence parks the delivery and posts nothing until resumed',async()=>{
+        // tear/delivery witness: ingest m1 a, claim K m1:W, pause W, go K.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{inboundHookClaim}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'paused-claim',url:'https://hooks.example.org/paused-claim'},201);
+        await route('paused-claim@receive.example',['webhook:paused-claim'],'paused-claim');
+        const m=await ingest('paused-claim',['paused-claim@receive.example']);
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='paused-claim'",[wid])).rows[0].id;
+        const delivery=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0].id as string;
+        // The claim statement joins the endpoint while it is still active, then the pause commits.
+        const payload={deliveryId:delivery};
+        const claimed=(await runtime.db.execute<import('./src/core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT 'job_paused_claim'::text AS id,${wid}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify(payload)}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0];
+        assert.ok(claimed);
+        await call('PATCH','/v1/endpoints/paused-claim',{paused:true});
+        const prev=runtime.webhookFetch;let posts=0;runtime.webhookFetch=async()=>{posts++;return {status:204}};
+        try{
+          await mailboxEventJobs['mailbox.webhook']!(runtime,payload,{id:'job_paused_claim',workspaceId:wid,attempts:1,webhook:claimed});
+          assert.equal(posts,0);
+          assert.deepEqual((await db.query('SELECT status,last_error,attempt_count FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0],{status:'paused',last_error:'ENDPOINT_PAUSED',attempt_count:0});
+          assert.equal((await db.query('SELECT FROM mail_action_attempts WHERE delivery_id=$1',[delivery])).rowCount,0);
+          // Unpausing requeues it as a new generation, which posts once.
+          await call('PATCH','/v1/endpoints/paused-claim',{paused:false});
+          await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:hookId},{id:'job_paused_resume',workspaceId:wid,attempts:1});
+          const resumed=(await db.query("SELECT payload FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND payload->>'deliveryId'=$2 AND payload->>'generation'='1'",[wid,delivery])).rows[0];
+          await mailboxEventJobs['mailbox.webhook']!(runtime,resumed.payload,{id:'job_paused_retry',workspaceId:wid,attempts:1});
+          assert.equal(posts,1);
+          assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0].status,'delivered');
+        }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
+      await t.test("delivery: a ritual failing to junk for one recipient leaves another recipient's routed webhook delivery clean",async()=>{
+        // tear/delivery witness: rituals over, ingest m1 b+z, run K m1:V.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'clean-route',url:'https://hooks.example.org/clean-route'},201);
+        await route('clean@receive.example',['webhook:clean-route'],'clean-route');
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='clean-route'",[wid])).rows[0].id;
+        // 33 intents exceed the per-run action budget: the ritual fails and its recipient's copy is junk.
+        await call('PUT','/v1/rituals',{rituals:[{key:'overrun',source:`export default function route(email){${'label("l");'.repeat(33)}}`}],attachments:[{ritual:'overrun',target:box.id}]});
+        const prev=runtime.webhookFetch;let posts=0;
+        try{
+          const m=await ingest('junk-one',[box.address,'clean@receive.example']);
+          assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[box.id,m.id])).rows[0].labels.includes('ritual-error'));
+          const d=(await db.query("SELECT id,payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
+          assert.equal(d.payload.type,'message.received');assert.equal(d.payload.data.junk,false);
+          runtime.webhookFetch=async()=>{posts++;return {status:204}};
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:'job_clean_route',workspaceId:wid,attempts:1});
+          assert.equal(posts,1);
+          assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0].status,'delivered');
+        }finally{runtime.webhookFetch=prev;await call('PUT','/v1/rituals',{});await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
+      await t.test('delivery: another receipt of one email routes and runs rituals only for recipients not routed before',async()=>{
+        // tear/delivery witnesses: rituals slack, ingest m1 b, ingest d1 b; ingest m1 a, route r1 off, ingest d1 a.
+        await call('POST','/v1/endpoints',{type:'webhook',name:'once-a',url:'https://hooks.example.org/once-a'},201);
+        await call('POST','/v1/endpoints',{type:'webhook',name:'once-b',url:'https://hooks.example.org/once-b'},201);
+        const ids:Record<string,string>=Object.fromEntries((await db.query("SELECT key,id FROM mailbox_webhooks WHERE workspace_id=$1 AND key IN ('once-a','once-b')",[wid])).rows.map(r=>[r.key,r.id]));
+        await route('once@receive.example',['webhook:once-a'],'once-route');
+        await call('PUT','/v1/rituals',{rituals:[{key:'notify',source:'export default function route(email){endpoints["once-a"]({subject:email.subject})}'}],attachments:[{ritual:'notify',target:box.id}]});
+        const email=Buffer.from('From: Agent <a@example.org>\r\nSubject: Once\r\nMessage-ID: <once@example.org>\r\n\r\nHello');
+        const receive=async(mid:string,to:string[])=>{raw.set(mid,email);await submit(mid,to,'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);};
+        const queued=async()=>Object.fromEntries((await db.query('SELECT h.key,count(d.id)::int AS n FROM mailbox_webhooks h LEFT JOIN mailbox_webhook_deliveries d ON d.webhook_id=h.id WHERE h.id=ANY($1) GROUP BY h.key',[Object.values(ids)])).rows.map(r=>[r.key,r.n]));
+        try{
+          await receive('once-1',[box.address,'once@receive.example']);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':0},'the ritual call for the box and the route for once@');
+          // The same email under another SES receipt ID, after the route moved and the ritual was saved again.
+          await call('PATCH','/v1/routing/routes/once-route',{to:['webhook:once-b']});
+          await receive('once-2',[box.address,'once@receive.example']);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':0});
+          assert.deepEqual((await db.query("SELECT envelope_to FROM mail_messages WHERE workspace_id=$1 AND message_id='once@example.org'",[wid])).rows.map(r=>[...r.envelope_to].sort()),[[box.address,'once@receive.example'].sort()]);
+          // A reopen of that receipt with a new recipient routes only the new recipient.
+          await receive('once-2',[box.address,'once@receive.example','once+tag@receive.example']);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
+          // Reopening the first receipt keeps the recipients the second one added (tear/delivery witness:
+          // rituals slack, ingest m1 a, ingest d1 b, ingest m1 a+z, ingest d1 b+z).
+          await receive('once-1',[box.address,'once@receive.example','once+two@receive.example']);
+          assert.deepEqual((await db.query("SELECT envelope_to FROM mail_messages WHERE workspace_id=$1 AND message_id='once@example.org'",[wid])).rows.map(r=>[...r.envelope_to].sort()),[[box.address,'once@receive.example','once+tag@receive.example','once+two@receive.example'].sort()]);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
+        }finally{await call('PUT','/v1/rituals',{});for(const id of Object.values(ids))await call('DELETE',`/v1/inbound/webhooks/${id}?detach=true`);}
+      });
+      await t.test('delivery: a runner whose claim went stale sends nothing once the delivery settled or resumed',async()=>{
+        // tear/delivery witnesses: ingest m1 a, claim K m1:W, expire m1:W, run L m1:W, reply L 400, go K;
+        // ingest m1 z, claim K m1:V, pause V, expire m1:V, run L m1:V, unpause V, go K.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{inboundHookClaim}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'stale-claim',url:'https://hooks.example.org/stale-claim'},201);
+        await route('stale@receive.example',['webhook:stale-claim'],'stale-claim');
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='stale-claim'",[wid])).rows[0].id;
+        const deliveryOf=async(mid:string)=>{const m=await ingest(mid,['stale@receive.example']);return (await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0].id as string;};
+        const claim=async(delivery:string)=>(await runtime.db.execute<import('./src/core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT 'job_stale'::text AS id,${wid}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify({deliveryId:delivery})}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0]!;
+        const runJob=(delivery:string,webhook?:import('./src/core.js').ClaimedWebhook,generation?:number)=>mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:delivery,...(generation===undefined?{}:{generation})},{id:'job_stale',workspaceId:wid,attempts:1,...(webhook?{webhook}:{})});
+        const state=async(delivery:string)=>(await db.query('SELECT status,generation FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0];
+        const prev=runtime.webhookFetch;let posts=0,reply=400;runtime.webhookFetch=async()=>{posts++;return {status:reply}};
+        try{
+          // Another runner takes over the expired lease and the endpoint refuses it.
+          const refused=await deliveryOf('stale-refused'),staleRefused=await claim(refused);
+          await assert.rejects(runJob(refused),{code:'DESTINATION_REFUSED'});
+          assert.equal(posts,1);assert.deepEqual(await state(refused),{status:'failed',generation:0});
+          reply=204;await runJob(refused,staleRefused);
+          assert.equal(posts,1);assert.deepEqual(await state(refused),{status:'failed',generation:0});
+          // The endpoint is paused and resumed meanwhile: the delivery is a new generation.
+          const resumed=await deliveryOf('stale-resumed'),staleResumed=await claim(resumed);
+          await call('PATCH','/v1/endpoints/stale-claim',{paused:true});await runJob(resumed);
+          await call('PATCH','/v1/endpoints/stale-claim',{paused:false});
+          await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:hookId},{id:'job_stale_resume',workspaceId:wid,attempts:1});
+          await runJob(resumed,staleResumed);
+          assert.equal(posts,1);assert.deepEqual(await state(resumed),{status:'pending',generation:1});
+          await runJob(resumed,undefined,1);
+          assert.equal(posts,2);assert.deepEqual(await state(resumed),{status:'delivered',generation:1});
+        }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
+      await t.test('delivery: a paused endpoint holds mail that arrives during the pause and sends it on unpause, until retention dead-letters it',async()=>{
+        // tear/delivery witnesses: pause W, ingest m1 a, run K m1:W, unpause W, run K m1:W, reply K 200;
+        // ingest m1 a, pause W, run K m1:W, age m1:W, prune.
+        const {mailboxEventJobs,pruneMailboxEvents}=await import('./src/mailbox-events.js');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'held-w',url:'https://hooks.example.org/held-w'},201);
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='held-w'",[wid])).rows[0].id;
+        await route('held@receive.example',['webhook:held-w'],'held-route');
+        const sub=await call('POST','/v1/inbound/webhooks',{url:'https://hooks.example.org/held-sub',addressIds:[box.id],key:'held-sub',paused:true},201);
+        await call('PATCH','/v1/endpoints/held-w',{paused:true});
+        const prev=runtime.webhookFetch;const posts:string[]=[];runtime.webhookFetch=async url=>{posts.push(new URL(url).pathname);return {status:204}};
+        const rows=async(mid:string)=>(await db.query("SELECT d.id,d.webhook_id,d.status,d.last_error,d.generation FROM mailbox_webhook_deliveries d WHERE d.webhook_id=ANY($1) AND d.payload->>'messageId'=$2 ORDER BY d.webhook_id",[[hookId,sub.id],mid])).rows;
+        const runAll=async(mid:string)=>{for(const d of await rows(mid))await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id,generation:d.generation},{id:unique('job'),workspaceId:wid,attempts:1});};
+        try{
+          const m=await ingest('held-mail',[box.address,'held@receive.example']);
+          assert.equal((await rows(m.id)).length,2,'the routed endpoint and the subscription each queue a copy while paused');
+          await runAll(m.id);
+          assert.deepEqual(posts,[]);
+          assert.deepEqual((await rows(m.id)).map(r=>[r.status,r.last_error]),[['paused','ENDPOINT_PAUSED'],['paused','ENDPOINT_PAUSED']]);
+          await call('PATCH','/v1/endpoints/held-w',{paused:false});await call('PATCH',`/v1/inbound/webhooks/${sub.id}`,{paused:false});
+          for(const hook of [hookId,sub.id])await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:unique('job'),workspaceId:wid,attempts:1});
+          await runAll(m.id);
+          assert.deepEqual(posts.sort(),['/held-sub','/held-w']);
+          assert.deepEqual((await rows(m.id)).map(r=>r.status),['delivered','delivered']);
+          // Held past the 30-day retention: dead-lettered with a reason, kept for a while, not deleted.
+          await call('PATCH','/v1/endpoints/held-w',{paused:true});
+          const old=await ingest('held-old',['held@receive.example']);await runAll(old.id);
+          await db.query("UPDATE mailbox_webhook_deliveries SET created_at=now()-interval '31 days' WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,old.id]);
+          await pruneMailboxEvents(runtime);await pruneMailboxEvents(runtime);
+          assert.deepEqual((await rows(old.id)).map(r=>[r.status,r.last_error]),[['failed','ENDPOINT_PAUSED_EXPIRED']]);
+        }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${sub.id}`);await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const importer=runtime.importPublicImage;let imports=0;
@@ -10870,7 +11138,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ok(await local('PATCH',`${base}/webhooks/${allHook.id}`,{paused:false}));assert.equal((await state()).generation,0);
         const resume=async()=>mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:allHook.id},{id:'page',attempts:1,workspaceId:scope});
         await assert.rejects(resume(),(await import('./src/jobs.js')).JobDeferred);assert.equal((await db.query("SELECT FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND status='paused'",[allHook.id])).rowCount,2);
-        await resume();await (await import('./src/mailbox-events.js')).pruneMailboxEvents(runtime);assert.equal((await db.query('SELECT FROM mailbox_webhook_deliveries WHERE id=$1',[clone+'101'])).rowCount,0);
+        // Held past the 30-day retention: not resumed, and dead-lettered with its reason rather than deleted.
+        await resume();await (await import('./src/mailbox-events.js')).pruneMailboxEvents(runtime);assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[clone+'101'])).rows,[{status:'failed',last_error:'ENDPOINT_PAUSED_EXPIRED'}]);
         assert.equal((await state()).generation,1);await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:clone},{id:'old',attempts:1,workspaceId:scope});assert.equal(attempts,0);
         // The reaper runs in a savepoint with only the spent lease visible; no unrelated delivery is dispatched.
         await runtime.db.transaction(async tx=>{const {sql}=await import('drizzle-orm');await tx.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('spent','mailbox.webhook',${scope},${JSON.stringify({deliveryId:clone,generation:1})}::jsonb,'running',10,now()-interval '1 minute')`);assert.equal(await processJobs({...runtime,db:tx},{},1,1),0);await tx.execute(sql`DROP TABLE pg_temp.jobs`);});
@@ -11137,6 +11406,220 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a lost delivery attempt counts toward the endpoint retry budget: retryAttempts 0 is never sent twice',async t=>{
+    // tear/delivery witness (retryAttempts 0): ingest m1 z, run K m1:V, crash K, expire m1:V, run L m1:V.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'once',url:'https://example.com/once',retryAttempts:0}),201);
+      ok(await local('PATCH','/v1/endpoints/once',{idempotent:true}));
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='once'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_lost_once',wid,hook,{id:'mev_lost_once',type:'message.received',messageId:'msg_lost_once',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_lost_once','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_lost_once\"}')",[wid]);
+      // The request leaves, then the runner is lost: nothing after it is recorded.
+      const lost={on:false},transport=runtime.webhookFetch;let posts=0;
+      const gone=new Proxy(runtime.db,{get(target,p){const v=Reflect.get(target,p);return typeof v==='function'?(...a:unknown[])=>{if(lost.on)throw new Error('Synthetic lost runner');return v.apply(target,a);}:v;}});
+      try{
+        runtime.webhookFetch=async()=>{posts++;lost.on=true;return {status:204};};
+        await assert.rejects(processJobs({...runtime,db:gone},mailboxEventJobs,1,1,20000,'webhooks'));
+        assert.deepEqual((await db.query("SELECT status,attempts,(payload->>'maxAttempts')::int AS max FROM jobs WHERE id='job_lost_once'")).rows[0],{status:'running',attempts:1,max:1});
+        // Its lease expires: that was the endpoint's only attempt, so it is dead-lettered, not sent again.
+        await db.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id='job_lost_once'");
+        runtime.webhookFetch=async()=>{posts++;return {status:204};};
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,1);
+        assert.deepEqual((await db.query("SELECT status,last_error FROM jobs WHERE id='job_lost_once'")).rows[0],{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'});
+        assert.deepEqual((await db.query("SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id='mwd_lost_once'")).rows[0],{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  test('a delivery attempt lost before its fence does not use up retryAttempts 0: the next claim sends it',async t=>{
+    // tear/delivery witness (retryAttempts 0): ingest m1 a, claim K m1:W, drop K, expire m1:W, run L m1:W.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'unsent',url:'https://example.com/unsent',retryAttempts:0}),201);
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='unsent'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_unsent',wid,hook,{id:'mev_unsent',type:'message.received',messageId:'msg_unsent',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_unsent','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_unsent\"}')",[wid]);
+      // The runner is lost right after its claim, before the fence: nothing leaves.
+      let statements=0;const transport=runtime.webhookFetch;let posts=0;
+      const lost=new Proxy(runtime.db,{get(target,p){const v=Reflect.get(target,p);return typeof v==='function'?(...a:unknown[])=>{if(statements++>=1)throw new Error('Synthetic lost runner');return v.apply(target,a);}:v;}});
+      try{
+        runtime.webhookFetch=async()=>{posts++;return {status:204};};
+        await assert.rejects(processJobs({...runtime,db:lost},mailboxEventJobs,1,1,20000,'webhooks'));
+        assert.deepEqual((await db.query("SELECT status,attempts FROM jobs WHERE id='job_unsent'")).rows[0],{status:'running',attempts:1});
+        await db.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id='job_unsent'");
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,1);
+        assert.deepEqual((await db.query("SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id='mwd_unsent'")).rows[0],{status:'delivered',last_error:null});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  test('a runner whose job lease is no longer its own sends nothing, for every delivery kind',async t=>{
+    // tear/delivery witness (retryAttempts 0): ingest m1 z, claim K m1:V, expire m1:V, run L m1:V, go K.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'leased',url:'https://example.com/leased',retryAttempts:0}),201);
+      ok(await local('PATCH','/v1/endpoints/leased',{idempotent:true}));
+      const routed=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='leased'",[wid])).rows[0].id;
+      const plain=ok(await local('POST','/v1/inbound/webhooks',{url:'https://example.com/leased-sub',eventTypes:['message.received']}),201).id;
+      const transport=runtime.webhookFetch;let posts=0;runtime.webhookFetch=async()=>{posts++;return {status:204};};
+      try{
+        for(const [n,hook,isRouted] of [[1,routed,true],[2,plain,false]] as const){
+          const id='mwd_leased_'+n,job='job_leased_'+n;
+          await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,event_seq,payload) VALUES($1,$2,$3,$4,$5,$6)',[id,wid,hook,isRouted,n,{id:'mev_'+id,type:'message.received',messageId:'msg_'+id,data:{recipients:['a@example.net']}}]);
+          // Runner K claimed it first (attempt 1); its lease expired and runner L claimed it again (attempt 2).
+          const old=(await db.query("SELECT (now()-interval '4 minutes')::text AS t")).rows[0].t;
+          const lease=(await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES($1,'mailbox.webhook',$2,$3,'running',2,now()+interval '3 minutes') RETURNING lease_until::text AS t",[job,wid,{deliveryId:id}])).rows[0].t;
+          const before=posts;
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id},{id:job,workspaceId:wid,attempts:1,leaseFence:old});
+          assert.equal(posts,before,`stale runner K, ${isRouted?'routed':'plain'}`);
+          assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[id])).rows[0].status,'pending');
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id},{id:job,workspaceId:wid,attempts:2,leaseFence:lease});
+          assert.equal(posts,before+1,`current runner L, ${isRouted?'routed':'plain'}`);
+        }
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  test('a rate-limited delivery keeps its spent attempts: retries still end at 1 + retryAttempts',async t=>{
+    // tear/delivery witness: rate W 1, ingest m1 a, run K m1:W, reply K 503, run K m1:W.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'paced',url:'https://example.com/paced',retryAttempts:1}),201);
+      ok(await local('PATCH','/v1/endpoints/paced',{perMinute:1}));
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='paced'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_paced',wid,hook,{id:'mev_paced',type:'message.received',messageId:'msg_paced',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_paced','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_paced\"}')",[wid]);
+      const state=async()=>(await db.query("SELECT j.status,j.attempts,d.status AS delivery,d.attempt_count FROM jobs j JOIN mailbox_webhook_deliveries d ON d.id=j.payload->>'deliveryId' WHERE j.id='job_paced'")).rows[0];
+      const due=()=>db.query("UPDATE jobs SET available_at=now() WHERE id='job_paced'");
+      const transport=runtime.webhookFetch;let posts=0;
+      try{
+        runtime.webhookFetch=async()=>{posts++;return {status:503};};
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.deepEqual(await state(),{status:'pending',attempts:1,delivery:'pending',attempt_count:1});
+        // Due again within the same minute: the endpoint's one call per minute is spent.
+        await db.query('UPDATE api_request_budgets SET used=1,window_start=date_trunc($3,now()) WHERE workspace_id=$1 AND key_id=$2',[wid,'ritual:'+hook,'minute']);await due();
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,1);
+        assert.deepEqual(await state(),{status:'pending',attempts:1,delivery:'pending',attempt_count:1});
+        // The next minute: the second (last) attempt fails too, so the delivery is dead-lettered.
+        await db.query("UPDATE api_request_budgets SET window_start=window_start-interval '1 minute' WHERE workspace_id=$1 AND key_id=$2",[wid,'ritual:'+hook]);await due();
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,2);
+        assert.deepEqual(await state(),{status:'failed',attempts:2,delivery:'failed',attempt_count:2});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  test('a resumed delivery keeps the attempts it made before its endpoint was paused',async t=>{
+    // tear/delivery witness: ingest m1 a, run K m1:W, reply K 503, pause W, run K m1:W, unpause W, run K m1:W, reply K 503.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'held',url:'https://example.com/held',retryAttempts:1}),201);
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='held'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_held',wid,hook,{id:'mev_held',type:'message.received',messageId:'msg_held',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_held','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_held\"}')",[wid]);
+      const due=()=>db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid]);
+      const delivery=async()=>(await db.query("SELECT status,attempt_count FROM mailbox_webhook_deliveries WHERE id='mwd_held'")).rows[0];
+      const transport=runtime.webhookFetch;let posts=0;
+      try{
+        runtime.webhookFetch=async()=>{posts++;return {status:503};};
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.deepEqual(await delivery(),{status:'pending',attempt_count:1});
+        // Paused before its retry: the claim parks it. Unpausing resumes it with one attempt left.
+        ok(await local('PATCH','/v1/endpoints/held',{paused:true}));await due();
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.deepEqual(await delivery(),{status:'paused',attempt_count:1});
+        ok(await local('PATCH','/v1/endpoints/held',{paused:false}));
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_held_resume',workspaceId:wid,attempts:1});
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid])).rows,[{attempts:1}]);
+        await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,2);
+        assert.deepEqual(await delivery(),{status:'failed',attempt_count:2});
+        // An attempt whose outcome was never recorded (its runner was lost) counts too.
+        await db.query("UPDATE mailbox_webhook_deliveries SET status='paused',attempt_count=0 WHERE id='mwd_held'");
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_held_resume_2',workspaceId:wid,attempts:1});
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid])).rows,[{attempts:2}]);
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{
+    // tear/delivery witnesses: ingest m1 b, claim K m1:U, pause U, go K; ingest m1 b, claim K m1:U, expire m1:U,
+    // run L m1:U, reply L 410, go K; three timeouts, then run K m1:U (the breaker defers, attempts kept).
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs,inboundHookClaim}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js'),{sql}=await import('drizzle-orm');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      const sub=ok(await local('POST','/v1/inbound/webhooks',{url:'https://example.com/plain-sub',eventTypes:['message.received']}),201);
+      let seq=0;
+      const delivery=async(id:string)=>{await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload) VALUES($1,$2,$3,$4,$5)',[id,wid,sub.id,++seq,{id:'mev_'+id,type:'message.received',messageId:'msg_'+id,data:{}}]);return id;};
+      const claim=async(id:string)=>(await runtime.db.execute<import('./src/core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT 'job_plain'::text AS id,${wid}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify({deliveryId:id})}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0]!;
+      const handle=(id:string,webhook?:import('./src/core.js').ClaimedWebhook,generation?:number)=>mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id,...(generation===undefined?{}:{generation})},{id:'job_plain',workspaceId:wid,attempts:1,...(webhook?{webhook}:{})});
+      const state=async(id:string)=>(await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[id])).rows[0];
+      const transport=runtime.webhookFetch;let posts=0,reply:number|'timeout'=204;
+      runtime.webhookFetch=async()=>{posts++;if(reply==='timeout')throw Object.assign(new Error('synthetic timeout'),{name:'TimeoutError'});return {status:reply};};
+      try{
+        // Paused between the claim and the send: parked, then sent once on unpause.
+        const paused=await delivery('mwd_plain_paused'),claimed=await claim(paused);
+        ok(await local('PATCH',`/v1/inbound/webhooks/${sub.id}`,{paused:true}));
+        await handle(paused,claimed);
+        assert.equal(posts,0);assert.deepEqual(await state(paused),{status:'paused',last_error:'ENDPOINT_PAUSED'});
+        ok(await local('PATCH',`/v1/inbound/webhooks/${sub.id}`,{paused:false}));
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:sub.id},{id:'job_plain_resume',workspaceId:wid,attempts:1});
+        await handle(paused,undefined,1);
+        assert.equal(posts,1);assert.equal((await state(paused)).status,'delivered');
+        // A stale claim: another runner settled it (410) meanwhile, so the stale runner sends nothing.
+        const stale=await delivery('mwd_plain_stale'),old=await claim(stale);
+        reply=410;await assert.rejects(handle(stale));
+        assert.equal(posts,2);assert.equal((await state(stale)).status,'failed');
+        reply=204;await handle(stale,old);
+        assert.equal(posts,2);
+        // Behind the timeout breaker: the deferral keeps the three attempts already spent.
+        await delivery('mwd_plain_breaker');await db.query("DELETE FROM jobs WHERE workspace_id=$1",[wid]);
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_plain_breaker','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_plain_breaker\"}')",[wid]);
+        const due=()=>db.query("UPDATE jobs SET available_at=now() WHERE id='job_plain_breaker'");
+        reply='timeout';
+        for(let i=0;i<3;i++){await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');}
+        assert.equal(posts,5);
+        await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,5);
+        assert.deepEqual((await db.query("SELECT status,attempts,last_error FROM jobs WHERE id='job_plain_breaker'")).rows[0],{status:'pending',attempts:3,last_error:null});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  test('a breaker deferral is not a delivery attempt: a resumed delivery keeps its retries',async t=>{
+    // tear/delivery witness: three timeouts on V, a breaker deferral of m1:V, pause V, run K m1:V, unpause V.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{JobDeferred}=await import('./src/jobs.js');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'tripped',url:'https://example.com/tripped',retryAttempts:2}),201);
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='tripped'",[wid])).rows[0].id;
+      for(const id of ['mwd_trip_target','mwd_trip_1','mwd_trip_2','mwd_trip_3'])await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',[id,wid,hook,{id:'mev_'+id,type:'message.received',messageId:'msg_'+id,data:{recipients:['a@example.net']}}]);
+      const handle=(id:string,attempts:number,generation?:number)=>mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id,...(generation===undefined?{}:{generation})},{id:'job_'+id,workspaceId:wid,attempts});
+      const fence=async()=>(await db.query("SELECT attempts FROM mail_action_attempts WHERE delivery_id='mwd_trip_target'")).rows[0].attempts;
+      const transport=runtime.webhookFetch;
+      runtime.webhookFetch=async(url,init)=>{if(JSON.parse(String(init.body)).id==='mev_mwd_trip_target')return {status:503};throw Object.assign(new Error('synthetic timeout'),{name:'TimeoutError'});};
+      try{
+        await assert.rejects(handle('mwd_trip_target',1));
+        for(const id of ['mwd_trip_1','mwd_trip_2','mwd_trip_3'])await assert.rejects(handle(id,1));
+        assert.equal(await fence(),1);
+        // Three timeouts tripped the breaker: the next call defers before anything leaves.
+        await assert.rejects(handle('mwd_trip_target',2),(e:unknown)=>e instanceof JobDeferred&&e.keepAttempts);
+        assert.equal(await fence(),1);
+        ok(await local('PATCH','/v1/endpoints/tripped',{paused:true}));await handle('mwd_trip_target',2);
+        ok(await local('PATCH','/v1/endpoints/tripped',{paused:false}));
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_trip_resume',workspaceId:wid,attempts:1});
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND payload->>'deliveryId'='mwd_trip_target' AND payload->>'generation'='1'",[wid])).rows,[{attempts:1}]);
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
     await simulatedSesFixture(t,async({runtime,local,db})=>{
       const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
@@ -13317,6 +13800,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);
+          CREATE TABLE \${schema}.mail_action_attempts (LIKE public.mail_action_attempts INCLUDING ALL);
           CREATE VIEW \${schema}.regional_simulated_connections AS SELECT * FROM public.regional_simulated_connections WHERE false;\`);
         try {
           const scopedUrl = new URL(dbUrl);

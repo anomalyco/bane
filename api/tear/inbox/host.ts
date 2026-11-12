@@ -128,7 +128,7 @@ const base = (x: string) => `/v1/inboxes/${ids[x]}`;
 // The request each mutation verb sends.
 async function mutation(words: string[]): Promise<[string, string, unknown?]> {
   const [verb, x, m, r, dst] = words as [string, string, string, string, string];
-  const msg = `${base(x)}/messages/${verb === 'purge' || verb === 'delete' ? '' : await resolveId(m)}`;
+  const msg = `${base(x)}/messages/${verb === 'purge' || verb === 'delete' || verb === 'subscribe' ? '' : await resolveId(m)}`;
   switch (verb) {
     case 'seen': return ['PATCH', msg, { read: true }];
     case 'unseen': return ['PATCH', msg, { read: false }];
@@ -140,6 +140,7 @@ async function mutation(words: string[]): Promise<[string, string, unknown?]> {
     case 'trash': return ['DELETE', `${msg}?source=${r}`];
     case 'expunge': return ['DELETE', `${msg}?source=${r}&permanent=true`];
     case 'purge': return ['POST', `${base(x)}/folders/${m}/expunge`, {}];
+    case 'subscribe': return ['PATCH', `${base(x)}/folders/inbox`, { subscribed: true }];
     case 'delete': return ['DELETE', base(x)];
   }
   throw new Error(`unknown mutation ${verb}`);
@@ -171,6 +172,7 @@ function statement(words: string[], c: { db: Db }, claim?: string[]): () => Prom
   return async () => {
     const [method, path, body] = await mutation(words);
     const r = await rest(c.db, method, path, body);
+    if (verb === 'subscribe') return r.error ?? Number(r.body.state);
     if (words[0] === 'purge') return r.error ?? { expunged: r.body.expunged };
     if (words[0] === 'delete') return r.error ?? r.body.status;
     return mutationResult(r);
@@ -242,7 +244,7 @@ async function autoAct(words: string[]): Promise<unknown> {
       const v = await autoTxn(() => statement(['store', x], auto, row.recipients)());
       return typeof v === 'string' && v.startsWith('e:') ? v : recipName(row.recipients);
     }
-    case 'accept': case 'seen': case 'unseen': case 'flag': case 'del': case 'undel': case 'move': case 'copy': case 'trash': case 'expunge': case 'purge': case 'delete':
+    case 'accept': case 'seen': case 'unseen': case 'flag': case 'del': case 'undel': case 'move': case 'copy': case 'trash': case 'expunge': case 'purge': case 'delete': case 'subscribe':
       return autoTxn(statement(words, auto));
     case 'send': return autoTxn(async () => {
       const id = mid(`s${x}`), thread = `${ws}_thr_s${x}`;

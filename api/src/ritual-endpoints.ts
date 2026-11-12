@@ -368,6 +368,19 @@ function registerForwardPages(app: App) {
   });
 }
 
+/**
+ * Ingest records whether a message may be forwarded. A message stored before it did (or before its
+ * workspace routed) is judged from its stored columns by the same rules: parsed, not automated,
+ * DMARC not failed, no loop or auto-reply header, at most 25 Received headers. Stored headers are
+ * complete below 200 (the parser already caps their size), so more than that is never forwarded.
+ */
+function forwardSafe(m: typeof mailMessages.$inferSelect) {
+  const stored = (m.verdicts as { forwardSafe?: boolean }).forwardSafe;
+  if (stored !== undefined) return stored;
+  const names = m.headers.map(h => h.name.toLowerCase());
+  return m.status === 'received' && !m.automated && m.verdicts.dmarc !== 'FAIL' && names.length < 200
+    && !names.some(n => ['x-bane-loop', 'auto-submitted', 'x-autoreply', 'x-autorespond'].includes(n)) && names.filter(n => n === 'received').length <= 25;
+}
 /** Delivers one Slack, Discord or forward call. Retries, rates and fences are applied by ritualDelivery. */
 export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWebhook) {
   const event = h.payload as { messageId: string; type: string; ritualBody?: unknown; data: { recipients?: string[]; junk?: boolean } },
@@ -384,7 +397,7 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
     const [m] = await tx.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, event.messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
     if (
       !m ||
-      (m.verdicts as { forwardSafe?: boolean }).forwardSafe !== true ||
+      forwardSafe(m) !== true ||
       m.automated ||
       m.spam ||
       m.status !== 'received' ||

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { receivedMailStore, withMailObjects } from './mail-objects.js';
 import {mimeIndex} from './mailbox-mime-index.js';
+import {wirePreview} from './protocol-preview.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { matchRouting, plusBase } from './routing-match.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
@@ -252,13 +253,13 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 const HEADER_LINES = 256, MIME_DEPTH = 12, MIME_PARSE_MS = 1000;
-function withinMimeLimits(raw: Uint8Array) {
+function withinMimeLimits(raw: Uint8Array,lineLimit=PARSE_LINE_LIMIT) {
   let lines = 0, start = 0, headers = true, headerBytes = 0, headerLines = 0;
   const boundaries: string[] = [];
   const declared = new Set<string>();
   while (start < raw.length) {
     const lf = raw.indexOf(10, start), end = lf < 0 ? raw.length : lf;
-    if (++lines > PARSE_LINE_LIMIT) return false;
+    if (++lines > lineLimit) return false;
     const length = end-start-(end>start && raw[end-1] === 13 ? 1 : 0);
     // Conservative preflight of possible RFC 2046 delimiters, without decoding
     // headers or bodies. Parser-side limits below remain authoritative for
@@ -323,7 +324,7 @@ function countHeaderEscaped(msg: Email, count: number) {
 }
 type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
 type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
-const mimeBudget = () => ({ count: 0, headerLines: 0, lines: 0, deadline: performance.now() + MIME_PARSE_MS });
+const mimeBudget = (ms=MIME_PARSE_MS) => ({ count: 0, headerLines: 0, lines: 0, deadline: performance.now() + ms });
 const escapeBudgetStore = new AsyncLocalStorage<ReturnType<typeof mimeBudget>>();
 const postalProto = PostalMime.prototype as unknown as {
   parse?: (this: unknown, buf: unknown) => Promise<Email>;
@@ -381,9 +382,10 @@ const escapeGuardInstalled = (() => {
 })();
 if (!escapeGuardInstalled) warnMissingEscapeGuard();
 export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
-export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
-  const budget = mimeBudget();
-  if (raw.byteLength > PARSE_LIMIT || !withinMimeLimits(raw)) return null;
+export const SMTP_WIRE_LIMIT=8*1024*1024;
+export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submission'='receipt'): Promise<Email | null> {
+  const submission=mode==='submission',budget=mimeBudget(submission?5000:MIME_PARSE_MS);
+  if (raw.byteLength > (submission?SMTP_WIRE_LIMIT:PARSE_LIMIT) || !withinMimeLimits(raw,submission?150_000:PARSE_LINE_LIMIT)) return null;
   if (!isPostalMimeEscapeGuardInstalled()) {
     warnMissingEscapeGuard();
     if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;
@@ -393,9 +395,10 @@ export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
       attachmentEncoding: 'arraybuffer', maxHeadersSize: HEADER_LIMIT, maxNestingDepth: MIME_DEPTH,
       maxRfc822NestingDepth: 4, maxPartCount: 200, maxForwardedAddresses: 256,
     }));
-    return performance.now() < budget.deadline ? mail : null;
+    if(performance.now()>=budget.deadline)throw new RangeError('MIME parse deadline');
+    return !mail.attachments.some(a=>a.rfc822DepthExceeded) ? mail : null;
   }
-  catch { return null; }
+  catch { if(submission && performance.now()>=budget.deadline)throw new ApiError(503,'MIME_BUSY','Submission parser timed out.',undefined,true);return null; }
 }
 
 // A terminal write settles the receipt only as this attempt claimed it: still pending, with the same
@@ -534,7 +537,11 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
   try {
-    if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualVerified:verifiedAuthor,ritualScores:evaluated.answers,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});}
+    // A forward can be queued later than this first store (a reopened receipt, another receipt of the
+    // same email, rituals saved meanwhile) and reads these verdicts from the stored message, so any
+    // workspace that routes records them, not only one whose rituals already run.
+    if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});
+    if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualScores:evaluated.answers});}
     if(!initiallyKept&&keptRoute(plan)){
       if(unverifiedKept)throw new JobDeferred(new Date(Date.now()+60000).toISOString());
       if(!copied.large)await keptStore.objects.put(keptStore.rawKey,raw,'message/rfc822');
@@ -542,7 +549,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       Object.assign(message,{rawKey:keptStore.rawKey,rawBucket:keptStore.bucket,lifecycle:'kept'});
     }
   } finally { s3.destroy(); }
-  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null);
+  const preview=message.lifecycle==='kept'?wirePreview(raw,sizeBytes):undefined;
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null,preview);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };

@@ -249,6 +249,7 @@ pub enum Mut {
     Expunge(u8, u8, u8),
     Purge(u8, u8),
     Delete(u8),
+    Subscribe(u8),
     /// Conversation PATCH (/v1/inbound/threads/{id}) for the thread of a message:
     /// 0 archived=true, 1 archived=false, 2 trashed=true, 3 trashed=false, 4 read=true, 5 read=false.
     Thread(u8, u8, u8),
@@ -265,6 +266,7 @@ impl Mut {
             | Mut::Expunge(x, ..)
             | Mut::Purge(x, ..)
             | Mut::Delete(x)
+            | Mut::Subscribe(x)
             | Mut::Thread(x, ..) => x,
         }
     }
@@ -394,6 +396,7 @@ pub fn parse(label: &str) -> Option<Act> {
         "trash" => mutation(Some(Mut::Trash(x(1)?, m(2)?, r(3)?))),
         "expunge" => mutation(Some(Mut::Expunge(x(1)?, m(2)?, r(3)?))),
         "purge" => mutation(Some(Mut::Purge(x(1)?, r(2)?))),
+        "subscribe" => mutation(Some(Mut::Subscribe(x(1)?))),
         "delete" => mutation(Some(Mut::Delete(x(1)?))),
         "thread" if conn.is_none() => {
             let kind = ["archive", "unarchive", "trash", "untrash", "read", "unread"]
@@ -455,6 +458,7 @@ pub fn alphabet(msgs: u8, core: bool) -> Vec<String> {
     }
     for x in BOXES {
         for c in writers {
+            out.push(format!("{c}subscribe {x}"));
             out.push(format!("{c}delete {x}"));
             for role in roles {
                 out.push(format!("{c}purge {x} {role}"));
@@ -627,6 +631,10 @@ fn mutate(db: &mut Db, mu: Mut) -> Value {
     }
     let content = db.content.clone();
     let b = &mut db.boxes[x];
+    if let Mut::Subscribe(_) = mu {
+        b.modseq += 1;
+        return json!(b.modseq);
+    }
     if let Mut::Delete(_) = mu {
         b.status = 1;
         return json!("deleting");
@@ -1120,6 +1128,7 @@ impl Model {
                         let b = &head.boxes[x as usize];
                         live(x)
                             && match mu {
+                                Mut::Subscribe(_) => true,
                                 Mut::Delete(_) => b.status == 0,
                                 Mut::Purge(_, r) => b.entries.iter().any(|e| e.role == r),
                                 Mut::Read(_, m, _) | Mut::Flag(_, m) | Mut::Thread(_, m, _) => {
