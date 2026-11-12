@@ -1,5 +1,5 @@
 SET LOCAL lock_timeout='2s';
--- A reopened receipt keeps every recipient the stored email was routed for. 156 adds another
+-- A reopened receipt keeps every recipient the stored email was routed for. 160 adds another
 -- receipt's recipients to a known email's envelope, but a later reopen of the first receipt
 -- replaced the envelope with its own recipients, so those were routed (and their ritual actions
 -- queued) a second time. The reopen now stores the union, in first-seen order.
