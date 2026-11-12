@@ -31,7 +31,7 @@ pub struct FolderMeta {
 #[derive(Clone, Deserialize)]
 pub struct Principal {
     #[serde(skip)]
-    pub epoch: u64,
+    started: Option<Instant>,
     pub kid: String,
     pub inbox: String,
     addresses: Vec<String>,
@@ -63,8 +63,31 @@ struct Gate {
     reads: Arc<tokio::sync::Semaphore>,
     last: Instant,
 }
+#[derive(Default)]
+struct Revocations {
+    reset: Option<Instant>,
+    by_inbox: HashMap<String, Instant>,
+}
+impl Revocations {
+    const MAX_LOGIN: Duration = Duration::from_secs(30);
+    fn record(&mut self, inbox: Option<&str>, now: Instant) {
+        self.by_inbox
+            .retain(|_, t| now.duration_since(*t) <= Self::MAX_LOGIN);
+        if let Some(i) = inbox {
+            self.by_inbox.insert(i.to_owned(), now);
+        } else {
+            self.by_inbox.clear();
+            self.reset = Some(now);
+        }
+    }
+    fn current(&self, inbox: &str, started: Instant, now: Instant) -> bool {
+        now.duration_since(started) < Self::MAX_LOGIN
+            && self.reset.is_none_or(|t| t < started)
+            && self.by_inbox.get(inbox).is_none_or(|&t| t < started)
+    }
+}
 pub struct Api {
-    epoch: std::sync::atomic::AtomicU64,
+    revoked: Mutex<Revocations>,
     gates: Mutex<HashMap<String, Gate>>,
     views: Arc<tokio::sync::Semaphore>,
     heavy: tokio::sync::Semaphore,
@@ -86,7 +109,7 @@ impl Api {
             "invalid gateway API configuration"
         );
         Ok(Self {
-            epoch: 0.into(),
+            revoked: Default::default(),
             online: false.into(),
             gates: Mutex::default(),
             views: Arc::new(tokio::sync::Semaphore::new(192 * 1024)),
@@ -188,17 +211,24 @@ impl Api {
         })?)
         .map_err(|_| store::Error::Unavailable)
     }
-    pub fn epoch(&self) -> u64 {
-        self.epoch.load(std::sync::atomic::Ordering::Acquire)
+    pub fn current(&self, p: &Principal) -> bool {
+        p.started.is_some_and(|s| {
+            self.revoked
+                .lock()
+                .is_ok_and(|v| v.current(&p.inbox, s, Instant::now()))
+        })
     }
     pub fn invalidate(&self, inbox: Option<&str>) {
         if let Ok(mut c) = self.cache.lock() {
-            self.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.revoked
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(inbox, Instant::now());
             c.retain(|_, (_, p)| inbox.is_some_and(|i| p.inbox != i));
         }
     }
     fn login(&self, user: &str, password: &str, proto: Protocol) -> Result<Principal, u16> {
-        let epoch = self.epoch();
+        let started = Some(Instant::now());
         if !self.online.load(std::sync::atomic::Ordering::Acquire) {
             return Err(503);
         }
@@ -221,7 +251,7 @@ impl Api {
             .filter(|(t, _)| t.elapsed() < Duration::from_secs(5))
         {
             let mut cached = v.clone();
-            cached.epoch = epoch;
+            cached.started = started;
             return Ok(cached);
         }
         let mut principal: Principal = serde_json::from_slice(
@@ -229,10 +259,10 @@ impl Api {
         )
         .map_err(|_| 503u16)?;
         let mut c = self.cache.lock().map_err(|_| 503u16)?;
-        if self.epoch() != epoch {
+        principal.started = started;
+        if !self.current(&principal) {
             return Err(503);
         }
-        principal.epoch = epoch;
         if c.len() >= 1024 {
             c.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(5))
         }
@@ -770,6 +800,21 @@ impl Submitter for Store {
     }
 }
 pub struct Offline;
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    #[test]
+    fn revoke_fences_only_the_inflight_login_for_that_inbox() {
+        let t = Instant::now();
+        let after = t + Duration::from_millis(1);
+        let mut r = Revocations::default();
+        r.record(Some("one"), after);
+        assert!(!r.current("one", t, after));
+        assert!(r.current("two", t, after));
+        r.record(None, after);
+        assert!(!r.current("two", t, after));
+    }
+}
 impl Submitter for Offline {
     fn submit(&mut self, _: Submission<'_>) -> Result<(), SubmitError> {
         Err(SubmitError::Unavailable)

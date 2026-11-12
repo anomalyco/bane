@@ -353,7 +353,7 @@ impl Gateway {
                         let sub = self.events.subscribe(&p.inbox);
                         login_generation = sub.1.borrow().auth;
                         anyhow::ensure!(
-                            p.epoch == auth.api.epoch(),
+                            auth.api.current(&p),
                             "authentication changed during login"
                         );
                         feed = Some(sub);
