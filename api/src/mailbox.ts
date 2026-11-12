@@ -818,7 +818,9 @@ function registerInboundWebhooks(app: App) {
       if (error instanceof JobDeferred) throw new ApiError(503, 'WEBHOOK_COOLING_DOWN', `This endpoint timed out three times in a row; Bane tries it again after ${error.availableAt}.`, undefined, true);
       if (error instanceof ApiError) throw error;
       // The receiver timed out, refused the connection or failed its TLS handshake: the test's result, not a server failure (a 500).
-      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+      // Node reports a socket or certificate code; a Worker's fetch reports a TypeError. Anything else is a bug and stays a 500.
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'), code = (error as { code?: unknown }).code;
+      if (!timedOut && !(error instanceof TypeError) && !(typeof code === 'string' && /^(?:E[A-Z]+|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_\w+|SELF_SIGNED_\w+)$/.test(code))) throw error;
       throw new ApiError(503, 'WEBHOOK_UNREACHABLE', timedOut ? `The endpoint did not answer within ${row.timeoutSeconds} seconds.` : 'The endpoint could not be reached.', undefined, true);
     }
   });
