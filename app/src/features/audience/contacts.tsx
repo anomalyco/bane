@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -66,6 +66,8 @@ function ContactEditor({ contact, onClose }: { contact?: Contact; onClose: () =>
   </Dialog>
 }
 
+// Imported and API-set properties (plan, say), which segments match on, after the fields every contact has.
+const customProperties = (contact: Contact) => Object.entries(contact.properties ?? {}).map(([key, value]): [string, string] => [key, value === null || value === '' ? '—' : String(value)])
 export function ContactDetailPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['contacts', id], (api, signal) => api.contacts.get(id, signal))
@@ -91,7 +93,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
   return <div className="audience-page">
     <PageHeader title={contact.name || <PrivateAddress value={contact.email} />} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} title={contact.status === 'suppressed' ? 'Suppressed addresses are never emailed, so consent can’t be changed here.' : undefined} onClick={() => { status.reset(); setConsentInput(initialConsent()); setConfirm(true) }}>{consentAction(contact.status)}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
     <div className="audience-summary cluster">{contact.name && <PrivateAddress value={contact.email} />}<StatusBadge status={contact.status} /><span className="muted">{consentHelp[contact.status]}</span></div>
-    <div className="section form-grid audience-properties"><section><SectionHeader title="Properties" /><dl><dt>Full name</dt><dd>{contact.name || '—'}</dd><dt>Country</dt><dd>{contact.country || '—'}</dd><dt>Created</dt><dd>{date(contact.createdAt)}</dd><dt>Last opened</dt><dd>{date(contact.lastOpenedAt)}</dd></dl></section><section><SectionHeader title="Marketing consent" /><dl><dt>Status</dt><dd>{statusOptions.find(option => option.value === contact.status)?.label ?? contact.status}<span className="audience-dd-note">{consentHelp[contact.status]}</span></dd><dt>Suppression</dt><dd>{contact.suppressionReason || 'None'}<span className="audience-dd-note">{contact.suppressionReason ? 'Never emailed. Consent changes don’t lift it.' : 'Blocks all email after a bounce or complaint.'}</span></dd></dl></section></div>
+    <div className="section form-grid audience-properties"><section><SectionHeader title="Properties" /><dl><dt>Full name</dt><dd>{contact.name || '—'}</dd><dt>Country</dt><dd>{contact.country || '—'}</dd><dt>Created</dt><dd>{date(contact.createdAt)}</dd><dt>Last opened</dt><dd>{date(contact.lastOpenedAt)}</dd>{customProperties(contact).map(([key, value]) => <Fragment key={key}><dt>{key === 'plan' ? 'Plan' : key}</dt><dd>{value}</dd></Fragment>)}</dl></section><section><SectionHeader title="Marketing consent" /><dl><dt>Status</dt><dd>{statusOptions.find(option => option.value === contact.status)?.label ?? contact.status}<span className="audience-dd-note">{consentHelp[contact.status]}</span></dd><dt>Suppression</dt><dd>{contact.suppressionReason || 'None'}<span className="audience-dd-note">{contact.suppressionReason ? 'Never emailed. Consent changes don’t lift it.' : 'Blocks all email after a bounce or complaint.'}</span></dd></dl></section></div>
     <section className="section"><SectionHeader title="Lists" actions={<Button onClick={() => setEdit(true)}>Manage lists</Button>} />{lists.isPending ? <LoadingRegion label="Loading list memberships"><SkeletonText width={170} /></LoadingRegion> : lists.isError ? <ErrorState error={lists.error} onRetry={() => lists.refetch()} /> : <div className="cluster audience-links">{contact.listIds.length ? contact.listIds.map(id => <Link key={id} to={`/audience/lists/${id}`}>{lists.data.find(list => list.id === id)?.name || 'Unnamed list'}</Link>) : <span className="muted">Not on any lists.</span>}</div>}</section>
     <ConsentHistory id={contact.id} />
     {!history.isPending && <ContactActivity key={`${contact.email}:${regionId}`} email={contact.email} />}

@@ -21,9 +21,10 @@ export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumn
 export const listColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '24%', card: 'title' },
   { key: 'subscribed', label: consentLabel('subscribed'), width: '12%', align: 'right', card: 'line' },
-  { key: 'unknown', label: consentLabel('unknown'), width: '11%', align: 'right', card: 'inline' },
-  { key: 'unsubscribed', label: consentLabel('unsubscribed'), width: '13%', align: 'right', card: 'inline' },
-  { key: 'suppressed', label: consentLabel('suppressed'), width: '12%', align: 'right', card: 'inline' },
+  // A phone card has one line for consent: Subscribed's cell there names the other counts that aren't zero.
+  { key: 'unknown', label: consentLabel('unknown'), width: '11%', align: 'right', card: 'hide' },
+  { key: 'unsubscribed', label: consentLabel('unsubscribed'), width: '13%', align: 'right', card: 'hide' },
+  { key: 'suppressed', label: consentLabel('suppressed'), width: '12%', align: 'right', card: 'hide' },
   { key: 'total', label: 'Total', width: '11%', align: 'right', card: 'aside' },
   { key: 'created', label: 'Created', width: '17%', card: 'hide' },
 ]
