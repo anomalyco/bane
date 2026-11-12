@@ -9358,6 +9358,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
         ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
       });
+      // tear witness (9 steps): two requests on one key; the holder fails and releases between the other's claim and lookup -> IDEMPOTENCY_CONFLICT.
+      await t.test('create idempotency: a duplicate whose holder failed and released the key gets a retryable answer',async st=>{
+        const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let stage=0;
+        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+          if(this!==db)return query.apply(this,args);
+          // A concurrent holder claims the key first; this request's claim then conflicts with it.
+          if(stage===0&&/^insert into "sending_idempotency"/i.test(text)){stage=1;return query.apply(this,args).then(()=>query.apply(this,args));}
+          // The holder is refused (4xx) and releases the key just before this request reads it.
+          if(stage===1&&/^select .*from "sending_idempotency"/i.test(text)){stage=2;return query.call(this,"DELETE FROM sending_idempotency WHERE request_key='released-1'").then(()=>query.apply(this,args));}
+          return query.apply(this,args);} as typeof pg.Client.prototype.query);
+        const post=()=>local('POST','/v1/lists',{name:'tear released'},'live',{'idempotency-key':'released-1'});
+        let reply:Reply;try{reply=await post();}finally{wire.mock.restore();}
+        assert.equal(stage,2);assert.equal(error(reply,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(reply.headers.get('retry-after'),'1');
+        assert.equal(ok(await post(),201).name,'tear released');
+      });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),
           cfg = ok(read),

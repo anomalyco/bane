@@ -71,7 +71,9 @@ function idempotentCreates(paths: RegExp[]) {
     const claimed = await db.insert(sendingIdempotency).values({ ...identity, requestHash }).onConflictDoNothing().returning({ claimed: sql`1` });
     if (!claimed.length) {
       const [previous] = await db.select().from(sendingIdempotency).where(where);
-      if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
+      // The request that held the key failed and released it between our claim and this read.
+      if (!previous) { c.header('Retry-After','1');throw new ApiError(409,'IDEMPOTENCY_IN_PROGRESS','Another request with this Idempotency-Key just finished without a result. Retry with the same key.',undefined,true); }
+      if (previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new create.');
       const stored = previous.result as { status?: number; body?: unknown; withheld?: boolean; unknown?: boolean; id?: string | null } | null;
       if (stored?.unknown) throw new ApiError(409, 'IDEMPOTENCY_OUTCOME_UNKNOWN', 'The original request failed after it may have committed. Check whether the resource was created before starting another request.');
       if (!stored?.status) {
