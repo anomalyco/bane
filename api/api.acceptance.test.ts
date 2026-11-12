@@ -9415,6 +9415,45 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         for (const r of [only, dropped]) await call('DELETE', '/v1/routing/routes/' + r.id);
         await call('DELETE', `/v1/inbound/addresses/${box2.id}?detach=true`);
       });
+      // PR #55 review P2: one overview used to fan out to seven concurrent statements and 17-18 in total, and to unnest
+      // every route destination. It is now two statements, the same two whatever the route count.
+      await t.test('inbound overview: two statements whatever the route count, measured at 10,000 routes; endpoint lists stay bounded', async it => {
+        const tagged = (q: { arguments: unknown[] }) => { const text = q.arguments[0] as string | { text?: string } | undefined; return String(typeof text === 'string' ? text : text?.text ?? '').includes('/* inbound-overview'); };
+        const original = pg.Client.prototype.query, timings: number[] = [];
+        const measure = async (path = '/v1/inbound/overview') => {
+          timings.length = 0;
+          // Counts every statement, and times the overview's own (tagged) statements in the driver.
+          const queries = it.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+            const result = (original as (...a: unknown[]) => unknown).apply(this, args);
+            if (tagged({ arguments: args }) && result instanceof Promise) { const started = performance.now(); return result.finally(() => timings.push(performance.now() - started)); }
+            return result;
+          });
+          try { const started = performance.now(), body = await call('GET', path), ms = performance.now() - started; return { body, ms, total: queries.mock.callCount(), overview: queries.mock.calls.filter(tagged).length, sql: timings.map(x => x.toFixed(1)).join(' + ') }; }
+          finally { queries.mock.restore(); }
+        };
+        await measure();
+        const small = await measure();
+        assert.equal(small.overview, 2, 'one routes statement and one workspace statement');
+        await db.query("INSERT INTO mail_routes(id,workspace_id,domain_id,match,destinations) SELECT 'rte_ovbulk'||n,$1,$2,'bulk'||lpad(n::text,5,'0')||'@receive.example',jsonb_build_array($3::text) FROM generate_series(1,10000) n", [wid, domain, hook.id]);
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) SELECT 'mwh_ovbulk'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/bulk'||n,'[]'::jsonb,'synthetic' FROM generate_series(1,105) n", [wid]);
+        await db.query('ANALYZE mail_routes, mailbox_webhooks'); // as autovacuum would after a bulk load; the rows are in this test's transaction
+        try {
+          await measure();
+          const large = await measure(), deep = await measure('/v1/inbound/overview?kind=route&q=bulk09&limit=100');
+          assert.equal(large.overview, 2); assert.equal(deep.overview, 2);
+          assert.equal(large.total, small.total, 'the same statements, whatever the route count');
+          assert.ok(large.body.counts.route >= 10000, JSON.stringify(large.body.counts));
+          assert.equal(large.body.routes.data.length, 50); assert.ok(large.body.routes.nextCursor);
+          assert.equal(deep.body.routes.data.length, 100); assert.ok(deep.body.routes.data.every((r: Json) => r.match.startsWith('bulk09')));
+          assert.ok(large.body.endpoints.find((e: Json) => e.id === hook.id).routes >= 10000, 'route counts come from the destinations index');
+          assert.equal(large.body.endpoints.filter((e: Json) => e.source === 'inbound_webhook').length, 100, 'inbound webhooks are capped at 100');
+          assert.equal(large.body.endpointsTruncated, true);
+          it.diagnostic(`overview at ${large.body.counts.route} routes: ${large.overview} statements (${large.total} with auth), SQL ${large.sql} ms, request ${large.ms.toFixed(1)} ms; filtered page of 100: SQL ${deep.sql} ms; at ${small.body.counts.route} routes: SQL ${small.sql} ms, request ${small.ms.toFixed(1)} ms`);
+        } finally {
+          await db.query("DELETE FROM mail_routes WHERE id LIKE 'rte_ovbulk%'"); await db.query("DELETE FROM mailbox_webhooks WHERE id LIKE 'mwh_ovbulk%'");
+        }
+        assert.equal((await call('GET', '/v1/inbound/overview')).endpointsTruncated, false);
+      });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
         const questions=(start:number,count:number)=>Array.from({length:count},(_,i)=>`q${start+i}:"question ${start+i}?"`).join(',');

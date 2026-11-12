@@ -16,10 +16,12 @@ export type RouteEntry = {
 }
 export type OverviewRitual = { key: string; calls: string[]; delivers: string[]; omens: string[]; attachedTo: string[] }
 export type OverviewEndpoint = { id: string; source: 'endpoint' | 'inbound_webhook'; name: string; type: 'webhook' | 'slack' | 'discord' | 'forward'; status: EndpointStatus; target: string; call: string | null; eventTypes: string[]; routes: number; rituals: string[] }
+/** A domain as the overview lists it: its receiving host, receiving status and catch-all. */
+export type OverviewDomain = Pick<MailboxDomain, 'id' | 'name' | 'status' | 'catchAll'>
 export type Overview = {
   counts: { address: number; auto: number; route: number; pattern: number; catch_all: number; inbox: number }
   routes: { data: RouteEntry[]; nextCursor: string | null }
-  rituals: OverviewRitual[]; endpoints: OverviewEndpoint[]; domains: MailboxDomain[]; manage: boolean
+  rituals: OverviewRitual[]; endpoints: OverviewEndpoint[]; endpointsTruncated: boolean; domains: OverviewDomain[]; manage: boolean
 }
 export type OverviewQuery = { kind?: string; origin?: 'api' | 'auto'; domain?: string; q?: string; cursor?: string; limit?: number }
 
@@ -35,7 +37,7 @@ export function useOverview(query: OverviewQuery, keepPrevious = false, enabled 
 export const firstOverview: OverviewQuery = { limit: 50 }
 export const overviewQuery = (query: OverviewQuery) => ({ key: overviewKey(query), read: (_api: unknown, signal: AbortSignal) => readOverview(query, signal) })
 
-export const receivingDomains = (domains: MailboxDomain[]) => domains.filter(d => !['off', 'disabled'].includes(d.status))
+export const receivingDomains = <D extends Pick<MailboxDomain, 'status'>>(domains: D[]) => domains.filter(d => !['off', 'disabled'].includes(d.status))
 export const ago = (iso: string | null | undefined) => {
   if (!iso) return null
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000))

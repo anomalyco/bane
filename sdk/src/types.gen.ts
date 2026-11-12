@@ -2933,11 +2933,18 @@ export type InboundOverview = {
          */
         attachedTo: Array<string>;
     }>;
+    /**
+     * At most 100 endpoints (by name) and 100 inbound webhooks.
+     */
     endpoints: Array<InboundOverviewEndpoint>;
+    /**
+     * True when the workspace has more endpoints or inbound webhooks than listed; page the rest with listEndpoints and listInboundWebhooks.
+     */
+    endpointsTruncated: boolean;
     /**
      * Every domain with its receiving status, including domains that only send.
      */
-    domains: Array<InboundDomain>;
+    domains: Array<InboundOverviewDomain>;
     /**
      * False for members and scoped keys: they see their addresses, without routes, rituals, endpoints or domains.
      */
@@ -3039,6 +3046,19 @@ export type InboundOverviewEndpoint = {
      * Rituals that call it.
      */
     rituals: Array<string>;
+};
+
+export type InboundOverviewDomain = {
+    /**
+     * Bane domain ID.
+     */
+    id: string;
+    /**
+     * Receiving host: the domain, or the subdomain it receives at.
+     */
+    name: string;
+    status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
+    catchAll: 'create_address' | 'store';
 };
 
 export type UpdateInboundThread = {

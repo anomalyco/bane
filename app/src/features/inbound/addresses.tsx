@@ -20,9 +20,9 @@ import './receiving.css'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
-export const receivingDomains = (domains: MailboxDomain[]) => domains.filter(domain => !['off', 'disabled'].includes(domain.status))
+export const receivingDomains = <D extends Pick<MailboxDomain, 'status'>>(domains: D[]) => domains.filter(domain => !['off', 'disabled'].includes(domain.status))
 
-export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; onOpenChange: (open: boolean) => void; domains: MailboxDomain[] }) {
+export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] }) {
   const navigate = useNavigate()
   const [address, setAddress] = useState('')
   const [displayName, setDisplayName] = useState('')

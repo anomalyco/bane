@@ -73,25 +73,28 @@ export function renderChat(type: string, body: unknown) {
     : { content: s.replace(/([\\*_~`|>\[\]()#])/g, '\\$1').replace(/^(\s*)-/gm,'$1\\-').slice(0, 2000), allowed_mentions: { parse: [] }, flags:4 };
 }
 
-type Row = {
+export type EndpointRow = {
   name: string; type: EndpointType; hook_id: string; verified: boolean; expires_at: string | Date | null; declined_at: string | Date | null;
   created_at: string | Date; paused: boolean; encrypted_value: string | null; url: string | null;
   per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null;
 };
 const iso = (v: string | Date | null) => (v === null ? null : new Date(v).toISOString());
 /** All endpoints of a workspace: Slack, Discord and forwards in mail_endpoints, plus keyed webhooks. One name space. */
-export async function endpointRows(db: DbExecutor, w: string, q: { name?: string; cursor?: string; type?: string; limit?: number } = {}) {
-  return (await db.execute<Row>(sql`WITH e AS (
+/** Every endpoint row (named Slack, Discord, webhook and forward endpoints, and keyed webhooks) with its policy, as a
+ * FROM-able subquery. listEndpoints and the Receiving overview read endpoints through this one definition. */
+export const endpointSource = (w: string) => sql`(SELECT e.*,p.per_minute,p.retry_on_timeout,p.idempotent FROM (
       SELECT split_part(d.ref,':',2) AS name,split_part(d.ref,':',1) AS type,d.hook_id,d.verified,d.expires_at,d.declined_at,d.created_at,h.paused,d.encrypted_value,NULL::text AS url
       FROM mail_endpoints d JOIN mailbox_webhooks h ON h.workspace_id=d.workspace_id AND h.id=d.hook_id WHERE d.workspace_id=${w}
       UNION ALL
       SELECT h.key,'webhook',h.id,true,NULL,NULL,h.created_at,h.paused,NULL,h.url FROM mailbox_webhooks h
-      WHERE h.workspace_id=${w} AND h.key IS NOT NULL AND NOT starts_with(h.id,'con_'))
-    SELECT e.*,p.per_minute,p.retry_on_timeout,p.idempotent FROM e LEFT JOIN mail_action_policies p ON p.workspace_id=${w} AND p.hook_id=e.hook_id
+      WHERE h.workspace_id=${w} AND h.key IS NOT NULL AND NOT starts_with(h.id,'con_')) e
+    LEFT JOIN mail_action_policies p ON p.workspace_id=${w} AND p.hook_id=e.hook_id)`;
+export async function endpointRows(db: DbExecutor, w: string, q: { name?: string; cursor?: string; type?: string; limit?: number } = {}) {
+  return (await db.execute<EndpointRow>(sql`SELECT e.* FROM ${endpointSource(w)} e
     WHERE (${q.name ?? null}::text IS NULL OR e.name=${q.name ?? null}) AND (${q.cursor ?? null}::text IS NULL OR e.name>${q.cursor ?? null}) AND (${q.type ?? null}::text IS NULL OR e.type=${q.type ?? null})
     ORDER BY e.name LIMIT ${(q.limit ?? 500) + 1}`)).rows;
 }
-export async function endpointView(runtime: Runtime, w: string, r: Row): Promise<z.infer<typeof Endpoint>> {
+export async function endpointView(runtime: Runtime, w: string, r: EndpointRow): Promise<z.infer<typeof Endpoint>> {
   const policy = endpointPolicy(r.type, r), call = endpointCall(r.name);
   const value = r.encrypted_value ? await decrypt(runtime, r.encrypted_value, w + ':endpoint:' + r.hook_id) : null;
   const target = r.type === 'webhook' ? webhookUrlHint(r.url!) : r.type === 'forward' ? value! : `${r.type === 'slack' ? 'Slack incoming webhook' : 'Discord webhook'} ${webhookUrlHint(value!)}`;

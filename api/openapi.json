@@ -10438,12 +10438,17 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InboundOverviewEndpoint"
-            }
+            },
+            "description": "At most 100 endpoints (by name) and 100 inbound webhooks."
+          },
+          "endpointsTruncated": {
+            "type": "boolean",
+            "description": "True when the workspace has more endpoints or inbound webhooks than listed; page the rest with listEndpoints and listInboundWebhooks."
           },
           "domains": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/InboundDomain"
+              "$ref": "#/components/schemas/InboundOverviewDomain"
             },
             "description": "Every domain with its receiving status, including domains that only send."
           },
@@ -10457,6 +10462,7 @@
           "routes",
           "rituals",
           "endpoints",
+          "endpointsTruncated",
           "domains",
           "manage"
         ]
@@ -10719,6 +10725,44 @@
           "eventTypes",
           "routes",
           "rituals"
+        ]
+      },
+      "InboundOverviewDomain": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Bane domain ID."
+          },
+          "name": {
+            "type": "string",
+            "description": "Receiving host: the domain, or the subdomain it receives at."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "off",
+              "provisioning",
+              "waiting_for_mx",
+              "active",
+              "disabling",
+              "disabled",
+              "failed"
+            ]
+          },
+          "catchAll": {
+            "type": "string",
+            "enum": [
+              "create_address",
+              "store"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "catchAll"
         ]
       },
       "UpdateInboundThread": {
@@ -47338,7 +47382,7 @@
           }
         ],
         "summary": "Every route mail can take, with its rituals and endpoints, in one read",
-        "description": "One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rituals that run on it and where its mail goes. Also returns counts per kind, the rituals, the endpoints and the domains. Members and scoped keys see only their addresses.",
+        "description": "One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rituals that run on it and where its mail goes. Also returns counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. Requires explicit receiving consent on MCP-derived credentials, like the other receiving reads.",
         "parameters": [
           {
             "schema": {

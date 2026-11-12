@@ -110,7 +110,9 @@ Older links keep working: `/receiving/routing` opens Routes and `/receiving/endp
 
 ## API, SDK and MCP
 
-The Receiving screen is one read: `getInboundOverview` (`GET /v1/inbound/overview`) returns a page of routes merged across kinds, each with the rituals that run on it and where its mail goes, plus counts per kind, the rituals, the endpoints and the domains. Filter with `kind` (`address`, `inbox`, `route`, `pattern`, `catch_all`, comma-separated), `origin` (address rows only: `api` or `auto`), `domain` and `q`; page with `cursor`. Members and scoped keys see only their own addresses. Webhook, Slack and Discord URLs are write-only: only the last four characters are returned.
+The Receiving screen is one read: `getInboundOverview` (`GET /v1/inbound/overview`) returns a page of routes merged across kinds, each with the rituals that run on it and where its mail goes, plus counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks (`endpointsTruncated` says when there are more; page them with `listEndpoints` and `listInboundWebhooks`) and the domains. Filter with `kind` (`address`, `inbox`, `route`, `pattern`, `catch_all`, comma-separated), `origin` (address rows only: `api` or `auto`), `domain` and `q`; page with `cursor`. It costs two database statements whatever the number of routes.
+
+Access matches the other receiving reads: members and scoped keys see only their own addresses; the full view needs a manage credential, and credentials that come from an MCP approval also need its explicit receiving consent. Over MCP it is offered exactly to the approvals REST allows. Webhook, Slack and Discord URLs are write-only: only the last four characters are returned.
 
 | Task | Operation (also the MCP tool name) |
 |---|---|

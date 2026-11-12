@@ -4121,7 +4121,7 @@ export const listLogs = <ThrowOnError extends boolean = false>(options?: Options
 /**
  * Every route mail can take, with its rituals and endpoints, in one read
  *
- * One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rituals that run on it and where its mail goes. Also returns counts per kind, the rituals, the endpoints and the domains. Members and scoped keys see only their addresses.
+ * One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rituals that run on it and where its mail goes. Also returns counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. Requires explicit receiving consent on MCP-derived credentials, like the other receiving reads.
  */
 export const getInboundOverview = <ThrowOnError extends boolean = false>(options?: Options<GetInboundOverviewData, ThrowOnError>): RequestResult<GetInboundOverviewResponses, GetInboundOverviewErrors, ThrowOnError> => (options?.client ?? client).get<GetInboundOverviewResponses, GetInboundOverviewErrors, ThrowOnError>({
     security: [
