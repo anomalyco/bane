@@ -9105,6 +9105,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }));
   });
 
+  test('Sent-copy archiving and reputation alerts retry a transient failure instead of failing for good', async t => {
+    await simulatedSesFixture(t, async ({ runtime }) => {
+      const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js'), { reputationAlertJobs } = await import('./src/reputation-alerts.js');
+      const wid = runtime.config.workspaceId, retryable = { code: 'OPERATION_TEMPORARILY_UNAVAILABLE', retryable: true };
+      // A storage or network error that is not an ApiError (an S3 SlowDown, a timed-out post) used to fail the job on its first attempt.
+      const slowDown = () => { throw Object.assign(new Error('Please reduce your request rate.'), { name: 'SlowDown', $metadata: { httpStatusCode: 503 } }); };
+      for (const method of ['execute', 'select'] as const) t.mock.method(runtime.db, method, slowDown);
+      await assert.rejects(mailboxIngestJobs['mail.archiveSent']!(runtime, { messageId: 'msg_archive' }, { id: 'job_archive', workspaceId: wid, attempts: 1 }), retryable);
+      for (const method of ['execute', 'select'] as const) (runtime.db[method] as unknown as { mock: { restore(): void } }).mock.restore();
+      runtime.config.reputationAlertUrl = 'https://hooks.slack.example/alerts';
+      // Swapped by hand: a t.mock of fetch would reinstall the fixture's own fetch mock for later tests when it is restored again.
+      const fixtureFetch = globalThis.fetch;
+      globalThis.fetch = async () => { throw new DOMException('The operation timed out.', 'TimeoutError'); };
+      try { await assert.rejects(reputationAlertJobs['reputation.alert']!(runtime, { region: REGION, metric: 'bounceRate', level: 'warning', previous: 'ok', value: 0.03 }, { id: 'job_alert', workspaceId: wid, attempts: 1 }), retryable); }
+      finally { globalThis.fetch = fixtureFetch; }
+      // A malformed alert is still a permanent failure.
+      await assert.rejects(reputationAlertJobs['reputation.alert']!(runtime, { region: REGION, metric: 'nope' }, { id: 'job_alert_bad', workspaceId: wid, attempts: 1 }), { code: 'JOB_PAYLOAD_INVALID', retryable: false });
+    });
+  });
   test('only old or BYO unmatched feedback acks after a short retry; hosted and unavailable writes still retry',()=>import('./src/adapters/feedback-queue.js').then(({settleFeedbackMessage})=>{
     const result=(attempts:number,kind:'shared'|'byo',days:number,error='SES_FEEDBACK_UNMATCHED')=>{
       let settled:number|'ack'|undefined;
@@ -9241,6 +9260,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for(let i=0;i<3;i++)await assert.rejects(post('one'),{name:'TimeoutError'});
       await assert.rejects(post('one'),JobDeferred);assert.equal(calls,3);
       await assert.rejects(post('two'),{name:'TimeoutError'});assert.equal(calls,4);
+    });
+  });
+  test('a sending webhook behind the timeout breaker keeps its spent attempts, so a hanging endpoint exhausts its retries',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId,hook=ok(await local('POST','/v1/webhooks',{url:`https://${unique('breaker')}.example.org/hook`,eventTypes:['email.delivered']}),201);
+      const transport=runtime.webhookFetch;let posts=0;
+      runtime.webhookFetch=async()=>{posts++;throw new DOMException('local synthetic timeout','TimeoutError');};
+      try{
+        for(const n of [1,2,3,4]){
+          const event={id:`evt_breaker_${n}_${hook.id}`,type:'email.delivered',createdAt:new Date().toISOString(),workspaceId:wid,region:null,data:{}};
+          await db.query("INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload) VALUES($1,$2,$3,$4,$5)",[`whd_breaker_${n}_${hook.id}`,wid,hook.id,event.id,event]);
+          await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'operation.webhook',$2,$3)",[`job_breaker_${n}`,wid,{deliveryId:`whd_breaker_${n}_${hook.id}`,generation:0}]);
+        }
+        const round=async()=>{await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND status='pending'",[wid]);await processJobs(runtime,operationJobs,4,1,20000,'webhooks');};
+        const attempts=async()=>(await db.query("SELECT id,attempts FROM jobs WHERE workspace_id=$1 ORDER BY id",[wid])).rows;
+        // Three timeouts trip the breaker; the fourth delivery is deferred before anything leaves.
+        await round();assert.equal(posts,3);
+        // The next round defers all four: the three that timed out keep their attempt, the deferred one has none.
+        await round();assert.equal(posts,3);
+        assert.deepEqual((await attempts()).map(row=>row.attempts),[1,1,1,0]);
+        assert.deepEqual((await db.query("SELECT attempt_count FROM operation_deliveries WHERE workspace_id=$1 AND webhook_id=$2 ORDER BY id",[wid,hook.id])).rows.map(row=>row.attempt_count),[1,1,1,0]);
+      }finally{runtime.webhookFetch=transport;}
     });
   });
 
@@ -10190,6 +10233,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   // Recheck of #57, R3 (tear witness, 3 steps: accept m3 a, W accept m2 a, X accept m3 ac -> the reopen did not
   // wait on the window row). A held-envelope replay batch and an ordinary reopen took the window and the
   // receipt in opposite orders and deadlocked.
+  test('a routed inbound webhook whose connection was refused retries instead of failing as an unknown outcome', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { ritualDelivery, ActionRetry } = await import('./src/ritual-delivery.js'), wid = runtime.config.workspaceId;
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('routed')}.example.org/hook`, eventTypes: [] }), 201);
+      const fence = async (id: string) => (await db.query('SELECT state FROM mail_action_attempts WHERE workspace_id=$1 AND delivery_id=$2', [wid, id])).rows[0]?.state;
+      const attempt = async (id: string, send: () => Promise<{ status: number }>) => {
+        await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,routed) VALUES($1,$2,$3,$4,true) ON CONFLICT DO NOTHING", [id, wid, hook.id, { id: 'mev_' + id, type: 'message.received' }]);
+        return ritualDelivery(runtime, wid, { delivery_id: id, generation: 0, routed: true, webhook_id: hook.id, payload: { id: 'mev_' + id, type: 'message.received' } } as unknown as import('./src/core.js').ClaimedWebhook, send);
+      };
+      // Nothing left the box (Node's connect and DNS errors): a known outcome, retried like a 503.
+      for (const code of ['ECONNREFUSED', 'ENOTFOUND']) {
+        const id = `mwd_unreachable_${code.toLowerCase()}`;
+        await assert.rejects(attempt(id, () => Promise.reject(Object.assign(new Error(`connect ${code} 203.0.113.9:443`), { code, syscall: 'connect' }))), (e: unknown) => e instanceof ActionRetry && e.code === 'DESTINATION_UNREACHABLE');
+        assert.equal(await fence(id), 'retry');
+        // The next attempt sends.
+        assert.equal((await attempt(id, async () => ({ status: 200 }))).status, 200);
+        assert.equal(await fence(id), 'delivered');
+      }
+      // A reset after connecting may follow a sent request: still unknown, and this endpoint does not replay unknown outcomes.
+      await assert.rejects(attempt('mwd_unreachable_reset', () => Promise.reject(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))), { code: 'ACTION_UNKNOWN' });
+      assert.equal(await fence('mwd_unreachable_reset'), 'unknown');
+    });
+  });
   test('receive route: a held-envelope replay and a reopen of one of its messages do not deadlock',async t=>{
     const {nodeRuntime}=await import('./src/adapters/node.js'),{acceptInboundNotification,recoverHeldReceipts}=await import('./src/mailbox-receipts.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
@@ -12614,6 +12680,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('an inbound webhook test to a receiver that times out or refuses the connection reports it, not a 500', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('down')}.example.org/hook`, eventTypes: ['message.received'] }), 201);
+      const transport = runtime.webhookFetch;
+      try {
+        for (const [failure, message] of [
+          [new DOMException('The operation was aborted due to timeout', 'TimeoutError'), /did not answer within 5 seconds/],
+          [Object.assign(new Error('connect ECONNREFUSED 203.0.113.9:443'), { code: 'ECONNREFUSED' }), /could not be reached/],
+        ] as const) {
+          runtime.webhookFetch = async () => { throw failure; };
+          const body = error(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {}), 503, 'WEBHOOK_UNREACHABLE');
+          assert.match(body.message, message); assert.equal(body.retryable, true);
+        }
+        // A bug in the send path is not an unreachable endpoint.
+        runtime.webhookFetch = async () => { throw new RangeError('Invalid header value'); };
+        error(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {}), 500, 'INTERNAL_ERROR');
+        runtime.webhookFetch = async () => ({ status: 204 });
+        assert.deepEqual(ok(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {})), { statusCode: 204 });
+      } finally { runtime.webhookFetch = transport; }
+    });
+  });
   test('a webhook storm stays off campaign lanes; capped fan-out and due selection are bounded', async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       const {processJobs}=await import('./src/jobs.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
