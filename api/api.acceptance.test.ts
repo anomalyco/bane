@@ -8447,16 +8447,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         SELECT $1||n,$1,$2,'key','a@example.org','["b@example.org"]','[]','[]','fixture','{}',false,'delivered',now()-(n%24)*interval '1 hour' FROM generate_series($3::int,$4::int)n`,[wid,REGION,start,Math.min(start+19999,total)]);
       const allowance=hostedAllowance(runtime.config,wid,1);
       assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total);
-      // Production plans read the (workspace_id,hour) key. On a tiny analyzed table the planner may
-      // seq-scan instead and count other suites' committed rows, so pin the plan to the index path.
+      // Production plans read the (workspace_id,hour) key. On a tiny analyzed table the planner may seq-scan, or
+      // hash-join a whole-index scan bounded only by hour (CI, 3f5137c), and count other suites' committed rows.
+      // Another workspace's busy day in the same hours makes such a plan both costly and visible: whatever the plan
+      // text (s.id, a constant, ANY, $n, another index), the scans may read only this workspace's 24 rows.
+      await db.query(`INSERT INTO hosted_usage_hourly(workspace_id,hour,recipients) SELECT $1||'-other-'||w,date_trunc('hour',now(),'UTC')-h*interval '1 hour',1
+        FROM generate_series(1,1000)w,generate_series(0,23)h`,[wid]);
       await db.query('SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off');
       const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM hosted_allowance_read(${wid},1,0,100,1000,10000,10)`)).rows[0]['QUERY PLAN'] as Json[];
       await db.query('RESET enable_seqscan; RESET enable_bitmapscan');
       const nodes=(p:Json):Json[]=>[p,...(p.Plans??[]).flatMap(nodes)]; const all=nodes(plan[0].Plan);
       assert.ok(!all.some(n=>['sending_emails','sending_email_events'].includes(n['Relation Name'])));
-      const usage=all.filter(n=>n['Relation Name']==='hosted_usage_hourly');
-      assert.equal(usage.length,1); assert.match(usage[0]['Index Cond']??'',/workspace_id = /);
-      assert.equal(usage[0]['Actual Rows']*usage[0]['Actual Loops'],24);
+      const usage=all.filter(n=>n['Relation Name']==='hosted_usage_hourly'), shape=JSON.stringify(usage.map(n=>[n['Node Type'],n['Index Name'],n['Index Cond'],n['Filter']]));
+      assert.ok(usage.length && usage.every(n=>/^Index (Only )?Scan$/.test(n['Node Type'])),shape);
+      const read=usage.reduce((sum,n)=>sum+(n['Actual Rows']+(n['Rows Removed by Filter']??0)+(n['Rows Removed by Index Recheck']??0))*n['Actual Loops'],0);
+      assert.equal(read,24,`Read ${read} hourly rows: ${shape}`);
       assert.ok(plan[0]['Execution Time']<100,`Allowance took ${plan[0]['Execution Time']}ms for ${total} messages.`);
       t.diagnostic(`Allowance on ${total} envelopes: 24 hourly rows, ${plan[0]['Execution Time']} ms.`);
       await db.query(`UPDATE sending_emails SET status='rejected' WHERE id=$1`,[wid+'1']);
