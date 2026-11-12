@@ -1143,6 +1143,13 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const held = { recipients: 0 };
   const runClients = new Map<string, SESv2Client>();
   const lane: Lane = { attachmentBytes:0,deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
+  // The owner cursor rotates where each lease starts, so every owner gets a turn, but a lease
+  // never wraps past the last owner. One that started after the cursor and reached the end
+  // empty-handed has not looked at the owners before it: with exactly a lease's worth of owners
+  // (or a cursor left by the previous run) the run used to stop and report idle with mail due.
+  // Look there at once, unless a whole pass since the last wrap leased nothing (the remaining
+  // mail is leased elsewhere or not yet due), so a run still ends.
+  let progressed = true;
   const lease = async (priorityOnly = false, first = false) => {
     const now = Date.now();
     if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
@@ -1154,7 +1161,13 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     }
     const inline = first && runtime.config.multiTenant && !gate.dailyBlockedUntil && gate.nextAllowedAt <= now && (gate.brakeUntil ?? 0) <= now
       ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs), margin: provisionalMargin(gate.sentSinceRefresh, 1, options.shard) } : undefined;
-    return phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
+    const leaseOnce = () => phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
+    const fromCursor = gate.ownerCursor !== undefined;
+    let rows = await leaseOnce();
+    if (fromCursor && !rows.length && gate.ownerCursor === undefined && progressed) { progressed = false; rows = await leaseOnce(); }
+    else if (!fromCursor) progressed = false;
+    if (rows.length) progressed = true;
+    return rows;
   };
   let blocked = false;
   const drainLane = async (batch: Leased[]) => {

@@ -5942,6 +5942,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
     });
   });
+  // tear witness (api/tear): send ok, send ok, then a one-row dispatcher stepped through
+  // lease, claim, send, record and the next lease, which found nothing and ended the run.
+  test('a dispatcher lease that passes the last owner wraps to the first, so a run never stops with mail due', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      // A region of its own: this workspace is its only owner, so a one-row lease's cursor is
+      // the last owner, exactly as with 24 owners and the normal 24-row lease.
+      const region = 'te-cursor-1', status = async (ids: string[]) => (await db.query('SELECT status FROM sending_emails WHERE id=ANY($1) ORDER BY id', [ids])).rows.map(r => r.status);
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=ANY($1)', [ids, region]);
+      const gate = initialGate();
+      const report = await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate });
+      assert.deepEqual(await status(ids), ['accepted', 'accepted', 'accepted'], 'One run drains every due row.');
+      assert.equal(report.sent, 3);
+      // A cursor left by the previous run must not end the next run before it reaches the first owner.
+      const later = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=$1', [later, region]);
+      gate.ownerCursor = runtime.config.workspaceId;
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, gate })).sent, 1);
+      assert.deepEqual(await status([later]), ['accepted']);
+      // With every remaining row leased elsewhere the run still ends after one pass.
+      const held = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query("UPDATE sending_emails SET region=$2, lease_until=now()+interval '2 minutes' WHERE id=$1", [held, region]);
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate })).claimed, 0);
+      assert.deepEqual(await status([held]), ['queued']);
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
