@@ -94,6 +94,17 @@ test('mail gateway: receipt parser distinguishes readable forwards from unparsed
   assert.ok(await parseInboundMime(Buffer.from(forward+base)));
   assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
 });
+test('review PR #84 P2: examples use the server’s canonical origin, never the page’s Host', async () => {
+  // P2: the dashboard's origin comes from /v1/me or /health (PUBLIC_URL). A page served under another Host is flagged
+  // (Docs then shows no examples), and an unknown origin is null (callers wait) rather than the page's own address.
+  const { canonicalOrigin, originOf } = await import('../app/src/lib/public-origin.js');
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', demo: false, page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
+  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', demo: false, page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: false, page: 'https://attacker.example' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', demo: false, page: 'https://bane.mx' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
+  assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
+});
 test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
   const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
   const host = 'inbox.example.com';
@@ -469,6 +480,12 @@ describe('Public contract and authentication', () => {
     assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(healthReply.headers.get('referrer-policy'), 'no-referrer');
     assert.match(healthReply.headers.get('permissions-policy') ?? '', /camera=\(\)/);
+    // Review PR #84 P2: Docs builds every copyable example from this origin, so it must be PUBLIC_URL's, never the Host a
+    // proxy or default virtual host forwarded. A request naming an attacker's Host still gets the canonical origin.
+    assert.equal(health.origin, PUBLIC_ORIGIN);
+    const { request: rawRequest } = await import('node:http');
+    const spoofed = await new Promise<Json>((done, fail) => { const target = new URL('/health', BASE); rawRequest({ host: target.hostname, port: target.port, path: target.pathname, headers: { Host: 'attacker.example', 'X-Forwarded-Host': 'attacker.example', Accept: 'application/json' } }, res => { let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; }); res.on('end', () => { try { done(JSON.parse(body)); } catch (error) { fail(error); } }); }).on('error', fail).end(); });
+    assert.equal(spoofed.origin, PUBLIC_ORIGIN);
     const { publicFailureBucket, admissionPeer } = await import('./src/core.js');
     assert.equal(admissionPeer('2001:0db8:0:0::3'),admissionPeer('2001:db8::ffff:abcd'));
     assert.notEqual(admissionPeer('2001:db8:0:1::3'),admissionPeer('2001:db8::3'));
@@ -14322,6 +14339,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           const healthRes = await worker.fetch(new Request('https://dev.bane.mx/%68ealth'), {...env,ENABLE_LIVE_SES:'true',get HYPERDRIVE(){throw Error('liveness opened DB')}});
           assert.equal(healthRes.status, 200);
           assert.equal((await healthRes.json()).service, 'bane');
+          // Review PR #84 P2: the zero-dependency path also answers with PUBLIC_URL's origin, not the request's host.
+          assert.equal((await (await worker.fetch(new Request('https://attacker.example/health'), env)).json()).origin, 'https://dev.bane.mx');
           assert.equal([...loadedModules].some(u => /\\/src\\/app\\.[jt]s$/.test(u)), false, 'Encoded /health must take the zero-dep fast path.');
           admissionAllowed=false;assert.equal((await worker.fetch(new Request('https://dev.bane.mx/health/receiving'),env)).status,429);admissionAllowed=true;
 

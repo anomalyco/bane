@@ -19,7 +19,8 @@ export const mcpAccess = [
 export type McpAccess = typeof mcpAccess[number]['value']
 const clientTabs = mcpClients.map(value => ({ value, label: mcpClientNames[value] }))
 
-export function useMcpUrl() { return mcpServerUrl(usePublicOrigin()) }
+/** The hosted MCP URL on this installation's canonical address, or null until that is known. */
+export function useMcpUrl() { const origin = usePublicOrigin(); return origin ? mcpServerUrl(origin) : null }
 
 /** The snippet to paste for a client: Claude Code gets its one-line command, the others a JSON config. */
 export function mcpSnippet(client: McpClient, url: string, auth: { bearer: string } | { scope?: string }) {
@@ -27,8 +28,9 @@ export function mcpSnippet(client: McpClient, url: string, auth: { bearer: strin
 }
 
 /** Client tabs, the snippet with its copy button and the steps after it. Every tab shares one cell, so the height holds. */
-export function McpClientSetup({ client, onClient, url, auth, label = 'MCP client' }: { client: McpClient; onClient: (client: McpClient) => void; url: string; auth: { bearer: string } | { scope?: string }; label?: string }) {
+export function McpClientSetup({ client, onClient, url, auth, label = 'MCP client' }: { client: McpClient; onClient: (client: McpClient) => void; url: string | null; auth: { bearer: string } | { scope?: string }; label?: string }) {
   const kind = 'bearer' in auth ? 'key' : 'oauth'
+  if (!url) return <p className="muted developer-copy" role="status">Loading this installation’s address…</p>
   return <div className="stack">
     <Tabs label={label} value={client} onValueChange={value => onClient(value as McpClient)} items={clientTabs} />
     <div className="developer-client-panels">{mcpClients.map(value => {

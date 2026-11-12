@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
+import { Alert, EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApi, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiQuery, useCanonicalOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { AgentPrompt, agentPrompt } from './agent-setup'
 import { guides, type Guide } from './guides'
 import './docs.css'
@@ -48,8 +48,20 @@ function operations(document?: Document): Operation[] {
   return result.map((operation, index) => ({ operation, index })).sort((a, b) => rank(a.operation.tag) - rank(b.operation.tag) || a.index - b.index).map(item => item.operation)
 }
 
+// The installation's canonical address (useCanonicalOrigin). The page renders its examples only once it is known, and
+// never on another host, so every example below has it.
+const DocsOrigin = createContext('')
+const useDocsOrigin = () => useContext(DocsOrigin)
+/** Shown instead of any example when the docs are open somewhere other than the installation's own address. */
+function ForeignHost({ origin }: { origin: string }) {
+  const page = window.location.host, canonical = new URL(origin).host
+  return <article className="docs-operation docs-foreign"><Alert tone="danger" title="This isn’t this Bane installation’s address">
+    These docs are open at <strong>{page}</strong>, but this installation is at <strong>{canonical}</strong>. Examples, keys and agent setup are only shown at its own address, so nothing you copy sends a key somewhere else. <a href={`${origin}/docs${window.location.hash}`}>Open the docs at {canonical}</a>.
+  </Alert></article>
+}
+
 function Quickstart({ steps }: { steps: QuickstartStep[] }) {
-  const origin = usePublicOrigin()
+  const origin = useDocsOrigin()
   steps = steps.map(step => step.code ? { ...step, code: here(step.code, origin) } : step)
   return <section className="docs-section docs-quickstart" aria-labelledby="docs-quickstart"><h2 id="docs-quickstart">Quickstart</h2>
     <ol>{steps.map(step => <li key={step.title}><strong>{step.title}.</strong> {step.text}
@@ -74,7 +86,7 @@ function SchemaDefinition({ document, input }: {document: Document; input: Schem
 }
 
 function OperationPage({ document, operation: raw }: {document: Document; operation: Operation}) {
-  const origin = usePublicOrigin()
+  const origin = useDocsOrigin()
   const operation = useMemo(() => ({ ...raw, samples: raw.samples.map(sample => ({ ...sample, source: here(sample.source, origin) })) }), [raw, origin])
   const [language, setLanguage] = useState(operation.samples[0]?.label ?? 'TypeScript SDK')
   useEffect(() => setLanguage(operation.samples[0]?.label ?? 'TypeScript SDK'), [operation.id])
@@ -120,7 +132,7 @@ function useAgentPrompt() {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const demo = useApi().mode === 'demo'
   const withDomain = (Boolean(identity) || demo) && canAdminister
-  const origin = usePublicOrigin()
+  const origin = useDocsOrigin()
   const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 20, refresh: false }, signal), { enabled: withDomain })
   if ((!identity && !demo && checkingSession) || (withDomain && domains.isPending)) return null
   // Prefer a verified domain for the test send; any domain still gives the agent its DNS context.
@@ -153,6 +165,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
 }
 
 export function DocsPage() {
+  const site = useCanonicalOrigin()
   const query = useQuery<Document>({queryKey: ['public-openapi'], queryFn: async ({signal}) => { const response = await fetch('/openapi.json', {signal}); if (!response.ok) throw new Error('Couldn’t load the API definition.'); return response.json() }})
   const all = useMemo(() => operations(query.data), [query.data])
   const [search, setSearch] = useState('')
@@ -178,7 +191,7 @@ export function DocsPage() {
           {shownGuides.length > 0 && <div className="docs-nav-group docs-nav-group--guides"><h2>Guides</h2>{!q && <a href="#" data-active={!selected || undefined}><span>Overview and quickstart</span></a>}{shownGuides.map(item => <a key={item.id} href={`#guide-${item.id}`} data-active={selected === `guide-${item.id}` || undefined}><span>{item.title}</span></a>)}</div>}
           {query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && q ? !shownGuides.length && <p className="muted docs-nav-empty">Nothing matches.</p> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{tagTitle(group)}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
       </aside>
-      <main className="docs-main">{guide ? <GuidePage guide={guide} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : current ? <OperationPage document={query.data!} operation={current} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : <DocsOverview document={query.data!} all={all} />}</main>
+      <main className="docs-main">{site.foreign && site.origin ? <ForeignHost origin={site.origin} /> : !site.origin ? (site.error ? <ErrorState error={site.error} onRetry={site.retry} /> : <EmptyState title="Loading documentation…" />) : <DocsOrigin.Provider value={site.origin}>{guide ? <GuidePage guide={guide} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : current ? <OperationPage document={query.data!} operation={current} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : <DocsOverview document={query.data!} all={all} />}</DocsOrigin.Provider>}</main>
     </div>
   </div>
 }

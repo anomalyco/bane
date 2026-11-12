@@ -73,7 +73,7 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   const serverUrl = useMcpUrl()
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
-    <div className="developer-url"><code>{serverUrl}</code><CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
+    <div className="developer-url"><code>{serverUrl ?? ''}</code>{serverUrl && <CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" />}</div>
     <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are two ways to sign in. <strong>As you</strong>: the client opens your browser, you sign in with your dashboard’s Google account and approve what it may do; no key to copy. <strong>One agent inbox</strong>: an inbox key in the config limits the agent to that inbox; create it in the dashboard with Connect an agent (API keys, or any agent inbox).</p>
     {chooseAccess && <div className="developer-access">
       <Field label="Access it asks for" htmlFor="developer-mcp-access" hint={client === 'opencode' ? selected.hint : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
