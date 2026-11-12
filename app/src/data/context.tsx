@@ -223,6 +223,10 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     </div></main>}
   </SessionContext.Provider></ApiContext.Provider>
 }
+// The installation's public origin, for examples and connection URLs.
+export function usePublicOrigin() {
+  return useContext(SessionContext)?.identity?.origin || window.location.origin
+}
 export function useApi() {
   const api = useContext(ApiContext)
   if (!api) throw new Error('ApiProvider is required')
