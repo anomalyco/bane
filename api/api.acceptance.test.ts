@@ -4934,6 +4934,9 @@ describe('Dashboard API capabilities', () => {
       for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
       // Jobs: a refusal is retried with backoff (attempt charged); a real bug still fails the job.
       const { processJobs } = await import('./src/jobs.js');
+      // processJobs claims the next due job of any workspace: under the full suite another test's committed job could be
+      // claimed instead (CI flake: attempts 0). Shadow the queue in this rolled-back fixture, as the campaign.run tests do.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       const job = async (id: string, failure: unknown) => {
         await db.query("INSERT INTO jobs(id, workspace_id, type, payload, available_at) VALUES ($1, $2, 'campaign.run', '{}'::jsonb, now() - interval '1 second')", [id, wid]);
         assert.equal(await processJobs(runtime, { 'campaign.run': async () => { throw failure; } }, 1, 1), 1);

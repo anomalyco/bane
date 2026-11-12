@@ -12,9 +12,12 @@ if [[ ! -s $tail ]]; then
   jq -n --argjson ids "$ids" --arg reason "$reason" '{requestIds: $ids, available: false, reason: $reason, lines: []}'
   exit 0
 fi
-# Each tail event has logs[].message[] (Bane logs one JSON object per line) and exceptions[].
+# Each tail event has logs[].message[] (Bane logs one JSON object per line, as a string or an object) and
+# exceptions[]. A line counts when it carries one of the request IDs anywhere; only Bane's fields are kept from it.
 jq -sc --argjson ids "$ids" '
   def fields: {timestamp, level, requestId, operation, method, status, code, databaseCode, jobId, message: ((.message // "") | tostring | .[0:300])} | with_entries(select(.value != null and .value != ""));
-  [ .[] | (.logs // [])[] | .message[]? | (try fromjson catch null) | objects | select(.requestId as $id | $ids | index($id)) | fields ]
-  | {requestIds: $ids, available: true, lines: .[0:200]}
+  def mentions: tostring as $text | any($ids[]; . as $id | $text | contains($id));
+  [ .[] | objects ] as $events
+  | [ $events[] | (.logs // [])[] | .message[]? | (if type == "string" then (try fromjson catch null) else . end) | objects | select(mentions) | fields ]
+  | {requestIds: $ids, available: true, events: ($events | length), lines: .[0:200]}
 ' "$tail"
