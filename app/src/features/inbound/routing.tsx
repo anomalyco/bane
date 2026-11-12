@@ -6,6 +6,8 @@ import { useApiDef, useApiMutation } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
+import { PrivateAddress } from '../../components/PrivateAddress'
+import { CreatedEndpointDialog, NewEndpointDialog, type Endpoint } from './ritual-connections'
 import '../settings/settings.css'
 import './inbound.css'
 type Destination = { id: string; name: string; detail: string; kind: 'inbox' | 'webhook'; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook }
@@ -24,7 +26,7 @@ export function RouteEditor({ match, route, to, onClose }: { match: string; rout
   const webhooks = useApiDef(queries.inboundWebhooks())
   if (!addresses.data || !webhooks.data) return null
   const draft = route ? { match, to: route.to, route: { id: route.id, enabled: route.enabled, match, to: route.to } as MailRoute } : { match, to: to ?? [] }
-  return <RouteDialog draft={draft} destinations={destinationsOf(addresses.data, webhooks.data)} owners={addresses.data} onClose={onClose} />
+  return <RouteDialog draft={draft} destinations={destinationsOf(addresses.data, webhooks.data)} owners={addresses.data} onClose={onClose} refreshWebhooks={async () => (await webhooks.refetch()).data ?? []} />
 }
 
 const matchHint = (match: string) => {
@@ -33,7 +35,10 @@ const matchHint = (match: string) => {
   return local === '*' ? `Every address at ${host} without a more specific route.` : local.includes('*') ? `Addresses at ${host} that fit this pattern, unless an exact route matches.` : `Only ${m}, and its plus addresses such as ${local}+tag@${host}.`
 }
 type Action = 'deliver' | 'keep' | 'drop'
-function RouteDialog({ draft, destinations, owners, onClose }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void }) {
+function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; refreshWebhooks: () => Promise<InboundWebhook[]> }) {
+  // A new webhook endpoint is made here, without leaving, and ticked once it exists.
+  const [creating, setCreating] = useState(false)
+  const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
   const route = draft.route
   const [match, setMatch] = useState(draft.match)
   const [action, setAction] = useState<Action>(draft.to === 'drop' ? 'drop' : draft.to.length || !route ? 'deliver' : 'keep')
@@ -50,7 +55,7 @@ function RouteDialog({ draft, destinations, owners, onClose }: { draft: { match:
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!normalized.includes('@')) return setProblem('Enter an address, a pattern or *@domain.')
-    if (action === 'deliver' && !selected.length) return setProblem('Choose at least one inbox or endpoint, or store it without an inbox.')
+    if (action === 'deliver' && !selected.length) return setProblem('Choose at least one inbox or webhook, or store it without an inbox.')
     const order = new Map(destinations.map((d, i) => [d.id, i]))
     try { await save.mutateAsync({ match: normalized, to: action === 'drop' ? 'drop' : action === 'keep' ? [] : [...selected].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0)), enabled }); onClose() } catch { /* Shown in the form. */ }
   }
@@ -58,11 +63,12 @@ function RouteDialog({ draft, destinations, owners, onClose }: { draft: { match:
     const items = destinations.filter(d => d.kind === kind)
     return <fieldset className="routing-choices" disabled={save.isPending}>
       <legend className="ui-field__label">{label}</legend>
-      {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)} label={<span className="settings-cell-stack"><span>{d.name}{d.paused ? ' (paused)' : ''}</span>{d.detail !== d.name && <span className="ui-field__hint">{d.detail}</span>}</span>} />)}</div> : <p className="muted">{empty}</p>}
+      {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)} label={<span className="settings-cell-stack"><span>{d.kind === 'inbox' && d.name === d.detail ? <PrivateAddress value={d.name} /> : d.name}{d.paused ? ' (paused)' : ''}</span>{d.detail !== d.name && <span className="ui-field__hint">{d.kind === 'inbox' ? <PrivateAddress value={d.detail} /> : d.detail}</span>}</span>} />)}</div> : <p className="muted">{empty}</p>}
+      {kind === 'webhook' && <div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New webhook</Button></div>}
     </fieldset>
   }
   return <>
-    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : owner && draft.match ? `Route ${owner.address === normalized ? owner.address : normalized}` : 'Add route'}
+    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : draft.match ? <>Where should mail to <PrivateAddress value={normalized} /> go?</> : 'Add route'} description="A route says where an address’s mail goes: its inbox, other inboxes, webhooks, or nowhere." 
       footer={<>
         {route && <Button variant="ghost" className="routing-delete" disabled={save.isPending} onClick={() => setConfirmDelete(true)}>Delete route</Button>}
         <Button disabled={save.isPending} onClick={onClose}>Cancel</Button>
@@ -74,11 +80,12 @@ function RouteDialog({ draft, destinations, owners, onClose }: { draft: { match:
         </Field>
         <Field label="Goes to" htmlFor="routing-action" error={fieldError(save.error, 'to')}>
           <Select id="routing-action" value={action} disabled={save.isPending} onValueChange={value => { setAction(value as Action); setProblem(null) }}
-            options={[{ value: 'deliver', label: 'These inboxes and endpoints' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
+            options={[{ value: 'deliver', label: 'These inboxes and webhooks' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
         </Field>
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}
-          {group('webhook', 'Endpoints', <>No webhooks yet. <Link to="/receiving?tab=endpoints">Add an endpoint</Link>.</>)}
+          {group('webhook', 'Webhooks', 'No webhooks yet. A webhook posts each message to your server as signed JSON.')}
+          <p className="muted routing-explain">Slack, Discord and forwards aren’t listed: a ritual sends to them, so it can pick which mail and what the message says. <Link to="/receiving/rituals?new=1">Write a ritual</Link>. If a ritual calls one of these webhooks with its own payload, that webhook gets the ritual’s payload instead of the whole message, once per message.</p>
         </>}
         {action === 'keep' && <p className="muted routing-explain">Mail is stored and readable through the API by message ID, but appears in no inbox.</p>}
         {action === 'drop' && <Alert tone="warning">Dropped mail is not stored and cannot be recovered. Its receipt still records that it arrived.</Alert>}
@@ -88,6 +95,12 @@ function RouteDialog({ draft, destinations, owners, onClose }: { draft: { match:
         {!fieldError(save.error, 'match') && !fieldError(save.error, 'to') && <MutationError error={save.error} />}
       </form>
     </Dialog>
+    <NewEndpointDialog open={creating} onOpenChange={setCreating} types={['webhook']} onCreated={async endpoint => {
+      setCreating(false); setCreated(endpoint)
+      const hook = (await refreshWebhooks()).find(h => h.key === endpoint.name)
+      if (hook) { setAction('deliver'); setSelected(current => current.includes(hook.id) ? current : [...current, hook.id]) }
+    }} />
+    <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRitual={false} />
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description={`Mail to ${route?.match ?? ''} falls back to the next most specific rule: its own inbox, a pattern or the domain default.`} confirmLabel="Delete route" pending={remove.isPending}
       onConfirm={async () => { try { await remove.mutateAsync(); setConfirmDelete(false); onClose() } catch { /* The dialog stays open. */ } }} />
   </>

@@ -349,6 +349,15 @@ export function admissionPeer(address: string): string {
     return [...a, ...Array(8-a.length-b.length).fill('0'), ...b].slice(0,4).join(':') + '::';
   } catch { return 'unknown'; }
 }
+// Cloudflare gives every cross-zone Worker subrequest the same client address and names the calling
+// zone in CF-Worker, so callers on Workers (OpenCode Console among them) would otherwise share one
+// admission bucket and one failure budget with every other Worker on the Internet. Only that egress
+// address may choose a bucket this way; any other client keeps its own address.
+const WORKER_EGRESS = admissionPeer('2a06:98c0:3600::103');
+export function admissionKey(address: string, worker: string | null) {
+  const zone = worker?.trim().toLowerCase();
+  return address === WORKER_EGRESS && zone && /^[a-z0-9.-]{1,253}$/.test(zone) ? `worker:${zone}` : address;
+}
 
 // Identity entry has a request budget; authenticated API routes have a failure
 // budget. Check completed failures before dispatch, never charge concurrency.

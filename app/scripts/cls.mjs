@@ -79,6 +79,8 @@ const pages = ids => [
   ['Settings · account', '/settings#account', { from: '/settings' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Docs', '/docs', { from: '/' }],
+  ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
+  ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   ['Signed out', '/', { user: null }],
 ];

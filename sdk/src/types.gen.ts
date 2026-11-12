@@ -2732,6 +2732,13 @@ export type InboundThread = {
     subject: string;
     snippet: string;
     lastMessageAt: string;
+    /**
+     * Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address.
+     */
+    from: {
+        name: string | null;
+        address: string;
+    };
     addressIds: Array<string>;
     /**
      * Distinct messages visible within the requested address scope.
@@ -13302,7 +13309,10 @@ export type TestEndpointResponse = TestEndpointResponses[keyof TestEndpointRespo
 export type CreateInboxConnectionData = {
     body: {
         inboxes: Array<string>;
-        client: 'opencode' | 'claude' | 'generic';
+        /**
+         * opencode, claude (Claude Code), cursor, or generic for any other MCP client.
+         */
+        client: 'opencode' | 'claude' | 'cursor' | 'generic';
         auth: 'key' | 'oauth';
         reply?: boolean;
     };

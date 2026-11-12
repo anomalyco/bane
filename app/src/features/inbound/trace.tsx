@@ -140,7 +140,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
   const position = (row: number, step: number) => flat.findIndex(f => f.row === row && f.step === step)
   const done = at >= flat.length
   return <div className="trace-view" data-done={done || undefined}>
-    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `${result.trace.length} ${result.trace.length === 1 ? 'ritual' : 'rituals'} ran · ${result.steps} steps` : 'No ritual runs on this mail.'}</span>
+    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `Ran ${result.trace.length === 1 ? `the ${result.trace[0]!.key} ritual` : `${result.trace.length} rituals`}: each check lights up true or false, then what it did.` : 'No ritual runs on this mail.'}</span>
       <div className="cluster">{!done && <Button size="sm" variant="ghost" onClick={skip}>Show all</Button>}</div></div>
     {result.recipients.map(rcpt => {
       const rows = result.trace.map((row, r) => ({ row, r })).filter(x => x.row.recipient === rcpt.address)
@@ -178,10 +178,10 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
           <span className="trace-result__title">Result</span>
           <span className="trace-result__items">
             {rcpt.dropped ? <span className="trace-chip"><TargetIcon type="drop" size={13} />{outcomes.drop}</span> : <>
+              {rcpt.junk && <span className="trace-chip" data-tone="warning">Stored as junk</span>}
               {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} />{inboxName(id)}</span>)}
               {(rcpt.webhooks ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type={hook(id)?.type ?? 'webhook'} size={13} />{hook(id)?.name ?? 'Webhook'}</span>)}
               {!rcpt.inboxes?.length && !rcpt.webhooks?.length && <span className="trace-chip"><TargetIcon type="store" size={13} />{outcomes.store}</span>}
-              {rcpt.junk && <span className="trace-chip" data-tone="warning">Junk</span>}
               {(rcpt.labels ?? []).map(l => <span key={l} className="trace-chip trace-chip--label">{l}</span>)}
             </>}
             {(rcpt.warnings ?? []).map(w => <span key={w} className="trace-warning">{w}</span>)}
@@ -240,7 +240,7 @@ export function TracePage() {
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
         <Input id="trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Rituals run as saved. Omens answer their default; set answers when you try a ritual in its editor.</span></div>
+      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Rituals run as saved. Omens (questions for Bane’s AI) give their default answer here; to set answers, try a ritual in its editor.</span></div>
     </form>
     <div ref={view} className="trace-out">
       {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>
