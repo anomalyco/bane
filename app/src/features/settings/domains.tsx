@@ -12,6 +12,7 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { catchAllLabel, mxTone, receivingStatus } from '../inbound/status'
 import { catchAllSetting } from '../inbound/concepts'
 import { fieldError, MutationError } from './shared'
+import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 
@@ -70,6 +71,9 @@ function ReceivingSettings({ domainId, receiving }: { domainId: string; receivin
 }
 
 export function DomainsPage() {
+  return useWorkspaceAccess().canAdminister ? <DomainsList /> : <AdminOnlyPage title="Domains" button="Add domain" action="add domains, see their DNS records and turn on receiving" />
+}
+function DomainsList() {
   const { regionId } = useRegion()
   const warm = usePrefetchQueries()
   const { multiTenant } = useWorkspaceAccess()
@@ -121,6 +125,9 @@ export function DomainsPage() {
 }
 
 export function DomainDetailPage() {
+  return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" action="add domains, see their DNS records and turn on receiving" />
+}
+function DomainDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const { regionId, setRegionId } = useRegion()

@@ -118,13 +118,14 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .trace-cond { border-radius: 3px; background: transparent; color: inherit; box-shadow: inset 0 -1px 0 var(--color-border-strong); transition: background 220ms ease-out, box-shadow 220ms ease-out, color 220ms ease-out; }
 .trace-cond[data-state='true'] { background: var(--color-success-bg); box-shadow: inset 0 0 0 1px var(--color-success-border); color: var(--color-success); }
 .trace-cond[data-state='false'] { background: var(--color-danger-bg); box-shadow: inset 0 0 0 1px var(--color-danger-border); color: var(--color-danger); }
-.trace-steps { display: grid; align-content: start; gap: 2px; margin: 0; padding: var(--space-8); list-style: none; }
+.trace-steps { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 2px; margin: 0; padding: var(--space-8); list-style: none; }
 .trace-step { display: flex; align-items: center; gap: var(--space-8); min-height: 30px; padding: var(--space-4) var(--space-8); border-radius: var(--radius-sm); font-size: var(--text-sm); transition: opacity 220ms ease-out, transform 260ms var(--ease-out-strong), background 220ms ease-out; }
 .trace-step[data-state='pending'] { opacity: 0; transform: translateY(4px); }
 .trace-step[data-state='active'] { background: var(--color-active-bg); }
 .trace-step--error { color: var(--color-danger); }
 .trace-step__line { flex: none; width: 28px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
-.trace-step__code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); }
+/* A long condition wraps, so its true or false always stays in view. */
+.trace-step__code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 18px; }
 .trace-bool { flex: none; padding: 0 6px; border-radius: 4px; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 18px; }
 .trace-bool[data-value='true'] { background: var(--color-success-bg); color: var(--color-success); }
 .trace-bool[data-value='false'] { background: var(--color-danger-bg); color: var(--color-danger); }
