@@ -8,7 +8,7 @@ import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mergeSuppression } from './db/audience.js';
-import { SuppressionReason, SuppressionEventData } from './core.js';
+import { SuppressionReason, SuppressionEventData, readCursor, nextCursor } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
@@ -122,6 +122,10 @@ const SendInput = z.object({
   if (v.kind === 'marketing' && ((Array.isArray(v.to) ? v.to.length : 1) !== 1 || v.cc.length || v.bcc.length)) ctx.addIssue({ code: 'custom', message: 'Marketing messages require exactly one To recipient and no Cc/Bcc.' });
   if (v.template && (v.attachments.length || v.kind === 'marketing')) ctx.addIssue({ code: 'custom', message: 'Stored templates currently support transactional messages without attachments only.' });
 }).openapi('BatchSendEmailItem');
+// SMTP already limits the entire MIME message to the advertised wire SIZE. Keep all
+// address, HTML and encoded-size checks, without imposing the public JSON body-part cap.
+const ProtocolBody = z.string().min(1).optional();
+const ProtocolSendInput = SendInput.safeExtend({ html: ProtocolBody, text: ProtocolBody });
 const ReplyAddressId = z.string().min(1).max(120).optional();
 const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
@@ -237,18 +241,6 @@ export async function pageBinding(a: Actor, resource: string, query: Record<stri
   const { cursor: _cursor, limit: _limit, ...filters } = query;
   // This fixed field is part of the hash in already-issued email and campaign cursors.
   return (await digest(canonical({ workspaceId: a.workspaceId, environment: 'live', resource, filters }))).slice(0, 24);
-}
-function readCursor(value: string | undefined, binding: string): { at: string; id: string } | null {
-  if (!value) return null;
-  try {
-    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
-    const tuple = z.tuple([z.string().datetime({ offset: true }), z.string().min(1).max(120), z.literal(binding)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
-    return { at: tuple[0], id: tuple[1] };
-  } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
-}
-function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
-  const last = rows[limit - 1];
-  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
 }
 export function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
 export const scope = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
@@ -678,7 +670,9 @@ async function validateHtmlUrls(html: string | undefined) {
   }
 }
 export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
-  const bytes = new TextEncoder().encode((snapshot.raw ?? '') + (snapshot.html ?? '') + (snapshot.text ?? '') + snapshot.subject).length;
+  // Count UTF-8 bytes without flattening all body parts into another full-size string
+  // and allocating a second full-size buffer during dispatch.
+  const bytes = [snapshot.raw, snapshot.html, snapshot.text, snapshot.subject].reduce<number>((n,part)=>n+(part ? Buffer.byteLength(part) : 0),0);
   // Conservatively reserve base64/MIME expansion, line folding and headers. This is an application cap, not SES's 40 MB maximum.
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
   if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
@@ -1024,7 +1018,8 @@ export type MailboxSendRequest = { protocolEnvelope?:boolean; from: string; from
  * Only sendFromMailbox calls it, after taking the admission lock. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   sesHeaders(request.headers.length);
-  const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
+  const schema = request.protocolEnvelope ? ProtocolSendInput : SendInput;
+  const parsed = schema.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
   const bulk=await checkPending(runtime, db, a, hostedCost(request.to, request.cc, request.bcc));
@@ -1140,23 +1135,24 @@ export function registerSending(app: App) {
     const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
       contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
         WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
-      timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t.id),'[]') FROM (
+      timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
         SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
-        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY id LIMIT 101) t)`
+        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`
     }).from(emails).where(mailWhere(a,emailId)).limit(1);
     if(!detail) return notFound('Email');
     const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
     const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
-    return c.json({email,content:{html,text,attachments},contact,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:timeline.length>100 ? timeline[99]!.id : null}},200);
+    return c.json({email,content:{html,text,attachments},contact,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
     const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
     return c.json(await visibleEmailContent(c.env,a,row,row.untrustedContent),200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
-    const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), q.cursor ? gt(emailEvents.id, q.cursor) : undefined)).orderBy(asc(emailEvents.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    // Oldest first by creation time: event IDs are random, so ordering by ID shuffled an email's history.
+    const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query'), binding = `email-events:${emailId}`, cursor = readCursor(q.cursor, binding);
+    const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), cursor ? sql`(${emailEvents.createdAt},${emailEvents.id})>(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(asc(emailEvents.createdAt), asc(emailEvents.id)).limit(q.limit + 1);
+    return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');
