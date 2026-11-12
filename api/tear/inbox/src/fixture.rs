@@ -1,5 +1,5 @@
-//! Product side: one long-lived Bun process (`host.ts`) over the isolated PostgreSQL in
-//! DATABASE_URL. `open` resets it to a fresh synthetic workspace; `act` runs one action and
+//! Product side: one long-lived Bun process (`host.ts`) over the disposable PostgreSQL in
+//! TEAR_DATABASE_URL. `open` resets it to a fresh synthetic workspace; `act` runs one action and
 //! returns the observation (request result, statements it unblocked, committed view, safety).
 use serde_json::{Value, json};
 use statecheck::{Error, R};
@@ -18,12 +18,12 @@ fn error(e: impl std::fmt::Display) -> Error {
 
 impl Host {
     pub fn spawn() -> R<Self> {
-        let api = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let api = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
         let log = std::env::var("TEAR_LOG")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/target/host.log").into());
         let log = std::fs::File::create(log).map_err(error)?;
         let mut child = Command::new(std::env::var("BUN").unwrap_or_else(|_| "bun".into()))
-            .arg("tear/host.ts")
+            .arg("tear/inbox/host.ts")
             .current_dir(api)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -45,7 +45,12 @@ impl Host {
             .map_err(error)?;
         let mut line = String::new();
         if self.stdout.read_line(&mut line).map_err(error)? == 0 {
-            return Err(Error::new("host exited; see tear/target/host.log"));
+            // A refused database (see ../disposable.ts) or a crash: surface the host's last words.
+            let log = std::env::var("TEAR_LOG").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/target/host.log").into());
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let tail: Vec<&str> = text.lines().rev().take(3).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            return Err(Error::new(format!("host exited ({log}): {}", tail.join(" | "))));
         }
         let reply: Value = serde_json::from_str(&line).map_err(error)?;
         if reply["ok"] == json!(true) {

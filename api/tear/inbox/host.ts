@@ -6,6 +6,11 @@
 // inside explicit transactions so a step can land between a statement's locks and its COMMIT;
 // a statement waiting on another backend's lock is reported as "blocked". Unprefixed actions
 // are autocommit requests on a separate connection.
+//
+// It runs only on a dedicated, migrated database its creator marked disposable
+// (../disposable.ts, the rule every tear host shares): TEAR_DATABASE_URL must be a plain loopback
+// URL, and the marker and the foreign-data check pass before the first write and before every
+// fixture. Its workspaces are tear_inbox_*.
 import pg from 'pg';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sql } from 'drizzle-orm';
@@ -17,12 +22,25 @@ const hex = (n: number) => Array.from({ length: Math.ceil(n / 32) }, () => rando
 for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) console[level] = (...a: unknown[]) => { process.stderr.write(a.map(String).join(' ') + '\n'); };
 const out = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
 
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(DATABASE_URL).hostname)) throw new Error('tear host needs an isolated local DATABASE_URL');
+// Before any module that connects: a loopback URL nothing can redirect, then the marker and the
+// data check. A refusal exits 1 with the reason on stderr.
+const { disposableUrl, assertDisposable } = await import('../disposable.js');
+const DATABASE_URL = await (async () => {
+  try {
+    const checked = disposableUrl(process.env.TEAR_DATABASE_URL, 'TEAR_DATABASE_URL');
+    const c = new pg.Client({ connectionString: checked });
+    await c.connect();
+    try { await assertDisposable(text => c.query(text)); } finally { await c.end(); }
+    return checked;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+})();
 
 const [{ createApp }, { dispatchAsMailboxAccess }, { nodeRuntime }, { storeIncoming }, { acceptInboundNotification }, { attachToMailboxes }, { ingestInput }] = await Promise.all([
-  import('../src/app.js'), import('../src/auth.js'), import('../src/adapters/node.js'), import('../src/mailbox-ingest-store.js'),
-  import('../src/mailbox-receipts.js'), import('../src/mailbox-store.js'), import('../src/mailbox-ingest-input.js'),
+  import('../../src/app.js'), import('../../src/auth.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-ingest-store.js'),
+  import('../../src/mailbox-receipts.js'), import('../../src/mailbox-store.js'), import('../../src/mailbox-ingest-input.js'),
 ]);
 const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), GOOGLE_CLIENT_ID: 'tear-fixture', GOOGLE_CLIENT_SECRET: 'tear-fixture',
   AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear' });
@@ -63,10 +81,11 @@ async function abortAll() {
 }
 async function reset(q: number | null) {
   await abortAll();
+  await assertDisposable(text => checker.client.query(text));
   if (ws) await auto.client.query('DELETE FROM mailboxes WHERE workspace_id=$1', [ws]);
-  ws = 'tear' + hex(12); quota = q;
+  ws = 'tear_inbox_' + hex(12); quota = q;
   runtime.config.workspaceId = ws;
-  const host = `${ws}.invalid`, domain = `${ws}_dom`;
+  const host = `${ws.replaceAll('_', '-')}.invalid`, domain = `${ws}_dom`;
   ids = { A: `${ws}_a`, B: `${ws}_b` }; addr = { A: `a@${host}`, B: `b@${host}` };
   const c = auto.client;
   await c.query('BEGIN');

@@ -7,7 +7,8 @@
 //!   cargo run --release -- edges [DEPTH] [MAX_STATES] [--msgs M] [--quota Q|none]
 //!   cargo run --release -- trace ACTION...         replay one trace, e.g. "accept m1 a" "store m1"
 //!
-//! Requires DATABASE_URL for an isolated local PostgreSQL with Bane's migrations applied.
+//! Run from `api/tear/inbox`. Requires TEAR_DATABASE_URL: a plain loopback URL of a dedicated,
+//! migrated PostgreSQL database marked disposable (`../disposable.ts`, shared by every tear host).
 //!
 //! # Edge-case checklist
 //!
@@ -656,6 +657,7 @@ fn main() -> R<()> {
         serde_json::to_string_pretty(&report).unwrap_or_default()
     );
     let bad = report["mismatched"].as_u64().is_some_and(|n| n > 0)
+        || report["errors"].as_array().is_some_and(|e| !e.is_empty())
         || report["status"].as_str().is_some_and(|s| s != "match");
     if bad {
         std::process::exit(1);
