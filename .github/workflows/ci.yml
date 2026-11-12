@@ -158,3 +158,61 @@ jobs:
       - name: Run all acceptance tests with isolated database and object storage
         run: bash ../.github/scripts/acceptance.sh
         working-directory: api
+
+  # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
+  # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
+  # Fails above CLS 0.001 or on a long task over 200 ms during in-app navigation. Locally: cd app && bun run cls.
+  cls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_PASSWORD: fixture-admin
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      # Pull requests run it when they touch the dashboard, the API or this workflow; every dev push runs it.
+      # HEAD^1 of a pull request's merge checkout is the base branch.
+      - name: Check for dashboard or API changes
+        id: changes
+        run: |
+          if [[ $GITHUB_EVENT_NAME != pull_request ]] || ! git diff --quiet HEAD^1 HEAD -- app api .github/workflows/ci.yml; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'No app/, api/ or CI changes: nothing to measure.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.changes.outputs.run == 'true'
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+      - if: steps.changes.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - if: steps.changes.outputs.run == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('api/bun.lock', 'app/bun.lock') }}
+      - if: steps.changes.outputs.run == 'true'
+        run: for pkg in api app; do (cd "$pkg" && bun install --frozen-lockfile); done
+      # Builds the dashboard, then measures it with the runner's Google Chrome against the Postgres service.
+      - name: Measure layout shift on every page
+        if: steps.changes.outputs.run == 'true'
+        working-directory: app
+        env:
+          CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
+        run: bun run cls
+      - name: Upload the shift sources
+        if: failure() && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cls-shift-sources
+          path: app/.cls/
+          retention-days: 14
