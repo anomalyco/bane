@@ -36752,8 +36752,10 @@
                     "enum": [
                       "opencode",
                       "claude",
+                      "cursor",
                       "generic"
-                    ]
+                    ],
+                    "description": "opencode, claude (Claude Code), cursor, or generic for any other MCP client."
                   },
                   "auth": {
                     "type": "string",

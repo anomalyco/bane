@@ -10031,6 +10031,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
         const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);
+        // One config builder (mcp-clients.ts) for the API, the dashboard and Docs: plain /mcp, the key as a bearer header, and keys
+        // named for the inbox and client so several connections stay apart. OpenCode gets its V2 shape (mcp.servers).
+        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer bane_mbx_/);
+        assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
+        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
+        assert.deepEqual(opencode.config.mcp.servers.bane,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.bane,undefined);
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer bane_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);

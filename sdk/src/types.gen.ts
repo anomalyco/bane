@@ -12778,7 +12778,10 @@ export type TestEndpointResponse = TestEndpointResponses[keyof TestEndpointRespo
 export type CreateInboxConnectionData = {
     body: {
         inboxes: Array<string>;
-        client: 'opencode' | 'claude' | 'generic';
+        /**
+         * opencode, claude (Claude Code), cursor, or generic for any other MCP client.
+         */
+        client: 'opencode' | 'claude' | 'cursor' | 'generic';
         auth: 'key' | 'oauth';
         reply?: boolean;
     };

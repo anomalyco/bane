@@ -117,7 +117,7 @@ export interface Inbox {
   status: InboxStatus; createdAt: ISODate; expiresAt: ISODate; deleteAfter: ISODate; limits: { messages: number; bytes: number }
   send: { enabled: boolean; perDay: number; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
 }
-export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; credential?: { name: string; permissions: ('read' | 'modify')[] } }
+export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; send?: { enabled: boolean }; credential?: { name: string; permissions: ('read' | 'modify' | 'send')[] } }
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
   id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
