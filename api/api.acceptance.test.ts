@@ -8603,6 +8603,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(ok(await http('GET',`/v1/inboxes/${bids[1]}/messages/${mid}`,tokens[1]!)).id,mid);
     assert.deepEqual((await peer.query("SELECT total,uid_next::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bids[0]])).rows,[{total:0,uid_next:2}]);
   });
+  // tear (api/tear) witness: accept, store, W delete, V flag, W commit.
+  test('inbox delete: a flag change queued on the inbox row behind the deletion fails and changes nothing',async t=>{
+    const writer=await fixtureDatabase(t),peer=await fixtureDatabase(t),w=unique('qdel'),bid=unique('mbx'),mid=unique('msg'),tid=unique('thr');
+    await writer.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'qdel.invalid',$3,'active','store')",[bid,w,REGION]);
+    await writer.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'qdel@qdel.invalid','inbox','forever')",[bid,w]);
+    await writer.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await writer.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);await writer.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'outbound','kept')",[mid,w,tid]);
+    await writer.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read) VALUES($1,$2,$3,$4,'outbound',now(),true)",[w,bid,mid,tid]);
+    const state=()=>peer.query('SELECT s.modseq::int,l.flags,l.modseq::int AS member FROM inbox_state s JOIN mailbox_messages l ON l.mailbox_id=s.inbox_id WHERE s.inbox_id=$1',[bid]).then(r=>r.rows[0]);
+    const before=await state(),pid=(await peer.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    await writer.query('BEGIN');try{
+      await writer.query('SELECT inbox_end($1,$2)',[w,bid]);
+      const queued=peer.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}') r`,[w,bid,mid]);
+      // Commit only once the change waits on the inbox row: it must then see the deletion.
+      let waiting=false;
+      for(let i=0;i<400&&!waiting;i++){waiting=(await writer.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+      assert.ok(waiting,'the flag change must queue behind the deletion');
+      await writer.query('COMMIT');
+      assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
+    }finally{await writer.query('ROLLBACK');}
+    assert.deepEqual(await state(),before);
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
