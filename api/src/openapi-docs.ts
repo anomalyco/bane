@@ -1,3 +1,4 @@
+import { webhookSignatureGuide } from './webhook-signature-guide.js';
 import type { App } from './core.js';
 
 type Json = Record<string, any>;
@@ -107,15 +108,17 @@ const quickstartCurl = `curl --request POST \\
   --url 'https://bane.mx/v1/emails/send' \\
   --header "Authorization: Bearer $BANE_API_KEY" \\
   --header 'Content-Type: application/json' \\
-  --header 'Idempotency-Key: first-email' \\
+  --header "Idempotency-Key: $(uuidgen)" \\
   --data '{"from":"hello@acme.com","to":"you@acme.com","subject":"Hello from Bane","text":"It works."}'`;
 export const quickstart: { title: string; text: string; code?: string }[] = [
   { title: 'Add and verify your domain', text: 'In the dashboard, open Domains and add it, or call POST /v1/domains with {"name":"acme.com"}. Publish the DNS records it returns at your DNS provider. Sending works once GET /v1/domains/{id} reports sending: "verified", usually within minutes of the records resolving. A domain whose records are still unproven after 72 hours is released.' },
   { title: 'Create an API key', text: 'In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as BANE_API_KEY on your server and never ship it to a browser.' },
-  { title: 'Send', text: '202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). These addresses count against hosted sending limits.', code: quickstartCurl },
+  { title: 'Send', text: '202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.', code: quickstartCurl },
   { title: 'Receive (optional)', text: 'Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.' },
   { title: 'Reply', text: 'POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References.' },
 ];
+// Guides beyond the first five minutes, for /docs.md and /llms.txt; the dashboard shows the same text as a Docs guide.
+export const guides: { id: string; title: string; text: string; code?: string; language?: string }[] = [webhookSignatureGuide];
 // Getting started first; account and installation plumbing last.
 const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Audience', 'Consent', 'ApiKeys', 'Inbound keys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
 const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
@@ -179,7 +182,10 @@ function grouped(document: Json, entries: ReturnType<typeof operationEntries>) {
   return tags.map(tag => ({ tag, entries: entries.filter(entry => tagOf(entry) === tag) }));
 }
 function quickstartMarkdown() {
-  return `## Quickstart\n\n${quickstart.map((step, index) => `${index + 1}. **${step.title}.** ${step.text}${step.code ? `\n\n   \`\`\`sh\n${step.code.split('\n').map(line => `   ${line}`).join('\n')}\n   \`\`\`` : ''}`).join('\n')}\n\n`;
+  return `## Quickstart\n\n${quickstart.map((step, index) => `${index + 1}. **${step.title}.** ${step.text}${step.code ? `\n\n   \`\`\`sh\n${step.code.split('\n').map(line => `   ${line}`).join('\n')}\n   \`\`\`` : ''}`).join('\n')}\n\n${guidesMarkdown()}`;
+}
+function guidesMarkdown() {
+  return guides.map(guide => `## ${guide.title}\n\n${guide.text}\n\n${guide.code ? `\`\`\`${guide.language ?? 'sh'}\n${guide.code}\n\`\`\`\n\n` : ''}`).join('');
 }
 
 export function createMarkdownDocs(document: Json, operationId?: string): string | null {

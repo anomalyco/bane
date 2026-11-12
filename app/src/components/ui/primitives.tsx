@@ -7,6 +7,7 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
+import { permissionCodes } from '../../data/types';
 import { usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
 import { Sheet, SheetOpenEffects, useSheetDrag } from './sheet';
@@ -202,9 +203,14 @@ function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, 
 export function TableSkeleton({ columns, rows = 5, pagination = false, className }: { columns: SkeletonColumn[]; rows?: number; pagination?: boolean; className?: string }) {
   return <><DataTable className={className} columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} />{pagination && <PaginationSkeleton />}</>;
 }
-export function Pagination({ page, pageSize, total, nextCursor, onPageChange }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void }) {
+// Cursor lists don't know their total until the last page: they say which rows are showing ("Showing 21–40"), and on
+// the last page how many there are in all, instead of a page size and a "2+" page count.
+export function Pagination({ page, pageSize, total, nextCursor, onPageChange, count }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void; count?: number }) {
   if (total === undefined && page <= 1 && !nextCursor) return null;
-  if (total === undefined) return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{pageSize} per page</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">{page} / {nextCursor ? `${page + 1}+` : page}</span><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
+  if (total === undefined) {
+    const first = (page - 1) * pageSize + 1, last = first + Math.max(0, (count ?? pageSize) - 1);
+    return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{count === undefined ? null : count === 0 ? 'No rows on this page' : `Showing ${first.toLocaleString()}–${last.toLocaleString()}${nextCursor ? '' : ` of ${last.toLocaleString()}`}`}</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">Page {page.toLocaleString()}</span><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
+  }
   return <NumberedPagination page={page} pageSize={pageSize} total={total} onPageChange={onPageChange} />
 }
 function NumberedPagination({ page, pageSize, total, onPageChange }: { page: number; pageSize: number; total: number; onPageChange: (page: number) => void }) {
@@ -255,7 +261,10 @@ export function ErrorText({ error, fallback = 'Something went wrong. Please try 
   if (error instanceof Error && 'text' in error && 'reference' in error) return <><span>{String(error.text)}</span><span className="ui-error-reference">{String(error.reference)}</span></>;
   return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
 }
+// A role that can't open something isn't a failure: a calm note with who can, and no retry that would fail again.
+const permissionError = (error: unknown) => error instanceof Error && 'code' in error && permissionCodes.has(String(error.code));
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof Error && 'text' in error ? String(error.text) : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
   return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
 }
 type ToastTone = 'success' | 'error' | 'info';

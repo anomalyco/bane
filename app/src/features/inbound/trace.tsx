@@ -217,8 +217,10 @@ export function TracePage() {
   const recent = useRecentMail()
   const [picked, setChoice] = useState<EmailChoice | null>(null)
   const choice = picked ?? defaultChoice(recent.data, preferred ?? addresses[0] ?? '')
-  // The form shows once recent mail and the routes are known, so its first paint is its final layout.
-  const ready = (recent.data !== undefined || !!recent.error) && (overview.data !== undefined || !!overview.error)
+  // The form shows once recent mail and the routes are known, so its first paint is its final layout. Gated on the first
+  // answer (isFetched), not data or error: the picker retries a failed read when it mounts, and that retry clears the
+  // error, so a gate on the error unmounted the picker and remounted it in a loop of requests.
+  const ready = recent.isFetched && (overview.data !== undefined || !!overview.error)
   const [to, setTo] = useState(preferred ?? '')
   const dry = useDryRun()
   const view = useRef<HTMLDivElement>(null)

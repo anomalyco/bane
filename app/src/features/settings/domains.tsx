@@ -12,6 +12,7 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { catchAllLabel, mxTone, receivingStatus } from '../inbound/status'
 import { catchAllSetting } from '../inbound/concepts'
 import { fieldError, MutationError } from './shared'
+import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 
@@ -42,7 +43,9 @@ function ReceivingCell({ domain, name }: { domain?: MailboxDomain; name: string 
 function DomainCardLine({ domain, receiving }: { domain: Domain; receiving?: MailboxDomain }) {
   if (domain.status !== 'verified' || ['pending', 'failed'].includes(domain.mailFromStatus) || domain.receivingIssue) return <span className={domain.receivingIssue ? 'text-warning' : undefined}>{setupSummary(domain)}</span>
   if (!receiving || receiving.status === 'off' || receiving.status === 'disabled') return <>Send only</>
-  return <>Receiving {receivingStatus[receiving.status].label.toLowerCase()}{receiving.name !== domain.name ? ` at ${receiving.name}` : ''} · {receiving.addressCount.toLocaleString('en-US')} {receiving.addressCount === 1 ? 'address' : 'addresses'}</>
+  // "Receiving" alone when active (its label is "Receiving"); otherwise the state, keeping MX in capitals.
+  const state = receiving.status === 'active' ? '' : `: ${receivingStatus[receiving.status].label.replace(/^./, c => c.toLowerCase())}`
+  return <>Receiving{state}{receiving.name !== domain.name ? ` at ${receiving.name}` : ''} · {receiving.addressCount.toLocaleString('en-US')} {receiving.addressCount === 1 ? 'address' : 'addresses'}</>
 }
 
 /** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
@@ -68,6 +71,9 @@ function ReceivingSettings({ domainId, receiving }: { domainId: string; receivin
 }
 
 export function DomainsPage() {
+  return useWorkspaceAccess().canAdminister ? <DomainsList /> : <AdminOnlyPage title="Domains" button="Add domain" action="add domains, see their DNS records and turn on receiving" />
+}
+function DomainsList() {
   const { regionId } = useRegion()
   const warm = usePrefetchQueries()
   const { multiTenant } = useWorkspaceAccess()
@@ -119,6 +125,9 @@ export function DomainsPage() {
 }
 
 export function DomainDetailPage() {
+  return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" action="add domains, see their DNS records and turn on receiving" />
+}
+function DomainDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const { regionId, setRegionId } = useRegion()
