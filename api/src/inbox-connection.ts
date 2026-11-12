@@ -8,13 +8,6 @@ import {mcpClientConfig,mcpClientNames,mcpClients,mcpServerUrl} from './mcp-clie
 // One connection: an inbox-only key inside a ready client config, or the same config for OAuth, where the person who
 // approves selects the inboxes on the consent screen. The config comes from mcp-clients.ts, as in the dashboard and Docs.
 export function registerInboxConnection(app:App){
-<<<<<<< HEAD
- const body=z.object({inboxes:z.array(z.string().min(1).max(120)).min(1).max(20),client:z.enum(['opencode','claude','generic']),auth:z.enum(['key','oauth']),reply:z.boolean().default(false)}).strict();
- app.openapi(createRoute({method:'post',path:'/v1/inbox-connections',operationId:'createInboxConnection',tags:['Agent inboxes'],security,summary:'Generate client config for selected inboxes. Key shown once; OAuth requires human selection at consent.',request:{body:json(body)},responses:{201:response(z.object({id:z.string().nullable(),inboxes:z.array(z.string()),config:z.record(z.string(),z.unknown()),nextStep:z.string()})),...errors}}),async c=>{const a=ritualAdmin(c,true),q=c.req.valid('json'),w=a.workspaceId,url=new URL(q.client==='opencode'?'/mcp?toolsets=all':'/mcp?toolsets=inboxes',c.env.config.publicUrl).href;const ids=[...new Set(q.inboxes)],key=q.auth==='key'?randomSecret('bane_mbx_'):null,kid=key?id('mbk'):null;
- await c.env.db.transaction(async tx=>{const found=await tx.execute<{expires:string|null}>(sql`SELECT delete_after::text AS expires FROM mailboxes WHERE workspace_id=${w} AND id=ANY(${sql.param(ids)}::text[]) AND kind='inbox' AND (delete_after IS NULL OR delete_after>now()) ORDER BY delete_after DESC FOR SHARE`);if(found.rowCount!==ids.length)throw new ApiError(422,'UNKNOWN_INBOX','Choose active inboxes in this workspace.');if(key&&kid){await tx.insert(mailboxKeys).values({id:kid,workspaceId:w,name:'Agent · '+q.client,hash:await digest(key),prefix:key.slice(0,14),expiresAt:found.rows[0]!.expires,mailboxIds:ids,permissions:q.reply?['read','send']:['read']});await ownReceiving(tx,c,'key',kid);
-    await recordAudit(tx,c,{action:'inbox_connection.create',workspaceId:w,target:{type:'inbox_key',id:kid},after:{client:q.client,auth:q.auth,inboxIds:ids,permissions:q.reply?['read','send']:['read']}})}});
- const headers=key?{headers:{Authorization:'Bearer '+key}}:{},config=q.client==='opencode'?{mcp:{bane:{type:'remote',url,...headers,...(key?{oauth:false}:{})}}}:q.client==='claude'?{mcpServers:{bane:{type:'http',url,...headers}}}:{url,...headers};c.header('Cache-Control','no-store');return c.json({id:kid,inboxes:ids,config,nextStep:key?'Copy the config to your agent. The bearer key is shown only once.':'Connect, then choose Only selected inboxes and select these inboxes on the human consent screen.'},201)});
-=======
  const body=z.object({inboxes:z.array(z.string().min(1).max(120)).min(1).max(20),client:z.enum(mcpClients).describe('opencode, claude (Claude Code), cursor, or generic for any other MCP client.'),auth:z.enum(['key','oauth']),reply:z.boolean().default(false)}).strict();
  app.openapi(createRoute({method:'post',path:'/v1/inbox-connections',operationId:'createInboxConnection',tags:['Agent inboxes'],security,summary:'Generate client config for selected inboxes. Key shown once; OAuth requires human selection at consent.',request:{body:json(body)},responses:{201:response(z.object({id:z.string().nullable(),inboxes:z.array(z.string()),config:z.record(z.string(),z.unknown()),nextStep:z.string()})),...errors}}),async c=>{
   const a=ritualAdmin(c,true),q=c.req.valid('json'),w=a.workspaceId,url=mcpServerUrl(c.env.config.publicUrl);
@@ -27,11 +20,11 @@ export function registerInboxConnection(app:App){
     const what=found.rows.length===1?found.rows[0]!.label:`${found.rows.length} inboxes`;
     await tx.insert(mailboxKeys).values({id:kid,workspaceId:w,name:`${what} · ${mcpClientNames[q.client]}`.slice(0,100),hash:await digest(key),prefix:key.slice(0,14),expiresAt:found.rows[0]!.expires,mailboxIds:ids,permissions:q.reply?['read','send']:['read']});
     await ownReceiving(tx,c,'key',kid);
+    await recordAudit(tx,c,{action:'inbox_connection.create',workspaceId:w,target:{type:'inbox_key',id:kid},after:{client:q.client,auth:q.auth,inboxIds:ids,permissions:q.reply?['read','send']:['read']}});
    }
   });
   const config=mcpClientConfig(q.client,url,key?{bearer:key}:{});
   c.header('Cache-Control','no-store');
   return c.json({id:kid,inboxes:ids,config,nextStep:key?'Copy the config to your agent. The bearer key is shown only once.':'Connect, then choose Only selected inboxes and select these inboxes on the human consent screen.'},201);
  });
->>>>>>> bane/dev
 }
