@@ -11,6 +11,7 @@ pub struct Limits {
     ips: HashMap<IpAddr, (u32, Arc<tokio::sync::Semaphore>)>,
     anonymous: u32,
     failures: HashMap<(IpAddr, u64), Failures>,
+    peer_failures: HashMap<IpAddr, VecDeque<Instant>>,
     accepts: HashMap<IpAddr, Bucket>,
 }
 #[derive(Default)]
@@ -25,12 +26,28 @@ impl Limits {
         self.failures.remove(&(ip, key));
     }
     pub fn blocked(&self, ip: IpAddr, key: u64, now: Instant) -> bool {
-        self.failures
+        self.peer_failures.get(&ip).is_some_and(|v| {
+            v.len() >= 30
+                && v.front()
+                    .is_some_and(|&t| now - t < Duration::from_secs(60))
+        }) || self
+            .failures
             .get(&(ip, key))
             .and_then(|f| f.until)
             .is_some_and(|until| until > now)
     }
     pub fn failure(&mut self, ip: IpAddr, key: u64, now: Instant) {
+        if self.peer_failures.len() >= 8192 {
+            self.peer_failures
+                .retain(|_, v| v.back().is_some_and(|&t| now - t < Duration::from_secs(60)));
+        }
+        if self.peer_failures.len() < 8192 || self.peer_failures.contains_key(&ip) {
+            let v = self.peer_failures.entry(ip).or_default();
+            v.retain(|&t| now - t < Duration::from_secs(60));
+            if v.len() < 30 {
+                v.push_back(now);
+            }
+        }
         self.failures.retain(|_, f| {
             f.until.is_some_and(|u| u > now) || f.times.back().is_some_and(|&t| now - t < WINDOW)
         });
@@ -146,6 +163,18 @@ impl Drop for Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn peer_failure_window_is_shared_across_names_not_peers() {
+        let mut a = Limits::default();
+        let ip = "127.0.0.1".parse().unwrap();
+        let t = Instant::now();
+        for k in 0..30 {
+            a.failure(ip, k, t);
+        }
+        assert!(a.blocked(ip, 31, t));
+        assert!(!a.blocked("127.0.0.2".parse().unwrap(), 31, t));
+        assert!(!a.blocked(ip, 31, t + Duration::from_secs(60)));
+    }
     #[test]
     fn peer_handshake_share_is_distinct_from_other_peers_and_global_slots() {
         let limits = Arc::new(Mutex::new(Limits::default()));
