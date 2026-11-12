@@ -4,7 +4,61 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+
+pub struct Shares {
+    pub responses: Arc<Semaphore>,
+    pub data: Arc<Semaphore>,
+    pub uploads: Arc<Semaphore>,
+    pub views: Arc<Semaphore>,
+}
+impl Shares {
+    pub fn new(responses: usize, data: usize, uploads: usize, view_mib: usize) -> Self {
+        Self {
+            responses: Arc::new(Semaphore::new(responses)),
+            data: Arc::new(Semaphore::new(data)),
+            uploads: Arc::new(Semaphore::new(uploads)),
+            views: Arc::new(Semaphore::new(view_mib * 1024)),
+        }
+    }
+}
+pub struct Reservation(Vec<OwnedSemaphorePermit>);
+impl Reservation {
+    /// FIFO within each share; a busy credential waits without holding an inbox or global permit.
+    pub async fn take(
+        global: Arc<Semaphore>,
+        shares: Option<(Arc<Semaphore>, Arc<Semaphore>)>,
+        n: u32,
+    ) -> Option<Self> {
+        tokio::time::timeout(Duration::from_secs(2), async move {
+            let mut permits = Vec::with_capacity(3);
+            if let Some((credential, inbox)) = shares {
+                for pool in [credential, inbox] {
+                    permits.push(pool.acquire_many_owned(n).await.ok()?);
+                }
+            }
+            permits.push(global.acquire_many_owned(n).await.ok()?);
+            Some(Self(permits))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+    pub fn len(&self) -> usize {
+        self.0[0].num_permits()
+    }
+    pub fn merge(&mut self, p: Self) {
+        for (a, b) in self.0.iter_mut().zip(p.0) {
+            a.merge(b)
+        }
+    }
+    pub fn shrink(&mut self, n: usize) {
+        for a in &mut self.0 {
+            drop(a.split(n));
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Limits {

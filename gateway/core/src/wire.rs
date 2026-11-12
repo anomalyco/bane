@@ -29,6 +29,9 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub fn tag(&self) -> &[u8] {
+        self.bytes.split(|b| *b == b' ').next().unwrap_or(b"*")
+    }
     pub fn partial(&self) -> bool {
         !self.bytes.is_empty()
     }

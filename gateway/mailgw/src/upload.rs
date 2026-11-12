@@ -1,7 +1,7 @@
+use crate::admission::Reservation;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::OwnedSemaphorePermit;
 
 /// Disk spool is anonymous (unlinked), bounded and owned by the connection. Allows
 /// signing the digest before sending headers, without retaining the literal in RAM.
@@ -10,22 +10,16 @@ pub struct Upload {
     hash: Sha256,
     pub remaining: usize,
     pub size: usize,
-    _global: OwnedSemaphorePermit,
-    _inbox: OwnedSemaphorePermit,
+    _reservation: Reservation,
 }
 impl Upload {
-    pub fn new(
-        size: usize,
-        global: OwnedSemaphorePermit,
-        inbox: OwnedSemaphorePermit,
-    ) -> Result<Self> {
+    pub fn new(size: usize, reservation: Reservation) -> Result<Self> {
         Ok(Self {
             file: tokio::fs::File::from_std(tempfile::tempfile()?),
             hash: Sha256::new(),
             size,
             remaining: size,
-            _global: global,
-            _inbox: inbox,
+            _reservation: reservation,
         })
     }
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
@@ -53,12 +47,8 @@ mod tests {
     #[tokio::test]
     async fn an_upload_owns_capacity_until_complete_or_dropped() {
         let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
-        let mut upload = Upload::new(
-            2,
-            slots.clone().try_acquire_owned().unwrap(),
-            slots.clone().try_acquire_owned().unwrap(),
-        )
-        .unwrap();
+        let mut upload =
+            Upload::new(2, Reservation::take(slots.clone(), None, 2).await.unwrap()).unwrap();
         assert_eq!(slots.available_permits(), 0);
         assert!(upload.finish().await.is_err());
         assert!(upload.write(b"abc").await.is_err());

@@ -56,7 +56,8 @@ struct Snapshot {
 }
 type WakeCache = HashMap<(String, Option<String>, u64), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
 struct Gate {
-    uploads: Arc<tokio::sync::Semaphore>,
+    inbox_share: Arc<crate::admission::Shares>,
+    credential_share: Arc<crate::admission::Shares>,
     bytes: Arc<Mutex<crate::admission::Bucket>>,
     calls: crate::admission::Bucket,
     inbox: String,
@@ -324,9 +325,10 @@ impl Identity for Login {
 }
 pub struct Store {
     headers: std::cell::RefCell<BTreeMap<u32, Arc<[u8]>>>,
-    bytes: std::cell::RefCell<Option<tokio::sync::OwnedSemaphorePermit>>,
+    bytes: std::cell::RefCell<Option<crate::admission::Reservation>>,
+    pub credential_share: Arc<crate::admission::Shares>,
+    pub inbox_share: Arc<crate::admission::Shares>,
     pub upload: Option<crate::upload::Upload>,
-    pub uploads: Arc<tokio::sync::Semaphore>,
     pub upload_rate: Arc<Mutex<crate::admission::Bucket>>,
     api: Arc<Api>,
     pub principal: Principal,
@@ -341,10 +343,11 @@ pub struct Store {
 impl Store {
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
-        let (uploads, upload_rate) = {
+        let (credential_share, inbox_share, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
             gates.retain(|_, v| {
-                Arc::strong_count(&v.uploads) > 1 || v.last.elapsed() < Duration::from_secs(60)
+                Arc::strong_count(&v.credential_share) > 1
+                    || v.last.elapsed() < Duration::from_secs(60)
             });
             ensure!(
                 gates.len() < 8192 || gates.contains_key(&p.kid),
@@ -355,11 +358,17 @@ impl Store {
                 .find(|g| g.inbox == p.inbox)
                 .map(|g| g.reads.clone())
                 .unwrap_or_else(|| Arc::new(tokio::sync::Semaphore::new(2)));
+            let inbox_share = gates
+                .values()
+                .find(|g| g.inbox == p.inbox)
+                .map(|g| g.inbox_share.clone())
+                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(2, 2, 2, 80)));
             let g = gates.entry(p.kid.clone()).or_insert_with(|| Gate {
+                inbox_share,
+                credential_share: Arc::new(crate::admission::Shares::new(1, 1, 1, 64)),
                 inbox: p.inbox.clone(),
                 reads,
                 last: Instant::now(),
-                uploads: Arc::new(tokio::sync::Semaphore::new(2)),
                 bytes: Arc::new(Mutex::new(crate::admission::Bucket::new(
                     tokio::time::Instant::now(),
                     16384,
@@ -368,14 +377,19 @@ impl Store {
                 calls: crate::admission::Bucket::new(tokio::time::Instant::now(), 200, 50),
             });
             g.last = Instant::now();
-            (g.uploads.clone(), g.bytes.clone())
+            (
+                g.credential_share.clone(),
+                g.inbox_share.clone(),
+                g.bytes.clone(),
+            )
         };
         let mut s = Self {
             api,
             bytes: Default::default(),
             upload: None,
             headers: Default::default(),
-            uploads,
+            credential_share,
+            inbox_share,
             upload_rate,
             principal: p,
             folders: BTreeMap::new(),
@@ -417,18 +431,22 @@ impl Store {
     }
     fn reserve_view(&self, bytes: usize) -> Result<(), store::Error> {
         let target = bytes.div_ceil(1024);
-        if target > 96 * 1024 {
+        if target > 64 * 1024 {
             return Err(store::Error::Limit);
         }
         let mut slot = self.bytes.borrow_mut();
-        let held = slot.as_ref().map_or(0, |p| p.num_permits());
+        let held = slot.as_ref().map_or(0, |p| p.len());
         if target > held {
-            let extra = self
-                .api
-                .views
-                .clone()
-                .try_acquire_many_owned((target - held) as u32)
-                .map_err(|_| store::Error::Limit)?;
+            let extra = tokio::runtime::Handle::current()
+                .block_on(crate::admission::Reservation::take(
+                    self.api.views.clone(),
+                    Some((
+                        self.credential_share.views.clone(),
+                        self.inbox_share.views.clone(),
+                    )),
+                    (target - held) as u32,
+                ))
+                .ok_or(store::Error::Limit)?;
             if let Some(p) = slot.as_mut() {
                 p.merge(extra)
             } else {
@@ -583,9 +601,9 @@ impl Store {
             + self.handles.values().map(String::len).sum::<usize>();
         self.reserve_view(weight)?;
         if let Some(p) = self.bytes.get_mut() {
-            let excess = p.num_permits().saturating_sub(weight.div_ceil(1024));
+            let excess = p.len().saturating_sub(weight.div_ceil(1024));
             if excess > 0 {
-                drop(p.split(excess));
+                p.shrink(excess);
             }
         }
         self.stamp = Instant::now();
@@ -800,21 +818,6 @@ impl Submitter for Store {
     }
 }
 pub struct Offline;
-#[cfg(test)]
-mod auth_tests {
-    use super::*;
-    #[test]
-    fn revoke_fences_only_the_inflight_login_for_that_inbox() {
-        let t = Instant::now();
-        let after = t + Duration::from_millis(1);
-        let mut r = Revocations::default();
-        r.record(Some("one"), after);
-        assert!(!r.current("one", t, after));
-        assert!(r.current("two", t, after));
-        r.record(None, after);
-        assert!(!r.current("two", t, after));
-    }
-}
 impl Submitter for Offline {
     fn submit(&mut self, _: Submission<'_>) -> Result<(), SubmitError> {
         Err(SubmitError::Unavailable)
@@ -874,4 +877,20 @@ pub async fn listen(
         Err::<(), _>(anyhow!("listener ended"))
     };
     tokio::select! {r=pump=>r,r=async{client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth").await?;api.invalidate(None);api.online.store(true,std::sync::atomic::Ordering::Release);ready.send_replace(true);std::future::pending::<Result<()>>().await}=>r}
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    #[test]
+    fn revoke_fences_only_the_inflight_login_for_that_inbox() {
+        let t = Instant::now();
+        let after = t + Duration::from_millis(1);
+        let mut r = Revocations::default();
+        r.record(Some("one"), after);
+        assert!(!r.current("one", t, after));
+        assert!(r.current("two", t, after));
+        r.record(None, after);
+        assert!(!r.current("two", t, after));
+    }
 }

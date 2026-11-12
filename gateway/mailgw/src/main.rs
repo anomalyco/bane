@@ -154,6 +154,7 @@ impl Gateway {
         let mut frame = Frame::default();
         let mut data_permit = None;
         let mut spool: Option<upload::Upload> = None;
+        let mut discard = 0usize;
         let mut terminator = 0usize;
         let mut buf = [0u8; 4096];
         let mut deadline = auth_deadline;
@@ -187,6 +188,15 @@ impl Gateway {
             }
             let mut src = &buf[..read];
             while !src.is_empty() {
+                if discard > 0 {
+                    let n = discard.min(src.len());
+                    discard -= n;
+                    src = &src[n..];
+                    if discard == 0 {
+                        deadline = Instant::now() + IDLE;
+                    }
+                    continue;
+                }
                 if let Some(u) = spool.as_mut() {
                     if u.remaining != 0 {
                         let n = u.remaining.min(src.len());
@@ -225,25 +235,38 @@ impl Gateway {
                 let bytes = match event {
                     Event::AppendBody { len, sync } => {
                         let store = backend.as_mut().context("missing upload owner")?;
-                        let global = self
-                            .uploads
-                            .clone()
-                            .try_acquire_owned()
-                            .context("upload limit")?;
-                        let local = store
-                            .uploads
-                            .clone()
-                            .try_acquire_owned()
-                            .context("inbox upload limit")?;
-                        if !store
-                            .upload_rate
-                            .lock()
-                            .map_err(|_| anyhow!("limits unavailable"))?
-                            .take(Instant::now(), len.div_ceil(1024).max(1) as u64)
-                        {
-                            anyhow::bail!("upload byte rate")
+                        let permit = admission::Reservation::take(
+                            self.uploads.clone(),
+                            Some((
+                                store.credential_share.uploads.clone(),
+                                store.inbox_share.uploads.clone(),
+                            )),
+                            1,
+                        )
+                        .await;
+                        let permitted = permit.is_some()
+                            && store
+                                .upload_rate
+                                .lock()
+                                .map_err(|_| anyhow!("limits unavailable"))?
+                                .take(Instant::now(), len.div_ceil(1024).max(1) as u64);
+                        if !permitted {
+                            let mut no = frame.tag().to_vec();
+                            no.extend_from_slice(b" NO [LIMIT] Upload capacity busy\r\n");
+                            write(&mut stream, &no).await?;
+                            frame = Frame::default();
+                            if !sync {
+                                discard = len + 2;
+                                deadline = Instant::now() + IO
+                            } else {
+                                deadline = Instant::now() + IDLE
+                            }
+                            continue;
                         }
-                        spool = Some(upload::Upload::new(len, global, local)?);
+                        spool = Some(upload::Upload::new(
+                            len,
+                            permit.context("reservation missing")?,
+                        )?);
                         deadline = Instant::now() + Duration::from_secs(180);
                         if sync {
                             write(&mut stream, b"+ Ready for literal\r\n").await?;
@@ -271,12 +294,21 @@ impl Gateway {
                         .iter()
                         .any(|v| verb.eq_ignore_ascii_case(v))
                 {
-                    Some(
-                        self.responses
-                            .clone()
-                            .try_acquire_owned()
-                            .context("response limit")?,
-                    )
+                    let shares = backend.as_ref().map(|s| {
+                        (
+                            s.credential_share.responses.clone(),
+                            s.inbox_share.responses.clone(),
+                        )
+                    });
+                    let Some(permit) =
+                        admission::Reservation::take(self.responses.clone(), shares, 1).await
+                    else {
+                        let mut no = bytes.split(|b| *b == b' ').next().unwrap_or(b"*").to_vec();
+                        no.extend_from_slice(b" NO [LIMIT] Response capacity busy\r\n");
+                        write(&mut stream, &no).await?;
+                        continue;
+                    };
+                    Some(permit)
                 } else {
                     None
                 };
@@ -323,9 +355,17 @@ impl Gateway {
                 };
                 if matches!(&core,Core::Smtp(s) if s.receiving_data()) {
                     if data_permit.is_none() {
-                        let Ok(permit) = self.smtp_data.clone().try_acquire_owned() else {
-                            write(&mut stream, b"421 4.3.1 Submission capacity busy\r\n").await?;
-                            return Ok(());
+                        let shares = backend
+                            .as_ref()
+                            .map(|s| (s.credential_share.data.clone(), s.inbox_share.data.clone()));
+                        let Some(permit) =
+                            admission::Reservation::take(self.smtp_data.clone(), shares, 1).await
+                        else {
+                            if let Core::Smtp(s) = &mut core {
+                                s.refuse_data();
+                            }
+                            write(&mut stream, b"452 4.3.1 Submission capacity busy\r\n").await?;
+                            continue;
                         };
                         data_permit = Some(permit);
                     }
@@ -422,7 +462,9 @@ impl Gateway {
                         .await?;
                     core = Core::new(port.protocol, true);
                 }
-                deadline = if login.is_some() {
+                deadline = if data_permit.is_some() {
+                    Instant::now() + IO
+                } else if login.is_some() {
                     Instant::now() + IDLE
                 } else {
                     auth_deadline

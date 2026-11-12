@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import urllib.request
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import imaplib
 import os
 from pathlib import Path
@@ -160,6 +161,12 @@ def real_services():
         INSERT INTO inbox_app_passwords VALUES('app_fixture','mbx_fixture','fixture','{digest}',ARRAY['smtp','imap']); UPDATE inbox_state SET protocol_passwords=1;
         """)
         log = stack.enter_context(open(ROOT / "target/real-api.log", "w"))
+        for i in range(2):
+            bid=f'mbx_load{i}';addr=f'load{i}@example.invalid';hashed=hmac.new(pepper,(PASS+str(i)).encode(),'sha256').hexdigest()
+            sql(f"""INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES('{bid}','default','fixture','{addr}','inbox','forever');
+            INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES('default','{addr}','{bid}','primary');
+            INSERT INTO inbox_state(inbox_id,workspace_id) VALUES('{bid}','default');
+            INSERT INTO inbox_app_passwords VALUES('app_load{i}','{bid}','fixture','{hashed}',ARRAY['imap']);UPDATE inbox_state SET protocol_passwords=1 WHERE inbox_id='{bid}';""")
         proc = sp.Popen(
             ["node", "--import", "tsx", "src/server.ts"],
             cwd=api,
@@ -227,9 +234,9 @@ def gateway(tmp, **overrides):
                 sql("UPDATE inbox_state SET protocol_monthly=2000")
 
 
-def connect(port):
+def connect(port,user=USER,password=PASS):
     c = imaplib.IMAP4_SSL("localhost", port, ssl_context=CTX, timeout=8)
-    c.login(USER, PASS)
+    c.login(user,password)
     return c
 
 
@@ -737,6 +744,26 @@ def large_folder(tmp):
             start=time.perf_counter();assert ok(c.uid('SEARCH',None,'UNSEEN'))==[b'1'];ok(c.uid('FETCH','50001','(UID FLAGS RFC822.SIZE)'));samples.append((time.perf_counter()-start)*1000)
         p95=sorted(samples)[18];print(f'CAPACITY 50001 entries, SELECT {cold:.3f}s, selected RSS delta {delta/1024:.1f} MiB, p95 SEARCH+FETCH {p95:.1f}ms',flush=True)
         assert cold<5 and delta<96*1024 and p95<250, 'capacity budget exceeded'
+        # Two other active inboxes select ordinary large folders and read metadata
+        # concurrently. Assert both the measured footprint and the victim's latency.
+        with contextlib.ExitStack() as clients,ThreadPoolExecutor(max_workers=2) as pool:
+            neighbors=[]
+            for i in range(2):
+                bid=f'mbx_load{i}';n=clients.enter_context(connect(p['IMAPS'],f'load{i}@example.invalid',PASS+str(i)));neighbors.append(n)
+                sql(f"""INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,modseq)
+                SELECT '{bid}',m.id,'default',m.thread_id,'inbound',true,now(),1 FROM mail_messages m WHERE m.id LIKE 'bench-%';
+                INSERT INTO inbox_entries SELECT '{bid}','inbox',i,'bench-'||i,1,false,now() FROM generate_series(2,50001)i;
+                UPDATE inbox_folders SET total=50000,uid_next=50002 WHERE inbox_id='{bid}' AND role='inbox';""",'fixture_observer')
+            def work(n):
+                assert ok(n.select('INBOX'))==[b'50000'];
+                for _ in range(12):ok(n.uid('FETCH','2:129','(UID FLAGS RFC822.SIZE)'))
+            jobs=[pool.submit(work,n) for n in neighbors];latencies=[];peak=rss()
+            while not all(job.done() for job in jobs):
+                start=time.perf_counter();ok(c.uid('FETCH','1','(UID FLAGS RFC822.SIZE)'));latencies.append((time.perf_counter()-start)*1000);peak=max(peak,rss())
+                time.sleep(.025)
+            for job in jobs:job.result()
+            p95=sorted(latencies)[int(.95*(len(latencies)-1))];print(f'THREE INBOXES: sampled peak {peak/1024:.1f} MiB; victim p95 {p95:.1f} ms',flush=True)
+            assert peak<300*1024 and p95<250
 
 
 def budgets(tmp):

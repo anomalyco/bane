@@ -132,6 +132,10 @@ impl Smtp {
     pub fn receiving_data(&self) -> bool {
         matches!(self.phase, Phase::Data(_) | Phase::Oversize)
     }
+    pub fn refuse_data(&mut self) {
+        self.phase = Phase::Command;
+        self.reset();
+    }
     pub fn new(tls: bool) -> Self {
         Self {
             tls,
