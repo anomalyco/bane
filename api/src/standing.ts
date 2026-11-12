@@ -384,7 +384,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   if (quarantine) quarantine.campaign = oneLine(quarantine.campaign);
   const notice = noticeText({ workspace: oneLine(event.name), step: event.to_step, reasons: event.reasons, quarantine, dashboard: runtime.config.publicUrl, marketingHeld: event.to_step === 'restrict' });
   const { sendSystemEmail } = await import('./sending.js');
-  await sendSystemEmail(runtime, sender, { from, to: event.recipients, subject: notice.subject, text: notice.text, idempotencyKey: `standing:${String(payload.eventId)}` });
+  await sendSystemEmail(runtime, sender, { from, to: event.recipients, subject: notice.subject, text: notice.text, idempotencyKey: `standing:${String(payload.eventId)}`, standingEvent: String(payload.eventId) });
   log('info', { code: 'STANDING_NOTIFIED', workspaceId: job.workspaceId, step: event.to_step, recipients: event.recipients.length, simulated: isSimulatedSes(runtime) });
 });
 export const standingJobs: Record<string, JobHandler> = { 'standing.notify': notifyJob };

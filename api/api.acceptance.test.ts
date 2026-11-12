@@ -9470,6 +9470,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const sent = (await db.query(`SELECT from_address,to_addresses,subject,snapshot->>'text' AS text,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1`, [platform])).rows;
       assert.deepEqual(sent.map(r => [r.from_address, r.to_addresses, r.kind]), [['notices@platform.example', [AUTH_EMAIL], 'transactional']], 'One email per owner, deduplicated on retry.');
       assert.match(sent[0].subject, /is warned$/);
+      // Review of #115: the notices were admitted but always canceled at dispatch (ORIGIN_KEY_REVOKED). They now dispatch
+      // under their own narrow origin; a forged one (an event that does not exist) is still canceled.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_forged_notice',workspace_id,region,'standing:stev_forged',from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated FROM sending_emails WHERE workspace_id=$1`, [platform]);
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      await runDispatcher(runtime, { region: REGION, accountId: pool });
+      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`, [platform])).rows.map(r => [r.id === 'email_forged_notice' ? 'forged' : 'notice', [r.status, r.error_code]]));
+      assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
+      assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       for (const part of ['What happened', '2 of 1,000 accepted emails were marked as spam', 'What Bane did', 'will not rise', 'How to fix it', '/docs#sending-limits']) assert.ok(sent[0].text.includes(part), part);
       // No second email for the same step within a day.
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'ok', reasons: [] }));

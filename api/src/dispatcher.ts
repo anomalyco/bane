@@ -557,6 +557,9 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
             JOIN mailbox_webhooks h ON h.workspace_id=d.workspace_id AND h.id=d.hook_id
             WHERE f.email_id=x.id AND f.workspace_id=x.workspace_id AND x.actor_key_id='forward:'||f.endpoint AND starts_with(d.ref,'forward:')
             AND d.verified AND d.declined_at IS NULL AND NOT h.paused AND NOT EXISTS(SELECT FROM jsonb_array_elements_text(f.grants) gid WHERE NOT mail_receiving_grant(f.workspace_id,gid,${receivingPolicy(runtime.config)}::jsonb)) FOR SHARE)
+          -- An owner notice (sendSystemEmail): only from the configured platform workspace, about a committed standing event.
+          WHEN starts_with(x.actor_key_id, 'standing:') THEN x.campaign_id IS NULL AND x.workspace_id=${runtime.config.platformDomainWorkspace ?? null}::text
+            AND EXISTS (SELECT FROM standing_events s WHERE s.id=substr(x.actor_key_id,10))
           WHEN starts_with(x.actor_key_id, 'user_') THEN EXISTS (${approvedOriginUser(runtime, sql`x.workspace_id`, sql`substr(x.actor_key_id, 6)`, sql`x.campaign_id IS NULL`)})
           WHEN starts_with(x.actor_key_id, 'mbk_') THEN EXISTS (
             SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.address = x.sender

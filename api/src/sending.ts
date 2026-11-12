@@ -2153,8 +2153,13 @@ export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':ca
  * Bane's own notices (standing changes) from a platform workspace, through the ordinary admission path: one
  * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.
  */
-export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string }) {
-  const a: Actor = { workspaceId, keyId: 'system_standing', permissions: ['send'], domains: [], credential: 'apiKey' };
+/**
+ * An internal notice from the platform workspace about one committed standing event. Its origin, standing:<event id>,
+ * dispatches only from the configured platform workspace and only while that event exists (the dispatcher's claim);
+ * it is not a general system bypass. Idempotent per event.
+ */
+export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string; standingEvent: string }) {
+  const a: Actor = { workspaceId, keyId: `standing:${mail.standingEvent}`, permissions: ['send'], domains: [], credential: 'apiKey' };
   const values = new Map<string, unknown>([['actor', a]]);
   const c = { env: runtime, req: { path: '/v1/emails/batch', header: (name: string) => name.toLowerCase() === 'idempotency-key' ? mail.idempotencyKey : undefined },
     get: (key: string) => values.get(key), set: (key: string, value: unknown) => { values.set(key, value); } } as unknown as Ctx;
