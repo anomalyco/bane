@@ -78,7 +78,8 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
     result = await send();
   } catch (e) {
     // Deferred or refused before anything left: the outcome is known, so a retry cannot duplicate.
-    if (e instanceof JobDeferred) { await mark('retry'); throw keepAttempts(e); }
+    // The breaker deferred it: nothing left, so the fence's count of attempts goes back down.
+    if (e instanceof JobDeferred) { await runtime.db.execute(sql`UPDATE mail_action_attempts SET state='retry',attempts=greatest(attempts-1,0) WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`); throw keepAttempts(e); }
     if (e instanceof ApiError) { await mark('retry'); throw e.retryable ? new ActionRetry(e.code) : e; }
     await mark('unknown');
     if (replaySafe(fence.policy)) throw new ActionRetry('ACTION_UNKNOWN');

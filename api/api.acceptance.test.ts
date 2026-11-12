@@ -11059,6 +11059,32 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  test('a breaker deferral is not a delivery attempt: a resumed delivery keeps its retries',async t=>{
+    // tear/delivery witness: three timeouts on V, a breaker deferral of m1:V, pause V, run K m1:V, unpause V.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{JobDeferred}=await import('./src/jobs.js');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'tripped',url:'https://example.com/tripped',retryAttempts:2}),201);
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='tripped'",[wid])).rows[0].id;
+      for(const id of ['mwd_trip_target','mwd_trip_1','mwd_trip_2','mwd_trip_3'])await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',[id,wid,hook,{id:'mev_'+id,type:'message.received',messageId:'msg_'+id,data:{recipients:['a@example.net']}}]);
+      const handle=(id:string,attempts:number,generation?:number)=>mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id,...(generation===undefined?{}:{generation})},{id:'job_'+id,workspaceId:wid,attempts});
+      const fence=async()=>(await db.query("SELECT attempts FROM mail_action_attempts WHERE delivery_id='mwd_trip_target'")).rows[0].attempts;
+      const transport=runtime.webhookFetch;
+      runtime.webhookFetch=async(url,init)=>{if(JSON.parse(String(init.body)).id==='mev_mwd_trip_target')return {status:503};throw Object.assign(new Error('synthetic timeout'),{name:'TimeoutError'});};
+      try{
+        await assert.rejects(handle('mwd_trip_target',1));
+        for(const id of ['mwd_trip_1','mwd_trip_2','mwd_trip_3'])await assert.rejects(handle(id,1));
+        assert.equal(await fence(),1);
+        // Three timeouts tripped the breaker: the next call defers before anything leaves.
+        await assert.rejects(handle('mwd_trip_target',2),(e:unknown)=>e instanceof JobDeferred&&e.keepAttempts);
+        assert.equal(await fence(),1);
+        ok(await local('PATCH','/v1/endpoints/tripped',{paused:true}));await handle('mwd_trip_target',2);
+        ok(await local('PATCH','/v1/endpoints/tripped',{paused:false}));
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_trip_resume',workspaceId:wid,attempts:1});
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND payload->>'deliveryId'='mwd_trip_target' AND payload->>'generation'='1'",[wid])).rows,[{attempts:1}]);
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
     await simulatedSesFixture(t,async({runtime,local,db})=>{
       const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
