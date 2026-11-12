@@ -8751,11 +8751,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // SES model: each tenant's own list and the account-level list one account shares across every workspace.
       const lists=new Map<string,Map<string,'BOUNCE'|'COMPLAINT'>>(),accounts:Record<string,string>={[REGION]:account,[second]:account},removals:string[]=[];
       const list=(region:string,name?:string)=>{const k=`${region}|${name??'account'}`;if(!lists.has(k))lists.set(k,new Map());return lists.get(k)!;};
-      let failAt=0,during:(()=>Promise<unknown>)|undefined;
+      let failAt=0,during:((region:string,name?:string)=>unknown)|undefined,inject:(()=>unknown)|undefined;
       const ses=(region:string)=>({account:async()=>accounts[region]!,get:async(a:string,name?:string)=>list(region,name).get(a)??null,
-        remove:async(a:string,name?:string)=>{removals.push(`${region}|${name??'account'}|${a}`);const hook=during;during=undefined;await hook?.();
+        remove:async(a:string,name?:string)=>{removals.push(`${region}|${name??'account'}|${a}`);const hook=during;during=undefined;await hook?.(region,name);
           if(removals.length===failAt)throw Object.assign(new Error('denied'),{name:'AccessDeniedException'});return list(region,name).delete(a);}});
-      const lift=(rcpt=to,...flags:string[])=>liftSuppression(db,[wid,rcpt,'--reason','The mailbox exists now',...flags],ses);
+      // The script's transaction as a savepoint in the fixture's; `inject` runs after the preflight, before the row lock.
+      const savepoint=async <T,>(work:()=>Promise<T>)=>{const hook=inject;inject=undefined;await hook?.();await db.query('SAVEPOINT lift');
+        try{const result=await work();await db.query('RELEASE SAVEPOINT lift');return result;}catch(error){await db.query('ROLLBACK TO SAVEPOINT lift');throw error;}};
+      const lift=(rcpt=to,...flags:string[])=>liftSuppression(db,[wid,rcpt,'--reason','The mailbox exists now',...flags],ses,savepoint);
       const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='lift-suppression' ORDER BY at`,[wid])).rows.map(r=>r.details);
       const suppressed=async(rcpt=to)=>(await db.query('SELECT suppressed,suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,rcpt.toLowerCase()])).rows[0];
       const bounce=(rcpt:string)=>db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES($1,$2,$3,true,'hard_bounce',now())`,[unique('con'),wid,rcpt.toLowerCase()]);
@@ -8786,6 +8789,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await assert.rejects(lift(other,'--account-level'),/complaint on the account-level list.*Nothing was changed/);
       await db.query(`UPDATE audience_contacts SET suppression_reason='complaint' WHERE workspace_id=$1 AND email=$2`,[wid,other]);
       await assert.rejects(lift(other),/complaint suppression is not lifted/);
+      // A complaint that arrives after the preflight read stops the lift before anything more is removed, and is kept:
+      // recorded in Bane before the row lock...
+      const late=address(),settled=removals.length; await bounce(late); list(REGION,tenant).set(late,'BOUNCE');
+      inject=()=>db.query(`UPDATE audience_contacts SET suppression_reason='complaint',suppressed_at=clock_timestamp() WHERE workspace_id=$1 AND email=$2`,[wid,late]);
+      await assert.rejects(lift(late),/complaint was recorded in Bane.*nothing more was removed; 0 SES removal/);
+      assert.deepEqual([removals.length,list(REGION,tenant).get(late),await suppressed(late)],[settled,'BOUNCE',{suppressed:true,suppression_reason:'complaint'}]);
+      assert.equal((await audits()).at(-1).status,'superseded');
+      // ...in SES before the first delete...
+      const early=address(); await bounce(early); list(REGION,tenant).set(early,'BOUNCE');
+      inject=()=>list(REGION,tenant).set(early,'COMPLAINT');
+      await assert.rejects(lift(early),/SES recorded a complaint.*nothing more was removed; 0 SES removal/);
+      assert.deepEqual([removals.length,list(REGION,tenant).get(early),await suppressed(early)],[settled,'COMPLAINT',{suppressed:true,suppression_reason:'hard_bounce'}]);
+      // ...or in SES for a later target, after an earlier one was removed.
+      const midway=address(); await bounce(midway); list(REGION,tenant).set(midway,'BOUNCE'); list(second,trusted).set(midway,'BOUNCE');
+      during=region=>(region===REGION?list(second,trusted):list(REGION,tenant)).set(midway,'COMPLAINT');
+      await assert.rejects(lift(midway),/SES recorded a complaint.*1 SES removal/);
+      assert.deepEqual([[list(REGION,tenant).get(midway),list(second,trusted).get(midway)].filter(Boolean),await suppressed(midway)],[['COMPLAINT'],{suppressed:true,suppression_reason:'hard_bounce'}]);
+      const midwayAudit=(await audits()).at(-1); assert.deepEqual([midwayAudit.status,midwayAudit.removed.length],['superseded',1]);
       // A bounce that arrives during the SES calls is kept, and the lift says so.
       const racer=address(); await bounce(racer); list(REGION,tenant).set(racer,'BOUNCE');
       during=()=>db.query(`UPDATE audience_contacts SET suppressed_at=clock_timestamp() WHERE workspace_id=$1 AND email=$2`,[wid,racer]);
