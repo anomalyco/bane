@@ -8407,6 +8407,32 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [{ bulk: true, kind: 'transactional', marketing: true }]);
     });
   });
+  test('MX review of #115: a paused or restricted workspace holds the other workspaces of its sponsor until an operator acts', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { applyChange } = await import('./src/standing.js'), { pauseHostedByOperator, resumeHostedSending } = await import('./src/states.js');
+      const f = await hostedHoldFixture(runtime, db);
+      await gradedSender(db, f.wid, 10000);
+      // The same owner opens a second workspace while the first is paused (it inherits the sponsor, as signup does).
+      const other = ok(await local('POST', '/v1/workspaces', { name: 'Second synthetic workspace' }), 201).id;
+      await db.query(`UPDATE workspaces SET quota_sponsor='sponsor-fixture' WHERE id=ANY($1)`, [[f.wid, other]]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [other, REGION, f.pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('second.example',$1,$1,'verified')`, [other]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('second-reader',$1,'reader@example.net','subscribed')`, [other]);
+      await gradedSender(db, other, 10000);
+      const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: 'news@second.example', to: 'reader@example.net', subject: 'Hello', text: 'Fixture', kind }, 'live', { 'X-Bane-Workspace': other });
+      await runtime.db.execute(pauseHostedByOperator(f.wid, 'Synthetic complaint review'));
+      assert.match(error(await send('transactional'), 409, 'HOSTED_SENDING_PAUSED').message, /another workspace of this account/, 'It used to admit mail from the new workspace.');
+      // An operator's resume of the paused workspace is what lifts it.
+      await runtime.db.execute(resumeHostedSending(f.wid, { reason: 'Reviewed synthetic hold', percent: 100, caps: runtime.config.hostedSendCaps }));
+      ok(await send('transactional'), 202);
+      // A sibling's marketing hold holds this workspace's marketing too; transactional mail flows.
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: true, step: 'restrict' }));
+      error(await send('marketing'), 409, 'MARKETING_HELD');
+      ok(await send('transactional'), 202);
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: false, step: 'warn' }));
+      ok(await send('marketing'), 202);
+    });
+  });
   test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking', async t => {
     await simulatedSesFixture(t, async ({ db, runtime, local }) => {
       const f = await hostedHoldFixture(runtime, db);

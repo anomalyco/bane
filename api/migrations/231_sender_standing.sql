@@ -141,6 +141,17 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- An unresolved hold on another workspace of the same sponsor (an account's workspaces share quota_sponsor) holds
+-- this one too, so a paused or restricted sender cannot open a new workspace and send from it: 'pause' when a sibling
+-- is paused (not just resuming), 'restrict' when a sibling's marketing is held. Only an operator's review lifts it
+-- (resuming or releasing the sibling). Exempt (first-party) workspaces neither inherit nor pass on a sponsor hold.
+CREATE FUNCTION hosted_sponsor_hold(wid text) RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN bool_or(pc.paused_at IS NOT NULL AND pc.resume_pending_at IS NULL) THEN 'pause'
+    WHEN bool_or(pc.marketing_held_at IS NOT NULL OR coalesce(s.marketing_hold OR (s.step IN ('restrict','pause') AND NOT coalesce(s.release_until>now() AND s.release_percent IS NOT NULL,false)),false)) THEN 'restrict' END
+  FROM workspaces me JOIN workspaces o ON o.quota_sponsor=me.quota_sponsor AND o.id<>me.id AND NOT o.exempt_hosted_quotas
+  JOIN provider_connections pc ON pc.workspace_id=o.id AND pc.kind='shared' LEFT JOIN sender_standing s ON s.workspace_id=o.id
+  WHERE me.id=wid AND me.quota_sponsor IS NOT NULL AND NOT me.exempt_hosted_quotas
+$$;
 -- The limit before any resume restore: an active operator override, nothing when exempt, else the standing's limit
 -- (first_week for a workspace the standing job has not seen yet). A resume stores restore_cap from it (src/states.ts).
 CREATE OR REPLACE FUNCTION hosted_base_cap(wid text,first_week int,second_week int,mature int) RETURNS int LANGUAGE sql STABLE AS $$
@@ -162,7 +173,7 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
      CASE WHEN s.release_until>now() THEN s.release_percent END AS release_percent,
      CASE WHEN w.send_cap_override_expires_at IS NULL OR w.send_cap_override_expires_at>now() THEN p.send_cap_override END AS override,
      CASE WHEN NOT p.exempt_hosted_quotas AND (p.send_cap_override IS NULL OR w.send_cap_override_expires_at<=now()) THEN w.quota_sponsor END AS sponsor,
-     hosted_base_cap(wid,first_week,second_week,mature) AS full_cap
+     hosted_base_cap(wid,first_week,second_week,mature) AS full_cap,hosted_sponsor_hold(wid) AS sponsor_hold
    FROM hosted_admission_policy_read p JOIN workspaces w ON w.id=p.workspace_id LEFT JOIN sender_standing s ON s.workspace_id=p.workspace_id
    WHERE p.workspace_id=wid
  ), capped AS (
@@ -177,9 +188,10 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
  ), usage AS (SELECT hour,sum(recipients) OVER(ORDER BY hour DESC) AS running FROM hours)
  SELECT jsonb_build_object('cap',p.cap,'marketingCap',m.cap,'used',u.used,'resetAt',u.reset,
    'nextChangeAt',least(p.restored_until,coalesce(u.first_expiry,date_trunc('hour',now(),'UTC')+interval '24 hours')),
-   'pauseReason',p.pause_reason,'pendingCapOverride',p.pending_cap_override,'exemptHostedQuotas',p.exempt_hosted_quotas,
+   'pauseReason',coalesce(p.pause_reason,CASE WHEN p.sponsor_hold='pause' THEN 'Hosted sending is paused for another workspace of this account. Bane reviews it before this workspace can send.' END),
+   'pendingCapOverride',p.pending_cap_override,'exemptHostedQuotas',p.exempt_hosted_quotas,
    'nextCap',CASE WHEN p.restored_until IS NOT NULL AND p.full_cap>p.cap THEN p.full_cap END,'nextCapAt',CASE WHEN p.restored_until IS NOT NULL AND p.full_cap>p.cap THEN p.restored_until END,
-   'marketingHeld',coalesce((p.step IN ('restrict','pause') AND p.release_percent IS NULL) OR p.operator_hold,false) OR p.marketing_held_at IS NOT NULL,
+   'marketingHeld',coalesce((p.step IN ('restrict','pause') AND p.release_percent IS NULL) OR p.operator_hold,false) OR p.marketing_held_at IS NOT NULL OR p.sponsor_hold IS NOT NULL,
    'marketingHoldReason',CASE WHEN NOT coalesce((p.step IN ('restrict','pause') AND p.release_percent IS NULL) OR p.operator_hold,false) THEN p.marketing_hold_reason END,'step',coalesce(p.step,'ok'))
  FROM capped p CROSS JOIN LATERAL (SELECT CASE WHEN p.cap IS NOT NULL THEN
      (greatest(0,p.cap-CASE WHEN p.override IS NULL THEN greatest(least(100,p.cap),ceil(p.cap*headroom/100)::int) ELSE ceil(p.cap*headroom/100)::int END)
@@ -193,7 +205,7 @@ $$;
 -- standing shipped.
 CREATE OR REPLACE FUNCTION hosted_marketing_held(wid text) RETURNS boolean LANGUAGE sql STABLE AS $$
   SELECT coalesce((SELECT pc.marketing_held_at IS NOT NULL OR coalesce(s.marketing_hold OR (s.step IN ('restrict','pause') AND NOT coalesce(s.release_until>now() AND s.release_percent IS NOT NULL,false)),false)
-    FROM provider_connections pc LEFT JOIN sender_standing s ON s.workspace_id=pc.workspace_id WHERE pc.workspace_id=wid AND pc.kind='shared'),false)
+    FROM provider_connections pc LEFT JOIN sender_standing s ON s.workspace_id=pc.workspace_id WHERE pc.workspace_id=wid AND pc.kind='shared'),false) OR hosted_sponsor_hold(wid) IS NOT NULL
 $$;
 -- Bursts follow the limit too: clamp(limit ÷ 20, 50, 500) a minute per workspace, half that per domain.
 CREATE OR REPLACE FUNCTION hosted_minute_cap(wid text) RETURNS int LANGUAGE sql STABLE AS $$
