@@ -142,16 +142,22 @@ const ledgerColumns: Column<LedgerEntry>[] = [
   { key: 'description', label: 'Description', render: e => <span className="billing-desc" title={e.description}>{e.description}</span>, card: 'title' },
   { key: 'at', label: 'Date', width: 132, render: e => date(e.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
   { key: 'amount', label: 'Amount', width: 112, align: 'right', render: e => <span className="billing-amount" data-sign={BigInt(e.amount) < 0n ? 'out' : 'in'}>{usd(e.amount, { sign: true })}</span>, card: 'aside' },
-  { key: 'after', label: 'Balance after', width: 128, align: 'right', render: e => usd(e.balanceAfter), card: 'field' },
-  { key: 'invoice', label: '', width: 88, align: 'right', render: e => e.invoiceUrl ? <a className="billing-link" href={e.invoiceUrl} target="_blank" rel="noreferrer">Invoice<ArrowUpRight size={12} aria-hidden="true" /></a> : null, card: 'inline' },
+  { key: 'after', label: 'Balance after', width: 128, align: 'right', render: e => usd(e.balanceAfter), cardRender: e => <>{usd(e.balanceAfter)}{e.invoiceUrl && <> · <InvoiceLink href={e.invoiceUrl} label="Invoice" /></>}</>, card: 'field' },
+  { key: 'invoice', label: '', width: 88, align: 'right', render: e => e.invoiceUrl ? <InvoiceLink href={e.invoiceUrl} label="Invoice" /> : null, card: 'hide' },
 ]
+function InvoiceLink({ href, label }: { href: string; label: string }) {
+  return <a className="billing-link" href={href} target="_blank" rel="noreferrer">{label}<ArrowUpRight size={12} aria-hidden="true" /></a>
+}
+const PaymentLinks = ({ payment: p }: { payment: Payment }) => <>{p.invoiceUrl && <InvoiceLink href={p.invoiceUrl} label="Invoice" />}{p.receiptUrl && <InvoiceLink href={p.receiptUrl} label="Receipt" />}</>
+const PaymentStatusBadge = ({ payment: p }: { payment: Payment }) => <StatusBadge status={p.status === 'succeeded' ? 'Paid' : p.status === 'requires_action' ? 'Needs action' : p.status}
+  tone={p.status === 'succeeded' ? 'success' : p.status === 'failed' ? 'danger' : ['canceled', 'expired'].includes(p.status) ? 'neutral' : 'warning'} />
 const KIND: Record<Payment['kind'], string> = { checkout: 'Top-up · Checkout', saved_card: 'Top-up · saved card', recharge: 'Auto-recharge', setup: 'Card saved' }
 const paymentColumns: Column<Payment>[] = [
   { key: 'kind', label: 'Payment', render: p => KIND[p.kind], card: 'title' },
   { key: 'at', label: 'Date', width: 132, render: p => date(p.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
   { key: 'amount', label: 'Amount', width: 112, align: 'right', render: p => p.kind === 'setup' ? '—' : centsUsd(p.totalCents ?? p.amountCents), card: 'aside' },
-  { key: 'status', label: 'Status', width: 120, render: p => <StatusBadge status={p.status === 'succeeded' ? 'Paid' : p.status === 'requires_action' ? 'Needs action' : p.status} tone={p.status === 'succeeded' ? 'success' : p.status === 'failed' ? 'danger' : ['canceled', 'expired'].includes(p.status) ? 'neutral' : 'warning'} />, card: 'line' },
-  { key: 'links', label: '', width: 136, align: 'right', render: p => <span className="cluster billing-links">{p.invoiceUrl && <a className="billing-link" href={p.invoiceUrl} target="_blank" rel="noreferrer">Invoice<ArrowUpRight size={12} aria-hidden="true" /></a>}{p.receiptUrl && <a className="billing-link" href={p.receiptUrl} target="_blank" rel="noreferrer">Receipt<ArrowUpRight size={12} aria-hidden="true" /></a>}</span>, card: 'inline' },
+  { key: 'status', label: 'Status', width: 120, render: p => <PaymentStatusBadge payment={p} />, cardRender: p => <span className="cluster billing-links"><PaymentStatusBadge payment={p} /><PaymentLinks payment={p} /></span>, card: 'line' },
+  { key: 'links', label: '', width: 136, align: 'right', render: p => <span className="cluster billing-links"><PaymentLinks payment={p} /></span>, card: 'hide' },
 ]
 function History() {
   const [view, setView] = useState<'ledger' | 'payments'>('ledger')
