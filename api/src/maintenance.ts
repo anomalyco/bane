@@ -1,12 +1,12 @@
 import { sql, type SQL } from 'drizzle-orm';
-import type { Runtime } from './core.js';
+import { ApiError, type Runtime } from './core.js';
 import { log } from './core.js';
-import { enqueue } from './jobs.js';
 import { campaignActive, pauseHostedSending } from './states.js';
 import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
+const UPLOAD_BATCH = 1000;
 const DAY_MS = 24 * 3600_000;
 
 /**
@@ -188,22 +188,49 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff} AND reason NOT IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY')`));
   await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
-  await runtime.db.transaction(async tx => {
-    const unused = await tx.execute<{ id: string; storage_key: string; workspace_id: string; source_template_asset_id: string | null }>(sql`WITH old AS (
+  // A fixed 50 rows an hour fell behind any installation retiring more than about 1,200 uploads a day, so their objects and
+  // the workspace's stored-attachment usage were never released. Up to 5,000 a run now (120,000 a day), 1,000 per
+  // transaction in workspace order: each queues an object deletion that shares the 'other' job class with domain checks and
+  // alerts, and each row's usage trigger holds its workspace's usage row until the batch commits.
+  const uploads = async (name: string, statement: () => SQL) => {
+    for (let i = 0; i < 5 && Date.now() < deadline; i++) {
+      const n = Number((await runtime.db.execute<{ n: number }>(statement())).rows[0]?.n ?? 0);
+      deleted[name] = (deleted[name] ?? 0) + n;
+      if (n < UPLOAD_BATCH) return;
+    }
+  };
+  await uploads('unused_attachments', () => sql`WITH old AS (
       SELECT a.id FROM sending_attachments a WHERE a.created_at < ${cutoff}
-        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.attachment_id = a.id)
-      LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.workspace_id, a.source_template_asset_id`);
-    for (const object of unused.rows) if (!object.source_template_asset_id) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
-    const unusedTemplateAssets = await tx.execute<{ storage_key: string; workspace_id: string }>(sql`WITH old AS (
+        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.workspace_id = a.workspace_id AND l.attachment_id = a.id)
+      ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
+    ), gone AS (DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id, a.source_template_asset_id
+    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
+      FROM gone WHERE source_template_asset_id IS NULL
+    ) SELECT count(*)::int AS n FROM gone`);
+  await uploads('unused_template_assets', () => sql`WITH old AS (
       SELECT a.id FROM template_assets a WHERE a.created_at < ${cutoff}
         AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)
         AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
-      LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id`);
-    for (const object of unusedTemplateAssets.rows) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
-  });
+      ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
+    ), gone AS (DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id
+    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
+    ) SELECT count(*)::int AS n FROM gone`);
   await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   const complete=inboxComplete && Date.now()<deadline;
   log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
+}
+/** The hourly upkeep. Every step is best-effort: a failing step (a retention statement that keeps timing out) must not
+ * skip the steps after it, and on Node, where this used to run inside the dispatch loop, it must not stop job processing
+ * and mail dispatch. Returns the codes of the steps that failed. */
+export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promise<Runtime> = async () => runtime) {
+  const failed: string[] = [];
+  for (const [code, step] of [
+    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
+    ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
+    ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
+    ['MAILBOX_HOURLY_FAILED', async () => (await import('./mailbox-ingest.js')).mailboxHourly(await mailboxRuntime())],
+  ] as const) {
+    try { await step(); } catch (error) { failed.push(code); log('warn', { code: error instanceof ApiError ? error.code : code, step: code }); }
+  }
+  return failed;
 }

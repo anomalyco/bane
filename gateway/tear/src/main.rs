@@ -1022,8 +1022,8 @@ fn checklist(c: &BTreeMap<String, u64>) -> Value {
         ),
         item("C8 SMTP DATA lanes", &["smtp:data-lane-busy"]),
         item(
-            "R1 dropped connection, reconnect",
-            &["drop-before-command", "action:reconnect"]
+            "R1 refused command, reconnect",
+            &["refused-before-command", "action:reconnect"]
         ),
         item(
             "R5 lost response, idempotent COPY replay",

@@ -7524,6 +7524,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a NUL character or a date Postgres cannot store is a 422 in bodies, paths and queries, not a 500', async t => {
+    const key = (await keyFixture(t)).secret, nul = 'a\u0000b';
+    for (const [method, path, body] of [
+      ['POST', '/v1/lists', { name: nul }],
+      ['POST', '/v1/contacts', { email: address(), name: nul }],
+      ['POST', '/v1/contacts', { email: address(), properties: { note: nul } }],
+      ['GET', `/v1/contacts/${encodeURIComponent(nul)}`],
+      ['GET', `/v1/contacts?cursor=${encodeURIComponent(nul)}`],
+      ['GET', `/v1/inbound/messages?q=${encodeURIComponent(nul)}`],
+    ] as const) assert.match(error(await http(method, path, key, body), 422, 'VALIDATION_FAILED').message, /NUL character/, `${method} ${path}`);
+    // ISO 8601 allows year 0000; Postgres does not.
+    for (const path of ['/v1/emails?from=0000-01-01T00:00:00Z', '/v1/metrics?to=0000-01-01T00:00:00Z', `/v1/emails?from=${encodeURIComponent('2026-01-01T00:00:00+16:00')}`])
+      assert.match(error(await http('GET', path, key), 422, 'VALIDATION_FAILED').message, /out of range/, path);
+    // Valid neighbors still answer.
+    ok(await http('GET', '/v1/emails?from=0001-01-01T00:00:00Z', key));
+  });
   test('Hosted trusted pool: concurrent setup, signed publish, fenced send-only adoption and retention',async t=>{
     const [{nodeRuntime},{createApp},{trustedProvision},{setDomainPool},{adoptIdentities},{ensureRegionSettings},{JobDeferred},{SESv2Client},{SNSClient},{STSClient},{SESClient},{S3Client}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
@@ -8574,6 +8590,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('webhook delivery and email event pages follow creation time across pages, not random IDs', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const wid = runtime.config.workspaceId, n = 7;
+      // IDs sort opposite to creation time, so an ID-ordered page is visibly wrong. Two rows share an instant (the ID breaks the tie).
+      const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, i === n - 1 ? n - 2 : i)).toISOString().replace('Z', '123+00:00');
+      const idOf = (prefix: string, i: number) => `${prefix}_${String(99 - i).padStart(3, '0')}`;
+      const walk = async (path: string, limit = 3) => {
+        const ids: string[] = []; let cursor: string | null = null;
+        do { const body = ok(await local('GET', `${path}?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)); ids.push(...body.data.map((row: Json) => row.id)); cursor = body.nextCursor; } while (cursor);
+        return ids;
+      };
+      // Expected: created_at descending, ties by ID descending (the last two rows share an instant).
+      const newest = (prefix: string) => Array.from({ length: n }, (_, i) => ({ id: idOf(prefix, i), at: at(i) })).sort((x, y) => y.at.localeCompare(x.at) || y.id.localeCompare(x.id)).map(row => row.id);
+      const hook = ok(await local('POST', '/v1/webhooks', { url: `https://${unique('order')}.example.org/hook`, eventTypes: ['email.delivered'] }), 201);
+      for (let i = 0; i < n; i++) await db.query("INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload,status,created_at) VALUES($1,$2,$3,$4,$5,'delivered',$6)", [idOf('whd', i), wid, hook.id, `evt_order_${i}`, { id: `evt_order_${i}`, type: 'email.delivered', createdAt: at(i), workspaceId: wid, region: null, data: {} }, at(i)]);
+      assert.deepEqual(await walk(`/v1/webhooks/${hook.id}/deliveries`), newest('whd'));
+      const inbound = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('order')}.example.org/inbound`, eventTypes: ['message.received'] }), 201);
+      for (let i = 0; i < n; i++) await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload,status,created_at) VALUES($1,$2,$3,$4,$5,'delivered',$6)", [idOf('mwd', i), wid, inbound.id, 9000 + i, { id: `mev_order_${i}`, type: 'message.received' }, at(i)]);
+      assert.deepEqual(await walk(`/v1/inbound/webhooks/${inbound.id}/deliveries`), newest('mwd'));
+      const email = unique('email');
+      await db.query("INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated) VALUES($1,$2,$3,'fixture','sender@example.org','[]','[]','[]','Order','delivered',$1,$4,true)", [email, wid, REGION, { subject: 'Order', text: 'Order', attachments: [] }]);
+      for (let i = 0; i < n; i++) await db.query("INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at) VALUES($1,$2,$3,'delivered','{}',true,$4)", [idOf('event', i), wid, email, at(i)]);
+      const oldest = newest('event').reverse();
+      assert.deepEqual(await walk(`/v1/emails/${email}/events`), oldest);
+      // An ID from before this change is not a cursor any more: a 422, not a silently different page.
+      error(await local('GET', `/v1/webhooks/${hook.id}/deliveries?cursor=${idOf('whd', 3)}`), 422, 'INVALID_CURSOR');
+      // An edited cursor with an offset Postgres refuses is a 422 too.
+      const edited = Buffer.from(JSON.stringify(['2026-01-01T00:00:00+16:00', idOf('whd', 3), `webhook-deliveries:${hook.id}`])).toString('base64url');
+      error(await local('GET', `/v1/webhooks/${hook.id}/deliveries?cursor=${edited}`), 422, 'INVALID_CURSOR');
+    });
+  });
   test('dev E2E: the deploy sets a finite, audited fixture override that releases a held campaign without exempting it', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
       const {applyDevE2eFixture,DEV_E2E_SEND_CAP}=await import('./scripts/dev-e2e-fixture.js');
@@ -8920,6 +8967,53 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  // Both are ambiguous: the calls in flight stay acceptance_unknown with their own code, and nothing else is spent.
+  for (const [answer,code,fail] of [
+    ['stops answering','SES_ACCEPTANCE_UNKNOWN',()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ECONNREFUSED'}});}],
+    ['answers without a MessageId','SES_MESSAGE_ID_MISSING',()=>({})],
+  ] as const) test(`MX: when SES ${answer}, the dispatcher holds queued mail instead of failing all of it as acceptance_unknown`, async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local}) => {
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js');
+      const wid=runtime.config.workspaceId, account='111122223333', domain='outage.example';
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[domain,wid]);
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1',[wid]);
+      let down=true,calls=0;const tags=new Map<string,number>(),{ SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
+        const email=cmd.input.EmailTags.find((tag:{Name:string})=>tag.Name==='bane_email_id').Value;tags.set(email,(tags.get(email)??0)+1);
+        calls++; return down ? fail() : {MessageId:unique('fake-ses')};
+      });
+      ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:50},(_,i)=>mail({from:`no-reply@${domain}`,to:`user${i}@example.net`,subject:'Verify your email'}))}),202);
+      const statuses=async()=>Object.fromEntries((await db.query(`SELECT status,count(*)::int n FROM sending_emails WHERE workspace_id=$1 GROUP BY 1`,[wid])).rows.map(r=>[r.status,r.n]));
+      const gate=initialGate(),due=()=>db.query(`UPDATE sending_emails SET scheduled_at=now() WHERE workspace_id=$1 AND status='queued'`,[wid]);
+      const report=await runDispatcher(runtime,{region:REGION,accountId:account,gate});
+      // Ambiguous calls are never replayed, so the ones in flight stay unknown; the shard stops, and what it had
+      // already claimed goes back to the queue until SES answers.
+      const wave=calls;
+      assert.ok(wave>=1 && wave<=6,`only the calls in flight reach SES (${wave})`);
+      assert.deepEqual(await statuses(),{acceptance_unknown:wave,queued:50-wave});
+      assert.ok(report.paceRetryAt!>Date.now()+10000,'the shard waits before probing again');
+      const held=(await db.query(`SELECT count(*)::int n,bool_and(scheduled_at>now()+interval '10 seconds') later FROM sending_emails WHERE workspace_id=$1 AND error_code='SES_UNAVAILABLE'`,[wid])).rows[0];
+      assert.ok(held.n>0 && held.later,'claimed mail is requeued after the outage window');
+      assert.deepEqual((await db.query(`SELECT DISTINCT data->>'code' code FROM sending_email_events WHERE workspace_id=$1 AND data->>'status'='acceptance_unknown'`,[wid])).rows,[{code}]);
+      // Still down when the window ends: exactly one probe, and the next window doubles.
+      gate.outageUntil=gate.brakeUntil=gate.nextAllowedAt=Date.now();await due();
+      const probe=await runDispatcher(runtime,{region:REGION,accountId:account,gate});
+      assert.equal(calls,wave+1,'one probe while SES is still down');
+      assert.equal(gate.outageStreak,2);
+      assert.ok(probe.paceRetryAt!>Date.now()+25000,'the second window is twice as long');
+      const lost=calls;
+      // SES answers again once the window has passed: the held mail is sent and the probe ends the outage.
+      down=false; gate.outageUntil=gate.brakeUntil=gate.nextAllowedAt=Date.now();await due();
+      for (let i=0;i<5 && (await statuses()).queued;i++) await runDispatcher(runtime,{region:REGION,accountId:account,gate});
+      assert.deepEqual(await statuses(),{acceptance_unknown:lost,accepted:50-lost});
+      assert.equal(gate.outageStreak,undefined);
+      assert.ok([...tags.values()].every(n=>n===1) && tags.size===50,'every email reached SES at most once');
+    });
+  });
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
     // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
     await simulatedSesFixture(t,async ({runtime,local,db})=>{
@@ -9260,6 +9354,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(await getCap('new'),100);
     });
   });
+  test('hourly upkeep: a retention statement that keeps failing does not skip the steps after it', async t => {
+    await simulatedSesFixture(t, async ({ runtime }) => {
+      const { hourlyUpkeep } = await import('./src/maintenance.js'), { PgDialect } = await import('drizzle-orm/pg-core');
+      const dialect = new PgDialect(), seen: string[] = [], execute = runtime.db.execute.bind(runtime.db);
+      const failing = /^DELETE FROM sending_attachment_links l USING sending_campaign_reviews/;
+      // Swapped by hand, not with t.mock: node:test restores every mock again at the end of the test, which would reinstall
+      // the fixture's own fetch mock over the real fetch for the tests after this one.
+      const fixtureFetch = globalThis.fetch;
+      globalThis.fetch = async () => { throw new Error('Offline fixture: DNS refreshes and alerts fail here.'); };
+      t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        const text = dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql; seen.push(text);
+        if (failing.test(text)) throw new Error('canceling statement due to statement timeout');
+        return execute(query);
+      });
+      // Only the cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
+      try { assert.equal((await hourlyUpkeep(runtime))[0], 'MAINTENANCE_CLEANUP_FAILED'); } finally { globalThis.fetch = fixtureFetch; }
+      const failedAt = seen.findIndex(text => failing.test(text));
+      assert.ok(failedAt >= 0, 'the retention statement ran and failed');
+      assert.ok(seen.slice(failedAt + 1).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery still ran after it');
+    });
+  });
   test('MX: disconnect and reconnect cannot reset operator policy', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const {setHostedLimits}=await import('./scripts/set-hosted-limits.js'), {hostedAllowance}=await import('./src/hosted-sending.js'), {sql}=await import('drizzle-orm');
@@ -9555,6 +9670,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }));
   });
 
+  test('Sent-copy archiving and reputation alerts retry a transient failure instead of failing for good', async t => {
+    await simulatedSesFixture(t, async ({ runtime }) => {
+      const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js'), { reputationAlertJobs } = await import('./src/reputation-alerts.js');
+      const wid = runtime.config.workspaceId, retryable = { code: 'OPERATION_TEMPORARILY_UNAVAILABLE', retryable: true };
+      // A storage or network error that is not an ApiError (an S3 SlowDown, a timed-out post) used to fail the job on its first attempt.
+      const slowDown = () => { throw Object.assign(new Error('Please reduce your request rate.'), { name: 'SlowDown', $metadata: { httpStatusCode: 503 } }); };
+      for (const method of ['execute', 'select'] as const) t.mock.method(runtime.db, method, slowDown);
+      await assert.rejects(mailboxIngestJobs['mail.archiveSent']!(runtime, { messageId: 'msg_archive' }, { id: 'job_archive', workspaceId: wid, attempts: 1 }), retryable);
+      for (const method of ['execute', 'select'] as const) (runtime.db[method] as unknown as { mock: { restore(): void } }).mock.restore();
+      runtime.config.reputationAlertUrl = 'https://hooks.slack.example/alerts';
+      // Swapped by hand: a t.mock of fetch would reinstall the fixture's own fetch mock for later tests when it is restored again.
+      const fixtureFetch = globalThis.fetch;
+      globalThis.fetch = async () => { throw new DOMException('The operation timed out.', 'TimeoutError'); };
+      try { await assert.rejects(reputationAlertJobs['reputation.alert']!(runtime, { region: REGION, metric: 'bounceRate', level: 'warning', previous: 'ok', value: 0.03 }, { id: 'job_alert', workspaceId: wid, attempts: 1 }), retryable); }
+      finally { globalThis.fetch = fixtureFetch; }
+      // A malformed alert is still a permanent failure.
+      await assert.rejects(reputationAlertJobs['reputation.alert']!(runtime, { region: REGION, metric: 'nope' }, { id: 'job_alert_bad', workspaceId: wid, attempts: 1 }), { code: 'JOB_PAYLOAD_INVALID', retryable: false });
+    });
+  });
   test('only old or BYO unmatched feedback acks after a short retry; hosted and unavailable writes still retry',()=>import('./src/adapters/feedback-queue.js').then(({settleFeedbackMessage})=>{
     const result=(attempts:number,kind:'shared'|'byo',days:number,error='SES_FEEDBACK_UNMATCHED')=>{
       let settled:number|'ack'|undefined;
@@ -9691,6 +9825,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for(let i=0;i<3;i++)await assert.rejects(post('one'),{name:'TimeoutError'});
       await assert.rejects(post('one'),JobDeferred);assert.equal(calls,3);
       await assert.rejects(post('two'),{name:'TimeoutError'});assert.equal(calls,4);
+    });
+  });
+  test('a sending webhook behind the timeout breaker keeps its spent attempts, so a hanging endpoint exhausts its retries',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId,hook=ok(await local('POST','/v1/webhooks',{url:`https://${unique('breaker')}.example.org/hook`,eventTypes:['email.delivered']}),201);
+      const transport=runtime.webhookFetch;let posts=0;
+      runtime.webhookFetch=async()=>{posts++;throw new DOMException('local synthetic timeout','TimeoutError');};
+      try{
+        for(const n of [1,2,3,4]){
+          const event={id:`evt_breaker_${n}_${hook.id}`,type:'email.delivered',createdAt:new Date().toISOString(),workspaceId:wid,region:null,data:{}};
+          await db.query("INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload) VALUES($1,$2,$3,$4,$5)",[`whd_breaker_${n}_${hook.id}`,wid,hook.id,event.id,event]);
+          await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'operation.webhook',$2,$3)",[`job_breaker_${n}`,wid,{deliveryId:`whd_breaker_${n}_${hook.id}`,generation:0}]);
+        }
+        const round=async()=>{await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND status='pending'",[wid]);await processJobs(runtime,operationJobs,4,1,20000,'webhooks');};
+        const attempts=async()=>(await db.query("SELECT id,attempts FROM jobs WHERE workspace_id=$1 ORDER BY id",[wid])).rows;
+        // Three timeouts trip the breaker; the fourth delivery is deferred before anything leaves.
+        await round();assert.equal(posts,3);
+        // The next round defers all four: the three that timed out keep their attempt, the deferred one has none.
+        await round();assert.equal(posts,3);
+        assert.deepEqual((await attempts()).map(row=>row.attempts),[1,1,1,0]);
+        assert.deepEqual((await db.query("SELECT attempt_count FROM operation_deliveries WHERE workspace_id=$1 AND webhook_id=$2 ORDER BY id",[wid,hook.id])).rows.map(row=>row.attempt_count),[1,1,1,0]);
+      }finally{runtime.webhookFetch=transport;}
     });
   });
 
@@ -10381,6 +10539,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }finally{await db.query('ROLLBACK');}
   });
   // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
+  test('malformed cursors and out-of-range page numbers are a 422 or a first page, not a 500', async t => {
+    await simulatedSesFixture(t, async ({ local }) => {
+      const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      for (const cursor of ['1.5', '1e10', '99999999999']) error(await local('GET', `/v1/routing/versions?cursor=${cursor}`), 422, 'INVALID_CURSOR');
+      ok(await local('GET', '/v1/routing/versions?cursor=5'));
+      for (const at of ['x', '0000-01-01 00:00:00+00', '2026-13-01 00:00:00+00', '2026-01-01 00:00:00+99', '2026-02-31 00:00:00+00', '2026-02-29 00:00:00+00', '2026-04-31 00:00:00+00', '1900-02-29 00:00:00+00']) error(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`), 422, 'INVALID_CURSOR');
+      for (const at of ['2026-11-12 17:42:19.355123+00', '2024-02-29 12:00:00.5+05:30', '2000-02-29T00:00:00Z', '2026-01-31 23:59:59+0530']) ok(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`));
+      for (const rank of [1.5, 1e12]) error(await local('GET', `/v1/inbound/overview?cursor=${b64(['host.example', rank, 'match', 'id'])}`), 422, 'INVALID_CURSOR');
+      error(await local('GET', '/v1/inbound/events?after=9999999999999999999'), 422, 'INVALID_CURSOR');
+      // A version cursor past the integer range starts from the newest version.
+      ok(await local('GET', '/v1/rituals/history?cursor=3000000000'));
+    });
+  });
   test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
     const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
     await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'fence.invalid',$3,'active','store')",[bid,w,REGION]);
@@ -10640,6 +10811,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   // Recheck of #57, R3 (tear witness, 3 steps: accept m3 a, W accept m2 a, X accept m3 ac -> the reopen did not
   // wait on the window row). A held-envelope replay batch and an ordinary reopen took the window and the
   // receipt in opposite orders and deadlocked.
+  test('a routed inbound webhook whose connection was refused retries instead of failing as an unknown outcome', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { ritualDelivery, ActionRetry } = await import('./src/ritual-delivery.js'), wid = runtime.config.workspaceId;
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('routed')}.example.org/hook`, eventTypes: [] }), 201);
+      const fence = async (id: string) => (await db.query('SELECT state FROM mail_action_attempts WHERE workspace_id=$1 AND delivery_id=$2', [wid, id])).rows[0]?.state;
+      const attempt = async (id: string, send: () => Promise<{ status: number }>) => {
+        await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,routed) VALUES($1,$2,$3,$4,true) ON CONFLICT DO NOTHING", [id, wid, hook.id, { id: 'mev_' + id, type: 'message.received' }]);
+        return ritualDelivery(runtime, wid, { delivery_id: id, generation: 0, routed: true, webhook_id: hook.id, payload: { id: 'mev_' + id, type: 'message.received' } } as unknown as import('./src/core.js').ClaimedWebhook, send);
+      };
+      // Nothing left the box (Node's connect and DNS errors): a known outcome, retried like a 503.
+      for (const code of ['ECONNREFUSED', 'ENOTFOUND']) {
+        const id = `mwd_unreachable_${code.toLowerCase()}`;
+        await assert.rejects(attempt(id, () => Promise.reject(Object.assign(new Error(`connect ${code} 203.0.113.9:443`), { code, syscall: 'connect' }))), (e: unknown) => e instanceof ActionRetry && e.code === 'DESTINATION_UNREACHABLE');
+        assert.equal(await fence(id), 'retry');
+        // The next attempt sends.
+        assert.equal((await attempt(id, async () => ({ status: 200 }))).status, 200);
+        assert.equal(await fence(id), 'delivered');
+      }
+      // A reset after connecting may follow a sent request: still unknown, and this endpoint does not replay unknown outcomes.
+      await assert.rejects(attempt('mwd_unreachable_reset', () => Promise.reject(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))), { code: 'ACTION_UNKNOWN' });
+      assert.equal(await fence('mwd_unreachable_reset'), 'unknown');
+    });
+  });
   test('receive route: a held-envelope replay and a reopen of one of its messages do not deadlock',async t=>{
     const {nodeRuntime}=await import('./src/adapters/node.js'),{acceptInboundNotification,recoverHeldReceipts}=await import('./src/mailbox-receipts.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
@@ -10933,6 +11127,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   // Recheck 2 of #57 (tear witness, 3 steps: foreign, day, purge -> reconciliation took a workspace named
   // `attachments`'s kept mail, k/attachments/msg_*.eml, for an upload of workspace `k` and deleted it).
+  test('retention retires every aged, unused upload in one run, not 50 an hour', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { cleanup } = await import('./src/maintenance.js'), wid = runtime.config.workspaceId, n = 130;
+      await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at)
+        SELECT 'attachment_aged'||i,$1,'old.txt','text/plain',10,'attachment',$1||'/attachments/attachment_aged'||i,'x',now()-interval '31 days' FROM generate_series(1,$2) i`, [wid, n]);
+      // One still linked to a draft, and one recent: both stay.
+      await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at) VALUES
+        ('attachment_agedlinked',$1,'kept.txt','text/plain',10,'attachment',$1||'/attachments/attachment_agedlinked','x',now()-interval '31 days'),
+        ('attachment_recent',$1,'new.txt','text/plain',10,'attachment',$1||'/attachments/attachment_recent','x',now())`, [wid]);
+      await db.query("INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) VALUES($1,'attachment_agedlinked','email','email_draft_fixture')", [wid]);
+      await cleanup(runtime);
+      assert.deepEqual((await db.query("SELECT id FROM sending_attachments WHERE workspace_id=$1 ORDER BY id", [wid])).rows.map(row => row.id), ['attachment_agedlinked', 'attachment_recent']);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND payload->>'key' LIKE '%attachment_aged%' AND status='pending'", [wid])).rows[0].n, n);
+    });
+  });
   test('attachment upload: reconciliation and deletion never touch another key family or a referenced key',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const {storeAttachmentBytes}=await import('./src/sending.js'),{reconcileUploads}=await import('./src/maintenance.js'),dispatch=await import('./src/dispatch.js');
@@ -13049,6 +13258,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('an inbound webhook test to a receiver that times out or refuses the connection reports it, not a 500', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('down')}.example.org/hook`, eventTypes: ['message.received'] }), 201);
+      const transport = runtime.webhookFetch;
+      try {
+        for (const [failure, message] of [
+          [new DOMException('The operation was aborted due to timeout', 'TimeoutError'), /did not answer within 5 seconds/],
+          [Object.assign(new Error('connect ECONNREFUSED 203.0.113.9:443'), { code: 'ECONNREFUSED' }), /could not be reached/],
+        ] as const) {
+          runtime.webhookFetch = async () => { throw failure; };
+          const body = error(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {}), 503, 'WEBHOOK_UNREACHABLE');
+          assert.match(body.message, message); assert.equal(body.retryable, true);
+        }
+        // A bug in the send path is not an unreachable endpoint.
+        runtime.webhookFetch = async () => { throw new RangeError('Invalid header value'); };
+        error(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {}), 500, 'INTERNAL_ERROR');
+        runtime.webhookFetch = async () => ({ status: 204 });
+        assert.deepEqual(ok(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {})), { statusCode: 204 });
+      } finally { runtime.webhookFetch = transport; }
+    });
+  });
   test('a webhook storm stays off campaign lanes; capped fan-out and due selection are bounded', async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       const {processJobs}=await import('./src/jobs.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
@@ -13895,6 +14125,31 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a deadlock or serialization victim is a retryable 503 and a job retries it; a pool checkout timeout is transient', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { PgDialect } = await import('drizzle-orm/pg-core'), { processJobs } = await import('./src/jobs.js');
+      const dialect = new PgDialect(), execute = runtime.db.execute.bind(runtime.db), wid = runtime.config.workspaceId;
+      let failure: Error | undefined;
+      t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        // Wrapped like Drizzle's query error, with the driver's error as the cause.
+        if (failure && dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql.includes('FROM mail_routing_versions')) throw new Error('Failed query', { cause: failure });
+        return execute(query);
+      });
+      for (const code of ['40P01', '40001']) {
+        failure = Object.assign(new Error('deadlock detected'), { code });
+        const reply = await local('GET', '/v1/routing/versions');
+        assert.equal(error(reply, 503, 'DATABASE_CONFLICT').retryable, true, code); assert.equal(reply.headers.get('retry-after'), '1');
+      }
+      failure = new Error('timeout exceeded when trying to connect');
+      assert.equal(error(await local('GET', '/v1/routing/versions'), 503, 'DATABASE_UNAVAILABLE').retryable, true);
+      failure = undefined;
+      // A background handler that is not wrapped in retryDatabaseFailures retries a deadlock instead of failing for good.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_conflict','reputation.alert',$1,'{}')", [wid]);
+      await processJobs(runtime, { 'reputation.alert': async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); } }, 1, 1, 20000, 'work');
+      assert.deepEqual((await db.query("SELECT status,attempts,last_error FROM jobs WHERE id='job_conflict'")).rows[0], { status: 'pending', attempts: 1, last_error: 'DATABASE_UNAVAILABLE' });
+    });
+  });
   test('deadlock and serialization retries persist the accepted provider id without repeating SES',async t=>{
     await simulatedSesFixture(t,async ({local,run,db})=>{
       const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
@@ -15660,6 +15915,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             body: '{}',
           }), env);
           assert.ok([400,422].includes(exemptSns.status));
+
+          // 5) Cloudflare gives every cross-zone Worker subrequest the client address 2a06:98c0:3600::103 and names the
+          // calling zone in CF-Worker. One zone's failures or burst must not throttle another zone's Worker (Console).
+          admissionAllowed = true;
+          const limited = [];
+          const zoneEnv = { ...env, ADMISSION: { async limit({ key }) { limited.push(key); return { success: true }; } } };
+          const fromWorker = (zone, ip = '2a06:98c0:3600::103') => worker.fetch(new Request('https://dev.bane.mx/v1/domains', {
+            headers: { 'CF-Connecting-IP': ip, 'CF-Worker': zone, authorization: 'Bearer bane_malformed' },
+          }), zoneEnv);
+          for (let n = 0; n < 40; n++) assert.equal((await fromWorker('noisy.example')).status, 401);
+          const noisy = await fromWorker('noisy.example');
+          assert.equal(noisy.status, 429);
+          assert.equal((await noisy.json()).error?.code, 'PUBLIC_RATE_LIMITED');
+          const other = await fromWorker('console.example');
+          assert.equal(other.status, 401, 'Another zone\\'s Worker keeps its own failure budget.');
+          assert.equal((await other.json()).error?.code, 'AUTH_INVALID');
+          assert.notEqual(limited[0], limited.at(-1), 'Each calling zone has its own admission bucket.');
+          // A client that is not Cloudflare's Worker egress cannot pick a bucket by sending CF-Worker.
+          limited.length = 0;
+          await fromWorker('noisy.example', '198.51.100.7'); await fromWorker('console.example', '198.51.100.7');
+          assert.equal(limited[0], limited[1]);
         } finally {
           await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
           await setup.end();
