@@ -76,6 +76,7 @@ test('SDK release: extraction accepts one bounded regular package at a fixed pat
     ['duplicate',[[name,bytes,0],[name,bytes,0]],false],
     ['link',[[name,'../other',0o120777]],false],
     ['large',[[name,'large',0]],false],
+    ['compression',[[name,bytes,0]],false],
   ] as const){
     const dir=join(root,label);mkdirSync(dir);
     execFileSync('python3',['-c',`import sys,json,zipfile,warnings
@@ -83,10 +84,10 @@ warnings.simplefilter('ignore',UserWarning)
 with zipfile.ZipFile(sys.argv[1],'w',compression=zipfile.ZIP_DEFLATED) as archive:
     for name,data,mode in json.loads(sys.argv[2]):
         entry=zipfile.ZipInfo(name)
-        entry.compress_type=zipfile.ZIP_DEFLATED
+        entry.compress_type=zipfile.ZIP_BZIP2 if sys.argv[3]=='compression' else zipfile.ZIP_DEFLATED
         if mode: entry.external_attr=mode<<16
         archive.writestr(entry,'x'*(16*1024*1024+1) if data=='large' else data)
-`,join(dir,'sdk-artifact.zip'),JSON.stringify(entries)],{timeout:5000});
+`,join(dir,'sdk-artifact.zip'),JSON.stringify(entries),label],{timeout:5000});
     const result=spawnSync('python3',['-c',reader],{env:{...process.env,RUNNER_TEMP:dir,VERSION:version},encoding:'utf8',timeout:5000});
     assert.equal(result.status===0,accept,`${label}: ${result.stderr}`);
     assert.equal(existsSync(join(root,name)),false,label);
