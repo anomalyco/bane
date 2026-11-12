@@ -121,6 +121,19 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
+  // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"]')) return
+      const search = content.current?.querySelector<HTMLInputElement>('input[type="search"]:not(:disabled)')
+      if (!search) return
+      event.preventDefault(); search.focus(); search.select()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)

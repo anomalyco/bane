@@ -118,9 +118,14 @@ export function DataTable<T>({ columns, rows, rowKey, onRowClick, onRowIntent, r
 export function TableSkeleton({ columns, rows = 5, pagination = false, className }: { columns: SkeletonColumn[]; rows?: number; pagination?: boolean; className?: string }) {
   return <><DataTable className={className} columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} />{pagination && <PaginationSkeleton />}</>;
 }
-export function Pagination({ page, pageSize, total, nextCursor, onPageChange }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void }) {
+// Cursor lists don't know their total until the last page: they say which rows are showing ("Showing 21–40"), and on
+// the last page how many there are in all, instead of a page size and a "2+" page count.
+export function Pagination({ page, pageSize, total, nextCursor, onPageChange, count }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void; count?: number }) {
   if (total === undefined && page <= 1 && !nextCursor) return null;
-  if (total === undefined) return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{pageSize} per page</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">{page} / {nextCursor ? `${page + 1}+` : page}</span><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
+  if (total === undefined) {
+    const first = (page - 1) * pageSize + 1, last = first + Math.max(0, (count ?? pageSize) - 1);
+    return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{count === undefined ? null : count === 0 ? 'No rows on this page' : `Showing ${first.toLocaleString()}–${last.toLocaleString()}${nextCursor ? '' : ` of ${last.toLocaleString()}`}`}</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">Page {page.toLocaleString()}</span><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
+  }
   return <NumberedPagination page={page} pageSize={pageSize} total={total} onPageChange={onPageChange} />
 }
 function NumberedPagination({ page, pageSize, total, onPageChange }: { page: number; pageSize: number; total: number; onPageChange: (page: number) => void }) {
