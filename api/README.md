@@ -411,7 +411,7 @@ For an **older `ENCRYPTION_KEY` installation**, retain that old key only as upgr
 
 ## Verification
 
-The only acceptance-test file is `api/api.acceptance.test.ts`. `bun run test` uses the local API/job worker and a paired local database; its Google identities are synthetic and its OAuth transport is mocked. It does **not** prove normal Google login with a real client. Do not run it against production or unrelated data: synthetic contacts/campaigns and audit records are created.
+The only acceptance-test file is `api/api.acceptance.test.ts`. Idempotency and access control are also model-checked by [`api/tear`](tear/README.md) against the same kind of isolated database. `bun run test` uses the local API/job worker and a paired local database; its Google identities are synthetic and its OAuth transport is mocked. It does **not** prove normal Google login with a real client. Do not run it against production or unrelated data: synthetic contacts/campaigns and audit records are created.
 
 Use an isolated database with synthetic identities, never real user data, for local acceptance. For that dedicated local test installation, the suite needs the server's matching `BETTER_AUTH_SECRET`, `API_BASE_URL`, and paired `DATABASE_URL`. Allow its default fixture email `operator@example.com` in `AUTH_ALLOWED_EMAILS` and fixture domain `example.com` in `AUTH_ALLOWED_DOMAINS` (or use matching `AUTH_TEST_EMAIL` / `AUTH_TEST_GOOGLE_DOMAIN` values). Reserve `operator@example.com` for the fixture; it must not collide with an existing user. Restart the API/worker after changing configuration. These are **test-only** identities/permissions, not production onboarding, and fake OAuth credentials alone are not an alternate login path.
 

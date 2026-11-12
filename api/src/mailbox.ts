@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { domains } from './db/operations.js';
@@ -45,14 +45,14 @@ async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermissi
 }
 
 export async function authorizeInboxKey(c:Ctx,token:string):Promise<MailboxAccess>{
-  const key=await chargeCredential<{id:string;workspace_id:string;grant_id:string|null;mailbox_ids:string[]|null;permissions:MailboxPermission[]}>(c, mailboxKeys,sql`
-    SELECT k.id,k.workspace_id,k.id AS key_id,g.grant_id,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=k.workspace_id AND b.created_by=k.id AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000)) ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='key' AND g.resource=k.id WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
+  const key=await chargeCredential<{id:string;workspace_id:string;grant_id:string|null;mailbox_ids:string[]|null;scope_ids:string[]|null;permissions:MailboxPermission[]}>(c, mailboxKeys,sql`
+    SELECT k.id,k.workspace_id,k.id AS key_id,g.grant_id,k.mailbox_ids AS scope_ids,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=k.workspace_id AND b.created_by=k.id AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000)) ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='key' AND g.resource=k.id WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
   if(!key)throw new ApiError(401,'AUTH_INVALID','The inbox key is invalid or expired.');
   if(key.grant_id){
     const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+key.grant_id);
     if(grant?.workspaceId!==key.workspace_id||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The originating receiving approval is no longer active.');
   }
-  return {keyId:key.id,grantId:key.grant_id??undefined,workspaceId:key.workspace_id,admin:false,mailboxIds:key.mailbox_ids,permissions:key.permissions};
+  return {keyId:key.id,grantId:key.grant_id??undefined,workspaceId:key.workspace_id,admin:false,mailboxIds:key.mailbox_ids,scopeIds:key.scope_ids,permissions:key.permissions};
 }
 async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   const delegated=delegatedInbox(c.env);if(delegated){c.set('mailboxAccess',delegated);return next();}
@@ -75,14 +75,6 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     c.set('mailboxAccess', value);
     await next();
   });
-}
-// Received mail a Bane credential can read: dashboard members read addressed mail; unrestricted manage credentials read
-// the whole workspace; everything else reads none. Used by mailboxAuth and the unified logs.
-function actorMailAccess(actor: Actor): MailboxAccess | null {
-  if (actor.domains.length) return null;
-  if (actor.role === 'member' && actor.credential === 'dashboard') return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: ['read', 'send'] };
-  if (!actor.permissions.includes('manage')) return null;
-  return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] };
 }
 
 // ---------- helpers ----------
@@ -498,12 +490,11 @@ import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
   registerRouting(app);
   registerRituals(app);
-  app.use('/v1/inbound/*', mailboxAuth);
-  for (const path of ['policy','retired/*','domains/*','addresses/*','keys/*','webhooks/*','messages/:messageId/redeliver']) app.use('/v1/inbound/'+path,requireReceivingConsent);
-  app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
-
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
-  app.use('/v1/inboxes/*', mailboxAuth);
+  // mailboxRoute and receivingConsentRoute (core.ts) are the rules the MCP listing applies too.
+  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? mailboxAuth(c, next) : next());
+  app.use('/v1/inbound/*', (c, next) => receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
+  app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inbound/*', mailboxCreates);
   app.use('/v1/inboxes/*', mailboxCreates);
