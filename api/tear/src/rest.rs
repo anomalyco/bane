@@ -37,7 +37,7 @@ pub enum Check {
     MailboxOwnReceiving,
 }
 
-/// (operationId, method, OpenAPI path, check), for the 202 operations of the hosted MCP catalog.
+/// (operationId, method, OpenAPI path, check), for the 209 operations of the hosted MCP catalog.
 pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("addListMembers", "post", "/v1/lists/{id}/members", Check::Manage),
     ("applyAudiencePlan", "post", "/v1/audience-query/apply", Check::Manage),
@@ -67,7 +67,9 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("createInboundThread", "post", "/v1/inbound/threads", Check::MailboxAccess("send")),
     ("createInboundWebhook", "post", "/v1/inbound/webhooks", Check::MailboxHook),
     ("createInbox", "post", "/v1/inboxes", Check::MailboxAccess("create")),
+    ("createInboxAppPassword", "post", "/v1/inboxes/{id}/app-passwords", Check::MailboxAdmin),
     ("createInboxConnection", "post", "/v1/inbox-connections", Check::RitualWrite),
+    ("createInboxFolder", "post", "/v1/inboxes/{id}/folders", Check::MailboxAccess("modify")),
     ("createRoute", "post", "/v1/routing/routes", Check::Manage),
     ("createSegment", "post", "/v1/segments", Check::Manage),
     ("createWebhook", "post", "/v1/webhooks", Check::Manage),
@@ -82,6 +84,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("deleteInboundWebhook", "delete", "/v1/inbound/webhooks/{id}", Check::MailboxHook),
     ("deleteInbox", "delete", "/v1/inboxes/{id}", Check::MailboxAccess("modify")),
     ("deleteInboxMessage", "delete", "/v1/inboxes/{id}/messages/{messageId}", Check::MailboxAccess("modify")),
+    ("deleteInboxFolder", "delete", "/v1/inboxes/{id}/folders/{folder}", Check::MailboxAccess("modify")),
     ("deleteRitual", "delete", "/v1/rituals/scripts/{key}", Check::RitualWrite),
     ("deleteRoute", "delete", "/v1/routing/routes/{id}", Check::Manage),
     ("deleteSegment", "delete", "/v1/segments/{id}", Check::Manage),
@@ -111,6 +114,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("getInboundAttachment", "get", "/v1/inbound/messages/{messageId}/attachments/{attachmentId}", Check::MailboxAccess("read")),
     ("getInboundDomain", "get", "/v1/inbound/domains/{id}", Check::MailboxAdmin),
     ("getInboundMessage", "get", "/v1/inbound/messages/{messageId}", Check::MailboxAccess("read")),
+    ("getInboundOverview", "get", "/v1/inbound/overview", Check::MailboxAccess("read")),
     ("getInboundScanPolicy", "get", "/v1/inbound/policy", Check::MailboxAdmin),
     ("getInboundSubdomain", "get", "/v1/inbound/domains/{id}/subdomains/{subdomainId}", Check::MailboxAdmin),
     ("getInboundThread", "get", "/v1/inbound/threads/{threadId}", Check::MailboxAccess("read")),
@@ -158,6 +162,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("listInboundThreads", "get", "/v1/inbound/threads", Check::MailboxAccess("read")),
     ("listInboundWebhookDeliveries", "get", "/v1/inbound/webhooks/{id}/deliveries", Check::MailboxAdmin),
     ("listInboundWebhooks", "get", "/v1/inbound/webhooks", Check::MailboxAdmin),
+    ("listInboxAppPasswords", "get", "/v1/inboxes/{id}/app-passwords", Check::MailboxAdmin),
     ("listInboxFolders", "get", "/v1/inboxes/{id}/folders", Check::MailboxAccess("read")),
     ("listInboxMessages", "get", "/v1/inboxes/{id}/messages", Check::MailboxAccess("read")),
     ("listInboxes", "get", "/v1/inboxes", Check::MailboxAccess("read")),
@@ -199,6 +204,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("revokeAgentToken", "post", "/v1/agent-tokens/{id}/revoke", Check::Manage),
     ("revokeApiKey", "post", "/v1/api-keys/{id}/revoke", Check::Manage),
     ("revokeInboundKey", "post", "/v1/inbound/keys/{id}/revoke", Check::MailboxAdmin),
+    ("revokeInboxAppPassword", "delete", "/v1/inboxes/{id}/app-passwords/{passwordId}", Check::MailboxAdmin),
     ("revokeMcpConnection", "post", "/v1/mcp-connections/{id}/revoke", Check::Dashboard),
     ("rotateInboundWebhookSecret", "post", "/v1/inbound/webhooks/{id}/rotate-secret", Check::MailboxHook),
     ("rotateWebhookSecret", "post", "/v1/webhooks/{id}/rotate-secret", Check::Manage),
@@ -232,6 +238,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("updateInboundThread", "patch", "/v1/inbound/threads/{threadId}", Check::MailboxAccess("modify")),
     ("updateInboundWebhook", "patch", "/v1/inbound/webhooks/{id}", Check::MailboxHook),
     ("updateInbox", "patch", "/v1/inboxes/{id}", Check::MailboxAccess("modify")),
+    ("updateInboxFolder", "patch", "/v1/inboxes/{id}/folders/{folder}", Check::MailboxAccess("modify")),
     ("updateInboxMessage", "patch", "/v1/inboxes/{id}/messages/{messageId}", Check::MailboxAccess("modify")),
     ("updateRoute", "patch", "/v1/routing/routes/{id}", Check::Manage),
     ("updateSegment", "patch", "/v1/segments/{id}", Check::Manage),
@@ -252,16 +259,22 @@ pub fn mailbox_path(path: &str) -> bool {
 /// requireReceivingConsent (app.ts and mailbox.ts): a grant without receiving consent is refused.
 pub fn receiving_path(path: &str) -> bool {
     let under = |base: &str| path == base || path.starts_with(&format!("{base}/"));
-    ["/v1/routing", "/v1/rituals", "/v1/endpoints", "/v1/inbound/retired", "/v1/inbound/domains", "/v1/inbound/addresses", "/v1/inbound/keys", "/v1/inbound/webhooks"]
+    ["/v1/routing", "/v1/rituals", "/v1/endpoints", "/v1/inbound/retired", "/v1/inbound/domains", "/v1/inbound/addresses", "/v1/inbound/keys", "/v1/inbound/webhooks", "/v1/inbound/overview"]
         .into_iter()
         .any(under)
+        || app_password_path(path)
         || matches!(path, "/v1/inbox-connections" | "/v1/domains/{id}/receiving-host" | "/v1/inbound/policy" | "/v1/inbound/messages/{messageId}/redeliver")
+}
+
+/// Mail client passwords (core.ts appPasswordRoute): owner/admin only, and receiving consent for a grant.
+fn app_password_path(path: &str) -> bool {
+    path == "/v1/inboxes/{id}/app-passwords" || path.starts_with("/v1/inboxes/{id}/app-passwords/")
 }
 
 /// notMember (app.ts): workspace members are refused these areas whatever their scopes.
 pub fn owner_area(method: &str, path: &str) -> bool {
     let under = |base: &str| path == base || path.starts_with(&format!("{base}/"));
-    under("/v1/domains") || under("/v1/webhooks") || under("/v1/agent-tokens") || path.starts_with("/v1/regions/") || (path == "/v1/regions" && method != "get")
+    app_password_path(path) || under("/v1/domains") || under("/v1/webhooks") || under("/v1/agent-tokens") || path.starts_with("/v1/regions/") || (path == "/v1/regions" && method != "get")
         || path == "/v1/settings/ses"
         || (method == "post" && ["send", "schedule", "pause", "resume", "pacing", "cancel"].iter().any(|a| path == format!("/v1/campaigns/{{id}}/{a}")))
 }
