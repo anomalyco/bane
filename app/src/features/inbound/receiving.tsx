@@ -1,6 +1,6 @@
 // Receiving: Routes, Rituals and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
 import { useState, type ReactNode } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import { Check } from 'lucide-react'
 import { Button, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { useWorkspaceAccess } from '../../data/context'
@@ -18,6 +18,7 @@ import { RouteEditor } from './routing'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
+import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 
 type Tab = 'routes' | 'rituals' | 'endpoints'
 const PAGE = 50
@@ -33,14 +34,16 @@ function note(r: RouteEntry) {
   const a = r.address
   if (r.kind === 'catch_all') return r.catchAll ? (r.catchAll === 'create_address' ? 'Catch-all · creates an address per recipient' : 'Catch-all · unknown addresses') : 'Catch-all route'
   if (r.kind === 'route') return kindNote.route
-  if (r.kind === 'pattern') return a ? `Pattern of ${a.address}` : kindNote.pattern
+  if (r.kind === 'pattern') return a ? <>Pattern of <PrivateAddress value={a.address} /></> : kindNote.pattern
   if (r.kind === 'inbox') return [a?.displayName, expiresIn(a?.expiresAt)].filter(Boolean).join(' · ') || kindNote.inbox
   if (a?.origin === 'auto') return kindNote.auto
-  const also = a?.aliases.length ? `also ${a.aliases.map(x => x.slice(0, x.indexOf('@') + 1)).join(', ')}` : null
-  return [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean).join(' · ') || 'Address'
+  const also = a?.aliases.length ? <>also <AddressList values={a.aliases.map(x => x.slice(0, x.indexOf('@') + 1))} /></> : null
+  const parts = [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean)
+  return parts.length ? parts.map((part, i) => <span key={i}>{i > 0 && ' · '}{part}</span>) : 'Address'
 }
-// Where a row leads: its address, its agent inbox, the domain that owns a default, or the route editor.
-const hrefOf = (r: RouteEntry) => r.kind === 'inbox' && r.address ? `/receiving/inboxes/${r.address.id}` : r.address ? `/receiving/addresses/${r.address.id}` : r.id.startsWith('default:') ? `/domains/${r.id.slice(8)}` : null
+// Where a row leads: its address or its agent inbox (real links). Every other route, including a domain's default
+// catch-all, opens its own route editor here, never the domain's page (Back from there led to Domains, not Receiving).
+const hrefOf = (r: RouteEntry) => r.kind === 'inbox' && r.address ? `/receiving/inboxes/${r.address.id}` : r.address ? `/receiving/addresses/${r.address.id}` : null
 
 /** A new account: the three steps everything else builds on, each with the one action that starts it. */
 function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: () => void }) {
@@ -58,7 +61,6 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
 }
 
 function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: () => void; onEditRoute: (r: RouteEntry) => void }) {
-  const navigate = useNavigate()
   const { canAdminister } = useWorkspaceAccess()
   const [newInbox, setNewInbox] = useState(false)
   const hosts = receivingDomains(overview.domains)
@@ -68,7 +70,7 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
   const rows = overview.routes.data
   const empty = filters.q ? { title: 'Nothing matches', description: `No route at ${filters.domain || 'any domain'} matches “${filters.q}”.` }
     : { title: filters.kind === 'all' ? 'No routes yet' : `No ${kinds[filters.kind].label.toLowerCase()} yet`, description: [kinds[filters.kind].line, kinds[filters.kind].example && `Example: ${kinds[filters.kind].example}`].filter(Boolean).join(' ') }
-  const open = (r: RouteEntry) => { const href = hrefOf(r); if (href) navigate(href); else if (r.route) onEditRoute(r) }
+  const open = (r: RouteEntry) => { if (!hrefOf(r)) onEditRoute(r) }
   return <div className="stack rcv-tab">
     <div className="rcv-toolbar">
       <div className="rcv-filters" role="group" aria-label="Show">{(Object.keys(kinds) as KindFilter[]).filter(k => overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k)).map(k =>
@@ -83,7 +85,7 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
       {canAdminister && filters.kind === 'inbox' && <Button size="sm" onClick={() => setNewInbox(true)}>New agent inbox</Button>}
       {canAdminister && filters.kind === 'address' && <Button size="sm" disabled={!hosts.length} onClick={onCreate}>New address</Button>}
     </div>
-    <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} onRowClick={open} loading={false} minRows={Math.min(8, rows.length)}
+    <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} rowHref={hrefOf} onRowClick={open} loading={false} minRows={Math.min(8, rows.length)}
       empty={<EmptyState title={empty.title} description={empty.description} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={onCreate}>New address</Button> : undefined} />}
       columns={[
         { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip">{note(r)}</span></div></div> },
@@ -102,11 +104,10 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
 }
 
 function RitualsTab({ overview }: { overview: Overview }) {
-  const navigate = useNavigate()
   const byName = new Map(overview.endpoints.filter(e => e.source === 'endpoint').map(e => [e.name, e]))
   return <div className="stack rcv-tab">
     <div className="rcv-kindline"><ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} /><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals?new=1">New ritual</Link></div>
-    <DataTable className="rcv-table" rows={overview.rituals} rowKey={r => r.key} onRowClick={r => navigate(`/receiving/rituals?key=${encodeURIComponent(r.key)}`)}
+    <DataTable className="rcv-table" rows={overview.rituals} rowKey={r => r.key} rowHref={r => `/receiving/rituals?key=${encodeURIComponent(r.key)}`}
       empty={<EmptyState title="No rituals yet" description="A ritual is a short script that runs on a route’s mail. For example: if the subject mentions a refund, label it and post it to Slack." action={<Link to="/receiving/rituals?new=1">Write a ritual</Link>} />}
       columns={[
         { key: 'key', label: 'Ritual', width: '20%', render: r => <span className="rcv-cell"><RitualIcon /><code>{r.key}</code></span> },
@@ -119,7 +120,6 @@ function RitualsTab({ overview }: { overview: Overview }) {
 }
 
 function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () => void }) {
-  const navigate = useNavigate()
   const toast = useToast()
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
@@ -134,7 +134,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
   return <div className="stack rcv-tab">
     <div className="rcv-kindline"><ConceptLine line={concepts.endpoints.line} example={concepts.endpoints.example} />
       <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/webhooks">Event webhooks</Link><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
-    <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} onRowClick={e => e.source === 'inbound_webhook' ? navigate(`/receiving/webhooks/${e.id}`) : undefined}
+    <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
       empty={<EmptyState title="No endpoints yet" description="An endpoint is a named place rituals and routes send mail: Slack, Discord, a webhook or a forward. For example, a ritual calls endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
         { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip">{e.target}</span></div></div> },
@@ -188,6 +188,6 @@ export function ReceivingPage() {
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
     {data && <CreateAddressDialog open={creating} onOpenChange={setCreating} domains={data.domains} />}
-    {editing?.route && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
+    {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
   </div>
 }

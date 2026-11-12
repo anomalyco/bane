@@ -6,6 +6,7 @@ import { Alert, DataTable, ErrorText, SkeletonText, StatusBadge } from '../../co
 import { Link } from 'react-router'
 import { contactColumns, memberColumns } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 export const pageSize = 8
 export const date = (value: string | null) => value ? formatDate(value) : 'Never'
@@ -19,7 +20,7 @@ export function useAudienceLists(search = '', cursor?: string) {
 export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
   const columns = members ? memberColumns : contactColumns
   return <DataTable tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} empty={empty} columns={columns.map(column => ({ ...column, render: (row: Contact) => {
-    if (column.key === 'email') return <Link className="audience-cell-text" title={row.email} to={`/audience/contacts/${row.id}`}>{row.email}</Link>
+    if (column.key === 'email') return <Link className="audience-cell-text" to={`/audience/contacts/${row.id}`}><PrivateAddress value={row.email} /></Link>
     if (column.key === 'status') return <StatusBadge status={row.status} />
     if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || undefined}>{row.suppressionReason || '—'}</span>
     if (column.key === 'name') return <span className="audience-cell-text" title={row.name}>{row.name || '—'}</span>

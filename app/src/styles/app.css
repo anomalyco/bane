@@ -32,8 +32,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .page-surface > .stack { gap: var(--page-gap); }
 .page-surface > .stack > .section { margin-block: 0; }
 .page-surface:focus { outline: none; }
-/* Route transitions: a new page (or a skeleton giving way to content) fades up 4px. Transform and opacity only. */
-.page-surface > :not(.page-notice) { animation: section-enter 200ms var(--ease-out-strong) both; }
+/* Route transitions: a new page (or a skeleton giving way to content) crossfades in 120 ms. Opacity only, no movement. */
+.page-surface > :not(.page-notice) { animation: section-enter 120ms ease-out both; }
 .main-navigation a { transition: color var(--motion-duration), background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .main-navigation a:active { transform: scale(.98); }
 .page-notice { flex-shrink: 0; margin-bottom: var(--page-gap); }
@@ -99,10 +99,11 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .logs-table .ui-table td:last-child svg { display: block; }
 .logs-table .ui-table tbody tr:nth-child(odd):not(.ui-table-spacer) { background: var(--color-hover); }
 .logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
-/* Other people's addresses in lists (PrivateAddress): blurred after two characters until hovered or focused. */
+/* Every mailbox address (PrivateAddress): blurred after two characters until hovered or its row or link is focused.
+   Only a filter changes, so blurred and revealed are the same width. */
 .private-address { display: inline-flex; max-width: 100%; white-space: nowrap; }
 .private-address__rest { filter: blur(4px); transition: filter var(--motion-duration); }
-.private-address:hover .private-address__rest, .ui-table__clickable:focus-visible .private-address__rest { filter: blur(0); }
+.private-address:hover .private-address__rest, :is(a, button, [tabindex], .ui-table__clickable):focus-visible .private-address__rest, .ui-table__linked:has(.ui-row-link:focus-visible) .private-address__rest { filter: blur(0); }
 /* Direction: a quiet mono tag, Out for sent mail and In for received mail. */
 .log-direction { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); }
 .log-direction[data-direction='received'] { color: var(--color-text); }

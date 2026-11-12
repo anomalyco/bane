@@ -1,5 +1,5 @@
-import { Suspense, useEffect, useRef } from 'react'
-import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
+import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
@@ -80,10 +80,35 @@ export function AppShell() {
     })()
     return () => { stopped = true; release?.(); warming.current = false }
   }, [api.mode, regionReady])
+  // Scroll: a new page starts at the top (filter and tab changes on the same page keep their place); Back and Forward
+  // restore where that entry was left, waiting a moment for its (usually cached) content to be tall enough again.
+  const navigationType = useNavigationType()
+  const scrolls = useRef(new Map<string, number>())
+  const lastPath = useRef(location.pathname)
   useEffect(() => {
+    const el = content.current, key = location.key
+    if (!el) return
+    const save = () => { scrolls.current.set(key, el.scrollTop) }
+    el.addEventListener('scroll', save, { passive: true })
+    return () => el.removeEventListener('scroll', save)
+  }, [location.key])
+  useLayoutEffect(() => {
+    const el = content.current, samePage = lastPath.current === location.pathname
+    lastPath.current = location.pathname
+    if (navigationType === 'POP') {
+      const top = scrolls.current.get(location.key) ?? 0
+      if (!el) return
+      let frame = 0, tries = 0
+      const apply = () => { el.scrollTop = top; if (Math.abs(el.scrollTop - top) > 1 && tries++ < 60) frame = requestAnimationFrame(apply) }
+      const stop = () => cancelAnimationFrame(frame)
+      apply()
+      el.addEventListener('wheel', stop, { once: true, passive: true }); el.addEventListener('touchstart', stop, { once: true, passive: true })
+      return () => { stop(); el.removeEventListener('wheel', stop); el.removeEventListener('touchstart', stop) }
+    }
+    if (samePage) return
     window.scrollTo(0, 0)
-    content.current?.scrollTo(0, 0)
-  }, [location.pathname])
+    el?.scrollTo(0, 0)
+  }, [location.key])
   useEffect(() => {
     const preferred = regions.data?.defaultRegion
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)

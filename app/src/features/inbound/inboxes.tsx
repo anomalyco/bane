@@ -8,9 +8,10 @@ import type { CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, Mailbo
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError } from '../settings/shared'
-import { nameOf, when } from './shared'
+import { nameOf, when, Sender } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const route = '/receiving/inboxes'
 const lifetimes = [{ value: '3600', label: '1 hour' }, { value: '86400', label: '24 hours' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -92,7 +93,7 @@ export function AgentInboxesPage() {
       <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`${route}/${row.id}`)}
         empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an inbox key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
         columns={[
-          { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link className="receiving-clip" to={`${route}/${row.id}`} title={row.address}>{row.address}</Link>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div> },
+          { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link className="receiving-clip" to={`${route}/${row.id}`}><PrivateAddress value={row.address} /></Link>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div> },
           { key: 'status', label: 'Status', width: '14%', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
           { key: 'expires', label: 'Expires', width: '16%', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : date(row.expiresAt) },
           { key: 'messages', label: 'Messages', align: 'right', render: row => number(row.usage.messages) },
@@ -112,7 +113,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
     {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
       <div className="settings-cell-stack">
-        <div className="mailbox-message__from"><span>{nameOf(m.from)}</span><span className="muted" title={m.from.address}>{m.from.address}</span></div>
+        <div className="mailbox-message__from"><span>{nameOf(m.from)}</span><span className="muted"><PrivateAddress value={m.from.address} /></span></div>
         <span className="muted">{date(m.receivedAt, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
       </div>
       <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>
@@ -148,7 +149,7 @@ function InboxDetail({ id }: { id: string }) {
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
   const next = messages.data?.hasMore ? messages.data.cursor : null
   return <div className="stack inbound-stack">
-    <PageHeader title={b ? b.address : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
+    <PageHeader title={b ? <PrivateAddress value={b.address} /> : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
       {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
       {canAdminister && b.status==='active' && <ConnectAgent id={id}/>}
       {canAdminister && b.status !== 'deleting' && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
@@ -173,9 +174,9 @@ function InboxDetail({ id }: { id: string }) {
       {folders.error ? <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/> : <Field label="Folder" htmlFor="inbox-folder"><Select id="inbox-folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/></Field>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
         <DataTable loading={messages.isPending} skeletonRows={3} minRows={1} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
-          empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? `Mail sent to ${b.address} shows up here within seconds.` : undefined} />}
+          empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? 'Mail sent to this inbox shows up here within seconds.' : undefined} />}
           columns={[
-            { key: 'from', label: 'From', width: '24%', render: row => <span className="receiving-clip" title={row.from.address}>{nameOf(row.from)}</span> },
+            { key: 'from', label: 'From', width: '24%', render: row => <span className="receiving-clip"><Sender value={row.from} /></span> },
             { key: 'subject', label: 'Subject', width: '40%', render: row => <div className="settings-cell-stack"><span className="receiving-clip">{row.subject || '(no subject)'}</span>{row.snippet && <span className="muted receiving-clip">{row.snippet}</span>}</div> },
             { key: 'code', label: 'Code', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span> },
             { key: 'state', label: 'Status', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },

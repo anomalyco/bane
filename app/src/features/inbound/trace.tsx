@@ -13,7 +13,7 @@ import { concepts, outcomes } from './concepts'
 import { useOverview, type Overview } from './overview'
 import { ConceptLine, Match, RitualIcon, TargetIcon } from './parts'
 import { when } from './shared'
-import { receivedTo, type ReceivedRecipients } from '../../lib/received-to'
+import { ownRecipient, receivedTo, type ReceivedRecipients } from '../../lib/private-address'
 import './receiving.css'
 
 export type TimelineStep =
@@ -41,7 +41,7 @@ export function traceInput(choice: EmailChoice, to?: string): { messageId?: stri
 
 type Received = ReceivedRecipients & { id: string; from: { name: string | null; address: string }; subject: string; at: string }
 /** The address to trace a message as: ours only (the receiving address or envelope recipient), never the header To. */
-const arrivedAt = (m: Received) => { const to = receivedTo(m); return to?.own ? to.address : undefined }
+const arrivedAt = (m: Received) => ownRecipient(m)
 /** The last few received messages, shared by the picker and the pages that wait for it before showing the picker. */
 export const useRecentMail = () => useApiQuery(['trace-recent'], (_api, signal) => request<{ data: Received[] }>('/v1/logs?direction=received&limit=6', { signal }).then(r => r.data))
 /** The email a picker starts on, from settled data: the newest received message, or the sample when there is none.
@@ -63,7 +63,7 @@ export function EmailPicker({ value, onChange, addresses, preferredTo }: { value
           <button type="button" role="radio" aria-checked={value.messageId === m.id} className="trace-recent__row" onClick={() => onChange({ mode: 'recent', messageId: m.id, to: arrivedAt(m) })}>
             <span className="trace-recent__from"><PrivateAddress value={m.from.address} /></span>
             <span className="trace-recent__subject">{m.subject || '(no subject)'}</span>
-            <span className="trace-recent__to">{(to => to?.own ? <Match value={to.address} /> : to ? <PrivateAddress value={to.address} /> : <span className="muted">—</span>)(receivedTo(m))}</span>
+            <span className="trace-recent__to">{(to => to ? <Match value={to} /> : <span className="muted">—</span>)(receivedTo(m))}</span>
             <time className="trace-recent__time">{when(m.at)}</time>
           </button></li>)}</ul>
         : value.mode === 'sample' ? <div className="trace-sample">
