@@ -207,7 +207,9 @@ a.ui-tab { text-decoration: none; }
 .ui-card__link::after { content: ''; position: absolute; inset: 0; z-index: 0; }
 .ui-card :is(a, button, input, select, label, [role='checkbox'], [role='switch']):not(.ui-card__link) { position: relative; z-index: 1; }
 .ui-card:has(.ui-card__link:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: -2px; }
-.ui-cards .ui-table-empty { border-top: 1px solid var(--color-border-muted); }
+/* An empty list keeps a page of cards' height (filtering to nothing doesn't collapse the page), but its message sits at
+   the top, where the first card would be: centred in that height it fell below the fold of a phone. */
+.ui-cards .ui-table-empty { place-items: start center; border-top: 1px solid var(--color-border-muted); }
 
 /* Bottom sheets: More, action sheets and every dialog on a phone. They rise from the bottom edge (above the keyboard),
    keep clear of the home indicator, and a swipe down on their top closes them. */
