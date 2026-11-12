@@ -17,6 +17,8 @@ import { mailboxS3, STAGING_PREFIX, refreshMailboxDns } from './mailbox-setup.js
 import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
+import { billed } from './billing/gate.js';
+import type { BillingPosition } from './billing/types.js';
 export { acceptInboundNotification } from './mailbox-receipts.js';
 
 const loadIngestS3 = lazyModule(() => import('@aws-sdk/client-s3'));
@@ -407,6 +409,35 @@ export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submissi
 // the database fails a pending receipt only for its running job on that lease (164).
 const claimedBy=(recipients:string[])=>sql`${mailReceipts.status}='pending' AND ${mailReceipts.recipients}=${JSON.stringify(recipients)}::jsonb`;
 const claimToken=(job:Parameters<JobHandler>[2])=>`${job.id}|${job.leaseFence??''}`;
+// Billing's receive hold (an enforced prepaid workspace unpaid for 7 days): the raw message is parked under held/ in the
+// same pool bucket, with no lifecycle rule, and the receipt waits as held/BILLING_HOLD until a credit releases it
+// (billing_release_receive_holds). Thrown from the reservation callback so nothing is copied to the workspace.
+const HELD_PREFIX='held/';
+class BillingHold extends Error {}
+/** Parks a receipt for billing: copies the raw message to held/ (unless it is already there), then one statement. */
+async function parkHeld(runtime:Runtime,s3:Awaited<ReturnType<typeof mailboxS3>>,receipt:IngestInput,sourceKey:string,workspaceId:string,sesMessageId:string){
+  try {
+    if(!sourceKey.startsWith(HELD_PREFIX)){
+      const {CopyObjectCommand}=await loadIngestS3();
+      await s3.send(new CopyObjectCommand({Bucket:receipt.bucket,Key:HELD_PREFIX+sesMessageId,CopySource:`${receipt.bucket}/${sourceKey}`,CopySourceIfMatch:receipt.notification.stagingEtag as string|undefined,TaggingDirective:'REPLACE'}));
+    }
+  } catch (error) {
+    if (error instanceof ModuleLoadError) throw error;
+    if (error instanceof Error && ['NoSuchKey','NotFound'].includes(error.name)) throw new ApiError(404,'RAW_MESSAGE_MISSING','The staging object is missing.');
+    throw new ApiError(503,'MAILBOX_HOLD_UNAVAILABLE','The received message could not be parked for the billing hold; retrying.',undefined,true);
+  } finally { s3.destroy(); }
+  // Nothing is parsed, stored, metered or delivered. The window bytes reserved for it stay reserved for the release.
+  await runtime.db.execute(sql`UPDATE mail_receipts SET status='held',error='BILLING_HOLD',object_key=${HELD_PREFIX}||ses_message_id,budget_retry_at=NULL
+    WHERE workspace_id=${workspaceId} AND ses_message_id=${sesMessageId} AND ${claimedBy(receipt.recipients)}`);
+  log('info',{code:'BILLING_RECEIVE_HELD',workspaceId});
+}
+/** After a released receipt is stored, its parked copy goes (best effort; the row keeps no reference to it). */
+async function dropHeld(runtime:Runtime,receipt:IngestInput,workspaceId:string,key:string){
+  try {
+    const s3=await mailboxS3(runtime,workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
+    try { const {DeleteObjectCommand}=await loadIngestS3(); await s3.send(new DeleteObjectCommand({Bucket:receipt.bucket,Key:key})); } finally { s3.destroy(); }
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; log('warn',{code:'BILLING_HELD_OBJECT_LEFT',workspaceId}); }
+}
 const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void,claim:{recipients?:string[]}) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
@@ -416,7 +447,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
-  const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
+  const sourceKey=(receipt.objectKey.startsWith(HELD_PREFIX)?HELD_PREFIX:!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
@@ -462,12 +493,12 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const keptStore=stores(keptReceipt);
   const mightKeep=initiallyKept||possibleKept;
   const readStarted=performance.now();
-  let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;
+  let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;const bill:{position:BillingPosition|null}={position:null};
   try {
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,store.rawKey,receipt.recipients,initiallyKept?'kept':'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
       // The window row before the receipt, the order every route statement takes them in (157).
-      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT r.reserved_bytes FROM (SELECT 1) one
+      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean;billing:BillingPosition|null}>(sql`WITH r AS MATERIALIZED (SELECT r.reserved_bytes FROM (SELECT 1) one
           LEFT JOIN LATERAL (SELECT FROM mail_receive_windows WHERE workspace_id=${scope.workspaceId} FOR UPDATE) w ON true
           CROSS JOIN LATERAL (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE) r),
         policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
@@ -476,13 +507,18 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
           WHERE (CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END)+excluded.bytes<=(SELECT bytes FROM policy) RETURNING 1),
         charged AS (UPDATE mail_receipts SET reserved_bytes=${size} WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND EXISTS(SELECT FROM debit) RETURNING 1)
         ${mightKeep?sql`, candidate AS (INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) SELECT ${'raw:'+messageRowId},${scope.workspaceId},${sesMessageId},${keptStore.bucket},${receipt.region},${messageRowId},ARRAY[${keptStore.rawKey}] FROM r ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour')`:sql``}
-        SELECT EXISTS(SELECT FROM charged UNION ALL SELECT FROM r WHERE reserved_bytes=${size}) AS ok,${size}::bigint<=bytes AND EXISTS(SELECT FROM r WHERE reserved_bytes IS NULL) AS fits FROM policy`);
+        SELECT EXISTS(SELECT FROM charged UNION ALL SELECT FROM r WHERE reserved_bytes=${size}) AS ok,${size}::bigint<=bytes AND EXISTS(SELECT FROM r WHERE reserved_bytes IS NULL) AS fits,
+          ${billed(runtime.config,scope.workspaceId)?sql`billing_position(${scope.workspaceId})`:sql`NULL::jsonb`} AS billing FROM policy`);
       if(!reserved.rows[0]?.ok){
         if(reserved.rows[0]?.fits) throw new JobDeferred(new Date((Math.floor(Date.now()/3600000)+1)*3600000).toISOString());
         throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
       }
+      const billing=bill.position=reserved.rows[0]!.billing;
+      // BYO workspaces pay SES themselves and are never held; their storage and Omens still bill and stop.
+      if(billing?.receiveHeld && receipt.binding?.kind!=='byo')throw new BillingHold();
     }, store.r2 ? store.objects : undefined);
   } catch (error) {
+    if (error instanceof BillingHold) return parkHeld(runtime,s3,receipt,sourceKey,scope.workspaceId,sesMessageId);
     s3.destroy();
     if (error instanceof JobDeferred || error instanceof ModuleLoadError || error instanceof ApiError) throw error;
     if (error instanceof Error && ['NoSuchKey','NotFound'].includes(error.name)) throw new ApiError(404,'RAW_MESSAGE_MISSING','The staging object is missing.');
@@ -545,7 +581,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     // same email, rituals saved meanwhile) and reads these verdicts from the stored message, so any
     // workspace that routes records them, not only one whose rituals already run.
     if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>['x-bane-loop','auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});
-    if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualScores:evaluated.answers});}
+    if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt,{omens:bill.position?.omens!==false});plan=evaluated.plan;Object.assign(verdicts,{ritualScores:evaluated.answers},evaluated.omenCalls?{omenCalls:evaluated.omenCalls}:{});}
     if(!initiallyKept&&keptRoute(plan)){
       if(unverifiedKept)throw new JobDeferred(new Date(Date.now()+60000).toISOString());
       if(!copied.large)await keptStore.objects.put(keptStore.rawKey,raw,'message/rfc822');
@@ -556,6 +592,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const preview=message.lifecycle==='kept'?wirePreview(raw,sizeBytes):undefined;
   const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null,preview);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
+  if(sourceKey.startsWith(HELD_PREFIX))await dropHeld(runtime,receipt,scope.workspaceId,sourceKey);
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
 
