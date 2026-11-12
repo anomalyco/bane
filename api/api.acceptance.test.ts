@@ -107,6 +107,43 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
+test('Cloudflare static files: only files the deployed build has get a cache lifetime',async()=>{
+  // Workers Assets answers a path that matches no file with the dashboard shell, under every _headers rule the path
+  // matches. The build therefore writes the cache rules itself, one per file it has (app/asset-headers.ts).
+  const {withFileRules,FILE_CACHE,MAX_RULES}=await import('../app/asset-headers.js');
+  const source=await readFile(new URL('../app/public/_headers',import.meta.url),'utf8');
+  const built=['assets/index-CxQdVBrk.js','assets/index-DTeZx0D0.css','assets/logs-Bq3k_9aZ.js','assets/inter-latin-Bv.T1~x.woff2'],fonts=['fonts/inter-latin.woff2','fonts/opentui-regular.woff2'];
+  // Cloudflare's reading of the file: a path, then its headers. * is any run, :name one segment, and every matching rule applies.
+  const sent=(headers:string,path:string)=>{
+    const out=new Map<string,string>();let applies=false;
+    for(const line of headers.split('\n').map(l=>l.trim())){
+      if(!line||line.startsWith('#'))continue;
+      if(line.startsWith('/')){applies=new RegExp('^'+line.replace(/[.+?^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/:[A-Za-z]\w*/g,'[^/]+')+'$').test(path);continue;}
+      const at=line.indexOf(':');
+      if(applies&&at>0){const name=line.slice(0,at).trim().toLowerCase(),value=line.slice(at+1).trim();out.set(name,out.has(name)?`${out.get(name)}, ${value}`:value);}
+    }
+    return out;
+  };
+  const {headers,uncached}=withFileRules(source,[...built,'index.html','constructor/index.js','theme.js',...fonts]);
+  assert.deepEqual(uncached,[]);assert.equal(sent(headers,'/constructor/index.js').get('cache-control'),undefined,'Only the directories with a lifetime get rules.');
+  for(const file of built)assert.equal(sent(headers,'/'+file).get('cache-control'),'public, max-age=31536000, immutable',file);
+  for(const file of fonts)assert.equal(sent(headers,'/'+file).get('cache-control'),FILE_CACHE.fonts,file);
+  assert.match(FILE_CACHE.fonts!,/^public, max-age=86400\b/);
+  // Another build's file, a longer and a shorter name, the directories, another case, a nested copy, a font no build has yet, dashboard routes.
+  for(const path of ['/assets/index-N3xtBu1d.js','/assets/index-CxQdVBrk.js.map','/assets/index-CxQdVBrk.j','/assets/','/assets','/ASSETS/index-CxQdVBrk.js','/assets/x/index-CxQdVBrk.js','/fonts/next.woff2','/fonts/','/index.html','/','/logs']){
+    assert.equal(sent(headers,path).get('cache-control'),undefined,`${path} keeps the revalidating default`);
+    assert.ok(sent(headers,path).get('content-security-policy'),`${path} keeps the security headers`);
+  }
+  for(const file of [...built,...fonts])assert.equal(sent(source,'/'+file).get('cache-control'),undefined,'The checked-in file gives no directory a lifetime of its own.');
+  // A name the rule syntax would read as a pattern gets no rule. Nor does a file past the rule limit, which Cloudflare would skip without a word.
+  const odd=['assets/a*-1.js','assets/:name-2.js','assets/has space-3.js','assets/sub/dir-4.js','fonts/a*.woff2'],strict=withFileRules(source,[...odd,...built]);
+  assert.deepEqual(strict.uncached,odd);
+  for(const path of ['/assets/abc-1.js','/assets/x-2.js','/assets/has','/assets/sub/dir-4.js','/fonts/abc.woff2'])assert.equal(sent(strict.headers,path).get('cache-control'),undefined,path);
+  const many=Array.from({length:150},(_,i)=>`assets/chunk-${i}.js`),capped=withFileRules(source,many);
+  assert.equal(capped.headers.split('\n').filter(line=>line.startsWith('/')).length,MAX_RULES);
+  assert.ok(capped.uncached.length>0);assert.deepEqual(capped.uncached,many.slice(-capped.uncached.length),'The files listed first keep their rules.');
+  assert.equal(sent(capped.headers,'/assets/chunk-0.js').get('cache-control'),FILE_CACHE.assets);
+});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
@@ -710,6 +747,58 @@ test('an MCP client name is shown as one short line of the characters that are d
   } finally {await db.query('ROLLBACK');}
 });
 
+test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
+  if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1,connectionTimeoutMillis:1000});
+  t.after(()=>pool.end());
+  const wid=unique('smtp'),bid=unique('mbx'),kid='app_'+randomUUID(),from=`box@${wid}.invalid`,key=randomUUID();
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid,mailGatewayToken:key}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await ensureRegionSettings(rt.db,rt.config);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[bid,wid,from.split('@')[1],REGION]);
+  await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'local:','fixture')",[wid,REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')",[bid,wid,from]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,from,bid]);
+  await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+  await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['smtp'])",[kid,bid]);
+  const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp();
+  async function submit(mime:string){
+    const body=JSON.stringify({op:'submit',kid,from,to:['sink@example.invalid'],content:Buffer.from(`From: ${from}\r\n${mime}`).toString('base64')});
+    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(body);
+    const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
+    return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body,headers}),rt);
+  }
+  for(const [label,mime] of [
+    ['plain','Subject: plain\r\n\r\nHello\r\n'],
+    ['attachment','Content-Type: application/octet-stream; name="bytes.bin"\r\nContent-Disposition: attachment; filename="bytes.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\nYnl0ZXM=\r\n'],
+    ['large text','Content-Type: text/plain\r\n\r\n'+('t'.repeat(998)+'\r\n').repeat(600)],
+  ] as const) await t.test(label,async()=>{
+    const res=await submit(mime),body=await res.json() as Json;assert.equal(res.status,200,JSON.stringify(body));
+    await (await import('./src/dispatcher.js')).dispatchDue(rt,REGION);
+    // The full harness also has a runner: it may already hold this message's lease.
+    for(const until=Date.now()+5000;;){
+      const {rows:[mail]}=await db.query('SELECT attempt_started_at,error_code FROM sending_emails WHERE id=$1 AND actor_key_id=$2',[body.id,kid]);
+      if(mail?.attempt_started_at)break;
+      assert.ok(!mail?.error_code && Date.now()<until,mail?.error_code??'no dispatch attempt');
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+  });
+  const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
+  const before=await usage();
+  for(const [quota,value] of [['quota_messages',before.messages],['quota_bytes',Number(before.bytes)+1]] as const){
+    await db.query(`UPDATE mailboxes SET ${quota}=$2 WHERE id=$1`,[bid,value]);
+    const full=await submit('Subject: no space\r\n\r\nNo send\r\n');assert.equal(full.status,507);
+    assert.equal(((await full.json()) as Json).error.code,'INBOX_OVER_QUOTA');assert.deepEqual(await usage(),before);
+    await db.query(`UPDATE mailboxes SET ${quota}=NULL WHERE id=$1`,[bid]);
+  }
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'sink@example.invalid',true)",[unique('contact'),wid]);
+  const denied=await submit('Subject: suppressed\r\n\r\nNo send\r\n');assert.equal(denied.status,422);
+  assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
+  await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
+  assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
+  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,3);
+});
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
   const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
@@ -9040,6 +9129,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('dispatch leases return bounded inline snapshots and deliver deferred content intact',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const text='fixture '.repeat(12500), inputs=[text,'ordinary',text,text].map((body,i)=>({from:'from@example.invalid',to:address(),subject:`bounded-${i}`,text:body}));
+      ok(await local('POST','/v1/emails/batch',{emails:inputs}),202);
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send, delivered:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(cmd instanceof SendEmailCommand){const content=cmd.input.Content!.Simple!;delivered.push(content.Subject!.Data!);assert.equal(content.Body!.Text!.Data,inputs.find(v=>v.subject===content.Subject!.Data)?.text);}
+        return Reflect.apply(send,this,[cmd]);
+      });
+      const queries=t.mock.method(db,'query');
+      const result=await (await import('./src/dispatcher.js')).dispatchDue(runtime,REGION);
+      const leases=queries.mock.calls.filter(c=>(c.arguments[0] as any)?.text?.includes('queued_owners'));
+      assert.ok(leases.length);let leased=0;
+      for(const entry of leases){
+        const {rows}=await entry.result as unknown as pg.QueryResult;
+        const snapshots=rows.filter(r=>r.id).map(r=>r.snapshot);leased+=snapshots.length;
+        assert.ok(snapshots.reduce((n,s)=>n+Buffer.byteLength(JSON.stringify(s)),0)<=snapshots.length*65536,'oversize content reached the lease caller');
+      }
+      assert.equal(leased,inputs.length);assert.equal(result.sent,inputs.length);assert.deepEqual(delivered.sort(),inputs.map(v=>v.subject));
+    });
+  });
   test('query budget: API key admission, dispatch, acceptance and delivery at one and 100 envelopes',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {runDispatcher}=await import('./src/dispatcher.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
