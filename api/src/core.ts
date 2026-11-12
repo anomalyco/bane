@@ -298,7 +298,8 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
 // node-postgres throws plain errors when a socket drops. Drizzle wraps all of them, so read the cause chain.
 const TRANSIENT_SQLSTATES = new Set(['58000', '53300', '57P01', '57P02', '57P03']);
 const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE']);
-const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|Server connection attempt failed: .+)$/;
+// node-postgres's pool checkout timeout is the same condition as Hyperdrive's "Failed to acquire a connection".
+const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|timeout exceeded when trying to connect|Server connection attempt failed: .+)$/;
 const errorChain = (error: unknown) => { const chain: Error[] = []; for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); return chain; };
 /** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs. */
 export const databaseCodeOf = (error: unknown) => errorChain(error).map(e => (e as { code?: unknown }).code).find((code): code is string => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code));
@@ -309,6 +310,9 @@ export function transientDatabaseError(error: unknown) {
     return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || TRANSIENT_DRIVER_MESSAGE.test(e.message);
   });
 }
+/** A transaction Postgres rolled back to break a deadlock (40P01) or a serialization conflict (40001): nothing it wrote
+ * was kept, so the same request or job can safely run again. */
+export const databaseConflict = (error: unknown) => !(error instanceof ApiError) && ['40P01', '40001'].includes(databaseCodeOf(error) ?? '');
 /** What callers see when the database is briefly unreachable: retry, nothing was committed by this request. */
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {

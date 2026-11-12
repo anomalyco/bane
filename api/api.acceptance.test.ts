@@ -13847,6 +13847,31 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a deadlock or serialization victim is a retryable 503 and a job retries it; a pool checkout timeout is transient', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { PgDialect } = await import('drizzle-orm/pg-core'), { processJobs } = await import('./src/jobs.js');
+      const dialect = new PgDialect(), execute = runtime.db.execute.bind(runtime.db), wid = runtime.config.workspaceId;
+      let failure: Error | undefined;
+      t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        // Wrapped like Drizzle's query error, with the driver's error as the cause.
+        if (failure && dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql.includes('FROM mail_routing_versions')) throw new Error('Failed query', { cause: failure });
+        return execute(query);
+      });
+      for (const code of ['40P01', '40001']) {
+        failure = Object.assign(new Error('deadlock detected'), { code });
+        const reply = await local('GET', '/v1/routing/versions');
+        assert.equal(error(reply, 503, 'DATABASE_CONFLICT').retryable, true, code); assert.equal(reply.headers.get('retry-after'), '1');
+      }
+      failure = new Error('timeout exceeded when trying to connect');
+      assert.equal(error(await local('GET', '/v1/routing/versions'), 503, 'DATABASE_UNAVAILABLE').retryable, true);
+      failure = undefined;
+      // A background handler that is not wrapped in retryDatabaseFailures retries a deadlock instead of failing for good.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_conflict','reputation.alert',$1,'{}')", [wid]);
+      await processJobs(runtime, { 'reputation.alert': async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); } }, 1, 1, 20000, 'work');
+      assert.deepEqual((await db.query("SELECT status,attempts,last_error FROM jobs WHERE id='job_conflict'")).rows[0], { status: 'pending', attempts: 1, last_error: 'DATABASE_UNAVAILABLE' });
+    });
+  });
   test('deadlock and serialization retries persist the accepted provider id without repeating SES',async t=>{
     await simulatedSesFixture(t,async ({local,run,db})=>{
       const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
