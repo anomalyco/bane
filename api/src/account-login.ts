@@ -129,7 +129,10 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
       ORDER BY (m.workspace_id=u.selected_workspace_id) DESC NULLS LAST,m.created_at,m.id LIMIT 1
     ), selected AS (UPDATE bane_users u SET selected_workspace_id=member.workspace FROM member WHERE u.id=member.id AND u.selected_workspace_id IS DISTINCT FROM member.workspace)
     SELECT * FROM member`);
-  if (!m) return null;
+  if (!m) {
+    if (selected && runtime.config.multiTenant && await accountSessionUser(runtime,headers)) throw new ApiError(403,'WORKSPACE_ACCESS_DENIED','This workspace is not available to your session.');
+    return null;
+  }
   return { keyId:`user_${m.id}`, email:m.email, name:m.name, workspaceId:m.workspace, role:m.role, permissions:m.role==='member'?['read','send']:['manage'], domains:[],credential:'dashboard' };
 }
 

@@ -184,7 +184,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
     // An MCP approval revoked while its request ran: the object it would own has no grant left.
-    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
+    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_resource_grant_fkey';
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')

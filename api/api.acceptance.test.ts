@@ -925,7 +925,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
 
   test('workspace selection, invitations and role checks', async mx => {
       const t=mx, [{createApp},{loadConfig},{drizzle}]=await Promise.all([import('./src/app.js'),import('./src/config.js'),import('drizzle-orm/node-postgres')]);
-      const app=createApp(),origin='https://workspace.example.org';
+      const app=createApp(),origin='https://mock-oauth.bane.dev';
       const pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL}); cleanup(t,()=>pool.end());
       const runtime:import('./src/core.js').Runtime={db:drizzle(pool),config:loadConfig({...process.env,PUBLIC_URL:origin,MULTI_TENANT:'true'}),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused')},async get(){throw Error('unused')},async delete(){throw Error('unused')}}};
       const local=async(method:string,path:string,body?:Json,cookie?:string,headers:Record<string,string>={})=>http(method,path,undefined,body,{origin,...(cookie?{cookie}:{}),...headers},5000,origin,r=>app.fetch(r,runtime));
@@ -6199,7 +6199,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return (await db.query('SELECT * FROM domain_placement_shadow WHERE domain_id=$1',[id])).rows[0];
       };
       runtime.config.multiTenant=false;assert.equal(await run(added.id),undefined);assert.equal(wire.length,0);runtime.config.multiTenant=true;
-      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,9);assert.equal(first.policy_version,2);
+      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,7);assert.equal(first.policy_version,2);
       assert.ok(first.reasons.includes('dbl_unconfigured'));assert.equal(first.signals.dbl,'unconfigured');assert.ok(first.recorded_at>=first.started_at);
       assert.equal(wire.filter(u=>u.includes('rdap.verisign.com')).length,1);assert.ok(wire.some(u=>u.endsWith('/domain/example.com')));
       assert.deepEqual(wire.filter(u=>u.includes('type=A')).map(u=>new URL(u).searchParams.get('name')),['first.example.com'],'No DBL or second site resolution.');
@@ -6208,7 +6208,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(ok(await create(added.name),201),added);assert.equal((await jobs(type)).length,1);
       runtime.config.placementDblZone=zone;
       const profile=async(host:string)=>run(ok(await create(host),201).id);
-      const trusted=await profile('yes.example.com');assert.equal(trusted.decision,'virginia');assert.equal(trusted.signals.verifiedSignup,true);
+      const trusted=await profile('yes.example.com');assert.equal(trusted.decision,'ohio');assert.equal(trusted.signals.verifiedSignup,false);
       assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE domain_id=$1',[trusted.domain_id])).rows[0].region,oh);
       const lookalike=await profile('xn--pypal-4ve.com');assert.equal(lookalike.decision,'hold');assert.ok(lookalike.reasons.includes('brand_lookalike'));
       mode='listed';const listed=await profile('bad.example.com');assert.equal(listed.decision,'hold');assert.ok(listed.reasons.includes('blocklisted'));

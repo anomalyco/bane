@@ -37,7 +37,7 @@ export function disposableUrl(url: string | undefined, name = 'DATABASE_URL'): s
 export async function assertDisposable(query: (text: string) => Promise<{ rows: any[] }>) {
   const { rows: [r] } = await query(`SELECT shobj_description(d.oid, 'pg_database') AS marker, current_database() AS name,
     (SELECT count(*)::int FROM workspaces WHERE id <> 'default' AND id NOT LIKE 'tear\\_%') AS workspaces,
-    (SELECT count(*)::int FROM auth_user WHERE id NOT LIKE 'tear-user-%') AS users
+    (SELECT count(*)::int FROM bane_users WHERE id NOT LIKE 'tear-user-%') AS users
     FROM pg_database d WHERE d.datname = current_database()`);
   if (r?.marker !== DISPOSABLE) throw new Error(`tear host: refusing database ${r?.name ?? '(unknown)'}: it is not marked disposable. Create a dedicated, migrated database and mark it with COMMENT ON DATABASE ... IS '${DISPOSABLE}' (see tear/disposable.ts).`);
   if (r.workspaces || r.users) throw new Error(`tear host: refusing database ${r.name}: it holds ${r.workspaces} workspaces and ${r.users} users that tear did not create.`);
