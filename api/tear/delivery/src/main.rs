@@ -250,7 +250,9 @@ fn walk(seed: u64, len: usize, labels: &[String], retries: u32) -> Vec<String> {
 /// The model's own drain: answer every request with 503, resume paused endpoints, start a new
 /// minute when rate-limited, run every due delivery and expire leases a crashed worker left.
 /// Appended to random walks so `delivery.settles` can close.
-fn drain(trace: &[String], retries: u32, bound: usize) -> Vec<String> {
+/// Returns None when the model says the drain cannot settle everything: the transport breaker
+/// waits 30 s of real time, which no step advances.
+fn drain(trace: &[String], retries: u32, bound: usize) -> Option<Vec<String>> {
     let mut m = Model::initial(retries);
     for l in trace {
         m.step(parse(l).unwrap());
@@ -293,7 +295,8 @@ fn drain(trace: &[String], retries: u32, bound: usize) -> Vec<String> {
         m.step(a);
         out.push(label);
     }
-    out
+    let settled = m.ds.iter().all(|d| ["delivered", "failed", "paused"].contains(&d.status.as_str()) || d.job.as_ref().is_some_and(|j| j.status != "pending" && j.status != "running"));
+    settled.then_some(out)
 }
 
 /// Group key: the action verb plus the mismatch path (digits elided).
@@ -696,9 +699,10 @@ fn main() -> R<()> {
                 let traces: Vec<(Vec<String>, Option<usize>)> = (0..2000)
                     .map(|s| {
                         let t = walk(seed + s * 3 + i as u64, 24, &labels, *r);
-                        let d = drain(&t, *r, 200);
-                        let n = d.len();
-                        ([t, d].concat(), Some(n))
+                        match drain(&t, *r, 200) {
+                            Some(d) => { let n = d.len(); ([t, d].concat(), Some(n)) }
+                            None => (t, None),
+                        }
                     })
                     .collect();
                 let slice = deadline.saturating_duration_since(Instant::now()) / (3 - i as u32);
@@ -719,9 +723,10 @@ fn main() -> R<()> {
             let traces = (0..n)
                 .map(|s| {
                     let t = walk(seed + s, len as usize, &labels, retries);
-                    let d = drain(&t, retries, 200);
-                    let k = d.len();
-                    ([t, d].concat(), Some(k))
+                    match drain(&t, retries, 200) {
+                        Some(d) => { let k = d.len(); ([t, d].concat(), Some(k)) }
+                        None => (t, None),
+                    }
                 })
                 .collect();
             campaign(&format!("random walks, drained (seed {seed}, {a}, retries {retries})"), traces, &c, Host::spawn()?, None)?

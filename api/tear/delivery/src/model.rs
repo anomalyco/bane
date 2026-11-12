@@ -377,6 +377,10 @@ impl Model {
 
     fn ingest(&mut self, m: &str, rcpts: &[String], variant: &str) -> Value {
         let email = email_of(m);
+        // A duplicate notification (same receipt, no new recipient) changes nothing.
+        if self.receipts.get(m).is_some_and(|old| rcpts.iter().all(|r| old.contains(r))) {
+            return json!("ok");
+        }
         let mut all: Vec<String> = self.receipts.get(m).cloned().unwrap_or_default();
         for r in rcpts {
             if !all.contains(r) {
