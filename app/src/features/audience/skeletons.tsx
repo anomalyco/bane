@@ -1,5 +1,5 @@
 import { Fragment } from 'react'
-import { ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
+import { SearchField, ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import { useWorkspaceAccess } from '../../data/context'
 import { AudienceHeader } from './header'
 import './audience.css'
@@ -19,18 +19,18 @@ export const contactColumns: SkeletonColumn[] = [
 export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%' }, contactColumns[4]]
 export const listColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '24%' },
-  { key: 'subscribed', label: 'Subscribed', width: '12%' },
-  { key: 'suppressed', label: 'Suppressed', width: '12%' },
-  { key: 'unsubscribed', label: 'Unsubscribed', width: '13%' },
-  { key: 'unknown', label: 'Unknown consent', width: '14%' },
-  { key: 'total', label: 'Total contacts', width: '12%' },
+  { key: 'subscribed', label: 'Subscribed', width: '12%', align: 'right' },
+  { key: 'suppressed', label: 'Suppressed', width: '12%', align: 'right' },
+  { key: 'unsubscribed', label: 'Unsubscribed', width: '13%', align: 'right' },
+  { key: 'unknown', label: 'Unknown consent', width: '14%', align: 'right' },
+  { key: 'total', label: 'Total contacts', width: '12%', align: 'right' },
   { key: 'created', label: 'Created', width: '13%' },
 ]
 export const segmentColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '30%' },
   { key: 'rules', label: 'Rules', width: '22%' },
-  { key: 'matched', label: 'Matched', width: '14%' },
-  { key: 'eligible', label: 'Eligible', width: '14%' },
+  { key: 'matched', label: 'Matched', width: '14%', align: 'right' },
+  { key: 'eligible', label: 'Eligible', width: '14%', align: 'right' },
   { key: 'updated', label: 'Updated', width: '20%' },
 ]
 export const activityColumns: SkeletonColumn[] = [
@@ -66,8 +66,8 @@ export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts
   if (kind === 'list') return <LoadingRegion className="audience-page" label="Loading list"><PageHeader title={<SkeletonText width={96} lineHeight={24} />} backTo="/audience/lists" actions={<><ControlSkeleton width={85} /><ControlSkeleton width={120} /></>} /><AudienceSummarySkeleton /><AudienceMembersSkeleton /></LoadingRegion>
   if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<ControlSkeleton width={121} />} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'
-  return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={132} />}<ControlSkeleton width={contacts ? 131 : kind === 'lists' ? 124 : 155} /></>} />
-    <div className="data-toolbar"><div className="cluster">{contacts ? <><Input className="audience-search" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><Input className="audience-list-search" aria-label="Find list filter" placeholder="Find list by name" disabled /><ControlSkeleton width={170} /></> : <ControlSkeleton width={320} />}</div></div>
+  return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={120} />}<ControlSkeleton width={contacts ? 98 : kind === "lists" ? 85 : 121} /></>} />
+    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><Input className="audience-list-search" aria-label="Find list filter" placeholder="Find list by name" disabled /><ControlSkeleton width={170} /></> : <ControlSkeleton width={320} />}</div></div>
     <TableSkeleton columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? 8 : 5} pagination />
   </LoadingRegion>
 }

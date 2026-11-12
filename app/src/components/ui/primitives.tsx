@@ -4,7 +4,7 @@ import * as SelectPrimitive from '@radix-ui/react-select';
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu';
 import * as CheckboxPrimitive from '@radix-ui/react-checkbox';
 import * as SwitchPrimitive from '@radix-ui/react-switch';
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, X } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
 import { SkeletonText, PaginationSkeleton } from './skeleton';
@@ -20,6 +20,10 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: s
 });
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, ...props }, ref) {
   return <input {...props} ref={ref} className={cx('ui-input', className)} />;
+});
+// A list's search box: the magnifier, type=search and the shared width (.search-box). Props go to the input.
+export const SearchField = forwardRef<HTMLInputElement, Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>>(function SearchField({ className, ...props }, ref) {
+  return <div className={cx('search-box', className)}><Search size={16} aria-hidden="true" /><Input {...props} ref={ref} type="search" /></div>;
 });
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(function Textarea({ className, ...props }, ref) {
   return <textarea {...props} ref={ref} className={cx('ui-input', 'ui-textarea', className)} />;
@@ -81,7 +85,7 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { if (open) setError(null); }, [open]);
   const working = pending || busy;
-  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { setError(cause instanceof Error ? cause.message : 'The action could not be completed. Try again.'); } finally { setBusy(false); } }
+  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { setBusy(false); } }
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger">{error}</Alert> : null}</Dialog>;
 }
 export function DropdownMenu({ items, label = 'More actions', trigger }: { items: { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean }[]; label?: string; trigger?: ReactNode }) {
@@ -89,11 +93,15 @@ export function DropdownMenu({ items, label = 'More actions', trigger }: { items
 }
 export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right'; skeleton?: ReactNode };
 export type SkeletonColumn = Pick<Column<never>, 'key' | 'label' | 'width' | 'align' | 'skeleton'>;
-export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string }) {
+// onRowIntent: a pointer resting on a row (not crossing it) or focus on it, before the click: warm what the row opens.
+export function DataTable<T>({ columns, rows, rowKey, onRowClick, onRowIntent, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string }) {
+  const intent = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(intent.current), [])
+  const rest = (row: T) => { window.clearTimeout(intent.current); intent.current = window.setTimeout(() => onRowIntent?.(row), 80) }
   return <div ref={tableRef} className={cx('ui-table-scroll', className)} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading table</span>}
     <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
-      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row); return <tr key={id} data-selected={selectedId === id || undefined} className={onRowClick ? 'ui-table__clickable' : undefined} tabIndex={onRowClick ? 0 : undefined} onClick={event => { if (onRowClick && !(event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]')) onRowClick(row); }} onKeyDown={event => { if (onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }}>{columns.map(column => <td key={column.key} style={{ textAlign: column.align }}>{column.render(row)}</td>)}</tr>; })}
+      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row); return <tr key={id} data-selected={selectedId === id || undefined} className={onRowClick ? 'ui-table__clickable' : undefined} tabIndex={onRowClick ? 0 : undefined} onClick={event => { if (onRowClick && !(event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]')) onRowClick(row); }} onKeyDown={event => { if (onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))}>{columns.map(column => <td key={column.key} style={{ textAlign: column.align }}>{column.render(row)}</td>)}</tr>; })}
         {!loading && rows.length > 0 && rows.length < minRows && <tr className="ui-table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: `calc(${minRows - rows.length} * var(--table-row-height))` }} /></tr>}
       </tbody></table>
     {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
@@ -146,7 +154,7 @@ export function ErrorText({ error, fallback = 'Something went wrong. Please try 
   return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
 }
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
-  return <div className="ui-error-state"><Alert tone="danger" title="Could not load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
+  return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;
@@ -171,5 +179,5 @@ export function CopyButton({ value, label = 'Copy' }: { value: string; label?: s
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const toast = useContext(ToastContext);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={async () => { try { await navigator.clipboard.writeText(value); setCopied(true); setError(false); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1800); } catch { setError(true); toast?.('Could not copy to clipboard.', 'error'); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : error ? 'Could not copy to clipboard' : ''}</span></span>;
+  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={async () => { try { await navigator.clipboard.writeText(value); setCopied(true); setError(false); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1800); } catch { setError(true); toast?.('Couldn’t copy to clipboard.', 'error'); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : error ? 'Couldn’t copy to clipboard' : ''}</span></span>;
 }

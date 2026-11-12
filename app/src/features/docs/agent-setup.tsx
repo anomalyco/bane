@@ -2,16 +2,12 @@ import { useState } from 'react'
 import { Download } from 'lucide-react'
 import { Field, SectionHeader, Select, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useSession } from '../../data/context'
+import { usePublicOrigin } from '../../data/context'
 import type { Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
 import './developer.css'
 
 // The canonical public origin from /v1/me; the page origin stands in for demo mode.
-export function usePublicOrigin() {
-  return useSession()?.identity?.origin || window.location.origin
-}
-
 function receivingMx(domain: Domain) {
   const record = recordsFor(domain, 'receiving').find(row => row.type === 'MX')
   const match = record?.value.match(/^(\d+)\s+(\S+)$/)

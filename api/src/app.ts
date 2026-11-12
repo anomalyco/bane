@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, ownerRoute, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -91,8 +91,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
     const start = Date.now();
     const enqueued = await countEnqueued(next);
-    // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
-    c.header('x-request-id', requestId); if (!c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
+    // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
+    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set; everything else is no-store.
+    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
@@ -149,19 +151,17 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.get('actor').domains.length && !['state', 'preview', 'preview-image', 'archive'].includes(c.req.param('action'))) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Campaign audience and delivery operations require an unrestricted credential.');
     return next();
   });
-  for (const path of ['/v1/routing/*','/v1/rituals/*','/v1/endpoints/*','/v1/inbox-connections','/v1/domains/:id/receiving-host']) app.use(path,requireReceivingConsent);
+  // Path guards are shared with the MCP listing (core.ts). Mailbox paths check receiving consent after mailboxAuth.
+  app.use('/v1/*', (c, next) => receivingConsentRoute(c.req.path) && !mailboxRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
   // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
-  app.use('/v1/*', (c, next) => /^\/v1\/(?:inboxes|inbound)(?:\/|$)/.test(c.req.path) ? next() : authenticatedCreates(c, next));
+  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? next() : authenticatedCreates(c, next));
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.
   const notMember = async (c: Ctx, next: () => Promise<void>) => {
     if (c.get('actor')?.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');
     await next();
   };
-  for (const area of ['domains', 'webhooks', 'agent-tokens']) app.use(`/v1/${area}/*`, notMember);
-  app.use('/v1/regions/*', (c, next) => c.req.method === 'GET' && c.req.path === '/v1/regions' ? next() : notMember(c, next));
-  app.use('/v1/settings/ses', notMember);
-  app.on('POST', ['send', 'schedule', 'pause', 'resume', 'pacing', 'cancel'].map(action => `/v1/campaigns/:id/${action}`), notMember);
+  app.use('/v1/*', (c, next) => ownerRoute(c.req.method, c.req.path) ? notMember(c, next) : next());
   const regions = async (c: Ctx, next: () => Promise<void>) => {
     c.env = await timed(c, 'region-db', () => withRegionSettings(c.env, c.get('actor').workspaceId));
     await next();
@@ -181,11 +181,14 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    // An MCP approval revoked while its request ran: the object it would own has no grant left.
+    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
       : transient ? databaseUnavailable()
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
+      : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
     if(invalidJson && c.req.path==='/v1/events/ses') {

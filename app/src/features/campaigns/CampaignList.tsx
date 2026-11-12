@@ -1,8 +1,10 @@
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
+import { usePrefetchQueries } from '../../data/prefetch'
+import { composer } from './composer-chunk'
 import { campaignEditable, type Campaign } from '../../data/types'
-import { Button, DataTable, EmptyState, ErrorState, Input, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
+import { SearchField, Button, DataTable, EmptyState, ErrorState, Input, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
 import { campaignColumns } from './skeletons'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
@@ -14,6 +16,7 @@ const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(ca
 
 export function CampaignsPage() {
   const navigate = useNavigate()
+  const warm = usePrefetchQueries()
   const [params, setParams] = useSearchParams()
   const archived = params.get('archived') === 'true'
   const search = params.get('search') || ''
@@ -41,13 +44,13 @@ export function CampaignsPage() {
   }
   return <>
     <CampaignsHeader actions={<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />
-    <div className="data-toolbar"><div className="cluster"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
+    <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={search} onChange={event => filter('search', event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
       { value: 'sending', label: 'Sending' }, { value: 'paused', label: 'Paused' }, { value: 'done', label: 'Done' }, { value: 'failed', label: 'Failed' }, { value: 'canceled', label: 'Canceled' },
       { value: 'archived', label: 'Archived' },
     ]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
+      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignPath(row).endsWith('/edit')) void composer.preload().catch(() => {}) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
         { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted">{row.subject}</span>}</div> },
         { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
         { ...campaignColumns[2], render: row => number(row.recipients) },

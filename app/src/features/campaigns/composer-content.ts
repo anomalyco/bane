@@ -28,7 +28,7 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
     if (!raster) throw new Error('unsupported')
     bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
   } catch {
-    throw new Error('This image could not be opened. Export it as a PNG or JPEG and try again.')
+    throw new Error('Couldn’t open this image. Export it as a PNG or JPEG and try again.')
   }
 
   const canvas = document.createElement('canvas')
@@ -50,7 +50,7 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
       scale *= 0.72
     }
   } catch {
-    throw new Error('This image could not be optimized. Try a smaller PNG or JPEG image.')
+    throw new Error('Couldn’t optimize this image. Try a smaller PNG or JPEG image.')
   } finally {
     bitmap.close()
     canvas.width = 0
