@@ -7837,6 +7837,217 @@
           "data"
         ]
       },
+      "RitualTraceRow": {
+        "type": "object",
+        "properties": {
+          "recipient": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "What the ritual is attached to: inbox or address."
+          },
+          "key": {
+            "type": "string",
+            "description": "Ritual key."
+          },
+          "scores": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          },
+          "steps": {
+            "type": "integer"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Statement lines run, in order (at most 128)."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "ref": {
+                  "type": "string"
+                },
+                "body": {},
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op"
+              ]
+            }
+          },
+          "timeline": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RitualTimelineStep"
+            },
+            "description": "The evaluation in order: each condition and its result, omen answers read, actions taken and the return (at most 128 steps). For stepping through a dry run."
+          }
+        },
+        "required": [
+          "recipient",
+          "kind",
+          "key",
+          "scores",
+          "steps",
+          "lines",
+          "error",
+          "actions",
+          "timeline"
+        ]
+      },
+      "RitualTimelineStep": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "condition"
+                ]
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "endLine": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "endColumn": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "result": {
+                "type": "boolean",
+                "description": "What the condition evaluated to."
+              }
+            },
+            "required": [
+              "kind",
+              "line",
+              "column",
+              "endLine",
+              "endColumn",
+              "result"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "omens"
+                ]
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "scores": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                },
+                "description": "Omen name → the answer the ritual read: the scores passed in, recorded answers or each omen’s onError value."
+              }
+            },
+            "required": [
+              "kind",
+              "line",
+              "scores"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "action"
+                ]
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "op": {
+                "type": "string",
+                "description": "label, junk, block, drop, allow, inbox.deliver or endpoint."
+              },
+              "ref": {
+                "type": "string",
+                "description": "endpoint:<name> or inbox:<key>."
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "line",
+              "op"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "return"
+                ]
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "kind",
+              "line"
+            ]
+          }
+        ]
+      },
       "Inbox": {
         "type": "object",
         "properties": {
@@ -10119,6 +10330,395 @@
           "addresses",
           "region",
           "envelopeTo"
+        ]
+      },
+      "InboundOverview": {
+        "type": "object",
+        "properties": {
+          "counts": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "integer"
+              },
+              "auto": {
+                "type": "integer",
+                "description": "Addresses a catch-all created (origin auto)."
+              },
+              "route": {
+                "type": "integer"
+              },
+              "pattern": {
+                "type": "integer"
+              },
+              "catch_all": {
+                "type": "integer"
+              },
+              "inbox": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "address",
+              "auto",
+              "route",
+              "pattern",
+              "catch_all",
+              "inbox"
+            ],
+            "description": "Routes per kind, after the domain and q filters and before kind and origin."
+          },
+          "routes": {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/InboundOverviewRoute"
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "data",
+              "nextCursor"
+            ]
+          },
+          "rituals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "calls": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Endpoint names it can call."
+                },
+                "delivers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Inbox keys it can deliver to."
+                },
+                "omens": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "attachedTo": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Address IDs or addresses it runs on."
+                }
+              },
+              "required": [
+                "key",
+                "calls",
+                "delivers",
+                "omens",
+                "attachedTo"
+              ]
+            }
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboundOverviewEndpoint"
+            }
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboundDomain"
+            },
+            "description": "Every domain with its receiving status, including domains that only send."
+          },
+          "manage": {
+            "type": "boolean",
+            "description": "False for members and scoped keys: they see their addresses, without routes, rituals, endpoints or domains."
+          }
+        },
+        "required": [
+          "counts",
+          "routes",
+          "rituals",
+          "endpoints",
+          "domains",
+          "manage"
+        ]
+      },
+      "InboundOverviewRoute": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> for a domain default."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "address",
+              "inbox",
+              "route",
+              "pattern",
+              "catch_all"
+            ]
+          },
+          "match": {
+            "type": "string",
+            "description": "The address or pattern mail is sent to."
+          },
+          "host": {
+            "type": "string"
+          },
+          "address": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InboundAddress"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The address that owns this route (address, inbox and address-pattern rows)."
+              }
+            ]
+          },
+          "route": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "to": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "drop"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "enabled",
+              "to"
+            ],
+            "description": "The explicit route for this match, when one exists."
+          },
+          "catchAll": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "store",
+              "create_address",
+              null
+            ],
+            "description": "The domain default for unknown recipients, on a domain-default row."
+          },
+          "rituals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Rituals attached to this address or alias, in the order they run."
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboundOverviewTarget"
+            },
+            "description": "Where its mail goes: routing first, then what attached rituals can send it to."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "match",
+          "host",
+          "address",
+          "route",
+          "catchAll",
+          "rituals",
+          "to"
+        ]
+      },
+      "InboundOverviewTarget": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "webhook",
+              "slack",
+              "discord",
+              "forward",
+              "store",
+              "drop",
+              "create_address"
+            ],
+            "description": "inbox: the address keeps the thread. webhook, slack, discord, forward: an endpoint or an inbound webhook. store: kept without an inbox. drop: not stored. create_address: the domain creates an address for the recipient."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Address ID for an inbox, webhook ID (mwh_…) for an endpoint or inbound webhook; null for store, drop and create_address."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, endpoint name or address."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where it delivers. Webhook, Slack and Discord URLs are write-only; only the last four characters are shown."
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ritual that sends mail here. A ritual may do so for only some mail; null when routing always does."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "ready",
+              "pending",
+              "expired",
+              "declined",
+              "paused",
+              null
+            ],
+            "description": "Endpoint status; paused for a paused inbound webhook; null for inboxes and outcomes."
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "detail",
+          "via",
+          "status"
+        ]
+      },
+      "InboundOverviewEndpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Webhook ID (mwh_…) that delivers for it."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "endpoint",
+              "inbound_webhook"
+            ],
+            "description": "endpoint: a named endpoint rituals call (and routes can name). inbound_webhook: a webhook created with createInboundWebhook."
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "webhook",
+              "slack",
+              "discord",
+              "forward"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "pending",
+              "expired",
+              "declined",
+              "paused"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "description": "Where it delivers; URLs are write-only (last four characters)."
+          },
+          "call": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How a ritual calls an endpoint; null for an inbound webhook."
+          },
+          "eventTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Events an inbound webhook subscribes to; empty for endpoints and route-only webhooks."
+          },
+          "routes": {
+            "type": "integer",
+            "description": "Routes that name it."
+          },
+          "rituals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Rituals that call it."
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "name",
+          "type",
+          "status",
+          "target",
+          "call",
+          "eventTypes",
+          "routes",
+          "rituals"
         ]
       },
       "UpdateInboundThread": {
@@ -38379,8 +38979,7 @@
                     "trace": {
                       "type": "array",
                       "items": {
-                        "type": "object",
-                        "additionalProperties": {}
+                        "$ref": "#/components/schemas/RitualTraceRow"
                       }
                     },
                     "steps": {
@@ -46717,6 +47316,221 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/logs' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inbound/overview": {
+      "get": {
+        "operationId": "getInboundOverview",
+        "tags": [
+          "Inbound addresses"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Every route mail can take, with its rituals and endpoints, in one read",
+        "description": "One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rituals that run on it and where its mail goes. Also returns counts per kind, the rituals, the endpoints and the domains. Members and scoped keys see only their addresses.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^(address|inbox|route|pattern|catch_all)(,(address|inbox|route|pattern|catch_all))*$",
+              "description": "Comma-separated kinds to list: address (a receiving address, including temporary ones), inbox (an agent inbox), route (an explicit route for an address that has no inbox of its own), pattern (an address wildcard rule or a pattern route), catch_all (a *@host route, or the domain default for unknown recipients). Default: every kind."
+            },
+            "required": false,
+            "description": "Comma-separated kinds to list: address (a receiving address, including temporary ones), inbox (an agent inbox), route (an explicit route for an address that has no inbox of its own), pattern (an address wildcard rule or a pattern route), catch_all (a *@host route, or the domain default for unknown recipients). Default: every kind.",
+            "name": "kind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "api",
+                "auto"
+              ],
+              "description": "Addresses only: api (created on purpose) or auto (created by a catch-all)."
+            },
+            "required": false,
+            "description": "Addresses only: api (created on purpose) or auto (created by a catch-all).",
+            "name": "origin",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 253,
+              "description": "Receiving host, e.g. reply.acme.com."
+            },
+            "required": false,
+            "description": "Receiving host, e.g. reply.acme.com.",
+            "name": "domain",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Matches the address, an alias or the display name."
+            },
+            "required": false,
+            "description": "Matches the address, an alias or the display name.",
+            "name": "q",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundOverview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getInboundOverview } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getInboundOverview({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inbound/overview' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }

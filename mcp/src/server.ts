@@ -15,7 +15,7 @@ const INBOUND = new Map([
   ['getRituals','get /v1/rituals'], ['testRituals','post /v1/rituals/test'],
   ['getRouting', 'get /v1/routing'], ['testRouting', 'post /v1/routing/test'], ['listRoutingVersions', 'get /v1/routing/versions'],
   ['listInboundDomains', 'get /v1/inbound/domains'], ['getInboundDomain', 'get /v1/inbound/domains/{id}'], ['enableInboundDomain', 'post /v1/inbound/domains/{id}/enable'],
-  ['listInboundAddresses', 'get /v1/inbound/addresses'], ['createInboundAddress', 'post /v1/inbound/addresses'],
+  ['listInboundAddresses', 'get /v1/inbound/addresses'], ['getInboundOverview', 'get /v1/inbound/overview'], ['createInboundAddress', 'post /v1/inbound/addresses'],
   ['getInboundAddress', 'get /v1/inbound/addresses/{addressId}'], ['updateInboundAddress', 'patch /v1/inbound/addresses/{addressId}'], ['deleteInboundAddress', 'delete /v1/inbound/addresses/{addressId}'],
   ['listInboundThreads', 'get /v1/inbound/threads'], ['createInboundThread', 'post /v1/inbound/threads'],
   ['getInboundThread', 'get /v1/inbound/threads/{threadId}'], ['updateInboundThread', 'patch /v1/inbound/threads/{threadId}'], ['replyToInboundThread', 'post /v1/inbound/threads/{threadId}/reply'],

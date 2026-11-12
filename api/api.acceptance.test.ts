@@ -8866,7 +8866,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,jobs,local,fetch:rawFetch})=>{
+    await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
       const wid=runtime.config.workspaceId,bucket=unique('bucket'),topic=`arn:aws:sns:${REGION}:111122223333:inbound`,domain=unique('mdom');
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
@@ -9242,6 +9242,46 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query('EXPLAIN INSERT INTO mailbox_webhook_deliveries DEFAULT VALUES ON CONFLICT(webhook_id,event_seq) DO NOTHING');
         await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
         const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});
+      });
+      await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rituals and endpoints; dry runs step through each condition', async () => {
+        const box2 = await call('POST', '/v1/inbound/addresses', { address: 'overview@receive.example', key: 'overview', displayName: 'Overview desk', aliases: ['ov-alias@receive.example'], rules: ['ov+*@receive.example'] }, 201);
+        const only = await route('ov-route@receive.example', [hook.id]), dropped = await route('ov-drop@receive.example', 'drop');
+        const source = 'export default function route(email){ if(/refund/i.test(email.subject)) { label("refund"); endpoints["support-hook"]({ s: email.subject }) } else junk("other") }';
+        await call('PUT', '/v1/rituals', { rituals: [{ key: 'ovtriage', source }], attachments: [{ target: box2.id, ritual: 'ovtriage' }] });
+        const overview = await call('GET', '/v1/inbound/overview?q=ov');
+        const byMatch = (m: string) => overview.routes.data.find((r: Json) => r.match === m);
+        const own = byMatch('overview@receive.example');
+        assert.equal(own.kind, 'address'); assert.equal(own.address.id, box2.id); assert.deepEqual(own.address.aliases, ['ov-alias@receive.example']); assert.deepEqual(own.rituals, ['ovtriage']);
+        assert.deepEqual(own.to.map((t: Json) => [t.type, t.id, t.via]), [['inbox', box2.id, null], ['webhook', hook.id, 'ovtriage']], 'its inbox by routing, then the endpoint the ritual can call');
+        assert.equal(byMatch('ov+*@receive.example').kind, 'pattern'); assert.equal(byMatch('ov+*@receive.example').address.id, box2.id);
+        assert.deepEqual([byMatch('ov-route@receive.example').kind, byMatch('ov-route@receive.example').route.id, byMatch('ov-route@receive.example').to[0].id], ['route', only.id, hook.id]);
+        assert.deepEqual(byMatch('ov-drop@receive.example').to.map((t: Json) => t.type), ['drop']);
+        assert.equal(overview.manage, true); assert.ok(overview.counts.address >= 1 && overview.counts.route >= 2 && overview.counts.pattern >= 1);
+        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { key: 'ovtriage', calls: ['support-hook'], delivers: [], omens: [], attachedTo: [box2.id] });
+        const endpoint = overview.endpoints.find((e: Json) => e.id === hook.id);
+        assert.deepEqual([endpoint.source, endpoint.name, endpoint.rituals], ['endpoint', 'support-hook', ['ovtriage']]); assert.ok(endpoint.routes >= 1);
+        assert.ok(!JSON.stringify(overview).includes('hooks.example.org'), 'webhook URLs stay write-only');
+        assert.equal((await call('GET', '/v1/inbound/overview?q=ov-alias')).routes.data[0].address.id, box2.id, 'search reaches aliases');
+        const first = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1'), second = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1&cursor=' + first.routes.nextCursor);
+        assert.deepEqual([first.routes.data[0].match, second.routes.data[0].match, second.routes.nextCursor], ['ov-drop@receive.example', 'ov-route@receive.example', null]);
+        error(await local('GET', '/v1/inbound/overview?cursor=bogus'), 422, 'INVALID_CURSOR');
+        const catchAll = (await call('GET', '/v1/inbound/overview?kind=catch_all')).routes.data.find((r: Json) => r.host === 'receive.example');
+        assert.deepEqual([catchAll.kind, catchAll.route.id, catchAll.to[0].id], ['catch_all', compat.id, inbound.id]);
+        const scoped = await call('POST', '/v1/inbound/keys', { name: 'overview reader', addressIds: [box2.id], permissions: ['read'] }, 201); secrets.add(scoped.secret);
+        const limited = ok(await request('GET', '/v1/inbound/overview', scoped.secret));
+        assert.equal(limited.manage, false); assert.deepEqual(limited.routes.data.map((r: Json) => r.match), ['overview@receive.example', 'ov+*@receive.example']);
+        assert.deepEqual([limited.rituals, limited.endpoints, limited.domains, limited.routes.data[0].to.map((t: Json) => t.type)], [[], [], [], ['inbox']]);
+        const step = async (subject: string) => (await call('POST', '/v1/rituals/test', { mime: `From: a@example.net\r\nTo: overview@receive.example\r\nSubject: ${subject}\r\n\r\nHello` })).trace[0].timeline;
+        const at = source.indexOf('/refund/') + 1, end = source.indexOf(') {') + 1;
+        assert.deepEqual(await step('Refund please'), [
+          { kind: 'condition', line: 1, column: at, endLine: 1, endColumn: end, result: true },
+          { kind: 'action', line: 1, op: 'label', value: 'refund' },
+          { kind: 'action', line: 1, op: 'endpoint', ref: 'endpoint:support-hook' },
+        ]);
+        assert.deepEqual((await step('Hello')).map((s: Json) => [s.kind, s.result ?? s.op]), [['condition', false], ['action', 'junk']]);
+        await call('PUT', '/v1/rituals', {});
+        for (const r of [only, dropped]) await call('DELETE', '/v1/routing/routes/' + r.id);
+        await call('DELETE', `/v1/inbound/addresses/${box2.id}?detach=true`);
       });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;

@@ -697,6 +697,11 @@ async function inbound() {
   await api('updateInboundAddress', { path: { addressId }, body: { displayName: prefix } });
   check((await api('getInboundAddress', { path: { addressId } })).displayName === prefix, 'receiving address edit not persisted');
   check(hasId(await api('listInboundAddresses', { query: { domain, q: prefix } }), addressId), 'receiving address not listed');
+  // The Receiving screen's one read: both run-owned addresses as address routes, searchable, with the inbox they keep.
+  const overview = await api('getInboundOverview', { query: { domain, q: prefix, kind: 'address' } });
+  const listed = overview.routes.data.filter(r => [sender.id, receiver.id].includes(r.address?.id ?? ''));
+  check(overview.manage && listed.length === 2 && listed.every(r => r.kind === 'address' && r.to.some(t => t.type === 'inbox' && t.id === r.address?.id)), 'overview missing the run-owned address routes');
+  check(overview.counts.address >= 2 && overview.domains.some(r => r.id === domainId), 'overview counts or domains wrong');
   if (destructive) {
     const query = {domain,q:prefix,limit:1};
     const a = await api('listInboundAddresses',{query});

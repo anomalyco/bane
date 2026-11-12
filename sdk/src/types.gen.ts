@@ -2132,6 +2132,73 @@ export type RitualTemplates = {
     }>;
 };
 
+export type RitualTraceRow = {
+    recipient: string;
+    /**
+     * What the ritual is attached to: inbox or address.
+     */
+    kind: string;
+    /**
+     * Ritual key.
+     */
+    key: string;
+    scores: {
+        [key: string]: number | boolean;
+    };
+    steps: number;
+    /**
+     * Statement lines run, in order (at most 128).
+     */
+    lines: Array<number>;
+    error: string | null;
+    actions: Array<{
+        op: string;
+        ref?: string;
+        body?: unknown;
+        value?: string;
+    }>;
+    /**
+     * The evaluation in order: each condition and its result, omen answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.
+     */
+    timeline: Array<RitualTimelineStep>;
+};
+
+export type RitualTimelineStep = {
+    kind: 'condition';
+    line: number;
+    column: number;
+    endLine: number;
+    endColumn: number;
+    /**
+     * What the condition evaluated to.
+     */
+    result: boolean;
+} | {
+    kind: 'omens';
+    line: number;
+    /**
+     * Omen name → the answer the ritual read: the scores passed in, recorded answers or each omen’s onError value.
+     */
+    scores: {
+        [key: string]: number | boolean;
+    };
+} | {
+    kind: 'action';
+    line: number;
+    /**
+     * label, junk, block, drop, allow, inbox.deliver or endpoint.
+     */
+    op: string;
+    /**
+     * endpoint:<name> or inbox:<key>.
+     */
+    ref?: string;
+    value?: string;
+} | {
+    kind: 'return';
+    line: number;
+};
+
 export type Inbox = {
     /**
      * Inbox ID. It also works as addressId on /v1/inbound endpoints, such as replying in a thread.
@@ -2829,6 +2896,149 @@ export type LogEntry = {
      * Received mail, administrators only: the SMTP envelope recipients.
      */
     envelopeTo: Array<string> | null;
+};
+
+export type InboundOverview = {
+    /**
+     * Routes per kind, after the domain and q filters and before kind and origin.
+     */
+    counts: {
+        address: number;
+        /**
+         * Addresses a catch-all created (origin auto).
+         */
+        auto: number;
+        route: number;
+        pattern: number;
+        catch_all: number;
+        inbox: number;
+    };
+    routes: {
+        data: Array<InboundOverviewRoute>;
+        nextCursor: string | null;
+    };
+    rituals: Array<{
+        key: string;
+        /**
+         * Endpoint names it can call.
+         */
+        calls: Array<string>;
+        /**
+         * Inbox keys it can deliver to.
+         */
+        delivers: Array<string>;
+        omens: Array<string>;
+        /**
+         * Address IDs or addresses it runs on.
+         */
+        attachedTo: Array<string>;
+    }>;
+    endpoints: Array<InboundOverviewEndpoint>;
+    /**
+     * Every domain with its receiving status, including domains that only send.
+     */
+    domains: Array<InboundDomain>;
+    /**
+     * False for members and scoped keys: they see their addresses, without routes, rituals, endpoints or domains.
+     */
+    manage: boolean;
+};
+
+export type InboundOverviewRoute = {
+    /**
+     * Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> for a domain default.
+     */
+    id: string;
+    kind: 'address' | 'inbox' | 'route' | 'pattern' | 'catch_all';
+    /**
+     * The address or pattern mail is sent to.
+     */
+    match: string;
+    host: string;
+    address: InboundAddress & ({
+        [key: string]: unknown;
+    } | null);
+    /**
+     * The explicit route for this match, when one exists.
+     */
+    route: {
+        id: string;
+        enabled: boolean;
+        to: Array<string> | 'drop';
+    } | null;
+    /**
+     * The domain default for unknown recipients, on a domain-default row.
+     */
+    catchAll: 'store' | 'create_address' | null;
+    /**
+     * Rituals attached to this address or alias, in the order they run.
+     */
+    rituals: Array<string>;
+    /**
+     * Where its mail goes: routing first, then what attached rituals can send it to.
+     */
+    to: Array<InboundOverviewTarget>;
+};
+
+export type InboundOverviewTarget = {
+    /**
+     * inbox: the address keeps the thread. webhook, slack, discord, forward: an endpoint or an inbound webhook. store: kept without an inbox. drop: not stored. create_address: the domain creates an address for the recipient.
+     */
+    type: 'inbox' | 'webhook' | 'slack' | 'discord' | 'forward' | 'store' | 'drop' | 'create_address';
+    /**
+     * Address ID for an inbox, webhook ID (mwh_…) for an endpoint or inbound webhook; null for store, drop and create_address.
+     */
+    id: string | null;
+    /**
+     * Display name, endpoint name or address.
+     */
+    name: string;
+    /**
+     * Where it delivers. Webhook, Slack and Discord URLs are write-only; only the last four characters are shown.
+     */
+    detail: string | null;
+    /**
+     * The ritual that sends mail here. A ritual may do so for only some mail; null when routing always does.
+     */
+    via: string | null;
+    /**
+     * Endpoint status; paused for a paused inbound webhook; null for inboxes and outcomes.
+     */
+    status: 'ready' | 'pending' | 'expired' | 'declined' | 'paused' | null;
+};
+
+export type InboundOverviewEndpoint = {
+    /**
+     * Webhook ID (mwh_…) that delivers for it.
+     */
+    id: string;
+    /**
+     * endpoint: a named endpoint rituals call (and routes can name). inbound_webhook: a webhook created with createInboundWebhook.
+     */
+    source: 'endpoint' | 'inbound_webhook';
+    name: string;
+    type: 'webhook' | 'slack' | 'discord' | 'forward';
+    status: 'ready' | 'pending' | 'expired' | 'declined' | 'paused';
+    /**
+     * Where it delivers; URLs are write-only (last four characters).
+     */
+    target: string;
+    /**
+     * How a ritual calls an endpoint; null for an inbound webhook.
+     */
+    call: string | null;
+    /**
+     * Events an inbound webhook subscribes to; empty for endpoints and route-only webhooks.
+     */
+    eventTypes: Array<string>;
+    /**
+     * Routes that name it.
+     */
+    routes: number;
+    /**
+     * Rituals that call it.
+     */
+    rituals: Array<string>;
 };
 
 export type UpdateInboundThread = {
@@ -13414,9 +13624,7 @@ export type TestRitualsResponses = {
         recipients: Array<{
             [key: string]: unknown;
         }>;
-        trace: Array<{
-            [key: string]: unknown;
-        }>;
+        trace: Array<RitualTraceRow>;
         steps: number;
     };
 };
@@ -16457,6 +16665,86 @@ export type ListLogsResponses = {
 };
 
 export type ListLogsResponse = ListLogsResponses[keyof ListLogsResponses];
+
+export type GetInboundOverviewData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Comma-separated kinds to list: address (a receiving address, including temporary ones), inbox (an agent inbox), route (an explicit route for an address that has no inbox of its own), pattern (an address wildcard rule or a pattern route), catch_all (a *@host route, or the domain default for unknown recipients). Default: every kind.
+         */
+        kind?: string;
+        /**
+         * Addresses only: api (created on purpose) or auto (created by a catch-all).
+         */
+        origin?: 'api' | 'auto';
+        /**
+         * Receiving host, e.g. reply.acme.com.
+         */
+        domain?: string;
+        /**
+         * Matches the address, an alias or the display name.
+         */
+        q?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inbound/overview';
+};
+
+export type GetInboundOverviewErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundOverviewError = GetInboundOverviewErrors[keyof GetInboundOverviewErrors];
+
+export type GetInboundOverviewResponses = {
+    /**
+     * Success
+     */
+    200: InboundOverview;
+};
+
+export type GetInboundOverviewResponse = GetInboundOverviewResponses[keyof GetInboundOverviewResponses];
 
 export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;

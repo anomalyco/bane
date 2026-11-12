@@ -21,6 +21,7 @@ import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwa
 import { withRegionSettings } from './ses-region-state.js';
 import { mailboxCreates } from './idempotency.js';
 import { registerLogs } from './logs.js';
+import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -603,6 +604,7 @@ export function registerMailbox(app: App) {
   }
   registerInboundThreadReads(app, access);
   registerLogs(app, actorMailAccess);
+  registerInboundOverview(app, { access, mailboxViews, domainViews, InboundAddressSchema, InboundDomainSchema, security });
   app.openapi(createRoute({method:'patch',path:'/v1/inbound/threads/{threadId}',operationId:'updateInboundThread',tags:['Inbound threads'],security,summary:'Mark a conversation read, star, archive or label it for one address',request:{params:z.object({threadId:z.string().min(1).max(120)}),body:json(UpdateInboundThread)},responses:{200:response(AddressState),...errors}}),async c=>{
     const v=access(c,'modify'),{threadId}=c.req.valid('param'),{addressId,...changes}=c.req.valid('json');
     const options=await c.env.db.select({id:mailboxThreads.mailboxId}).from(mailboxThreads).where(visibleThreadAddresses(v,threadId,addressId)).limit(2);
