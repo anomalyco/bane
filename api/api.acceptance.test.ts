@@ -2343,29 +2343,42 @@ describe('Hosted MCP OAuth and tools', () => {
     return output;
   }
 
-  test('an MCP client name is shown as one short line of visible characters', async t => {
+  test('an MCP client name is shown as one short line of the characters that are drawn', async t => {
     await simulatedSesFixture(t, async ({ db, local, request }) => {
+      // Register a client under this name, open its approval page, approve it, and read it back from the connections list.
+      async function shown(registered: string) {
+        const client = ok(await registerClient(t, db, { client_name: registered }, request), 201);
+        const redirectUri = 'http://127.0.0.1/callback', verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
+        secrets.add(verifier);
+        const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri, scope: writableScope, state: unique('acceptance-mcp-state'),
+          resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
+        const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
+        const oauthQuery = new URL(authorization.url, PUBLIC_ORIGIN).search.slice(1);
+        secrets.add(oauthQuery);
+        const consent = await request('GET', `/mcp/consent?${oauthQuery}`, MANAGER, undefined, { accept: 'text/html' });
+        assert.equal(consent.status, 200);
+        ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
+        const listed = ok(await local('GET', '/v1/mcp-connections')).data.find((row: Json) => row.clientId === client.client_id);
+        return { html: String(consent.body), listed: listed.name as string | null };
+      }
       // Reordering marks, an invisible character, a line break and a control character inside an over-long name.
-      const registered = `Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`;
-      const client = ok(await registerClient(t, db, { client_name: registered }, request), 201);
-      const redirectUri = 'http://127.0.0.1/callback', verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
-      secrets.add(verifier);
-      const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri, scope: writableScope, state: unique('acceptance-mcp-state'),
-        resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
-      const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
-      const consentUrl = new URL(authorization.url, PUBLIC_ORIGIN), oauthQuery = consentUrl.search.slice(1);
-      secrets.add(oauthQuery);
-      const shown = `Desk helper notes ${'x'.repeat(142)}`;
-      assert.equal(shown.length, 160);
-      const consent = await request('GET', `/mcp/consent?${oauthQuery}`, MANAGER, undefined, { accept: 'text/html' });
-      assert.equal(consent.status, 200);
-      const html = String(consent.body);
-      assert.ok(html.includes(`<h1>Allow ${shown} to access Bane?</h1>`), 'The heading names the client on one line.');
-      assert.ok(html.includes(`has not verified "${shown}".`));
-      assert.doesNotMatch(html, /[\u0007\u200B\u202A-\u202E\u2066-\u2069]|x{143}/u);
-      ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
-      const listed = ok(await local('GET', '/v1/mcp-connections')).data.find((row: Json) => row.clientId === client.client_id);
-      assert.equal(listed.name, shown, 'Connections list the same name the approval page showed.');
+      const long = await shown(`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`), label = `Desk helper notes ${'x'.repeat(142)}`;
+      assert.equal(label.length, 160);
+      assert.ok(long.html.includes(`<h1>Allow ${label} to access Bane?</h1>`), 'The heading names the client on one line.');
+      assert.ok(long.html.includes(`has not verified "${label}".`));
+      assert.doesNotMatch(long.html, /[\u0007\u200B\u202A-\u202E\u2066-\u2069]|x{143}/u);
+      assert.equal(long.listed, label, 'Connections list the same name the approval page showed.');
+      // Joiners and a variation selector that shape what is drawn stay; a soft hyphen, a grapheme joiner and stray joiners go.
+      const shaped = await shown('\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D');
+      assert.equal(shaped.listed, '👩\u200D💻 ❤\uFE0F می\u200Cخواهم Support');
+      assert.ok(shaped.html.includes(`<h1>Allow ${shaped.listed} to access Bane?</h1>`));
+      // Names with nothing to draw get the default label and no name in the list.
+      for (const blank of ['\u034F\u00AD\u206A', '\u2800 \u3164\u{E0041}\uFEFF', '\u0301\u200D\uFE0F']) {
+        const none = await shown(blank);
+        assert.ok(none.html.includes('<h1>Allow This MCP client to access Bane?</h1>'), JSON.stringify(blank));
+        assert.ok(none.html.includes('has not verified "This MCP client".'));
+        assert.equal(none.listed, null);
+      }
     });
   });
 
