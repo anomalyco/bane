@@ -2,12 +2,16 @@
 
 Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev E2E passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
 
-## Merging into `dev`: the merge queue
+## Merging into `dev`: the merge queue (one step from on)
 
-`dev` requires the merge queue. When a PR's own checks pass, add it to the queue (`gh pr merge <n>`, or "Merge when ready"). Only the accounts allowed to push `dev` can. The queue merges the PR onto the latest `dev` and every entry ahead of it, runs the required checks (`build`, `acceptance`) on exactly that commit (the `merge_group` event), and merges only if they pass. A PR no longer has to be up to date with `dev` first, so nobody re-runs CI because another PR landed.
+CI and the dev deploy are ready for GitHub's merge queue on `dev`: `ci.yml` runs the required checks (`build`, `acceptance`) on `merge_group`, and the deploy accepts the queue's pushes. The queue is not on yet. `dev` restricts pushes to thdxr and R44VC0RP, and under that classic restriction the queue may push only when the same classic rule requires it. That is the "Require merge queue" checkbox in Settings → Branches → `dev`, which neither the REST nor the GraphQL API exposes. A ruleset-based queue was tried on Nov 12: GitHub refused its merge of #103 with `branch_protection_failure`, so that ruleset (`dev merge queue`) is kept disabled.
+
+**To turn it on** (needs GitHub's sudo confirmation): on the `dev` rule, tick Require merge queue (merge commit, build concurrency 5, merge up to 5, only non-failing, 30-minute timeout) and untick "Require branches to be up to date before merging". From then on, `gh pr merge <n>` adds a green PR to the queue. The queue merges it onto the latest `dev` and the entries ahead of it, runs the required checks on exactly that commit, and merges only if they pass. Only accounts allowed to push `dev` can add PRs.
+
+**Until then:** `gh pr update-branch <n>` and then `gh pr merge <n> --merge --auto` (auto-merge is enabled) merge a PR as soon as its checks pass. Any merge to `dev` in the meantime makes it BEHIND again.
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
-- **Cost:** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between "merge" and the merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Cost (once on):** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between "merge" and the merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
