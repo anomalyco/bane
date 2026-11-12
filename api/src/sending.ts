@@ -1582,9 +1582,12 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
        FROM matched x ORDER BY x.workspace_id,x.email_id,x.ordinal
       ON CONFLICT DO NOTHING RETURNING *
     ) ${effects ? sql`, contact_events AS (
+      -- Effects follow the receipt this statement processed, not a newly inserted event: a recovery
+      -- job that stored the event and died before its suppression left the receipt open for us.
+      -- The merges below are idempotent, so overlapping with that job's own retry is harmless.
       SELECT x.workspace_id,r.address,x.ordinal,x.event_time,x.effects->>'suppress' AS reason,x.effects->>'observe' AS observe,
         min(x.ordinal) FILTER (WHERE x.effects->>'suppress' IS NOT NULL) OVER (PARTITION BY x.workspace_id,r.address) AS first_suppression
-      FROM matched x JOIN inserted ins ON ins.id=x.event_id JOIN recipients r USING(event_id)
+      FROM matched x JOIN recipients r USING(event_id)
     ), contact_changes AS (
       -- One write per address. A missing contact starts existing at its first suppression;
       -- an earlier open must not create it or retroactively contribute engagement.
