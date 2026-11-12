@@ -9,6 +9,8 @@
 .ui-table-scroll.keys-table--two-line { --table-row-height: 53px; }
 /* Narrow screens scroll the table sideways rather than wrapping cells, so loaded rows keep the skeleton's height. */
 .keys-table .ui-table { min-width: 880px; }
+/* A tablet fits the whole table, Revoke included, by narrowing its columns instead of scrolling it sideways. */
+@media (max-width: 1100px) { .keys-table .ui-table { min-width: 0; } .keys-table [data-col='prefix'] { width: 15% !important; } }
 .keys-cell { min-width: 0; }
 .keys-cell > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

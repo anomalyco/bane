@@ -9,29 +9,30 @@ const statuses = [{ value: 'subscribed', label: 'Subscribed' }, { value: 'unsubs
 export function AudienceCellSkeleton({ secondary = false }: { secondary?: boolean }) {
   return <div><SkeletonText width="78%" />{secondary && <SkeletonText width="48%" lineHeight={18} />}</div>
 }
+// Cards on a phone: a contact's address and status, then name, lists and when it was added.
 export const contactColumns: SkeletonColumn[] = [
-  { key: 'email', label: 'Email', width: '28%', skeleton: <AudienceCellSkeleton /> },
-  { key: 'status', label: 'Status', width: '17%', skeleton: <SkeletonText width={92} /> },
-  { key: 'name', label: 'Name', width: '18%' },
-  { key: 'lists', label: 'Lists', width: '20%' },
-  { key: 'created', label: 'Added', width: '17%', skeleton: <SkeletonText width={95} /> },
+  { key: 'email', label: 'Email', width: '28%', skeleton: <AudienceCellSkeleton />, card: 'title' },
+  { key: 'status', label: 'Status', width: '17%', skeleton: <SkeletonText width={92} />, card: 'aside' },
+  { key: 'name', label: 'Name', width: '18%', card: 'line' },
+  { key: 'lists', label: 'Lists', width: '20%', card: 'inline' },
+  { key: 'created', label: 'Added', width: '17%', skeleton: <SkeletonText width={95} />, card: 'inline' },
 ]
-export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%' }, contactColumns[4]]
+export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
 export const listColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Name', width: '24%' },
-  { key: 'subscribed', label: 'Subscribed', width: '12%', align: 'right' },
-  { key: 'suppressed', label: 'Suppressed', width: '12%', align: 'right' },
-  { key: 'unsubscribed', label: 'Unsubscribed', width: '13%', align: 'right' },
-  { key: 'unknown', label: 'Unknown consent', width: '14%', align: 'right' },
-  { key: 'total', label: 'Total contacts', width: '12%', align: 'right' },
-  { key: 'created', label: 'Created', width: '13%' },
+  { key: 'name', label: 'Name', width: '24%', card: 'title' },
+  { key: 'subscribed', label: 'Subscribed', width: '12%', align: 'right', card: 'line' },
+  { key: 'suppressed', label: 'Suppressed', width: '12%', align: 'right', card: 'inline' },
+  { key: 'unsubscribed', label: 'Unsubscribed', width: '13%', align: 'right', card: 'inline' },
+  { key: 'unknown', label: 'Unknown consent', width: '14%', align: 'right', card: 'hide' },
+  { key: 'total', label: 'Total contacts', width: '12%', align: 'right', card: 'aside' },
+  { key: 'created', label: 'Created', width: '13%', card: 'hide' },
 ]
 export const segmentColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Name', width: '30%' },
-  { key: 'rules', label: 'Rules', width: '22%' },
-  { key: 'matched', label: 'Matched', width: '14%', align: 'right' },
-  { key: 'eligible', label: 'Eligible', width: '14%', align: 'right' },
-  { key: 'updated', label: 'Updated', width: '20%' },
+  { key: 'name', label: 'Name', width: '30%', card: 'title' },
+  { key: 'rules', label: 'Rules', width: '22%', card: 'line' },
+  { key: 'matched', label: 'Matched', width: '14%', align: 'right', card: 'hide' },
+  { key: 'eligible', label: 'Eligible', width: '14%', align: 'right', card: 'hide' },
+  { key: 'updated', label: 'Updated', width: '20%', card: 'inline' },
 ]
 export const activityColumns: SkeletonColumn[] = [
   { key: 'subject', label: 'Email', width: '55%' },

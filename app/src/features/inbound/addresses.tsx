@@ -194,11 +194,13 @@ export function InboundAddressDetailPage() {
   }
   const focus = (target: () => HTMLElement | null) => { const el = target(); el?.scrollIntoView({ block: 'center' }); el?.focus() }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current && <>
+    {/* The actions hold their place while the address loads, as the same buttons disabled (their labels give their exact
+        widths): on a phone they take a row of their own. */}
+    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current ? <>
       {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/trace?to=${encodeURIComponent(current.address)}`}>Trace</Link>}
       <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in Inbox</Link>
       {canAdminister && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
-    </>} />
+    </> : <>{canAdminister && <Button disabled>Trace</Button>}<Button disabled>Open in Inbox</Button>{canAdminister && <Button variant="danger" disabled>Delete</Button>}</>} />
     {!ready ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : current && <div className="stack inbound-stack addr-page">
       <dl className="settings-facts">
         <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
@@ -220,7 +222,7 @@ export function InboundAddressDetailPage() {
           <MutationError error={save.error} />
           <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
           <AliasEditor id="inbound-address-aliases" address={current.address} temporary={!!current.expiresAt} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
-          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
+          <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
         <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
       </section>}

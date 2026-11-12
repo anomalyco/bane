@@ -34,9 +34,9 @@ export function HostedSettings() {
   return <div className="hosted-settings">
     <nav className="settings-rail" aria-label="Settings">
       <h1 className="settings-rail__title">Settings</h1>
-      {groups.map(group => <div key={group.title} className="settings-rail__group"><span className="settings-rail__group-title">{group.title}</span>
+      <div className="settings-rail__groups">{groups.map(group => <div key={group.title} className="settings-rail__group"><span className="settings-rail__group-title">{group.title}</span>
         {group.items.filter(item => canAdminister || !item.admin).map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined}>{item.label}</Link>)}
-      </div>)}
+      </div>)}</div>
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
     <div key={section} className="hosted-settings__content">
