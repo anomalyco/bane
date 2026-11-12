@@ -8735,6 +8735,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await db.query('UPDATE mailbox_threads SET message_count=message_count+1,unread_count=unread_count+1 WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]);
     assert.deepEqual(await summary(),{message_count:2,unread_count:2});
   });
+  // Receive admission races (api/tear/admission). Two connections insert receipts the way the SNS
+  // route does; the mail_receive_admit trigger and the window and backlog it charges are under test.
+  const receiptRace=async(t:TestContext,limits:{messages:number;backlog:number})=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('rwin');
+    await a.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,$2,$3)',[w,limits.messages,limits.backlog]);
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_receive_limits','mail_ingest_turns'])await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);});
+    // The route's upsert, plus the ingest job it queues for a pending receipt.
+    const accept=async(c:pg.Client,mid:string,recipients:string[])=>{
+      const r=await c.query(`INSERT INTO mail_receipts AS r(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'tear-bucket','key',$4,'{}')
+        ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=excluded.recipients WHERE r.status<>'failed' AND NOT r.recipients @> excluded.recipients RETURNING status`,[w,mid,REGION,JSON.stringify(recipients)]);
+      if(r.rows[0]?.status==='pending')await c.query(`INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'mailbox.ingest',$2,$3)`,[unique('job'),w,JSON.stringify({sesMessageId:mid})]);
+      return r.rows[0]?.status??null;
+    };
+    const pid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    // Run `second` on b while a holds its transaction open; commit a once b waits on a lock.
+    const race=async<T>(first:()=>Promise<unknown>,second:()=>Promise<T>)=>{
+      await a.query('BEGIN');
+      try {
+        await first();
+        const pending=(async()=>{await b.query('BEGIN');try{const v=await second();await b.query('COMMIT');return v;}catch(e){await b.query('ROLLBACK');throw e;}})();
+        let waiting=false;
+        for(let i=0;i<400&&!waiting;i++){waiting=(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+        assert.ok(waiting,'the second statement must wait on the first transaction');
+        await a.query('COMMIT');
+        return await pending;
+      } finally { await a.query('ROLLBACK'); }
+    };
+    const state=async()=>({window:Number((await a.query('SELECT messages FROM mail_receive_windows WHERE workspace_id=$1',[w])).rows[0]?.messages??0),
+      active:Number((await a.query('SELECT active FROM mail_ingest_turns WHERE workspace_id=$1',[w])).rows[0]?.active??0),
+      receipts:Object.fromEntries((await a.query('SELECT ses_message_id,status FROM mail_receipts WHERE workspace_id=$1',[w])).rows.map(r=>[r.ses_message_id,r.status]))});
+    return {a,b,w,accept,race,state};
+  };
+  // tear witness (4 steps): W accept m1 a, V accept m1 a, W commit, V commit -> the window was charged 2 for one message.
+  test('receive window: concurrent notifications of one new message charge the hourly window once',async t=>{
+    const {a,b,accept,race,state}=await receiptRace(t,{messages:5,backlog:5});
+    assert.equal(await race(()=>accept(a,'m1',['a@rwin.invalid']),()=>accept(b,'m1',['a@rwin.invalid'])),null);
+    assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending'}});
+    // A first notification that fails the 101-recipient budget charges nothing, and neither does its twin.
+    const many=Array.from({length:101},(_,i)=>`r${i}@rwin.invalid`);
+    assert.equal(await race(()=>accept(a,'m2',many),()=>accept(b,'m2',['a@rwin.invalid'])),null);
+    assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'failed'}});
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
