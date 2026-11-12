@@ -16,8 +16,8 @@
 //
 // Workers Logs keeps only a few days, so each 24-hour window's aggregate is cached under <dir>/state/<stage>/ and the
 // seven-day baseline is built from those files (and from whatever the API still holds the first time). The repository is
-// public: issues carry route templates, error codes, counts, deploy SHAs, stack frames and request IDs, never workspace
-// IDs, addresses, paths or message text.
+// public: an issue carries only route templates, error codes, SQLSTATEs, stage names and counts (publicText); request
+// IDs stay in the private report, and stack frames and messages are never read.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -26,15 +26,16 @@ import { fileURLToPath } from 'node:url';
 
 type Json = Record<string, any>;
 type Stage = { name: 'production' | 'dev'; account: string; script: string; awsProfile?: string };
-// Server errors are kept per code: when, how many workspaces, and the first error line's class, SQLSTATE and frames.
-type Failure = { count: number; first: string; last: string; workspaces: number; requestIds: string[]; errorType?: string; databaseCode?: string; frames?: string };
+// Server errors are kept per code: when, how many workspaces, request IDs and the SQLSTATE. Stack frames and messages
+// are never read: they can carry caller text (see publicText).
+type Failure = { count: number; first: string; last: string; workspaces: number; requestIds: string[]; databaseCode?: string };
 type Route = { method: string; route: string; total: number; c4: number; c5: number; codes: Record<string, number>; failures: Record<string, Failure>; p95?: number; n: number };
 type Code = { count: number; level: 'warn' | 'error'; where: Record<string, number> };
-type Background = { operation: string; code: string; count: number; level: string; errorType?: string; frames?: string; sample?: string; category: 'webhook' | 'dispatch' | 'jobs' };
-type Window = { stage: Stage['name']; from: string; to: string; events: number; expected?: number; requests: { total: number; c4: number; c5: number };
+type Background = { operation: string; code: string; count: number; level: string; category: 'webhook' | 'dispatch' | 'jobs' };
+type Window = { stage: Stage['name']; from: string; to: string; events: number; expected?: number; complete?: boolean; requests: { total: number; c4: number; c5: number };
   routes: Record<string, Route>; codes: Record<string, Code>; deploys: Record<string, { total: number; c5: number; first?: string; last?: string }>;
   background: Record<string, Background>; gateway?: Record<string, number> };
-type Problem = { fingerprint: string; kind: string; severity: number; title: string; body: string; stages: string[] };
+type Problem = { fingerprint: string; kind: string; severity: number; title: string; facts: string[]; stages: string[] };
 
 const HOUR = 3_600_000, DAY = 24 * HOUR, PAGE = 1000;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -76,7 +77,7 @@ async function telemetry(target: Stage, body: Json): Promise<Json> {
     await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
   }
 }
-type Event = { source: Json; version?: string; at: number };
+type Event = { source: Json; version?: string; at: number; id: string };
 const scriptFilter = (target: Stage) => ({ key: '$workers.scriptName', operation: 'eq', type: 'string', value: target.script });
 async function lineCount(target: Stage, from: number, to: number, filters: Json[] = []) {
   const result = await telemetry(target, { queryId: 'bane-nightly-count', timeframe: { from, to }, view: 'calculations', limit: 10,
@@ -85,18 +86,24 @@ async function lineCount(target: Stage, from: number, to: number, filters: Json[
 }
 // Every matching line in the window. The events view samples instead of paging: over a long window, or with a limit
 // above 1,000, it returns a subset spread over the window (Nov 12: 260 of 4,033). So compare each page with the exact
-// count and split the window until each part comes back whole.
+// count and split the window until each part comes back whole, down to one second. It also leaves out a few lines its
+// count includes, whatever the window (Nov 12: 33 of 6,539 on dev, even in one-second windows), so a part within 0.5%
+// of its count is accepted. The caller dedupes by event ID (a boundary event can be in both halves) and treats a window
+// that read less than 99.5% of its count as incomplete.
+const MIN_SPAN = 1000, COMPLETE = 0.995;
 async function events(target: Stage, from: number, to: number, filters: Json[], known?: number): Promise<Event[]> {
   const expected = known ?? await lineCount(target, from, to, filters);
   if (!expected) return [];
   const split = async () => { const middle = from + Math.floor((to - from) / 2); return [...await events(target, from, middle, filters), ...await events(target, middle, to, filters)]; };
-  if (expected > PAGE && to - from > 60_000) return split();
+  if (expected > PAGE && to - from > MIN_SPAN) return split();
   const result = await telemetry(target, { queryId: 'bane-nightly-report', timeframe: { from, to }, view: 'events', limit: PAGE,
     parameters: { datasets: ['cloudflare-workers'], filters: [scriptFilter(target), ...filters] } });
   const list: Json[] = result.events?.events ?? [];
-  if (list.length < expected * 0.98 && to - from > 60_000) return split();
-  return list.map(event => ({ source: event.source && typeof event.source === 'object' ? event.source : {}, version: event.$workers?.scriptVersion?.id, at: Number(event.timestamp) }));
+  if ((list.length >= PAGE || list.length < expected * COMPLETE) && to - from > MIN_SPAN) return split();
+  return list.map(event => ({ source: event.source && typeof event.source === 'object' ? event.source : {}, version: event.$workers?.scriptVersion?.id,
+    at: Number(event.timestamp), id: String(event.$metadata?.id ?? `${event.timestamp}:${JSON.stringify(event.source).length}`) }));
 }
+const unique = (list: Event[]) => [...new Map(list.map(event => [event.id, event])).values()];
 
 const WEBHOOK_JOBS = new Set(['operation.webhook', 'mailbox.webhook']);
 function category(line: Json): Background['category'] {
@@ -112,16 +119,16 @@ function routeOf(line: Json, error?: Json) {
   const named = [error?.operation, line.operation].find(value => typeof value === 'string' && !value.endsWith('*')) ?? str(line.operation) ?? 'unmatched';
   return named === '/*' ? 'unmatched' : named;
 }
-const framesOf = (line?: Json) => str(line?.stack)?.split('\n').slice(0, 4).join('\n');
 
 const REQUEST_LINES = [{ key: 'method', operation: 'exists', type: 'string' }];
 const PROBLEM_LINES = [{ kind: 'group', filterCombination: 'or', filters: ['warn', 'error'].map(value => ({ key: 'level', operation: 'eq', type: 'string', value })) },
   { key: 'method', operation: 'DOES_NOT_EXIST', type: 'string' }];
 async function aggregate(target: Stage, from: number, to: number): Promise<Window> {
   const counts = await Promise.all([lineCount(target, from, to, REQUEST_LINES), lineCount(target, from, to, PROBLEM_LINES)]);
-  const [requestLines, problemLines] = await Promise.all([events(target, from, to, REQUEST_LINES, counts[0]), events(target, from, to, PROBLEM_LINES, counts[1])]);
+  const [requestLines, problemLines] = (await Promise.all([events(target, from, to, REQUEST_LINES, counts[0]), events(target, from, to, PROBLEM_LINES, counts[1])])).map(unique) as [Event[], Event[]];
   const expected = counts[0] + counts[1];
-  const window: Window = { stage: target.name, from: iso(from), to: iso(to), events: requestLines.length + problemLines.length, expected, requests: { total: 0, c4: 0, c5: 0 }, routes: {}, codes: {}, deploys: {}, background: {} };
+  const window: Window = { stage: target.name, from: iso(from), to: iso(to), events: requestLines.length + problemLines.length, expected,
+    complete: requestLines.length >= counts[0] * COMPLETE && problemLines.length >= counts[1] * COMPLETE, requests: { total: 0, c4: 0, c5: 0 }, routes: {}, codes: {}, deploys: {}, background: {} };
   // A failed request's error line (its code, and for an unexpected failure the stack) joins its request line by ID.
   const errors = new Map<string, Json>();
   for (const { source } of problemLines) if (str(source.requestId) && !source.jobId && typeof source.status === 'number') errors.set(source.requestId, source);
@@ -152,7 +159,7 @@ async function aggregate(target: Stage, from: number, to: number): Promise<Windo
       failure.count += weight; if (when < failure.first) failure.first = when; if (when > failure.last) failure.last = when;
       release.first = !release.first || when < release.first ? when : release.first; release.last = !release.last || when > release.last ? when : release.last;
       if (failure.requestIds.length < 3 && str(source.requestId)) failure.requestIds.push(source.requestId);
-      failure.errorType ??= str(error?.errorType); failure.frames ??= framesOf(error); failure.databaseCode ??= str(source.databaseCode) ?? str(error?.databaseCode);
+      failure.databaseCode ??= str(source.databaseCode) ?? str(error?.databaseCode);
       const workspace = str(source.workspace) ?? str(source.workspaceId); // Counted, never stored.
       if (workspace) { const set = workspaces.get(failure) ?? new Set(); set.add(workspace); workspaces.set(failure, set); }
     } else { entry.c4 += weight; window.requests.c4 += weight; }
@@ -166,9 +173,6 @@ async function aggregate(target: Stage, from: number, to: number): Promise<Windo
     const level = source.level === 'error' ? 'error' : 'warn', key = `${operation}|${code}`;
     const entry = window.background[key] ??= { operation, code, count: 0, level, category: category(source) };
     entry.count++; if (level === 'error') entry.level = 'error';
-    entry.errorType ??= str(source.errorType); entry.frames ??= framesOf(source);
-    // Bane's own message text for this code (never a provider's): the logs carry no caller data, and it is scrubbed again.
-    entry.sample ??= str(source.message)?.slice(0, 160);
     note(code, level, operation, 1);
   }
   return window;
@@ -207,9 +211,10 @@ async function windowFor(target: Stage, windowEnd: number, current: boolean): Pr
   if (cached) return JSON.parse(readFileSync(cached, 'utf8'));
   if (!current && await lineCount(target, windowEnd - DAY, windowEnd) === 0) return null; // Past retention or no traffic.
   const window = await aggregate(target, windowEnd - DAY, windowEnd);
+  // An incomplete window is never cached or used as a baseline, and files no issues (problems()).
+  if (!window.complete) { console.error(`${target.name} to ${iso(windowEnd)}: read ${window.events} of ${window.expected} lines`); if (!current) return null; }
   try { window.gateway = await gateway(target, windowEnd - DAY, windowEnd); } catch (error) { console.error(`gateway logs for ${target.name} to ${iso(windowEnd)}: ${(error as Error).message.split('\n').find(line => line.includes('rror')) ?? 'failed'}`); }
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(window));
+  if (window.complete) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(window)); }
   return window;
 }
 
@@ -235,60 +240,70 @@ async function versionShas(target: Stage, versions: string[]): Promise<Map<strin
   return shas;
 }
 
+// Public issue text. The repository is public, so an issue is built only from values that pass these checks: route
+// templates, error codes, SQLSTATEs, stage names and numbers. Never stack frames, error messages, request or
+// workspace IDs, timestamps of single requests, or any other log text (PR #131 review: a multiline database error
+// can put caller text where a stack frame is expected).
+const METHOD = '(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)';
+const publicText = {
+  route: (value: string) => new RegExp(`^${METHOD} (?:/[A-Za-z0-9_:.*{}/-]{0,120}|unmatched)$`).test(value) ? value : 'an API route',
+  code: (value: string) => /^[A-Z][A-Z0-9_]{1,63}$/.test(value) ? value : 'an error code',
+  place: (value: string) => new RegExp(`^${METHOD} `).test(value) ? publicText.route(value) : /^[a-z][a-z0-9_.:-]{0,63}$/.test(value) ? value : 'background work',
+  sqlstate: (value?: string) => value && /^[0-9A-Z]{5}$/.test(value) ? value : undefined,
+  count: (value: number) => Math.round(value).toLocaleString('en-US'),
+};
+function publicIssueBody(problem: Problem, windowEnd: string) {
+  return `<!-- nightly-fingerprint: ${problem.fingerprint} -->\n${problem.facts.map(fact => `- ${fact}`).join('\n')}\n\n---\n`
+    + `Opened by the nightly log report (docs/ci.md, "Nightly report and self-improve loop") for the 24 hours to ${windowEnd.slice(0, 16)}Z. `
+    + 'Nightly issues carry error codes, route templates and counts only; the request IDs and details are in the private report.';
+}
+
 function problems(target: Stage, today: Window, baseline: Window[]): Problem[] {
   const found: Problem[] = [];
+  if (!today.complete) return found; // Counts from a partial read are not findings.
   const knownCodes = new Set(baseline.flatMap(day => Object.keys(day.codes)));
-  const where = `\`${target.name}\` (${target.script})`;
-  const footer = `\n\n---\nOpened by the nightly log report (docs/ci.md, "Nightly report and self-improve loop") for the 24 hours to ${today.to}. Look the request IDs up in Workers Logs for ${target.script}.`;
+  const stageName = `\`${target.name}\``;
   for (const route of Object.values(today.routes)) {
-    for (const [code, failure] of Object.entries(route.failures ?? {})) {
-      const fingerprint = `5xx|${route.method} ${route.route}|${code}`;
-      found.push({ fingerprint, kind: '5xx', stages: [target.name], severity: failure.count * (target.name === 'production' ? 100 : 10),
-        title: `${route.method} ${route.route} answers 5xx ${code}`,
-        body: `<!-- nightly-fingerprint: ${fingerprint} -->\n**What:** ${round(failure.count)} server error(s) \`${code}\` from \`${route.method} ${route.route}\` on ${where}, out of ~${round(route.total)} requests (${pct(failure.count, route.total)}).\n\n`
-          + `**When:** first ${failure.first}, last ${failure.last}${failure.workspaces ? `; ${failure.workspaces} workspace(s) affected` : ''}.\n\n`
-          + (failure.databaseCode ? `**SQLSTATE:** \`${failure.databaseCode}\`${failure.databaseCode === '40P01' ? ' (deadlock: see the deadlock guard in docs/ci.md)' : ''}\n\n` : '')
-          + (failure.errorType || failure.frames ? `**Error:** \`${failure.errorType ?? 'unknown'}\`${failure.frames ? `\n\n\`\`\`\n${failure.frames}\n\`\`\`` : ''}\n\n` : '')
-          + `**Request IDs:** ${failure.requestIds.map(id => `\`${id}\``).join(', ') || 'none kept'}${footer}` });
+    for (const [rawCode, failure] of Object.entries(route.failures ?? {})) {
+      const key = publicText.route(`${route.method} ${route.route}`), code = publicText.code(rawCode), sqlstate = publicText.sqlstate(failure.databaseCode);
+      found.push({ fingerprint: `5xx|${key}|${code}`, kind: '5xx', stages: [target.name], severity: failure.count * (target.name === 'production' ? 100 : 10),
+        title: `${key} answers 5xx ${code}`,
+        facts: [`${stageName}: \`${key}\` answered \`${code}\` ${publicText.count(failure.count)} time(s), out of about ${publicText.count(route.total)} requests.`
+          + (sqlstate ? ` SQLSTATE \`${sqlstate}\`${sqlstate === '40P01' ? ' (deadlock; see the deadlock guard in docs/ci.md)' : ''}.` : '')] });
     }
   }
-  for (const [code, entry] of Object.entries(today.codes)) {
-    if (knownCodes.has(code) || !baseline.length) continue;
-    const request = Object.keys(entry.where).some(key => /^[A-Z]+ \//.test(key) || key.includes(' unmatched'));
+  for (const [rawCode, entry] of Object.entries(today.codes)) {
+    if (knownCodes.has(rawCode) || !baseline.length) continue;
+    const request = Object.keys(entry.where).some(key => new RegExp(`^${METHOD} `).test(key));
     if (request && entry.level === 'error') continue; // Filed above as a 5xx route.
     if (entry.level !== 'error' && entry.count < 50) continue; // A new client error is noise until it is common.
-    const places = Object.entries(entry.where).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    const background = Object.values(today.background).find(item => item.code === code);
-    const fingerprint = `new-code|${code}|${places[0]?.[0] ?? ''}`;
-    found.push({ fingerprint, kind: 'new-code', stages: [target.name], severity: entry.count * (entry.level === 'error' ? 50 : 1) * (target.name === 'production' ? 10 : 1),
-      title: `New ${entry.level === 'error' ? 'error' : 'client error'} code ${code} in ${places[0]?.[0] ?? 'the Worker'}`,
-      body: `<!-- nightly-fingerprint: ${fingerprint} -->\n**What:** \`${code}\` (${entry.level}) appeared ${round(entry.count)} time(s) on ${where}; it was not logged in the previous ${baseline.length} day(s).\n\n`
-        + `**Where:**\n${places.map(([place, count]) => `- \`${place}\`: ${round(count)}`).join('\n')}\n\n`
-        + (background?.sample ? `**Logged message:** ${background.sample}\n\n` : '')
-        + (background?.frames ? `**Stack:**\n\`\`\`\n${background.frames}\n\`\`\`\n` : '') + footer });
+    const code = publicText.code(rawCode);
+    const places = Object.entries(entry.where).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([place, count]) => `\`${publicText.place(place)}\` ×${publicText.count(count)}`);
+    const first = publicText.place(Object.entries(entry.where).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'worker');
+    found.push({ fingerprint: `new-code|${code}|${first}`, kind: 'new-code', stages: [target.name], severity: entry.count * (entry.level === 'error' ? 50 : 1) * (target.name === 'production' ? 10 : 1),
+      title: `New ${entry.level === 'error' ? 'error' : 'client error'} code ${code} in ${first}`,
+      facts: [`${stageName}: \`${code}\` (${entry.level === 'error' ? 'error' : 'warn'}) was logged ${publicText.count(entry.count)} time(s) (${places.join(', ')}). It was not logged in the previous ${baseline.length} day(s).`] });
   }
   for (const route of Object.values(today.routes)) {
-    const key = `${route.method} ${route.route}`;
-    const history = baseline.map(day => day.routes[key]).filter((item): item is Route => Boolean(item?.p95 !== undefined && item.n));
+    const raw = `${route.method} ${route.route}`, key = publicText.route(raw);
+    const history = baseline.map(day => day.routes[raw]).filter((item): item is Route => Boolean(item?.p95 !== undefined && item.n));
     const n = history.reduce((sum, item) => sum + item.n, 0);
     if (route.p95 === undefined || route.n < 20 || n < 20) continue;
     const before = history.map(item => item.p95!).sort((a, b) => a - b)[Math.floor(history.length / 2)]!;
     if (route.p95 < Math.max(before * 1.5, before + 250)) continue;
-    const fingerprint = `p95|${key}`;
-    found.push({ fingerprint, kind: 'p95', stages: [target.name], severity: (route.p95 - before) / 10 * (target.name === 'production' ? 10 : 1),
-      title: `${key} p95 latency rose from ${round(before)} ms to ${round(route.p95)} ms`,
-      body: `<!-- nightly-fingerprint: ${fingerprint} -->\n**What:** successful \`${key}\` requests on ${where} had a p95 of ${round(route.p95)} ms over ${route.n} sampled requests, against a median daily p95 of ${round(before)} ms over the previous ${history.length} day(s) (${n} samples).${footer}` });
+    found.push({ fingerprint: `p95|${key}`, kind: 'p95', stages: [target.name], severity: (route.p95 - before) / 10 * (target.name === 'production' ? 10 : 1),
+      title: `${key} p95 latency rose from ${publicText.count(before)} ms to ${publicText.count(route.p95)} ms`,
+      facts: [`${stageName}: successful \`${key}\` requests had a p95 of ${publicText.count(route.p95)} ms over ${route.n} sampled requests, against a median daily p95 of ${publicText.count(before)} ms over the previous ${history.length} day(s) (${n} samples).`] });
   }
   if (today.gateway && baseline.some(day => day.gateway)) {
     const days = baseline.filter(day => day.gateway);
-    for (const [code, count] of Object.entries(today.gateway)) {
-      const usual = days.reduce((sum, day) => sum + (day.gateway![code] ?? 0), 0) / days.length;
-      const unavailable = code === 'GATEWAY_AUTH_UNAVAILABLE' && count > 0 && usual === 0;
+    for (const [rawCode, count] of Object.entries(today.gateway)) {
+      const usual = days.reduce((sum, day) => sum + (day.gateway![rawCode] ?? 0), 0) / days.length, code = publicText.code(rawCode);
+      const unavailable = rawCode === 'GATEWAY_AUTH_UNAVAILABLE' && count > 0 && usual === 0;
       if (!unavailable && !(count >= 50 && count > 3 * usual)) continue;
-      const fingerprint = `gateway|${code}`;
-      found.push({ fingerprint, kind: 'gateway', stages: [target.name], severity: count * (target.name === 'production' ? 10 : 1),
-        title: unavailable ? 'Mail gateway logins failed because the API was unavailable' : `Mail gateway login failures rose to ${count} a day`,
-        body: `<!-- nightly-fingerprint: ${fingerprint} -->\n**What:** \`${code}\` was logged ${count} time(s) by the IMAP/SMTP gateway on ${target.name}, against ${usual.toFixed(1)} a day over the previous ${days.length} day(s).${footer}` });
+      found.push({ fingerprint: `gateway|${code}`, kind: 'gateway', stages: [target.name], severity: count * (target.name === 'production' ? 10 : 1),
+        title: unavailable ? 'Mail gateway logins failed because the API was unavailable' : `Mail gateway login failures rose to ${publicText.count(count)} a day`,
+        facts: [`${stageName}: the IMAP/SMTP gateway logged \`${code}\` ${publicText.count(count)} time(s), against ${usual.toFixed(1)} a day over the previous ${days.length} day(s).`] });
     }
   }
   return found;
@@ -310,7 +325,7 @@ function stageSection(target: Stage, today: Window, baseline: Window[], shas: Ma
   const background = Object.values(today.background);
   const lines = [
     `## ${target.name} (\`${target.script}\`)`, '',
-    `~${round(today.requests.total)} API requests (successes are sampled and scaled), ${round(today.requests.c4)} client errors (4xx), ${round(today.requests.c5)} server errors (5xx); ${today.events} of ${today.expected ?? '?'} matching log lines read${today.expected && today.events < today.expected * 0.98 ? ' (**incomplete**: Workers Logs returned fewer events than it counted)' : ''}. Baseline: ${baseline.length ? baseline.map(day => day.to.slice(0, 10)).join(', ') : 'none yet'}.`, '',
+    `${round(today.requests.total)} API requests (successful requests are sampled, so their count and latency are estimates; failures are exact), ${round(today.requests.c4)} client errors (4xx), ${round(today.requests.c5)} server errors (5xx); ${today.events} of ${today.expected ?? '?'} matching log lines read${today.complete ? '' : ' (**incomplete**: Workers Logs returned under 99.5% of the lines it counted, so this stage files no issues and is not kept as a baseline)'}. Baseline: ${baseline.length ? baseline.map(day => day.to.slice(0, 10)).join(', ') : 'none yet'}.`, '',
     '### Top failing routes', '',
     table(['Route', 'Requests', '4xx', '5xx', 'Failure rate', 'Top codes'], failing.map(route => [`\`${route.method} ${route.route}\``, round(route.total), round(route.c4), round(route.c5), pct(route.c4 + route.c5, route.total), topCodes(route.codes)])), '',
     '**Highest failure rate** (routes with at least 10 requests):', '',
@@ -325,7 +340,7 @@ function stageSection(target: Stage, today: Window, baseline: Window[], shas: Ma
       return [version ? `${shas.get(version) ?? '?'} (version ${version.slice(0, 8)})` : deploy, round(value.total), round(value.c5), pct(value.c5, value.total), value.first ?? '', value.last ?? ''];
     })), '',
     '### Dispatcher, runner and job failures', '',
-    table(['Where', 'Code', 'Level', 'Count', 'Message'], background.filter(item => item.category !== 'webhook').sort((a, b) => b.count - a.count).slice(0, 15).map(item => [item.operation, `\`${item.code}\``, item.level, item.count, item.sample ?? item.errorType ?? ''])), '',
+    table(['Where', 'Code', 'Level', 'Count'], background.filter(item => item.category !== 'webhook').sort((a, b) => b.count - a.count).slice(0, 15).map(item => [item.operation, `\`${item.code}\``, item.level, item.count])), '',
     '### Webhook delivery failures', '',
     table(['Job', 'Code', 'Level', 'Count'], background.filter(item => item.category === 'webhook').sort((a, b) => b.count - a.count).map(item => [item.operation, `\`${item.code}\``, item.level, item.count])), '',
     '### Mail gateway auth failures', '',
@@ -354,8 +369,8 @@ async function main() {
   const merged = new Map<string, Problem>();
   for (const problem of all.sort((a, b) => b.severity - a.severity)) {
     const existing = merged.get(problem.fingerprint);
-    if (existing) { existing.stages.push(...problem.stages); existing.severity += problem.severity; existing.body += `\n\n**Also on ${problem.stages.join(', ')}:**\n\n${problem.body.replace(/^<!--.*-->\n/, '').replace(/\n\n---\n[\s\S]*$/, '')}`; }
-    else merged.set(problem.fingerprint, { ...problem, stages: [...problem.stages] });
+    if (existing) { existing.stages.push(...problem.stages); existing.severity += problem.severity; existing.facts.push(...problem.facts); }
+    else merged.set(problem.fingerprint, { ...problem, stages: [...problem.stages], facts: [...problem.facts] });
   }
   const ranked = [...merged.values()].sort((a, b) => b.severity - a.severity);
   const tracked = new Map<string, { number: number; state: string; url: string }>();
@@ -369,7 +384,7 @@ async function main() {
     const known = tracked.get(problem.fingerprint);
     if (known?.state === 'OPEN') { open.push({ ...problem, number: known.number, url: known.url }); continue; }
     if (!fileIssues || filed.length >= maxIssues) { skipped.push(problem); continue; }
-    const body = known ? `${problem.body}\n\nRecurred after #${known.number} was closed.` : problem.body;
+    const body = publicIssueBody(problem, iso(end)) + (known ? `\n\nRecurred after #${known.number} was closed.` : '');
     try {
       const url = gh(['issue', 'create', '--repo', repo, '--label', 'nightly', '--title', `Nightly: ${problem.title}${problem.stages.includes('production') ? '' : ' (dev)'}`, '--body-file', '-'], body).trim();
       filed.push({ ...problem, url, number: Number(url.split('/').pop()) });
@@ -390,7 +405,7 @@ async function main() {
   const base = join(reportDir, `nightly-${date}`);
   writeFileSync(`${base}.md`, report);
   writeFileSync(`${base}.json`, JSON.stringify({ date, window: { from: iso(end - DAY), to: iso(end) }, report: `${base}.md`,
-    filed: filed.map(({ body: _, ...item }) => item), open: open.map(({ body: _, ...item }) => item), notFiled: skipped }, null, 2));
+    filed, open, notFiled: skipped }, null, 2));
   console.log(JSON.stringify({ report: `${base}.md`, filed: filed.length, open: open.length, notFiled: skipped.length }));
 }
 
