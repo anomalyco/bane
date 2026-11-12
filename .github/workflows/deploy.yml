@@ -449,6 +449,29 @@ jobs:
             TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
           parse-json-secrets: false
 
+      # The stage's half of the mail gateway's shared HMAC key (gateway/PHASE2.md). Optional
+      # until Dax loads it: the action above fails on any missing secret, so this reads the
+      # same bane/<stage>/ folder itself. Absent leaves the Worker's current value (none keeps
+      # /internal/v1/mail at 403 PROTOCOL_DENIED); any other error stops the deploy.
+      - name: Fetch the optional mail-gateway token
+        run: |
+          set -euo pipefail
+          set +x
+          err=$(mktemp "$RUNNER_TEMP/mailgw-token.XXXXXX")
+          if token=$(aws secretsmanager get-secret-value --secret-id "bane/$STAGE/MAILGW_API_TOKEN" --query SecretString --output text 2>"$err"); then
+            # Check before masking: a workflow command masks one line and unescapes %XX.
+            if [[ ! $token =~ ^[A-Za-z0-9._~+/=-]{32,}$ ]]; then
+              echo "::error::bane/$STAGE/MAILGW_API_TOKEN must be at least 32 characters from [A-Za-z0-9._~+/=-]"; exit 1
+            fi
+            echo "::add-mask::$token"
+            echo "MAILGW_API_TOKEN=$token" >> "$GITHUB_ENV"
+            echo "bane/$STAGE/MAILGW_API_TOKEN is set; the Worker will be deployed with it."
+          elif grep -Eq 'ResourceNotFoundException|marked for deletion' "$err"; then
+            echo "::notice::bane/$STAGE/MAILGW_API_TOKEN is not set; the Worker keeps its current gateway token, if any."
+          else
+            cat "$err" >&2; exit 1
+          fi
+
       # Only dev runs a live E2E, so only dev has an E2E key to read.
       - name: Fetch the dev E2E API key
         if: needs.authorize.outputs.stage == 'dev'
