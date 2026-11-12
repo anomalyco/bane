@@ -141,8 +141,9 @@ jobs:
           TEAR_READ_TOKEN: ${{ secrets.TEAR_READ_TOKEN }}
         run: |
           if [[ -z $TEAR_READ_TOKEN ]]; then
-            echo "::error::Add the TEAR_READ_TOKEN secret (read access to anomalyco/tear) to run gateway/tear."
-            exit 1
+            echo "::warning::TEAR_READ_TOKEN is not set (read access to anomalyco/tear); skipping gateway/tear. The nightly run and local CI still check it."
+            echo "gateway/tear skipped: TEAR_READ_TOKEN not set" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           git config --global url."https://x-access-token:${TEAR_READ_TOKEN}@github.com/anomalyco/tear".insteadOf https://github.com/anomalyco/tear
           cargo build --release --locked
