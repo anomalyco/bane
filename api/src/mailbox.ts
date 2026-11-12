@@ -12,7 +12,7 @@ import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { webhookUrlHint, WebhookUrlHint } from './core.js';
-import { JobDeferred } from './jobs.js';
+import { chargeManualDelivery, JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
 import {registerRituals,ownReceiving} from './rituals.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
@@ -724,13 +724,7 @@ function registerInboundWebhooks(app: App) {
       throw new ApiError(409,'MAILBOX_HOOK_LIMIT',routeOnly?'At most 500 route-only webhooks can be active. Pause or delete one first.':'At most 32 webhooks with event subscriptions can be active. Pause or delete one, or use eventTypes [] for a route-only webhook.');
   };
   // Charge actual queued copies, not API requests. A rejected charge rolls the requeue and its jobs back.
-  const chargeManual=async(tx:DbExecutor,w:string,units:number)=>{
-    if(!units)return;
-    const q=await tx.execute(sql`INSERT INTO mailbox_manual_delivery_budget AS b VALUES(${w},date_trunc('hour',now()),${units})
-      ON CONFLICT(workspace_id) DO UPDATE SET hour=excluded.hour,used=CASE WHEN b.hour=excluded.hour THEN b.used ELSE 0 END+excluded.used
-      WHERE (CASE WHEN b.hour=excluded.hour THEN b.used ELSE 0 END)+excluded.used<=60 RETURNING used`);
-    if(!q.rowCount || units>60)throw new ApiError(429,'WEBHOOK_REDELIVERY_LIMIT','At most 60 manual webhook posts per workspace per hour.');
-  };
+  const chargeManual=chargeManualDelivery;
   const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
   const checkScope = (ids: string[] | null, types: string[], format: string) => {
     if (ids !== null && types.includes('message.stored')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'message.stored requires a workspace webhook without an addressIds filter.', 'addressIds');

@@ -4,6 +4,8 @@ import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipien
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
+import type { AudiencePlan, ConsentEvent, ImportPreview } from './types'
+import { parseCsv } from '../features/audience/csv'
 
 const STORAGE_KEY = 'bane.demo.v1'
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
@@ -233,6 +235,17 @@ function matchesRule(contact: Contact, rule: SegmentRule, time: number): boolean
   const matches = rule.field === 'listId' ? contact.listIds.includes(rule.value) : contact[rule.field] === rule.value
   return rule.operator === 'is_not' ? !matches : matches
 }
+// Demo consent history rides along in the stored snapshot; import previews and AudienceQL plans live for the session.
+type ConsentLog = DemoState & { consentEvents?: (ConsentEvent & { contactId: string })[] }
+type DemoImportRow = { row: number; email: string; name?: string; country: string }
+type DemoImport = Omit<ImportPreview, 'rows'> & { rows: DemoImportRow[]; listId: string | null }
+type DemoPlan = { plan: AudiencePlan; consent: 'subscribed' | 'unsubscribed'; targetIds: string[]; applied: boolean }
+function recordConsent(state: DemoState, contact: Contact, status: 'subscribed' | 'unsubscribed', source: string, evidence: string | null, policyVersion: string | null) {
+  const occurredAt = now()
+  ;((state as ConsentLog).consentEvents ??= []).push({ id: id('cns'), contactId: contact.id, status, source, evidence, policyVersion, occurredAt })
+  if (contact.status !== 'suppressed') contact.status = status
+  contact.consent = { source, at: occurredAt }
+}
 function segmentContacts(state: DemoState, segment: SegmentInput): Contact[] {
   const time = Date.now()
   return state.contacts.filter(contact => segment.match === 'all' ? segment.rules.every(rule => matchesRule(contact, rule, time)) : segment.rules.some(rule => matchesRule(contact, rule, time)))
@@ -246,8 +259,8 @@ function campaignAudience(state: DemoState, listId: string, segmentId: string | 
   return audience(contacts.filter(contact => contact.listIds.includes(listId)))
 }
 function listTotals(state: DemoState, list: AudienceList): AudienceList {
-  const result = audience(state.contacts.filter(contact => contact.listIds.includes(list.id)))
-  return { ...list, total: result.matched, subscribed: result.eligible, unsubscribed: result.unsubscribed, suppressed: result.suppressed }
+  const members = state.contacts.filter(contact => contact.listIds.includes(list.id)), result = audience(members)
+  return { ...list, total: result.matched, subscribed: result.eligible, unsubscribed: result.unsubscribed, suppressed: result.suppressed, unknown: members.filter(contact => contact.status === 'unknown').length }
 }
 function segmentTotals(state: DemoState, segment: Segment): Segment {
   const result = audience(segmentContacts(state, segment))
@@ -516,6 +529,7 @@ export function createMockApi(): BaneApi {
     }
     return clone(result)
   }
+  const importPreviews = new Map<string, DemoImport>(), audiencePlans = new Map<string, DemoPlan>()
   return {
     mode: 'demo',
     attachments: {
@@ -755,6 +769,30 @@ export function createMockApi(): BaneApi {
       // Demo sends finish instantly, so there is never an in-progress send to pause, resume, or re-pace.
       pause: (campaignId, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); throw new ApiError('Only a campaign that is still releasing recipients can be paused.', 'CAMPAIGN_NOT_PAUSABLE', {}, undefined, 409) }),
       resume: (campaignId, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); throw new ApiError('This campaign is not paused.', 'CAMPAIGN_NOT_PAUSED', {}, undefined, 409) }),
+      unschedule: (campaignId, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        if (campaign.status !== 'scheduled') throw new ApiError('Only a scheduled campaign that has not started sending can be unscheduled.', 'CAMPAIGN_NOT_SCHEDULED', {}, undefined, 409)
+        Object.assign(campaign, { status: 'draft', scheduledAt: null, updatedAt: now() })
+        return campaignTotals(s, campaign)
+      }),
+      reschedule: (campaignId, scheduledAt, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        if (campaign.status !== 'scheduled') throw new ApiError('Only a scheduled campaign that has not started sending can be rescheduled.', 'CAMPAIGN_NOT_SCHEDULED', {}, undefined, 409)
+        if (!validDateTime(scheduledAt) || Date.parse(scheduledAt) <= Date.now()) invalid('scheduledAt', 'Schedule between now and one year from now.')
+        Object.assign(campaign, { scheduledAt: new Date(Date.parse(scheduledAt)).toISOString(), updatedAt: now() })
+        return campaignTotals(s, campaign)
+      }),
+      cancel: (campaignId, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        if (campaign.status !== 'scheduled') throw new ApiError('Only a campaign that was sent or scheduled and has not finished can be canceled.', 'CAMPAIGN_NOT_SENDING', {}, undefined, 409)
+        Object.assign(campaign, { status: 'canceled', updatedAt: now() })
+        return { canceled: campaign.recipients, inFlight: 0 }
+      }),
+      stats: (campaignId, signal) => run(signal, false, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign'), delivered = campaign.delivered ?? 0
+        const rate = (numerator: number, denominator: number) => ({ value: denominator ? numerator / denominator : null, numerator, denominator })
+        return { tracking: false, totals: { accepted: 0, delivered, bounced: campaign.bounced ?? 0, complained: campaign.complaints ?? 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: delivered }, rates: { delivery: rate(delivered, delivered), bounce: rate(campaign.bounced ?? 0, delivered), complaint: rate(campaign.complaints ?? 0, delivered), open: rate(0, 0), click: rate(0, 0) } }
+      }),
       setPacing: (campaignId, input, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); validPerDay(input.perDay); validRateShare(input.rateShare); throw new ApiError('Only a campaign that is still sending can change its daily limit.', 'CAMPAIGN_NOT_SENDING', {}, undefined, 409) }),
     },
     templates: {
@@ -786,38 +824,93 @@ export function createMockApi(): BaneApi {
         else s.contacts.push(contact)
         return contact
       }),
-      import: (input, signal) => run(signal, true, s => {
-        find(s.lists, input.listId, 'List')
-        if (!Array.isArray(input.rows) || input.rows.length === 0 || input.rows.length > 10000) invalid('rows', 'Import between 1 and 10,000 contact rows.')
-        const result = { created: 0, matched: 0, skipped: 0, issues: [] as { row: number; message: string }[] }
-        const seen = new Set<string>()
-        input.rows.forEach((row, index) => {
+    },
+    // The demo's copy of the API's consent rules: an opt-out needs explicit renewed consent, suppression is never lifted.
+    consent: (contactId, input) => run(undefined, true, s => {
+      const contact = find(s.contacts, contactId, 'Contact')
+      if (input.status !== 'subscribed' && input.status !== 'unsubscribed') invalid('status', 'Choose subscribed or unsubscribed.')
+      if (contact.status === 'unsubscribed' && input.status === 'subscribed' && !input.confirmResubscribe) throw new ApiError('Explicitly confirm renewed verifiable consent to replace a prior opt-out.', 'RESUBSCRIBE_CONFIRMATION_REQUIRED', { confirmResubscribe: 'Confirm this person opted in again.' }, undefined, 409)
+      recordConsent(s, contact, input.status, input.source ?? 'dashboard', input.evidence?.trim() || null, input.policyVersion?.trim() || null)
+      return contact
+    }),
+    consentHistory: (contactId, cursor) => run(undefined, false, s => {
+      find(s.contacts, contactId, 'Contact')
+      const events = ((s as ConsentLog).consentEvents ?? []).filter(event => event.contactId === contactId).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+      const start = Number(cursor ?? 0)
+      return { items: events.slice(start, start + 20).map(({ contactId: _contact, ...event }) => event), nextCursor: events.length > start + 20 ? String(start + 20) : null }
+    }),
+    imports: {
+      preview: input => run(undefined, false, s => {
+        if (input.listId) find(s.lists, input.listId, 'List')
+        const [header, ...data] = parseCsv(input.csv), headers = header.map(h => h.trim())
+        for (const [field, column] of Object.entries(input.mapping)) if (!headers.includes(column)) invalid(`mapping.${field}`, `The mapped column for ${field} was not found.`)
+        const cell = (values: string[], field: string) => input.mapping[field] ? (values[headers.indexOf(input.mapping[field])] ?? '').trim() : ''
+        const rows: DemoImportRow[] = [], errors: ImportPreview['errors'] = [], seen = new Set<string>()
+        data.forEach((values, index) => {
+          const row = index + 2
+          if (values.length !== headers.length) { errors.push({ row, field: 'row', message: 'The row has a different number of columns than the header.' }); return }
           try {
-            if (!row || typeof row !== 'object') invalid('row', 'Each import row must contain an email address.')
-            const address = email(row.email)
-            const name = text(row.name ?? '', 'name', 200, true)
-            const countryCode = country(row.country ?? '', true)
-            if (row.subscribed !== undefined && typeof row.subscribed !== 'boolean') invalid('subscribed', 'Subscription consent must be true or false.')
-            if (seen.has(address)) { result.skipped++; result.issues.push({ row: index + 1, message: 'Duplicate email in this import.' }); return }
+            const address = email(cell(values, 'email'))
+            if (seen.has(address)) { errors.push({ row, field: 'email', message: 'Duplicate normalized email within this import.' }); return }
             seen.add(address)
-            const existing = s.contacts.find(c => c.email.toLowerCase() === address)
-            if (existing) {
-              if (!existing.listIds.includes(input.listId)) existing.listIds.push(input.listId)
-              if (name) existing.name = name
-              if (countryCode) existing.country = countryCode
-              // Import never changes an existing contact's subscription or suppression.
-              result.matched++
-            } else {
-              s.contacts.push({ id: id('con'), email: address, name, country: countryCode, status: row.subscribed === true ? 'subscribed' : 'unsubscribed', listIds: [input.listId], createdAt: now(), lastOpenedAt: null, consent: { source: row.subscribed === true ? 'import_opt_in' : 'import_without_consent', at: row.subscribed === true ? now() : null } })
-              result.created++
-            }
-          } catch (error) {
-            if (!(error instanceof ApiError)) throw error
-            result.skipped++
-            result.issues.push({ row: index + 1, message: error.message })
+            rows.push({ row, email: address, ...(cell(values, 'name') ? { name: text(cell(values, 'name'), 'name') } : {}), country: cell(values, 'country') })
+          } catch (error) { if (!(error instanceof ApiError)) throw error; errors.push({ row, field: Object.keys(error.fields)[0] ?? 'row', message: error.detail }) }
+        })
+        const preview = { id: id('imp'), status: 'preview' as const, imported: 0, rows, errors, listId: input.listId ?? null }
+        importPreviews.set(preview.id, preview)
+        return preview
+      }),
+      commit: (importId, input) => run(undefined, true, s => {
+        const preview = importPreviews.get(importId)
+        if (!preview) throw new ApiError('Import was not found. Preview the CSV again.', 'not_found', {}, undefined, 404)
+        if (preview.status === 'committed') return { ...preview, subscribed: 0 }
+        if (preview.listId) find(s.lists, preview.listId, 'List')
+        const evidence = input?.consent ? text(input.consent.evidence, 'consent.evidence', 2000) : null
+        let subscribed = 0
+        for (const row of preview.rows) {
+          let contact = s.contacts.find(c => c.email.toLowerCase() === row.email)
+          if (contact) { if (row.name) contact.name = row.name; if (row.country) contact.country = row.country }
+          else s.contacts.push(contact = { id: id('con'), email: row.email, name: row.name ?? '', country: row.country, status: 'unknown', listIds: [], createdAt: now(), lastOpenedAt: null, consent: { source: '', at: null } })
+          if (preview.listId && !contact.listIds.includes(preview.listId)) contact.listIds.push(preview.listId)
+          // Attested consent upgrades only contacts with no decision; an opt-out or suppression always stays.
+          if (evidence && contact.status === 'unknown') { recordConsent(s, contact, 'subscribed', 'import', evidence, input?.consent?.policyVersion?.trim() || null); subscribed++ }
+        }
+        Object.assign(preview, { status: 'committed', imported: preview.rows.length })
+        return { ...preview, subscribed }
+      }),
+    },
+    audienceQuery: {
+      plan: statement => run(undefined, false, s => {
+        const match = /^UPDATE\s+contacts\s+SET\s+consent\s*=\s*'(subscribed|unsubscribed)'\s+WHERE\s+(.+)$/is.exec(statement.trim())
+        if (!match) invalid('statement', 'The demo supports UPDATE contacts SET consent = … WHERE … only.')
+        const conditions = match![2].split(/\s+AND\s+/i).map(clause => {
+          const parts = /^(consent|suppressed|list|email|name)\s*(=|!=)\s*(?:'((?:[^']|'')*)'|(TRUE|FALSE))$/i.exec(clause.trim())
+          if (!parts) return invalid('statement', `Invalid WHERE condition: ${clause.slice(0, 80)}.`)
+          const [, field, operator, quoted, flag] = parts, value = quoted?.replaceAll("''", "'") ?? flag!.toUpperCase() === 'TRUE'
+          const list = field === 'list' ? s.lists.find(l => l.id === value || l.name === value) ?? invalid('statement', `List ${String(value)} was not found.`) : undefined
+          return (contact: Contact) => {
+            const actual = field === 'consent' ? (contact.status === 'suppressed' ? 'unknown' : contact.status) : field === 'suppressed' ? contact.status === 'suppressed' : field === 'list' ? contact.listIds.includes(list!.id) : contact[field as 'email' | 'name']
+            return (field === 'list' ? actual === true : actual === value) === (operator === '=')
           }
         })
-        return result
+        const targets = s.contacts.filter(contact => conditions.every(test => test(contact)))
+        if (targets.length > 10_000) throw new ApiError('A mutation plan may target at most 10,000 contacts. Narrow the WHERE clause.', 'AUDIENCEQL_LIMIT_EXCEEDED', { statement: 'Too many contacts.' }, undefined, 422)
+        const consent = match![1] as 'subscribed' | 'unsubscribed', suppressed = targets.filter(c => c.status === 'suppressed').length
+        const requiresResubscribeConfirmation = consent === 'subscribed' && targets.some(c => c.status === 'unsubscribed')
+        const plan: AudiencePlan = { id: id('aqp'), operation: 'update_contacts', matched: targets.length, sample: targets.slice(0, 10).map(c => ({ id: c.id, email: c.email, name: c.name || null, consent: c.status === 'suppressed' ? 'unknown' : c.status, suppressed: c.status === 'suppressed' })), warnings: [...(suppressed ? [`${suppressed} suppressed contact(s) remain suppressed.`] : []), ...(requiresResubscribeConfirmation ? ['The plan includes prior opt-outs and requires explicit resubscribe confirmation.'] : [])], requiresResubscribeConfirmation, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() }
+        audiencePlans.set(plan.id, { plan, consent, targetIds: targets.map(c => c.id), applied: false })
+        return plan
+      }),
+      apply: input => run(undefined, true, s => {
+        const entry = audiencePlans.get(input.planId)
+        if (!entry) throw new ApiError('Audience operation plan was not found.', 'not_found', {}, undefined, 404)
+        if (entry.applied) throw new ApiError('This audience operation plan was already applied.', 'AUDIENCE_PLAN_APPLIED', {}, undefined, 409)
+        if (Date.parse(entry.plan.expiresAt) <= Date.now()) throw new ApiError('This audience operation plan expired. Create a new plan.', 'AUDIENCE_PLAN_EXPIRED', {}, undefined, 409)
+        const targets = entry.targetIds.map(contactId => s.contacts.find(c => c.id === contactId)).filter((c): c is Contact => Boolean(c))
+        if (entry.consent === 'subscribed' && targets.some(c => c.status === 'unsubscribed') && !input.confirmResubscribe) throw new ApiError('This plan includes prior opt-outs. Explicitly confirm renewed consent before applying it.', 'RESUBSCRIBE_CONFIRMATION_REQUIRED', { confirmResubscribe: 'Confirm renewed consent.' }, undefined, 409)
+        for (const contact of targets) recordConsent(s, contact, entry.consent, 'audienceql', input.evidence?.trim() || null, null)
+        entry.applied = true
+        return { affected: targets.length }
       }),
     },
     lists: {
@@ -848,7 +941,7 @@ export function createMockApi(): BaneApi {
         else s.segments.push(segment)
         return segment
       }),
-      preview: (input, signal) => run(signal, false, s => audience(segmentContacts(s, validateSegment(s, input)))),
+      preview: (input, signal) => run(signal, false, s => audience(segmentContacts(s, validateSegment(s, input)).filter(contact => !input.listId || contact.listIds.includes(input.listId)))),
     },
     keys: {
       list: (signal, _cursor, includeRevoked = true) => run(signal, false, s => s.keys.filter(key => includeRevoked || !key.revokedAt)),
