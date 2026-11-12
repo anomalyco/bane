@@ -20,7 +20,7 @@ import { dmarcView } from './dmarc.js';
 import type { IdentityFacts } from './states.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
-import { assertHostedAllowance, hostedAllowance, hostedCost, type HostedAllowance } from './hosted-sending.js';
+import { assertHostedAllowance, hostedAllowance, hostedCost, marketingHeld, type HostedAllowance } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
@@ -1491,6 +1491,10 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
   const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, campaignSendRegion(runtime,row.draft),true);
   if (input.pacing?.autoPause === false && runtime.config.multiTenant && a.dispatchAccount?.kind === 'shared') throw hostedAutoPauseRequired();
+  if (runtime.config.multiTenant && a.dispatchAccount?.kind === 'shared') {
+    const [held] = (await db.execute<{ reason: string | null }>(sql`SELECT marketing_hold_reason AS reason FROM provider_connections WHERE workspace_id=${a.workspaceId} AND kind='shared' AND marketing_held_at IS NOT NULL`)).rows;
+    if (held) throw marketingHeld(held.reason);
+  }
   if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
   const rendered = await renderCampaignContent(runtime, draft);
   const reviewId = id('review');
@@ -2031,6 +2035,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
     assertHostedAllowance(buffer!.hosted, 0);
+    if (buffer!.hosted?.marketingHeld && !campaign.simulated) throw marketingHeld(buffer!.hosted.marketingHoldReason);
     let recipients = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
     const allowance = buffer!.hosted;
@@ -2096,7 +2101,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && error.code === 'HOSTED_SENDING_PAUSED') {
+    if (error instanceof ApiError && (error.code === 'HOSTED_SENDING_PAUSED' || error.code === 'MARKETING_HELD')) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }

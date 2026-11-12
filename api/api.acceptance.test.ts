@@ -7032,7 +7032,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const inputs=['--old-account',old,'--new-account',dest,'--region',r,'--old-bucket',bucket(old),'--new-bucket',bucket(dest),'--workspaces',[...inventory].reverse().join(',')];
   let runId=run;
   const command=(...args:string[])=>rehomeHostedAccount(db,[...inputs,'--run-id',runId,...args]);
-  const apply=(hash:string)=>command('--apply','--expect-plan-sha256',hash), restore=()=>command('--restore',runId);
+  const why=['--reason','Synthetic account re-home'];
+  const apply=(hash:string)=>command('--apply','--expect-plan-sha256',hash,...why), restore=()=>command('--restore',runId,...why);
   const first=await command(), hash=first.planSha256;
   const database=async()=>{
     const names=(await db.query(`SELECT tablename FROM pg_tables WHERE schemaname=$1 ORDER BY tablename`,[schema])).rows.map(row=>row.tablename as string);
@@ -7115,7 +7116,9 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   });
   const baseline=await database(), valid=(await command()).planSha256;
   await t.test('atomic apply changes only reviewed rows; immediate guarded restore round-trips',async()=>{
-    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images']);
+    await assert.rejects(command('--apply','--expect-plan-sha256',valid),/--reason/);assert.deepEqual(await database(),baseline,'No reason, no change.');
+    await apply(valid);const changed=await database(), allowed=new Set([...Object.keys(first.counts),'hosted_rehome_runs','hosted_rehome_images','hosted_operator_audit']);
+    assert.deepEqual((await db.query(`SELECT workspace_id FROM hosted_operator_audit WHERE action='rehome-apply' AND details->>'reason'='Synthetic account re-home' ORDER BY workspace_id`)).rows.map(r=>r.workspace_id),[...inventory].sort(),'Every re-homed workspace is audited with the reason.');
     for(const [tab,digest] of Object.entries(baseline))if(!allowed.has(tab))assert.equal(changed[tab],digest,tab);
     assert.equal((await db.query('SELECT FROM regional_sending_connections')).rowCount,0);
     const targets=(await db.query('SELECT workspace_id,aws_account_id,managed_tenant,tenant_state,pool_tenant_name,legacy_names FROM regional_connections ORDER BY workspace_id')).rows;
@@ -7137,7 +7140,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     for(const tab of Object.keys(first.counts))assert.equal(after[tab],baseline[tab],tab);
     for(const tab of Object.keys(after))if(!allowed.has(tab))assert.equal(after[tab],preRestore[tab],tab);
     assert.ok((await db.query('SELECT restored_at FROM hosted_rehome_runs')).rows[0]?.restored_at);
-    await command('--finalize',runId);assert.equal((await db.query('SELECT FROM hosted_rehome_images')).rowCount,0);await assert.rejects(restore(),/finalized/);
+    await command('--finalize',runId,...why);assert.equal((await db.query('SELECT FROM hosted_rehome_images')).rowCount,0);await assert.rejects(restore(),/finalized/);
   });
   await t.test('late feedback jobs do not invalidate either fence; before-images are bounded chunks',async()=>{
     runId=run+'-feedback';await db.query(`INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('fixture',$1,'https://callback.invalid','["email.opened","email.clicked"]','fixture')`,[w[0]]);
@@ -7147,7 +7150,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const plan=await command();await late('Open');const review=await command();assert.equal(review.planSha256,plan.planSha256);assert.notDeepEqual(review.jobs,plan.jobs);await apply(plan.planSha256);
     const sizes=await db.query(`SELECT (SELECT count(*)::int FROM jsonb_object_keys(before_image)) size FROM hosted_rehome_images WHERE relation='mail_messages' ORDER BY chunk`);assert.deepEqual(sizes.rows,[{size:256},{size:5}]);
     await late('Click');await restore();assert.equal((await db.query(`SELECT FROM jobs WHERE type='operation.webhook'`)).rowCount,2);
-    await command('--finalize',runId);await db.query(`DELETE FROM mail_messages WHERE id LIKE 'bulk-%'`);
+    await command('--finalize',runId,...why);await db.query(`DELETE FROM mail_messages WHERE id LIKE 'bulk-%'`);
   });
   runId+='-reconcile';await apply((await command()).planSha256);
   await t.test('flags-on reconciliation, fresh claim-tagged identities, receiving and signed historical feedback',async integration=>{
@@ -7253,7 +7256,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     await mailboxIngestJobs['mailbox.ingest']!(runtime,receiptJob.payload,{id:receiptJob.id,workspaceId:receiptJob.workspace_id,attempts:1});assert.equal((await db.query(`SELECT FROM mail_receipts WHERE ses_message_id=$1 AND status='processed' AND bucket=$2`,[recv,bucket(dest)])).rowCount,1);
     const download=ok(await api('GET','/v1/inbound/messages/mail/attachments/attachment'));assert.equal(await (await fetch(download.url)).text(),'old bytes');
     await assert.rejects(restore(),/refused/);
-    await command('--finalize',runId);await assert.rejects(restore(),/finalized/);
+    await command('--finalize',runId,...why);await assert.rejects(restore(),/finalized/);
   });
   await t.test('cold Hosted connection can create, list, read and verify domains before the pool binds its account',async cold=>{
     // POST /connection takes its account only from a ready sending pool.
@@ -7935,14 +7938,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const prepare=()=>trustedProvision(runtime,{connectionId:wid},{workspaceId:wid,id:'hosted.trusted:'+wid,attempts:1});
     // The operator creates both trusted sets with tenant suppression before enrollment (N7).
     for(const stream of POOL_STREAMS)sets.set(`bane-trusted-${stream}`,{ConfigurationSetName:`bane-trusted-${stream}`,Tags:Object.entries(tags('ses-feedback')).map(([Key,Value])=>({Key,Value})),SendingOptions:{SendingEnabled:true},SuppressionOptions:poolSuppression(stream),dest:[]});
-    await assert.rejects(setDomainPool(db,[wid,managed,'trusted'],{...flags,BANE_TRUSTED_POOL:'false'}),/enabled/);
+    await assert.rejects(setDomainPool(db,[wid,managed,'trusted','--reason','Synthetic pool placement'],{...flags,BANE_TRUSTED_POOL:'false'}),/enabled/);
     runtime.config.trustedPool=false;await assert.rejects(prepare(),JobDeferred);assert.deepEqual(calls,[]);runtime.config.trustedPool=true;
-    await setDomainPool(db,[wid,managed,'trusted'],flags);
-    await assert.rejects(setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted'],flags),/release-canary workspace/);
+    await setDomainPool(db,[wid,managed,'trusted','--reason','Synthetic pool placement'],flags);
+    await assert.rejects(setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted','--reason','Synthetic pool placement'],flags),/release-canary workspace/);
     await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('e2e.bane.mx',$1,$1,'verified')",[wid]);
     try {
       await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'e2e.bane.mx',$3)",['dom_'+randomUUID().replaceAll('-',''),wid,oh]);
-      await setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted'],flags);
+      await setDomainPool(db,[wid,'e2e-trusted.bane.mx','trusted','--reason','Synthetic pool placement'],flags);
     } finally {
       // This Ohio proof is only for operator authorization, not an SES identity in the Virginia mock.
       await db.query("DELETE FROM hosted_domain_tiers WHERE connection_id=$1 AND name='e2e-trusted.bane.mx'",[wid]);
@@ -7963,14 +7966,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     sets.get('bane-trusted-marketing')!.dest=[poolEventDestination('bane-trusted',topic)];
     await Promise.allSettled([prepare(),prepare()]);await prepare();
     assert.deepEqual(['SetTopicAttributesCommand','SetSubscriptionAttributesCommand','CreateTopicCommand','SubscribeCommand','CreateTenantCommand','CreateConfigurationSetCommand','CreateConfigurationSetEventDestinationCommand','PutConfigurationSetSuppressionOptionsCommand'].map(n=>calls.filter(c=>c===n).length),[0,0,0,1,1,0,0,0]);
-    const added=ok(await api('POST','/v1/domains',{name:managed}),201);assert.equal(added.region,va);await assert.rejects(setDomainPool(db,[wid,managed,'probation'],flags),/Already bound/);
+    const added=ok(await api('POST','/v1/domains',{name:managed}),201);assert.equal(added.region,va);await assert.rejects(setDomainPool(db,[wid,managed,'probation','--reason','Synthetic pool placement'],flags),/Already bound/);
     const {operationJobs}=await import('./src/operations.js');await operationJobs['domain.verify']!(runtime,{domainId:added.id,token:managedTags[0]!.Value},{workspaceId:wid,id:'verify',attempts:1});
     assert.equal(ok(await api('GET',`/v1/domains/${added.id}`)).ready,true);
     const {adoptionFacts}=await import('./src/adopted-identity.js');const rows=Array.from({length:12},(_,i)=>{const name=`adopted-${i}.fixture.test`;return {arn:`arn:aws:ses:${va}:${acct}:identity/${name}`,...adoptionFacts(identity(name) as any)};});
     const inventory={workspaceId:wid,installation:'opensend-042df6f752eaa1f62cb8',scope:'exclusive-send-only',identities:rows};
     const op=new SESv2Client({region:va,credentials:runtime.config.aws!});cleanup(t,async()=>op.destroy());
-    const adopt=(apply:boolean)=>adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,apply,flags);
+    const adopt=(apply:boolean)=>adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,apply,flags,'Synthetic identity adoption');
     assert.equal((await adopt(false)).length,12);assert.equal((await db.query('SELECT FROM hosted_adoptions WHERE workspace_id=$1',[wid])).rowCount,0);
+    await assert.rejects(adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,true,flags),/--reason/,'An apply without a reason fails before any read.');
     drift=true;await assert.rejects(adopt(true),/drift/);drift=false;
     await db.query(`INSERT INTO domain_claims(workspace_id,name) VALUES($1,'adopted-0.fixture.test')`,[wid]);await assert.rejects(adopt(true),/Overlapping/);await db.query(`DELETE FROM domain_claims WHERE workspace_id=$1 AND name='adopted-0.fixture.test'`,[wid]);
     await assert.rejects(adopt(true),/interrupted/);assert.equal((await db.query(`SELECT FROM domain_claims WHERE workspace_id=$1 AND sending_state='verified' AND identity ? 'adopted'`,[wid])).rowCount,0);
@@ -8060,9 +8064,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
     const operator=`arn:aws:sts::${acct}:assumed-role/platform-operator/fixture`,op=new SESv2Client({region:oh,credentials:runtime.config.aws!});cleanup(t,async()=>op.destroy());
     const {adoptionFacts,adoptionFingerprint}=await import('./src/adopted-identity.js'),reviewed=adoptionFingerprint(adoptionFacts(identity as any));
-    const adopt=(apply:boolean,overrides:Record<string,string|undefined>={},who=operator,fingerprint=reviewed)=>adoptPlatformDomain(db,op,owner,who,apply?{apply,fingerprint}:{},{...env,...overrides});
+    const adopt=(apply:boolean,overrides:Record<string,string|undefined>={},who=operator,fingerprint=reviewed)=>adoptPlatformDomain(db,op,owner,who,apply?{apply,fingerprint,reason:'Synthetic platform adoption'}:{},{...env,...overrides});
     await assert.rejects(adopt(true,{BANE_PLATFORM_DOMAIN_WORKSPACE:undefined}),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
-    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed},env),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
+    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed,reason:'Synthetic platform adoption'},env),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
     await assert.rejects(adopt(true,{},`arn:aws:iam::${acct}:user/bane-runtime`),/operator role/);
     identity.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];await assert.rejects(adopt(false),/domain claim created/);identity.Tags=[];
     identity.Policies={delegate:'{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"ses:SendEmail"}]}'};
@@ -8077,7 +8081,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const planned=await adopt(false);
     assert.deepEqual([planned.fingerprint,planned.tenant,planned.action,planned.dkimTokens,planned.receiving],[reviewed,tenant,'associate and adopt',[...dkim].sort(),{name:host,type:'MX',priority:10,value:'inbound-smtp.us-east-2.amazonaws.com'}]);
     assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0,'A dry run writes nothing.');
-    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true},env),/Review the dry run first/);
+    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true},env),/--reason/,'A change without a reason fails before any read.');
+    await assert.rejects(adoptPlatformDomain(db,op,owner,operator,{apply:true,reason:'Synthetic platform adoption'},env),/Review the dry run first/);
     await assert.rejects(adopt(true,{},operator,'0'.repeat(64)),/no longer matches the reviewed fingerprint/);assert.deepEqual(writes,[]);
     const adopted={domainId:(await adopt(true)).domainId!};
     assert.deepEqual(writes,[`CreateTenantResourceAssociationCommand:${arn}`],'Adoption only joins the existing identity to the workspace tenant.');assert.equal(members.get(arn),tenant);
@@ -8173,14 +8178,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // Revoke: the operator undo releases the claim and leaves the workspace's tenant, even once the configuration has moved on.
     await adopt(true,{},operator,renewed);assert.equal(members.get(arn),tenant);
     runtime.config.platformDomainWorkspace=undefined;
-    const revokePlan=await revokePlatformDomain(db,op,owner,operator,false,env);
+    const revokePlan=await revokePlatformDomain(db,op,owner,operator,{apply:false},env);
     assert.equal(revokePlan.action,`release the adopted claim, then remove the identity from ${tenant}`);assert.equal(members.get(arn),tenant);
-    await assert.rejects(revokePlatformDomain(db,op,owner,`arn:aws:iam::${acct}:user/bane-runtime`,true,env),/operator role/);
-    await revokePlatformDomain(db,op,owner,operator,true,{...env,BANE_PLATFORM_DOMAIN_WORKSPACE:undefined});
+    await assert.rejects(revokePlatformDomain(db,op,owner,operator,{apply:true},env),/--reason/);
+    await assert.rejects(revokePlatformDomain(db,op,owner,`arn:aws:iam::${acct}:user/bane-runtime`,{apply:true,reason:'Synthetic platform revoke'},env),/operator role/);
+    await revokePlatformDomain(db,op,owner,operator,{apply:true,reason:'Synthetic platform revoke'},{...env,BANE_PLATFORM_DOMAIN_WORKSPACE:undefined});
     assert.equal(members.has(arn),false);assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);
     assert.deepEqual(writes.slice(settled),[`DeleteTenantResourceAssociationCommand:${arn}`],'Revoking never touches the identity itself.');
     assert.equal((await db.query("SELECT details->>'tenant' AS tenant FROM hosted_operator_audit WHERE workspace_id=$1 AND action='platform-domain-revoked'",[owner])).rows[0].tenant,tenant);
-    assert.equal((await revokePlatformDomain(db,op,owner,operator,false,env)).action,'nothing to revoke');
+    assert.equal((await revokePlatformDomain(db,op,owner,operator,{apply:false},env)).action,'nothing to revoke');
     runtime.config.platformDomainWorkspace=owner;
   });
 
@@ -9016,7 +9022,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'limits.example', from = `sender@${domain}`;
       error(await local('GET','/v1/usage'),404,'NOT_FOUND'); // Plan & usage is hosted only.
       Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
-      const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending]);
+      const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending, '--reason', 'Synthetic limit change']);
       await assert.rejects(limits('100', 'default'), /No Hosted connection/);
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:feedback`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,created_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now()-interval '6 days 23 hours')`, [wid,REGION,pool]);
@@ -9171,7 +9177,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const c = ok(await local('POST','/v1/campaigns',{name:unique('guard'),from,subject:'Cap',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
       // 99 real recipients already admitted. 112 minus the 12-recipient reserve leaves one marketing slot.
       const {setHostedLimits}=await import('./scripts/set-hosted-limits.js');
-      await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default']);
+      await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default','--reason','Synthetic limit change']);
       error(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),422,'HOSTED_AUTO_PAUSE_REQUIRED');
       ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);
       error(await local('POST',`/v1/campaigns/${c.id}/pacing`,{perDay:null,autoPause:false}),422,'HOSTED_AUTO_PAUSE_REQUIRED');
@@ -9193,15 +9199,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await run('campaign.run');
       const resumed=ok(await local('GET',`/v1/campaigns/${c.id}`));
       assert.equal(resumed.delivery.expanded,3); assert.equal(resumed.delivery.waiting,null,'Hour expiry releases the tail without a resume request.');
-      await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']);
+      await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default','--reason','Synthetic limit change']);
       await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
       error(await batch(100),429,'SEND_LIMIT_REACHED');
       await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',100,0,0)",[wid]);
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
-      await (await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[wid,'on','--reason','Exercise uncapped reputation checks']);
-      // An uncapped workspace is still subject to bounce and complaint holds.
+      // A raised limit is still subject to bounce and complaint holds (only an exempt, first-party workspace is not).
+      await setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','default','--reason','Exercise uncapped reputation checks']);
       // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
       const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
@@ -9215,13 +9221,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await checkHostedHealth(runtime); assert.equal(await pause(),null);
       await db.query(`UPDATE sending_emails SET region='eu-west-1' WHERE id=$1`,[recipients[9].id]); // The final hard bounce is in another region.
       await event('bounce',9,10,{bounceType:'Permanent'});
-      await checkHostedHealth(runtime); const held = await pause(); assert.match(held.reason,/hard-bounce/); assert.ok(Date.parse(held.at));
+      // Bounces alone hold marketing: transactional mail keeps flowing and the SES tenants stay enabled.
+      const marketingHold = async () => (await db.query('SELECT marketing_held_at,marketing_hold_reason FROM provider_connections WHERE workspace_id=$1',[wid])).rows[0];
+      await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      assert.match((await marketingHold()).marketing_hold_reason,/hard-bounce/);
+      assert.equal(error(await send({kind:'marketing'}),409,'MARKETING_HELD').message,'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending. Remove the addresses that bounced; Bane reviews the hold.');
+      ok(await send(),202); ok(await thread(),202);
+      assert.equal((await db.query(`SELECT FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rowCount,0,'A marketing hold never disables the SES tenants.');
+      // Complaints pause everything, the stronger signal, even while marketing is held.
+      await event('complaint',2,4);
+      await checkHostedHealth(runtime); const held = await pause(); assert.match(held.reason,/complaint/); assert.ok(Date.parse(held.at));
       await checkHostedHealth(runtime); assert.deepEqual(await pause(),held);
       for (const attempt of [send,()=>batch(1),thread,()=>send({to:simulator})]) error(await attempt(),409,'HOSTED_SENDING_PAUSED');
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`,[`hosted.tenantStatus:${wid}`])).rows[0].status,'pending');
       const report = await runDispatcher(runtime,{region:REGION, accountId:pool}); assert.equal(report.sent,0); assert.equal(report.claimed,0);
       assert.deepEqual((await db.query('SELECT status,lease_until FROM sending_emails WHERE id=$1',[queued])).rows,[{status:'queued',lease_until:null}]);
-      await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await pause(),null);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps})); assert.equal(await pause(),null);
+      assert.equal((await marketingHold()).marketing_held_at,null,'The resume lifts the marketing hold too.');
       await checkHostedHealth(runtime); assert.equal(await pause(),null,'Reviewed events cannot re-pause the workspace.');
+      assert.equal((await marketingHold()).marketing_held_at,null,'Nor hold its marketing again.');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const ses = t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
@@ -9229,25 +9247,241 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES('suppressed-fixture',$1,'blocked@example.net',true)`,[wid]);
       const blocked=ok(await send({to:'blocked@example.net'}),202);
-      assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,1); assert.equal(ses.mock.callCount(),2);
+      // The queued message plus the two transactional messages admitted during the marketing hold.
+      assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,3); assert.equal(ses.mock.callCount(),4);
       assert.equal(ok(await local('GET',`/v1/emails/${blocked.id}`)).status,'suppressed');
       await event('complaint',1,2); await checkHostedHealth(runtime); assert.equal(await pause(),null);
       await event('complaint',2,3); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       error(await send(),409,'HOSTED_SENDING_PAUSED');
-      await runtime.db.execute(resumeHostedSending(wid));
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps}));
       await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1`,[wid]);
-      // At 200 sends, six hard bounces are exactly 3% (not over); seven exceed the rate despite being <10.
+      // A pause needs the count and the rate together. At 200 sends, nine hard bounces (4.5%) are fewer than ten.
       const accept200 = () => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at)
         SELECT gen_random_uuid()::text,$1,id,'accepted',false,clock_timestamp() FROM sending_emails WHERE workspace_id=$1 AND NOT simulated AND status<>'suppressed' AND to_addresses->>0<>$2 LIMIT 200`,[wid,simulator]);
       await accept200();
       assert.equal((await db.query(`SELECT count(*)::int n FROM sending_email_events WHERE workspace_id=$1`,[wid])).rows[0].n,200);
-      await event('bounce',0,6,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null);
-      await event('bounce',6,7,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.match((await pause()).reason,/hard-bounce/);
-      await runtime.db.execute(resumeHostedSending(wid));
+      await event('bounce',0,9,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null); assert.equal((await marketingHold()).marketing_held_at,null);
+      await event('bounce',9,10,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null); assert.match((await marketingHold()).marketing_hold_reason,/hard-bounce/);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps}));
       await accept200();
-      await event('complaint',0,1); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      // One complaint (0.5% of 200) no longer pauses a small sender; a second one does.
+      await event('complaint',0,1); await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await event('complaint',1,2); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));
       error(await local('DELETE','/v1/connection'),409,'HOSTED_SENDING_PAUSED'); // No self-service unpause via disconnect.
+    });
+  });
+  // A Hosted Ohio workspace with a ready tenant, for the reputation-hold regression tests (review of #111).
+  async function hostedHoldFixture(runtime: import('./src/core.js').Runtime, db: pg.Client, options: { createdDaysAgo?: number } = {}) {
+    const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'held.example';
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,created_at,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now()-make_interval(days=>$4::int),'bane-probation-fixture')`, [wid, REGION, pool, options.createdDaysAgo ?? 0]);
+    await db.query(`UPDATE provider_connection_regions SET tenant_state='ready' WHERE connection_id=$1`, [wid]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    const { pauseHostedSending, resumeHostedSending } = await import('./src/states.js'), { sql } = await import('drizzle-orm');
+    return { wid, pool, from: `news@${domain}`,
+      pause: () => runtime.db.execute(pauseHostedSending(sql`SELECT id,workspace_id,resumed_at,'Synthetic hold'::text AS reason,'all'::text AS scope,0 AS sends,0 AS bounces,0 AS complaints,0 AS rejected,0 AS screened FROM provider_connections WHERE id=${wid}`)),
+      resume: (percent: 50 | 100 = 50) => runtime.db.execute<{ pending: boolean }>(resumeHostedSending(wid, { reason: 'Reviewed synthetic hold', percent, caps: runtime.config.hostedSendCaps })),
+      connection: async () => (await db.query(`SELECT paused_at,pause_reason,resume_pending_at,tenant_generation::int AS generation FROM provider_connections WHERE id=$1`, [wid])).rows[0],
+      applied: async () => (await db.query(`SELECT region,applied,generation::int AS generation FROM hosted_tenant_status WHERE connection_id=$1 ORDER BY region`, [wid])).rows };
+  }
+  test('MX review: screen verdicts count when the screen judges, so spam queued before a resume pauses; simulator-only mail and unperformed screens do not dilute', async t => {
+    // A subtest owns the classifier stub, so its tracker resets before the fixture's network guard (as the screen benchmark does).
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => t.test('synthetic classifier', async t => {
+      const { checkHostedHealth } = await import('./src/maintenance.js'), { runDispatcher } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const f = await hostedHoldFixture(runtime, db);
+      await db.query('UPDATE workspaces SET send_cap_override=200000 WHERE id=$1', [f.wid]); // No limit or burst cap in the way (an exempt workspace is never paused).
+      const origin = 'https://screen.synthetic.invalid'; let spam = 0.01;
+      Object.assign(runtime.config, { hostedScreen: true, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL) => { assert.equal(String(url), origin); return Response.json({ answers: { spam: { noul: spam } } }); });
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => cmd instanceof GetAccountCommand ? { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 100000, SentLast24Hours: 0 } } : { MessageId: randomUUID() });
+      const batch = (to: (n: number) => string, n: number, subject: string) => local('POST', '/v1/emails/batch', { emails: Array.from({ length: n }, (_, i) => ({ from: f.from, to: to(i), subject, text: `Fixture ${subject}` })) });
+      const drain = () => runDispatcher(runtime, { region: REGION, accountId: f.pool, lanes: 1 });
+      const screen = async () => (await db.query(`SELECT coalesce(sum(screened),0)::int AS screened,coalesce(sum(rejected),0)::int AS rejected FROM hosted_screen_hourly WHERE workspace_id=$1`, [f.wid])).rows[0];
+      // Simulator-only mail is screened but is not reputation evidence.
+      ok(await batch(i => `success+${i}@simulator.amazonses.com`, 30, 'Simulator'), 202); await drain();
+      assert.deepEqual(await screen(), { screened: 0, rejected: 0 });
+      // 25 real messages queued before a pause and a resume; the screen rejects them only after the resume.
+      ok(await batch(i => `reader-${i}@example.net`, 25, 'Queued before the review'), 202);
+      await f.pause(); await f.resume(100);
+      spam = 0.99; await drain();
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND error_code='CONTENT_REJECTED_SPAM'`, [f.wid])).rows[0].n, 25);
+      assert.deepEqual(await screen(), { screened: 25, rejected: 25 });
+      await checkHostedHealth(runtime);
+      assert.match((await f.connection()).pause_reason, /content screen/, 'The verdicts count in the epoch they were made in, whenever the mail was admitted.');
+    }));
+  });
+  test('MX review: the SES tenant status converges whatever the interleaving of pauses, resumes and job runs', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime }) => {
+      const { checkHostedHealth } = await import('./src/maintenance.js'), { tenantStatusJob } = await import('./src/provider-connections.js');
+      const { SESv2Client, GetTenantCommand, UpdateReputationEntityCustomerManagedStatusCommand } = await import('@aws-sdk/client-sesv2');
+      const f = await hostedHoldFixture(runtime, db);
+      const jobId = `hosted.tenantStatus:${f.wid}`, job = { id: 'job_tenant_status', workspaceId: f.wid, attempts: 1 };
+      const aws = new Map<string, string>(); let during: (() => Promise<unknown>) | null = null, denied = false, failRegion: string | null = null, lost = false;
+      t.mock.method(SESv2Client.prototype, 'send', async function (this: InstanceType<typeof SESv2Client>, cmd: any) {
+        const region = await this.config.region();
+        if (cmd instanceof GetTenantCommand) return { Tenant: { TenantName: cmd.input.TenantName, TenantArn: `arn:aws:ses:${region}:${f.pool}:tenant/${cmd.input.TenantName}/t-1` } };
+        assert.ok(cmd instanceof UpdateReputationEntityCustomerManagedStatusCommand);
+        if (denied) throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
+        if (failRegion === region) throw Object.assign(new Error('throttled'), { name: 'ThrottlingException' });
+        aws.set(String(region), String(cmd.input.SendingStatus));
+        if (lost) throw Object.assign(new Error('socket hang up'), { name: 'TimeoutError' }); // AWS applied it; the response never arrived.
+        const transition = during; during = null; await transition?.();
+        return {};
+      });
+      const settled = async () => { const c = await f.connection(); return { paused: !!c.paused_at, pending: !!c.resume_pending_at, aws: Object.fromEntries(aws) }; };
+      // AWS denied (no IAM yet): nothing is recorded, so a resume does not wait on a disable that never happened.
+      await f.pause(); denied = true; await tenantStatusJob(runtime, {}, job); denied = false;
+      assert.deepEqual(await f.applied(), []);
+      assert.deepEqual((await f.resume(100)).rows.map(r => r.pending), [false]);
+      // Race 1: a resume lands while the disable is in flight, with the job row running (the runner holds it).
+      await f.pause(); await db.query(`UPDATE jobs SET status='running' WHERE id=$1`, [jobId]);
+      during = () => f.resume(100);
+      await tenantStatusJob(runtime, {}, job);
+      assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } }, 'The job saw the new generation, enabled the tenant and finished the resume it was holding.');
+      // Race 2: the job finished, then a pause landed before the runner marked the row complete: the enqueue was refused.
+      await f.pause();
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [jobId])).rows[0].status, 'running');
+      await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [jobId]);
+      await checkHostedHealth(runtime);
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [jobId])).rows[0].status, 'pending', 'The reconcile queues a pause not applied at the current generation.');
+      await tenantStatusJob(runtime, {}, job);
+      assert.deepEqual([(await settled()).aws, (await f.applied())[0].applied], [{ [REGION]: 'DISABLED' }, 'DISABLED']);
+      // A resume of a pause whose tenant AWS really disabled holds sending until the tenant is enabled again.
+      assert.deepEqual((await f.resume(100)).rows.map(r => r.pending), [true]);
+      assert.match((await f.connection()).pause_reason, /resuming/);
+      await tenantStatusJob(runtime, {}, job);
+      assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } });
+      // Review round 2: AWS applies a disable but its response is lost. The journal says "possibly disabled" (it used to
+      // say nothing, so the resume cleared the hold and the tenant stayed disabled), so the resume waits for an enable.
+      await f.pause(); lost = true;
+      await assert.rejects(tenantStatusJob(runtime, {}, job));
+      assert.deepEqual([aws.get(REGION), (await f.applied())[0].applied], ['DISABLED', 'DISABLING']);
+      assert.deepEqual((await f.resume(100)).rows.map(r => r.pending), [true]);
+      // The enable's outcome is lost too: still possibly disabled, still held; the retry enables it and finishes the resume.
+      await assert.rejects(tenantStatusJob(runtime, {}, job));
+      assert.deepEqual([aws.get(REGION), (await settled()).paused, (await settled()).pending], ['ENABLED', true, true]);
+      lost = false; await tenantStatusJob(runtime, {}, job);
+      assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } });
+      // A second region: a partial failure is retried, and a tenant that becomes ready later is covered by the reconcile.
+      await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name,tenant_state) VALUES($1,'us-west-1','bane-west-fixture','ready')`, [f.wid]);
+      await f.pause(); failRegion = 'us-west-1';
+      await assert.rejects(tenantStatusJob(runtime, {}, job));
+      assert.deepEqual((await f.applied()).map(r => [r.region, r.applied]), [[REGION, 'DISABLED'], ['us-west-1', 'DISABLING']], 'Each region records its own outcome; an unknown one stays possibly disabled.');
+      failRegion = null; await tenantStatusJob(runtime, {}, job);
+      assert.deepEqual((await f.applied()).map(r => r.applied), ['DISABLED', 'DISABLED']);
+      await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name,tenant_state) VALUES($1,'us-west-2','bane-west2-fixture','ready')`, [f.wid]);
+      await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [jobId]);
+      await checkHostedHealth(runtime);
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [jobId])).rows[0].status, 'pending', 'A newly ready tenant of a paused workspace is disabled too.');
+      await tenantStatusJob(runtime, {}, job);
+      assert.equal(aws.get('us-west-2'), 'DISABLED');
+    });
+  });
+  test('MX review round 2: a marketing hold keeps already-queued marketing queued at dispatch while transactional mail sends', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js'), { pauseHostedSending } = await import('./src/states.js'), { sql } = await import('drizzle-orm');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const f = await hostedHoldFixture(runtime, db);
+      await db.query('UPDATE workspaces SET send_cap_override=100000 WHERE id=$1', [f.wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('held-reader',$1,'reader@example.net','subscribed')`, [f.wid]);
+      const ses = t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => cmd instanceof GetAccountCommand ? { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 100000, SentLast24Hours: 0 } } : { MessageId: randomUUID() });
+      const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: `A ${kind} message`, text: 'Fixture', kind });
+      const marketing = ok(await send('marketing'), 202).id, transactional = ok(await send('transactional'), 202).id;
+      // The hourly check holds marketing after both were admitted.
+      await runtime.db.execute(pauseHostedSending(sql`SELECT id,workspace_id,resumed_at,'Synthetic bounce hold'::text AS reason,'marketing'::text AS scope,0 AS sends,0 AS bounces,0 AS complaints,0 AS rejected,0 AS screened FROM provider_connections WHERE id=${f.wid}`));
+      error(await send('marketing'), 409, 'MARKETING_HELD');
+      const status = async () => Object.fromEntries((await db.query('SELECT id,status FROM sending_emails WHERE id=ANY($1)', [[marketing, transactional]])).rows.map(r => [r.id === marketing ? 'marketing' : 'transactional', r.status]));
+      const drain = () => runDispatcher(runtime, { region: REGION, accountId: f.pool, lanes: 1 });
+      assert.equal((await drain()).sent, 1);
+      await db.query('UPDATE sending_emails SET lease_until=NULL WHERE id=$1', [marketing]); // As after a lease expires.
+      assert.equal((await drain()).sent, 0);
+      assert.deepEqual(await status(), { marketing: 'queued', transactional: 'accepted' }, 'It used to send the queued marketing.');
+      // The final election rechecks the hold too: a lease taken before the hold cannot send.
+      assert.equal(ses.mock.calls.filter(c => !(c.arguments[0] instanceof GetAccountCommand)).length, 1);
+      await f.resume(100);
+      assert.equal((await drain()).sent, 1);
+      assert.equal((await status()).marketing, 'accepted');
+    });
+  });
+  test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking or forgiving history', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const f = await hostedHoldFixture(runtime, db, { createdDaysAgo: 15 });
+      const limit = async () => ok(await local('GET', '/v1/me')).connection.sendingLimit;
+      // A dirty history (1,000 accepted, 100 hard bounces) earns the first-week cap of 100.
+      await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',1000,100,0)`, [f.wid]);
+      assert.equal((await limit()).cap, 100);
+      await f.pause(); await f.resume();
+      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [50, 100], 'The resume halves the limit and does not forgive the history (it used to grant 5,000).');
+      // A finite operator override is restored at half too, and a second resume inside the window cannot raise it.
+      await db.query(`UPDATE workspaces SET send_cap_override=10000 WHERE id=$1`, [f.wid]);
+      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [50, 10000]);
+      await db.query(`UPDATE provider_connections SET restore_until=now()-interval '1 second' WHERE id=$1`, [f.wid]);
+      assert.equal((await limit()).cap, 10000);
+      await f.pause(); await f.resume();
+      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [5000, 10000]);
+      await f.pause(); await f.resume();
+      assert.equal((await limit()).cap, 5000, 'No stacking: 50% of the limit, not 50% of 50%.');
+      await f.pause(); await f.resume(100);
+      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [10000, null], 'The explicit 100% restore is the opt-out.');
+      const audits = (await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='resume-hosted-sending' ORDER BY at`, [f.wid])).rows.map(r => [r.details.restorePercent, r.details.limitBefore, r.details.restoreCap]);
+      assert.deepEqual(audits, [[50, 100, 50], [50, 10000, 5000], [50, 10000, 5000], [100, 10000, null]]);
+    });
+  });
+  test('MX: an exempt (first-party) workspace crosses every pause line and keeps sending transactional and marketing; operators are warned and only an operator pauses it', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { checkHostedHealth } = await import('./src/maintenance.js'), { setWorkspaceExemption } = await import('./scripts/set-workspace-exemption.js');
+      const { pauseHosted } = await import('./scripts/pause-hosted-sending.js'), { reputationAlertJobs } = await import('./src/reputation-alerts.js');
+      const f = await hostedHoldFixture(runtime, db);
+      // The exemption is operator-only (a script, no API) and audited with its reason.
+      await setWorkspaceExemption(db, [f.wid, 'on', '--reason', 'First-party sign-in email']);
+      assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-workspace-exemption'`, [f.wid])).rows[0].details, { old: false, new: true, reason: 'First-party sign-in email', via: 'script' });
+      // Every line at once: 100 hard bounces (10%) and 10 complaints (1%) on 1,000 sends; 50 of 100 screened rejected.
+      await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) VALUES($1,'-infinity',date_trunc('hour',now()),1000,100,10)`, [f.wid]);
+      await db.query(`INSERT INTO hosted_screen_hourly(workspace_id,epoch,hour,screened,rejected) VALUES($1,'-infinity',date_trunc('hour',now()),100,50)`, [f.wid]);
+      await checkHostedHealth(runtime); await checkHostedHealth(runtime);
+      assert.deepEqual((await db.query(`SELECT paused_at,marketing_held_at FROM provider_connections WHERE id=$1`, [f.wid])).rows[0], { paused_at: null, marketing_held_at: null });
+      assert.equal((await db.query(`SELECT FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${f.wid}`])).rowCount, 0, 'The SES tenants are left enabled.');
+      const send = (kind: 'transactional' | 'marketing') => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: 'Your sign-in code', text: 'Fixture', kind });
+      ok(await send('transactional'), 202); ok(await send('marketing'), 202);
+      assert.equal(ok(await local('GET', '/v1/me')).connection.sendingPause, null);
+      // The warning: one operator alert for the strongest line, once a day however often the check runs.
+      const [alert, ...more] = (await db.query(`SELECT payload FROM jobs WHERE workspace_id=$1 AND type='reputation.alert'`, [f.wid])).rows.map(r => r.payload);
+      assert.deepEqual([alert.code, alert.line, alert.scope, Number(alert.complaints), more.length], ['HOSTED_EXEMPT_OVER_LINE', 'complaints', 'all', 10, 0]);
+      await t.test('the alert reaches the operators\' Slack channel', async t => {
+        const posted: string[] = [];
+        t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => { assert.equal(String(url), 'https://hooks.slack.invalid/fixture'); posted.push(JSON.parse(String(init!.body)).text); return new Response('ok'); });
+        runtime.config.reputationAlertUrl = 'https://hooks.slack.invalid/fixture';
+        try { await reputationAlertJobs['reputation.alert'](runtime, alert, { id: 'job_alert', workspaceId: f.wid, attempts: 1 }); } finally { runtime.config.reputationAlertUrl = undefined; }
+        assert.match(posted[0]!, new RegExp(`First-party workspace over the spam complaints line.*${f.wid}[\\s\\S]*Bane did not pause its sending`));
+      });
+      // Only an operator pauses it, and only with a reason.
+      await assert.rejects(pauseHosted(db, [f.wid, '--reason', 'short']), /at least 10 characters/);
+      await pauseHosted(db, [f.wid, '--reason', 'Confirmed complaint spike']);
+      error(await send('transactional'), 409, 'HOSTED_SENDING_PAUSED');
+      assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='pause-hosted-sending'`, [f.wid])).rows[0].details, { reason: 'Confirmed complaint spike', via: 'script' });
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${f.wid}`])).rows[0].status, 'pending', 'An operator pause disables the SES tenants.');
+    });
+  });
+  test('MX: a content-screen rejection keeps its charge against the limit; other rejections are refunded; scripts refuse to change anything without a reason', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const f = await hostedHoldFixture(runtime, db);
+      const usage = async () => Number((await db.query('SELECT coalesce(sum(recipients),0) AS n FROM hosted_usage_hourly WHERE workspace_id=$1', [f.wid])).rows[0].n);
+      const [spam, broken] = ok(await local('POST', '/v1/emails/batch', { emails: [{ from: f.from, to: 'a@example.net', subject: 'S', text: 'x' }, { from: f.from, to: 'b@example.net', subject: 'S', text: 'x' }] }), 202).data;
+      assert.equal(await usage(), 2);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='CONTENT_REJECTED_SPAM' WHERE id=$1`, [spam.id]);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [broken.id]);
+      assert.equal(await usage(), 1, 'Only the screen rejection still counts against the limit.');
+      const { setHostedLimits } = await import('./scripts/set-hosted-limits.js'), { resumeHosted } = await import('./scripts/resume-hosted-sending.js');
+      await assert.rejects(setHostedLimits(db, [f.wid, '--send-cap', '10', '--pending-cap', 'default']), /reason/);
+      await f.pause();
+      await assert.rejects(resumeHosted(db as never, [f.wid, '--reason', 'short']), /at least 10 characters/);
+      assert.ok((await f.connection()).paused_at, 'A refused script changes nothing.');
+      await setHostedLimits(db, [f.wid, '--send-cap', '10', '--pending-cap', 'default', '--reason', 'Synthetic support ticket']);
+      assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-hosted-limits'`, [f.wid])).rows[0].details,
+        { old: { sendCap: null, pendingCap: null }, new: { sendCap: 10, pendingCap: null }, reason: 'Synthetic support ticket', via: 'script' });
     });
   });
   test('MX: a workspace-only exemption admits all sending paths without resetting usage or disabling campaign health', async t => {
@@ -9298,7 +9532,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.hostedSendCaps.firstWeek=8;
       error(await send(),429,'SEND_LIMIT_REACHED');
       assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-workspace-exemption'`,[wid])).rows.map(r=>r.details).sort((a,b)=>Number(a.old)-Number(b.old)),
-        [{old:false,new:true,reason:'Synthetic exemption'},{old:true,new:false,reason:'Completed review'}]);
+        [{old:false,new:true,reason:'Synthetic exemption',via:'script'},{old:true,new:false,reason:'Completed review',via:'script'}]);
     });
   });
   for (const kind of ['Bounce','Complaint'] as const) test(`MX: ${kind==='Bounce'?'non-permanent bounces':'only explicit not-spam reports'} do not suppress or charge reputation on either feedback path`,async t=>{
@@ -9611,7 +9845,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
-      await (await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[wid,'on','--reason','Exercise real SES feedback ingestion']);
+      await (await import('./scripts/set-hosted-limits.js')).setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','default','--reason','Exercise real SES feedback ingestion']);
       const bcc=Array.from({length:49},(_,i)=>`bcc${i}@example.net`), simulator='success+fixture@simulator.amazonses.com';
       // 100 accepted envelopes yesterday: 4,999 real recipients plus one simulator. No sends today.
       await db.query(`WITH sent AS (INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,feedback_topic_arn,created_at)
@@ -9629,10 +9863,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await feedback('Complaint',1,[bcc[0],bcc[1],simulator]); await feedback('Complaint',1,[bcc[0].toUpperCase()]);
       assert.equal(await check(),null,'Two distinct complaints / 4,999 real recipients is below 0.05%, even with no sends today.');
       await feedback('Complaint',1,[bcc[2]]); assert.match((await check()).reason,/complaint/,'Three complaints on one envelope exceed the rate; do not double-count Send callbacks.');
-      await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await check(),null);
+      await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps})); assert.equal(await check(),null);
       await feedback('Bounce',1,[...bcc.slice(0,9),simulator]); await feedback('Bounce',1,bcc.slice(0,8));
       assert.equal(await check(),null,'Repeated hashes and a simulator bounce do not turn nine hard bounces into ten.');
-      await feedback('Bounce',2,[bcc[0]]); assert.match((await check()).reason,/hard-bounce/,'The same Bcc address on another email is a separate hard bounce.');
+      await feedback('Bounce',2,[bcc[0]]); assert.equal(await check(),null,'Bounces alone never pause transactional mail.');
+      assert.match((await db.query('SELECT marketing_hold_reason FROM provider_connections WHERE id=$1',[wid])).rows[0].marketing_hold_reason,/hard-bounce/,'The same Bcc address on another email is a separate hard bounce: marketing is held.');
       const {email_id,recipient_hashes}= (await db.query(`SELECT email_id,recipient_hashes FROM sending_email_events WHERE workspace_id=$1 AND type='bounce' AND cardinality(recipient_hashes)=9`,[wid])).rows[0];
       assert.ok(recipient_hashes.every((h:string)=>/^[0-9a-f]{64}$/.test(h)));
       const visible=JSON.stringify([ok(await local('GET',`/v1/emails/${email_id}/events`)),(await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1`,[wid])).rows]);
@@ -9837,8 +10072,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wid=runtime.config.workspaceId; runtime.config.multiTenant=true; runtime.config.sharedRegions=[REGION];
       runtime.config.liveEnabled=true; runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
       const connect=()=>local('POST','/v1/connection',{kind:'shared',region:REGION});
-      ok(await connect(),201); await setHostedLimits(db,[wid,'--send-cap','2','--pending-cap','3']);
-      ok(await local('DELETE','/v1/connection')); await assert.rejects(setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']),/No Hosted connection/);
+      ok(await connect(),201); await setHostedLimits(db,[wid,'--send-cap','2','--pending-cap','3','--reason','Synthetic limit change']);
+      ok(await local('DELETE','/v1/connection')); await assert.rejects(setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default','--reason','Synthetic limit change']),/No Hosted connection/);
       ok(await connect(),201);
       const allowance=(await runtime.db.execute<{a:{cap:number;pendingCapOverride:number}}>(sql`SELECT ${hostedAllowance(runtime.config,wid,1)} a`)).rows[0].a;
       assert.deepEqual([allowance.cap,allowance.pendingCapOverride],[2,3]);

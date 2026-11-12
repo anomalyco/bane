@@ -19,7 +19,9 @@ const attestation=z.object({workspaceId:z.string(),installation:z.literal('opens
 
 // No API endpoint. This legacy operator tool takes a private, independently attested ARN list.
 // Its independently reviewed facts are pinned BEFORE reading AWS; live discovery is not authorization.
-export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:unknown,inventory:unknown,operator:string,apply:boolean,env:Record<string,string|undefined>=process.env) {
+export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:unknown,inventory:unknown,operator:string,apply:boolean,env:Record<string,string|undefined>=process.env,reason?:string) {
+  const why=reason?.trim();
+  if (apply && (!why || why.length<10)) throw new Error('--apply needs --reason "why (at least 10 characters)"; it is written to hosted_operator_audit.');
   const platformAccount=requirePoolFlags(env),prefix=`arn:aws:ses:${region}:${platformAccount}:identity/`;
   if (!operator.startsWith(`arn:aws:sts::${platformAccount}:assumed-role/`)) throw new Error('Use the signed-in platform migration operator, never the runtime principal.');
   const input=attestation.parse(inventory),list=z.array(z.string()).length(12).parse(arns).sort(),tenant=poolTenantName(wid,'trusted');
@@ -82,7 +84,7 @@ export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:
       await db.query(`INSERT INTO domain_claims(workspace_id,name,connection_id,claim_scope,identity,ever_proven) VALUES($1,$2,$3,'exclusive',$4,true)`,[wid,d.name,c.id,{ses:{},proven:false,mx:null,note:null,imported:true,adopted:{arn:d.arn,fingerprint:d.fingerprint}}]);
       await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[id('dom'),wid,d.name,region]);
     }
-    await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'adoption-intent',$2)`,[wid,{operator,digest,tenant,source:input.installation}]);
+    await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'adoption-intent',$2)`,[wid,{operator,reason:why??null,via:'script',digest,tenant,source:input.installation}]);
     await db.query('COMMIT');
   } catch(e) {await db.query('ROLLBACK');throw e;}
   await db.query('BEGIN');
@@ -101,20 +103,20 @@ export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:
       await db.query(`UPDATE domain_claims SET sending_state='verified',lost_since=NULL,identity=identity||$4::jsonb WHERE workspace_id=$1 AND connection_id=$2 AND name=$3`,[wid,c.id,d.name,{ses,proven:true}]);
     }
     await db.query('UPDATE hosted_adoptions SET associated=true WHERE workspace_id=$1 AND manifest_hash=$2',[wid,digest]);
-    await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'adoption-published',$2)`,[wid,{operator,digest,tenant}]);
+    await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'adoption-published',$2)`,[wid,{operator,reason:why??null,via:'script',digest,tenant}]);
     await db.query('COMMIT');return plan;
   } catch(e) {await db.query('ROLLBACK');throw e;}
 }
 if (import.meta.main) {
   const platformAccount=requirePoolFlags(process.env);
-  const {positionals:[wid,...rest],values:v}=parseArgs({allowPositionals:true,options:{manifest:{type:'string'},facts:{type:'string'},'dry-run':{type:'boolean'},apply:{type:'boolean'}}});
-  if (!wid || rest.length || !v.manifest || v['dry-run'] && v.apply) throw new Error('Usage: adopt-identities.ts WORKSPACE_ID --manifest ARNS.json [--facts FACTS.json] [--dry-run|--apply]');
+  const {positionals:[wid,...rest],values:v}=parseArgs({allowPositionals:true,options:{manifest:{type:'string'},facts:{type:'string'},'dry-run':{type:'boolean'},apply:{type:'boolean'},reason:{type:'string'}}});
+  if (!wid || rest.length || !v.manifest || v['dry-run'] && v.apply || v.apply && (v.reason?.trim().length??0)<10) throw new Error('Usage: adopt-identities.ts WORKSPACE_ID --manifest ARNS.json [--facts FACTS.json] [--dry-run|--apply --reason "why (at least 10 characters)"]');
   const arns=JSON.parse(await readFile(v.manifest,'utf8')),facts=JSON.parse(await readFile(v.facts??v.manifest+'.facts.json','utf8'));
   const cfg={profile:'anomaly',region,ignoreConfiguredEndpointUrls:true,maxAttempts:1},sts=new STSClient(cfg),ses=new SESv2Client(cfg);paceSetupSes(ses);
   const db=new Client(postgresConnection(process.env.DATABASE_URL));await db.connect();
   try {
     const op=await sts.send(new GetCallerIdentityCommand({}));
     if (op.Account!==platformAccount || !op.Arn) throw new Error('Unexpected migration operator account.');
-    console.table(await adoptIdentities(db,ses,wid,arns,facts,op.Arn,!!v.apply));
+    console.table(await adoptIdentities(db,ses,wid,arns,facts,op.Arn,!!v.apply,process.env,v.reason));
   } finally {await db.end();sts.destroy();ses.destroy();}
 }
