@@ -107,30 +107,29 @@ impl Gateway {
     async fn serve(&self, tcp: TcpStream, port: Port, ip: IpAddr, slot: Slot) -> Result<()> {
         let start = Instant::now();
         let auth_deadline = start + self.preauth;
-        timeout_at(auth_deadline, tokio::time::sleep_until(slot.after)).await?;
+        const PREAUTH_IDLE: Duration = Duration::from_secs(4);
+        let greeting_deadline = auth_deadline.min(start + PREAUTH_IDLE);
+        timeout_at(greeting_deadline, tokio::time::sleep_until(slot.after)).await?;
         tcp.set_nodelay(true)?;
         if port.implicit {
             let mut prefix = [0];
             anyhow::ensure!(
-                timeout_at(
-                    auth_deadline.min(Instant::now() + Duration::from_secs(4)),
-                    tcp.peek(&mut prefix)
-                )
-                .await??
-                    > 0,
+                timeout_at(greeting_deadline, tcp.peek(&mut prefix)).await?? > 0,
                 "closed before TLS"
             );
         }
         let mut stream: Stream = Box::new(tcp);
         if port.implicit {
-            stream = self.accept_tls(stream, auth_deadline, &slot.tls).await?
+            stream = self
+                .accept_tls(stream, greeting_deadline, &slot.tls)
+                .await?
         }
         let mut core = Core::new(port.protocol, port.implicit);
         let greeting = match &core {
             Core::Imap(i) => format!("* OK [CAPABILITY {}] Bane ready\r\n", i.capabilities()),
             Core::Smtp(_) => "220 smtp.bane.mx ESMTP Bane ready\r\n".into(),
         };
-        write(&mut stream, greeting.as_bytes()).await?;
+        timeout_at(greeting_deadline, write(&mut stream, greeting.as_bytes())).await??;
         let mut changed = self.changed.subscribe();
         let mut feed = None;
         let mut login_generation = 0;
@@ -157,7 +156,7 @@ impl Gateway {
         let mut discard = 0usize;
         let mut terminator = 0usize;
         let mut buf = [0u8; 4096];
-        let mut deadline = auth_deadline;
+        let mut deadline = auth_deadline.min(Instant::now() + PREAUTH_IDLE);
         const KEEPALIVE: Duration = Duration::from_secs(240);
         let mut heartbeat = Instant::now() + KEEPALIVE;
         loop {
@@ -472,7 +471,7 @@ impl Gateway {
                 } else if login.is_some() {
                     Instant::now() + IDLE
                 } else {
-                    auth_deadline
+                    auth_deadline.min(Instant::now() + PREAUTH_IDLE)
                 };
             }
         }

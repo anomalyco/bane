@@ -409,11 +409,11 @@ def framing(p):
 
 
 def deadline(p):
-    with socket.create_connection(("localhost", p["IMAP"]), timeout=8) as s:
-        s.settimeout(8)
-        assert s.recv(2048).startswith(b"* OK")
-        s.sendall(b"a CAP")
-        assert not s.recv(1), "unfinished pre-auth command survived deadline"
+    for proto,greeting in [('IMAP',b'* OK'),('SMTP',b'220')]:
+        with socket.create_connection(('localhost',p[proto]),timeout=5) as s:
+            assert s.recv(2048).startswith(greeting)
+            if proto=='IMAP': s.sendall(b'a CAP')
+            assert not s.recv(1), 'idle or unfinished pre-auth command survived deadline'
 
 
 def admission(tmp):

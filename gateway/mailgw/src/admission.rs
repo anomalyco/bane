@@ -63,6 +63,7 @@ impl Reservation {
 #[derive(Default)]
 pub struct Limits {
     ips: HashMap<IpAddr, (u32, Arc<tokio::sync::Semaphore>)>,
+    blocks: HashMap<IpAddr, u32>,
     anonymous: u32,
     failures: HashMap<(IpAddr, u64), Failures>,
     peer_failures: HashMap<IpAddr, VecDeque<Instant>>,
@@ -159,6 +160,8 @@ pub struct Slot {
 }
 impl Slot {
     pub fn take(limits: Arc<Mutex<Limits>>, ip: IpAddr, now: Instant) -> Option<Self> {
+        let ip = ip.to_canonical();
+        let block = network_block(ip);
         let mut l = limits.lock().ok()?;
         if !l.accepts.contains_key(&ip) && l.accepts.len() >= 8192 {
             l.accepts
@@ -167,19 +170,20 @@ impl Slot {
                 return None;
             }
         }
-        if l.anonymous >= 128 {
+        if l.anonymous >= 128 || l.blocks.get(&block).copied().unwrap_or(0) >= 24 {
             return None;
         }
         let (count, tls) = l
             .ips
             .entry(ip)
             .or_insert_with(|| (0, Arc::new(tokio::sync::Semaphore::new(4))));
-        if *count >= 20 {
+        if *count >= 8 {
             return None;
         }
         *count += 1;
         let tls = tls.clone();
         l.anonymous += 1;
+        *l.blocks.entry(block).or_default() += 1;
         let b = l
             .accepts
             .entry(ip)
@@ -202,10 +206,23 @@ impl Slot {
         })
     }
 }
+fn network_block(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(a) => IpAddr::V4((u32::from(a) & (u32::MAX << 8)).into()),
+        IpAddr::V6(a) => IpAddr::V6((u128::from(a) & (u128::MAX << 80)).into()),
+    }
+}
 impl Drop for Slot {
     fn drop(&mut self) {
         let mut l = self.limits.lock().unwrap_or_else(|p| p.into_inner());
         l.anonymous -= 1;
+        let block = network_block(self.ip);
+        if let Some(n) = l.blocks.get_mut(&block) {
+            *n -= 1;
+            if *n == 0 {
+                l.blocks.remove(&block);
+            }
+        }
         if let Some((n, _)) = l.ips.get_mut(&self.ip) {
             *n -= 1;
             if *n == 0 {
@@ -217,6 +234,39 @@ impl Drop for Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anonymous_slots_are_scoped_and_returned_for_both_address_families() {
+        for (peers, other) in [
+            (
+                ["192.0.2.1", "::ffff:192.0.2.2", "192.0.2.3", "192.0.2.4"],
+                "192.0.3.1",
+            ),
+            (
+                [
+                    "2001:db8:1::1",
+                    "2001:db8:1:2::2",
+                    "2001:db8:1:3::3",
+                    "2001:db8:1:4::4",
+                ],
+                "2001:db8:2::1",
+            ),
+        ] {
+            let limits = Arc::new(Mutex::new(Limits::default()));
+            let take = |ip: &str| Slot::take(limits.clone(), ip.parse().unwrap(), Instant::now());
+            let mut held = Vec::new();
+            for ip in &peers[..3] {
+                for _ in 0..8 {
+                    held.push(take(ip).unwrap());
+                }
+                assert!(take(ip).is_none());
+            }
+            assert!(take(peers[3]).is_none());
+            assert!(take(other).is_some());
+            held.clear();
+            assert!(limits.lock().unwrap().blocks.is_empty());
+            assert!(take(peers[3]).is_some());
+        }
+    }
     #[tokio::test]
     async fn a_waiting_share_never_reserves_another_tenants_capacity() {
         use futures_util::FutureExt;
