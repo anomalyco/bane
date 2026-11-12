@@ -434,18 +434,33 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     const materialized = await materializeCampaignEmail(runtime, a, mail, leased.review, await loadAttachments(mail));
     mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
   }
-  const s = mail.snapshot;
+  let s = mail.snapshot;
   if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
-  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen), probation=!isSimulatedSes(runtime) && hosted && !leased.owner.trusted;
   if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
     const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
     if (hosted && (gate.screenRetryAt??0)>Date.now()) {
       if (required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted screen temporarily unavailable.',undefined,true);
-    } else await screenMail(runtime,mail,s,required,hosted?gate:undefined);
+    } else {
+      // Probation mail goes out as the copy the screen reads: every textual field without the bidi controls that
+      // reorder it, the markup reduced to what a client shows as text, the campaign preheader added back from its own
+      // field. Trusted senders keep their message.
+      if (probation) {
+        const { screenedHtml, screenedText } = await import('./screened-html.js');
+        for (const key of ['subject', 'text', 'fromName', 'previewText'] as const) { const value = s[key]; if (value !== undefined) s = { ...s, [key]: screenedText(value) }; }
+        if (s.html) s = { ...s, html: screenedHtml(s.html, s.previewText) };
+      }
+      await screenMail(runtime,mail,s,required,hosted?gate:undefined);
+    }
   }
   const parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
-  for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
+  for (const row of rows) {
+    const body = await verifiedAttachment(runtime, row);
+    // A probation attachment goes out under a name a client shows as is, as a type its extension and bytes agree with.
+    const { filename, contentType } = probation ? (await import('./screened-html.js')).screenedAttachment(row.filename, row.contentType, body, row.disposition === 'inline') : row;
+    parts.push({ FileName: filename, RawContent: body, ContentType: contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) });
+  }
   sizeCheck(s, rows);
   const content: SendEmailCommandInput['Content'] = s.raw
     ? { Raw: { Data: new TextEncoder().encode(s.raw) } }

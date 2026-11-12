@@ -6938,10 +6938,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const old=`arn:aws:sns:${oh}:${acct}:bane-feedback`,trusted=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`;
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture-only'}});
       assert.equal(runtime.config.regionalSending,false);
-      const attempts:string[][]=[];
+      const attempts:string[][]=[],delivered:string[]=[];
       t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
         if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
-        assert.ok(cmd instanceof SendEmailCommand);attempts.push([await this.config.region(),cmd.input.ConfigurationSetName!,cmd.input.TenantName!]);return {MessageId:unique('provider')};
+        assert.ok(cmd instanceof SendEmailCommand);attempts.push([await this.config.region(),cmd.input.ConfigurationSetName!,cmd.input.TenantName!]);delivered.push(cmd.input.Content?.Simple?.Body?.Html?.Data??'');return {MessageId:unique('provider')};
       });
       await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1`,[wid,oh,va]);
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES($1,$2,$3,'ready','ohio-fixture')`,[oh,acct,old]);
@@ -6984,14 +6984,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const frozen=async(id:string)=>(await db.query(`SELECT region,snapshot->'binding' AS binding,status,error_code FROM sending_emails WHERE id=$1`,[id])).rows[0];
       assert.deepEqual((await frozen(mixed[1].id)).binding,{account:acct,topic:trusted,connection:wid,domain:'va-domain',generation});
       await drain(oh);await drain(va);assert.deepEqual(attempts.slice(1),[[oh,'bane-transactional',`bane-${wid}`],[va,'bane-trusted-transactional',`bane-trusted-${wid}`]]);
+      // With the hosted screen on, probation mail (Ohio) is delivered as the copy the screen read; trusted mail (Virginia) as submitted.
+      const marked='<html><head><style>.x{display:none}</style></head><body><p>Regional fixture</p><!--[if mso]><p>Outlook only</p><![endif]--><p class="x" style="display:none;color:#fff">Hidden line</p></body></html>';
+      Object.assign(runtime.config,{hostedScreen:true,screen:{endpoint:'https://screen.regional.invalid',apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      const classifier=t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),'https://screen.regional.invalid');return Response.json({answers:{spam:{noul:0.01}}});});
+      ok(await batch({...parent,html:marked},{...child,html:marked}),202);
+      await drain(oh);await drain(va);classifier.mock.restore();Object.assign(runtime.config,{hostedScreen:false,screen:undefined});
+      assert.deepEqual(attempts.slice(3),[[oh,'bane-transactional',`bane-${wid}`],[va,'bane-trusted-transactional',`bane-trusted-${wid}`]]);
+      assert.deepEqual(delivered.slice(3),[(await import('./src/screened-html.js')).screenedHtml(marked),marked]);
+      assert.ok(!delivered[3]!.includes('<style') && !delivered[3]!.includes('Outlook only') && !delivered[3]!.includes('Hidden line') && delivered[3]!.includes('Regional fixture'));
       runtime.config.trustedPool=false;error(await send(child),409,'TRUSTED_POOL_DISABLED');runtime.config.trustedPool=true;
-      await db.query(`UPDATE workspaces SET send_cap_override=5 WHERE id=$1`,[wid]); // Three simulator recipients already charged across both regions.
+      await db.query(`UPDATE workspaces SET send_cap_override=7 WHERE id=$1`,[wid]); // Five simulator recipients already charged across both regions.
       const pair=[parent,child].map(m=>({...m,to:'real-counted@fixture.test'}));
       const charged=ok(await batch(...pair),202).data.map((m:Json)=>m.id);
       for (const m of pair) error(await send(m),429,'SEND_LIMIT_REACHED'); // Two regional envelopes consumed the same two slots.
       await db.query(`UPDATE provider_connections SET paused_at=now(),pause_reason='synthetic hold' WHERE id=$1`,[wid]);
       for (const m of [parent,child]) error(await send(m),409,'HOSTED_SENDING_PAUSED');
-      await drain(oh);await drain(va);assert.equal(attempts.length,3); // Neither lane attempts already-admitted mail while held.
+      await drain(oh);await drain(va);assert.equal(attempts.length,5); // Neither lane attempts already-admitted mail while held.
       assert.equal((await db.query(`SELECT FROM sending_emails WHERE id=ANY($1) AND status='queued'`,[charged])).rowCount,2);
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`,[charged]);await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE id=$1`,[wid]);await db.query(`UPDATE workspaces SET send_cap_override=NULL WHERE id=$1`,[wid]);
       const c=ok(await local('POST','/v1/campaigns',{name:'Regional',from:child.from,subject:'Review',html:'<p>Fixture.</p>',audience:{listId:ok(await local('POST','/v1/lists',{name:'Regional'}),201).id}}),201);
@@ -7020,7 +7029,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE provider_connection_regions SET generation=generation+1 WHERE connection_id=$1 AND region=$2`,[wid,va]);
       runtime.config.regionalSending=false;await drain(va);
       for (const id of [reviewed.id,stored.id,stale.id])assert.equal((await frozen(id)).error_code,'SENDER_BINDING_CHANGED');
-      assert.equal(attempts.length,3);
+      assert.equal(attempts.length,5);
       // A retired topic accepts delayed notifications only for the exact recorded ARN,
       // account, region and provider/email ID. Rotating a shared topic cannot move an event.
       const {ingestFeedbackBatch}=await import('./src/operations.js');
@@ -8453,12 +8462,60 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  // Ordinary templates the screen must read as their copy: hybrid Outlook with VML and conditional comments, a
+  // responsive newsletter with a large style sheet, a receipt, a dark-mode aware welcome, and client-specific hacks.
+  function screenCorpus(): Record<string,{html:string;expect:string[]}> {
+    const lorem=(n:number)=>Array.from({length:n},(_,i)=>`Paragraph ${i+1}: thank you for being a customer. Your order ships within two business days and you can track it from your account page at any time.`).join(' ');
+    const dataUrl='data:image/png;base64,'+Buffer.alloc(1500,7).toString('base64');
+    const resets='body{margin:0;padding:0;-webkit-text-size-adjust:100%} table,td{mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse} img{-ms-interpolation-mode:bicubic;border:0} a[x-apple-data-detectors]{color:inherit!important;text-decoration:none!important} .ExternalClass{width:100%} .ExternalClass,.ExternalClass p,.ExternalClass span,.ExternalClass td{line-height:100%}';
+    return {
+      hybridOutlook:{expect:['Spring collection is here','Shop now','Free shipping on orders over $50','Unsubscribe'],html:`<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><head>
+<!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><title>Spring collection</title>
+<style type="text/css">/* Client resets */ ${resets} .mobile-only{display:none;max-height:0;overflow:hidden;mso-hide:all} .desktop-only{display:block}
+@media only screen and (max-width:480px){ .mobile-only{display:block!important;max-height:none!important;overflow:visible!important} .desktop-only{display:none!important} .stack{display:block!important;width:100%!important} .h1{font-size:24px!important;line-height:30px!important} }
+@media screen{ @font-face{font-family:"Brand Sans";src:url("https://cdn.brand.example/fonts/brand-sans.woff2") format("woff2")} }</style></head>
+<body style="margin:0;padding:0;background-color:#f4f4f4"><div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;font-family:sans-serif">Spring styles just landed, with free shipping over $50. &nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
+<!--[if (gte mso 9)|(IE)]><table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]--><table role="presentation" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff" cellpadding="0" cellspacing="0" border="0">
+<tr><td style="padding:24px"><img src="https://cdn.brand.example/logo.png" width="140" alt="Brand logo" style="display:block"></td></tr><tr><td class="h1" style="padding:0 24px;font-family:'Brand Sans',Helvetica,Arial,sans-serif;font-size:32px;line-height:38px;color:#111111">Spring collection is here</td></tr>
+<tr><td style="padding:16px 24px;font-family:Helvetica,Arial,sans-serif;font-size:16px;line-height:24px;color:#333333">${lorem(3)}</td></tr><tr><td align="center" style="padding:8px 24px 32px">
+<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="https://shop.brand.example/spring" style="height:44px;v-text-anchor:middle;width:200px" arcsize="12%" stroke="f" fillcolor="#111111"><w:anchorlock/><center style="color:#ffffff;font-family:sans-serif;font-size:16px;font-weight:bold">Shop now</center></v:roundrect><![endif]-->
+<!--[if !mso]><!--><a href="https://shop.brand.example/spring" style="background-color:#111111;border-radius:5px;color:#ffffff;display:inline-block;font-family:sans-serif;font-size:16px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:200px;mso-hide:all">Shop now</a><!--<![endif]--></td></tr>
+<tr><td class="mobile-only" style="padding:0 24px;font-family:Helvetica,Arial,sans-serif;font-size:14px;color:#333333">Tap the button above to browse the collection on your phone.</td></tr>
+<tr><td style="padding:16px 24px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>${[1,2,3].map(i=>`<td class="stack" width="33%" valign="top" style="padding:8px;font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:20px;color:#333"><img src="https://cdn.brand.example/item-${i}.jpg" width="160" alt="Item ${i}" style="display:block;width:100%;height:auto"><p style="margin:8px 0 0"><strong>Item ${i}</strong><br>From $${19+i}.00</p></td>`).join('')}</tr></table></td></tr>
+<tr><td style="padding:16px 24px;font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:20px;color:#333">Free shipping on orders over $50. Returns are free within 30 days.</td></tr>
+<tr><td style="padding:24px;font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#888;text-align:center">Brand Inc., 1 Market Street, Springfield · <a href="https://shop.brand.example/preferences" style="color:#888">Preferences</a> · <a href="https://shop.brand.example/unsubscribe" style="color:#888">Unsubscribe</a></td></tr></table><!--[if (gte mso 9)|(IE)]></td></tr></table><![endif]--></body></html>`},
+      responsiveMarketing:{expect:['Your weekly digest','Read the full story','View in browser'],html:`<!doctype html><html lang="en"><head><meta charset="utf-8"><style>@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
+${Array.from({length:40},(_,i)=>`#templateSection${i} .mcnTextContent, #templateSection${i} .mcnTextContent p{font-family:'Open Sans',Helvetica,Arial,sans-serif;font-size:${14+(i%4)}px;line-height:150%;color:#${(i*7919%0xffffff).toString(16).padStart(6,'0')};text-align:left} #templateSection${i} .mcnImage{border-radius:${i%8}px}`).join('\n')}
+.mcnButtonContentContainer{border-radius:4px;background-color:#2a7ae2} .mcnButton{color:#fff;font-weight:bold;text-decoration:none;display:block;padding:14px 24px} blockquote{border-left:3px solid #ddd;margin:0;padding-left:12px;font-style:italic} h1,h2{font-family:'Open Sans',Helvetica,Arial,sans-serif;margin:0 0 12px} h1{font-size:28px} h2{font-size:22px}
+@media only screen and (max-width:480px){ ${Array.from({length:30},(_,i)=>`#templateSection${i} .mcnTextContent{font-size:16px!important;line-height:150%!important}`).join(' ')} .mcnButton{padding:18px!important} } @media only screen and (min-width:481px){ .mcnTextContentContainer{max-width:600px!important} }</style></head>
+<body style="background:#fafafa;margin:0"><center><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" border="0" style="background:#fff">
+<tr><td id="templateHeader" style="padding:12px;font:12px Helvetica,Arial,sans-serif;color:#777;text-align:right"><a href="https://news.brand.example/view?id=abc" style="color:#777">View in browser</a></td></tr>
+<tr><td id="templateSection0" style="padding:24px"><h1 class="mcnTextContent">Your weekly digest</h1><p class="mcnTextContent">${lorem(2)}</p></td></tr><tr><td id="templateSection1" style="padding:0 24px"><img class="mcnImage" src="${dataUrl}" width="552" alt="Chart of this week's activity" style="display:block;width:100%"></td></tr>
+${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="padding:24px"><h2 class="mcnTextContent">Story ${i+1}</h2><p class="mcnTextContent">${lorem(1)}</p><blockquote class="mcnTextContent">A short quoted remark from story ${i+1}.</blockquote><table cellpadding="0" cellspacing="0" border="0"><tr><td class="mcnButtonContentContainer"><a class="mcnButton" href="https://news.brand.example/story/${i+1}">Read the full story</a></td></tr></table></td></tr>`).join('\n')}
+<tr><td style="padding:24px;font:12px Helvetica,Arial,sans-serif;color:#999;text-align:center">You receive this digest because you signed up at brand.example. <a href="https://news.brand.example/unsubscribe" style="color:#999">Unsubscribe</a></td></tr></table></td></tr></table></center></body></html>`},
+      receipt:{expect:['Receipt from Brand','Amount paid','$42.00','Questions? Reply to this email'],html:`<!doctype html><html><head><meta charset="utf-8"><title>Receipt</title></head><body style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:#f6f9fc;margin:0;padding:24px"><table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#fff;border-radius:8px"><tr><td style="padding:32px">
+<h1 style="font-size:20px;margin:0 0 8px">Receipt from Brand</h1><p style="color:#697386;margin:0 0 24px">Receipt #1021-4493 · Nov 12, 2026</p><table width="100%" cellpadding="0" cellspacing="0" style="font-size:15px"><tr><td style="padding:8px 0;color:#697386">Amount paid</td><td align="right" style="padding:8px 0;font-weight:600">$42.00</td></tr><tr><td style="padding:8px 0;color:#697386">Payment method</td><td align="right" style="padding:8px 0">Visa ···· 4242</td></tr></table>
+<hr style="border:0;border-top:1px solid #e3e8ee;margin:24px 0"><table width="100%" cellpadding="0" cellspacing="0" style="font-size:15px"><tr><td style="padding:6px 0">Pro plan × 1</td><td align="right">$40.00</td></tr><tr><td style="padding:6px 0;color:#697386">Tax</td><td align="right">$2.00</td></tr></table>
+<p style="margin:24px 0 0;font-size:14px;color:#697386">Questions? Reply to this email or visit <a href="https://brand.example/help" style="color:#556cd6">brand.example/help</a>.</p></td></tr></table></body></html>`},
+      darkMode:{expect:['Welcome to Brand','Confirm your email'],html:`<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><style>:root{color-scheme:light dark;supported-color-schemes:light dark} .dark-img{display:none!important;mso-hide:all} .light-img{display:block}
+@media (prefers-color-scheme: dark){ .dark-img{display:block!important} .light-img{display:none!important} body,.body{background:#111!important;color:#eee!important} .btn{background:#eee!important;color:#111!important} } [data-ogsc] .dark-img{display:block!important} [data-ogsc] .light-img{display:none!important}</style></head>
+<body class="body" style="margin:0;background:#fff;color:#111;font-family:Helvetica,Arial,sans-serif"><table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px"><img class="light-img" src="https://cdn.brand.example/logo-dark.png" width="120" alt="Brand"><img class="dark-img" src="https://cdn.brand.example/logo-light.png" width="120" alt="Brand">
+<h1 style="font-size:24px">Welcome to Brand</h1><p style="font-size:16px;line-height:24px">Please confirm your email address to finish setting up your account.</p><a class="btn" href="https://app.brand.example/confirm?token=abc" style="display:inline-block;padding:12px 24px;background:#111;color:#fff;border-radius:6px;text-decoration:none">Confirm your email</a>
+<p style="font-size:12px;color:#777">If you did not create an account, you can ignore this message.</p></td></tr></table></body></html>`},
+      clientHacks:{expect:['Your invoice is ready','Download invoice','Pay by Nov 30'],html:`<!doctype html><html><head><meta charset="utf-8"><!--[if mso]><style>table{border-collapse:collapse;border-spacing:0;border:none;margin:0} div,td{padding:0} div{margin:0!important}</style><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
+<style>u + .body .gmail-hide{display:none!important} u + .body .gmail-show{display:block!important} .gmail-show{display:none} @supports (-webkit-overflow-scrolling:touch) and (color:#ffff){ .ios-fix{min-width:100%!important} } [owa] .outlook-fix{display:block!important} body[data-outlook-cycle] .outlook-fix{display:block!important} ${resets} #outlook a{padding:0} a[href^="tel"],a[href^="sms"]{color:inherit;text-decoration:none} .appleLinksGrey a{color:#888!important;text-decoration:none!important}</style></head>
+<body class="body" style="margin:0;padding:0"><div style="display:none;max-height:0;overflow:hidden">Invoice #2210 is ready to download. </div><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif">
+<tr><td style="padding:24px;font-size:22px;font-weight:bold">Your invoice is ready</td></tr><tr><td style="padding:0 24px;font-size:15px;line-height:22px">Invoice #2210 for October usage is attached and available online. Pay by Nov 30 to avoid a late fee.</td></tr>
+<tr><td style="padding:24px"><a href="https://billing.brand.example/invoices/2210" style="display:inline-block;padding:12px 20px;background:#0a7;color:#fff;text-decoration:none;border-radius:4px">Download invoice</a></td></tr>
+<tr><td class="gmail-show" style="padding:0 24px;font-size:13px;color:#666">Viewing in Gmail? Open the invoice in a new tab for the best experience.</td></tr><tr><td class="appleLinksGrey" style="padding:24px;font-size:12px;color:#888">Brand Billing · 1 Market Street · <a href="tel:+15555550100">+1 555 555 0100</a></td></tr></table></td></tr></table></body></html>`},
+    };
+  }
   test('hosted screen covers independent parts, hidden copy and link targets with a bounded request and a full-content cache key',async t=>{
     await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
       const {screenSnapshot}=await import('./src/screen.js');
       runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
       const bodies:string[]=[];
-      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{const body=JSON.parse(String(init.body)).state.email.body;bodies.push(body);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker') ? 0.99 : 0.1}}});});
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{const body=JSON.parse(String(init.body)).state.email.body;bodies.push(body);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker') ? 0.99 : 0.01}}});});
       const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,
         text:'plain signal',raw:'rendered MIME signal',html:`<div hidden>${'x'.repeat(16000)} hidden signal</div><p>HTML signal</p><a href="https://link.example.invalid/path">read</a><img src="https://image.example.invalid/tracker">`};
       await screenSnapshot(runtime,s);await screenSnapshot(runtime,s);
@@ -8473,10 +8530,124 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       const links=Array.from({length:300},(_,i)=>`<a href="https://docs.example.invalid/${i}">Guide.</a>`);
       links.splice(150,0,'<a href="https://samplemarker.invalid">docs.example.invalid</a>');
+      // Text as a client lays it out: inline runs and letters laid across table cells stay one word; style sheets, scripts and the head are not copy.
       for(const html of ['<p>SampleMarker</p>',`<div hidden>${'x'.repeat(8000)}</div>SampleMarker`,'<img src="https://samplemarker.invalid">',
         `${'a'.repeat(2500)} SampleMarker ${'b'.repeat(2500)}`,`<style>${'not-rendered '.repeat(200)}</style><script>not-rendered</script>${'a'.repeat(1000)} SampleMarker ${'b'.repeat(2500)}`,
-        links.join(''),'<p>Ｓample\u200bMarker</p>']){
-        const screened=await screenSnapshot(runtime,{...s,fromName:'Maria @ Acme',html},true);assert.equal(screened?.spam,.99);assert.ok(!bodies.at(-1)!.includes('not-rendered'));
+        links.join(''),'<p>Ｓample\u200bMarker</p>',`<p>${[...'SampleMarker'].map(c=>`<span>${c}</span>`).join('')}</p>`,`<p>${[...'SampleMarker'].map(c=>`<b style="display:inline-block">${c}</b>`).join('')}</p>`,
+        `<table><tr>${[...'SampleMarker'].map(c=>`<td>${c}</td>`).join('')}</tr></table>`]){
+        const screened=await screenSnapshot(runtime,{...s,fromName:'Maria @ Acme',html},true);assert.equal(screened?.spam,.99,html.slice(0,80));assert.ok(!bodies.at(-1)!.includes('not-rendered'));
+      }
+      // Probation mail is delivered as the copy the screen read. Whatever the markup did to hide, move, shrink, recolor
+      // or draw text, the classifier sees the marker exactly when the recipient can read it in the delivered copy:
+      // an element the light scheme does not display is left out, other hidden text comes back into view, filler
+      // salted between the letters of a word is shown with them or dropped with its hiding element, and text a
+      // client would draw from style sheets, attributes, controls or foreign content is not delivered at all.
+      const {screenedHtml,screenedText,visibleWords}=await import('./src/screened-html.js');
+      const reading=(html:string)=>html.replace(/<[^>]*>/g,'').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').normalize('NFKC').replace(/[\p{Cf}\p{Mn}\s]/gu,'');
+      const salted=(how:(i:number)=>string)=>`<p>Hello</p><p>${[...'SampleMarker'].map((c,i)=>`${c}${how(i)}`).join('')}</p>`;
+      const hidden=['display:none','display:/**/none','dis\\70 lay:none','visibility:hidden','opacity:0','opacity:0.0','font-size:0','font-size:2px','font-size:1em','position:absolute;left:-9999px','display:inline-block;transform:scale(0)',
+        'display:inline-block;width:0;overflow:hidden','display:inline-block;margin-left:-9999px','text-indent:-9999px','clip-path:inset(100%)','filter:opacity(0)','mix-blend-mode:screen','color:#fefefe','color:rgba(0,0,0,.02)','color:transparent',
+        'background-color:currentColor','background:#000 url(https://x.invalid/white.png);color:#fff','display:var(--d)','float:left;margin-left:-9999px','line-height:0;height:0;overflow:hidden','letter-spacing:-1em','zoom:0','unknown-property:1'];
+      const shapes={
+        hiddenText:[...hidden.map(style=>`<p>Hello</p><p style="${style}">SampleMarker</p>`),'<p>Hello</p><details><summary>More</summary><p>SampleMarker</p></details>','<p>Hello</p><table bgcolor="#112233"><tr><td><font color="#122334">SampleMarker</font></td></tr></table>',
+          '<html><body bgcolor="#000000" text="#000000"><p>Hello</p><p>SampleMarker</p></body></html>','<p>Hello</p><p style="font-size:1px"><small><small><small><small>SampleMarker</small></small></small></small></p>',
+          `<style>.q{display:none}</style><p>Hello</p><p class="q">SampleMarker</p>`,`<style>@media (max-width:0px){.q{display:none}}</style><p>Hello</p><p class="q">SampleMarker</p>`,'<p>Hello</p><div style="display:none">SampleMarker</div>','<p>Hello</p><div hidden>SampleMarker</div>',
+          `<style>.q{display:none!important}</style><p>Hello</p><p class="q" style="display:block">SampleMarker</p>`,`<style>.q:hover{display:none}</style><p>Hello</p><p class="q">SampleMarker</p>`,`<style>.q{font-size:0;color:#fff}</style><p>Hello</p><p class="q">SampleMarker</p>`,
+          `<div style="display:none;font-size:1px;max-height:0">SampleMarker &nbsp;&zwnj;&nbsp;</div><p>Hello</p>`],
+        salted:[...hidden.map(style=>salted(i=>`<span style="${style}">z${i}</span>`)),salted(i=>`<i class="q">z${i}</i>`).replace('<p>Hello','<style>.q{font-size:0;opacity:0}</style><p>Hello'),
+          salted(i=>`<span class="j">z${i}</span>`).replace('<p>Hello','<style>@media (min-width:0px){.j{display:none}} @media (max-width:0px){.l{display:none}}</style><p>Hello'),
+          salted(i=>`<span>z${i}</span>`).replace('<p>Hello','<style>span{display:none}.l{display:inline!important}</style><p>Hello').replace(/(<p>)(S)/,'$1<span class="l">$2</span>'),
+          `<p>Hello</p><p style="font-size:0">${[...'SampleMarker'].map((c,i)=>`<span style="font-size:16px">${c}</span><span style="font-size:1em">z${i}</span>`).join('')}</p>`,
+          `<p>Hello</p><p style="visibility:hidden">${[...'SampleMarker'].map((c,i)=>`<span style="visibility:visible">${c}</span>z${i}`).join('')}</p>`,`<style>span:nth-child(even){display:none}</style><p>Hello</p><p>${[...'SampleMarker'].map((c,i)=>`<span>${c}</span><span>z${i}</span>`).join('')}</p>`,
+          `<style>.z{display:none}</style><p>Hello</p><p>${[...'SampleMarker'].map((c,i)=>`${c}<span class="z">z${i}</span>`).join('')}</p>`],
+        // A reversed word is delivered as written, without the override that would have drawn it backwards.
+        reversed:['<p>Hello</p><p><bdo dir="rtl">rekraMelpmaS</bdo></p>','<p>Hello</p><p><span style="direction:rtl;unicode-bidi:bidi-override">rekraMelpmaS</span></p>','<p>Hello</p><p>\u202ErekraMelpmaS</p>'],
+        drawn:['<html><head><style>.decoy{display:none}.offer::before{content:"Sample\\4D arker"}</style></head><body><p class="decoy">Your appointment is confirmed.</p><div class="offer"></div></body></html>',
+          '<style>.o{--shown:"SampleMarker"}.o::before{content:var(--shown)}</style><p class="o"></p>','<style>p::before{content:attr(a)attr(b)}</style><p a="Sample" b="Marker">Hello</p>','<style>p::after{content:attr(data-note)}</style><p data-note="SampleMarker">Hello</p>',
+          '<p><input type="text" value="SampleMarker" readonly></p>','<p title="SampleMarker">Hello</p>','<svg><text>SampleMarker</text></svg><p>Hello</p>','<!--[if mso]><table><tr><td>SampleMarker</td></tr></table><![endif]--><p>Hello</p>',
+          '<!--[if gte mso 9]><style>.o::after{content:"SampleMarker"}</style><![endif]--><p class="o">Hello</p>','<noscript><p>SampleMarker</p></noscript><p>Hello</p>','<template><p>SampleMarker</p></template><p>Hello</p>',
+          '<div data-bane-preview="true" style="display:none">SampleMarker</div><p>Hello</p>','<p>Hello</p><p style="background:url(https://samplemarker.invalid/a.png)">Hello</p>'],
+      };
+      let shape=0;
+      for (const [kind,list] of Object.entries(shapes)) for (const html of list) {
+        // Shapes can normalize to the same copy; a distinct subject keeps each one out of the verdict cache.
+        const copy=screenedHtml(html), screened=await screenSnapshot(runtime,{...s,subject:`shape ${++shape}`,html:copy},true), saw=bodies.at(-1)!.replace(/\s+/g,''), readable=reading(copy).toLowerCase().includes('samplemarker');
+        assert.equal(screenedHtml(copy),copy,`${kind}: ${html.slice(0,60)} normalizes once`);
+        assert.ok(saw.includes(reading(copy)),`${kind}: ${html.slice(0,60)} screened as delivered`);
+        assert.equal(screened?.spam,readable?.99:.01,`${kind}: ${html.slice(0,60)} classified as readable`);
+        if (kind==='hiddenText') assert.ok(readable || !copy.toLowerCase().includes('samplemarker'),`${kind}: ${html.slice(0,60)} shown or left out`);
+        if (kind==='salted') assert.ok(readable ? !reading(copy).includes('z0') : reading(copy).includes('z0'),`${kind}: ${html.slice(0,60)} filler shown or dropped`);
+        if (kind==='reversed') assert.ok(reading(copy).includes('rekraMelpmaS') && !/bdo|unicode-bidi|\u202E/.test(copy),`${kind}: ${html.slice(0,60)} delivered as written`);
+        if (kind==='drawn') assert.ok(!copy.toLowerCase().includes('samplemarker') && !/<(?:style|script|svg|input|template|noscript)\b|<!--|\btitle=/.test(copy),`${kind}: ${html.slice(0,60)} not delivered`);
+      }
+      // The delivered copy: a document with its charset, sheet rules inlined by specificity and source order (at-rules
+      // and pseudo-elements left out, dark-mode and mobile-only swaps resolved to the light desktop state), the
+      // attributes and inline styles a client may apply, the first hidden block as the preheader (or the campaign's own
+      // preview text), everything else unwrapped or dropped.
+      const doc=(body:string,head='')=>`<!DOCTYPE html><html><head><meta charset="utf-8">${head}</head><body>${body}</body></html>`;
+      assert.equal(screenedHtml('<p>Hi</p>','Preview line'),doc('<div data-bane-preview="true" data-skip-in-text="true" style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all">Preview line</div><p>Hi</p>'));
+      assert.equal(screenedHtml('<div style="display:none;font-size:1px">Shipped &nbsp;&zwnj;</div><p>Hi</p>'),doc('<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all">Shipped &nbsp;\u200c</div><p>Hi</p>'));
+      assert.equal(screenedHtml('<!doctype html><html lang="en"><head><title>T</title><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="https://x.invalid/a.css"></head><body class="b" style="margin:0;background:#fff url(x.png);mso-line-height-rule:exactly"><table role="presentation" width="600" cellpadding="0" data-x="1"><tr><td bgcolor="#000000" style="padding:12px;color:#fff;font:bold 14px/1.4 Helvetica,Arial,sans-serif;float:left;position:relative">Hi <a href="https://x.invalid/" target="_blank" title="t" style="color:#fff;text-decoration:underline">there</a> <img src="https://x.invalid/a.png" alt="Logo" width="20" style="display:block;opacity:.5"></td></tr></table></body></html>'),
+        `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head><body style="margin:0;background-color:#fff"><table role="presentation" width="600" cellpadding="0"><tbody><tr><td bgcolor="#000000" style="padding:12px;color:#fff;font:bold 14px/1.4 helvetica,arial,sans-serif">Hi <a href="https://x.invalid/" style="color:#fff;text-decoration:underline">there</a> <img src="https://x.invalid/a.png" alt="Logo" width="20" style="display:block"></td></tr></tbody></table></body></html>`);
+      assert.equal(screenedHtml('<p style="font-size:7px">tiny</p><p><small><small><small><small>s</small></small></small></small></p><p style="color:#000"><span style="color:#010101">ink</span></p><p style="line-height:0;letter-spacing:-2px;margin:-1px 0;padding:9999px;text-indent:-9999px;width:0;max-height:0">box</p>'),
+        doc('<p>tiny</p><p><small><small><small><small style="font-size:8px">s</small></small></small></small></p><p style="color:#000"><span style="color:#010101">ink</span></p><p style="width:0;max-height:0">box</p>'));
+      assert.equal(screenedHtml('<p><bdo dir="rtl">a\u202Eb</bdo> <span style="direction:rtl;unicode-bidi:bidi-override">c</span> \u2066d\u2069 e\u200Ff</p>'),doc('<p>ab <span>c</span> d e\u200Ff</p>'));
+      assert.equal(screenedHtml('<p>a</p><p style="display:none">late</p><div hidden><span>not plain</span></div><a href="javascript:x">j</a><input value="v"><form><button>b</button></form><p style="visibility:hidden">v</p>'),doc('<p>a</p><a>j</a><p>v</p>'));
+      assert.equal(screenedHtml('<style>.btn{background:#111;color:#fff;display:inline-block;padding:12px 24px} a{text-decoration:none} .btn:hover{color:red} @media (max-width:480px){.btn{display:block}} .dark-img{display:none!important} .light-img{display:block} p::before{content:"x"} .mobile{display:none;mso-hide:all}</style><a class="btn" href="https://x.invalid/">Go</a><img class="dark-img" src="https://x.invalid/d.png" alt="D" width="120" height="40"><img class="light-img" src="https://x.invalid/l.png" alt="L" width="120" height="40"><p style="color:blue">t</p><p class="mobile">m</p>'),
+        doc('<a href="https://x.invalid/" style="text-decoration:none;background-color:#111;color:#fff;display:inline-block;padding:12px 24px">Go</a><img src="https://x.invalid/l.png" alt="L" width="120" height="40" style="display:block"><p style="color:blue">t</p>'));
+      assert.equal(screenedHtml('<style>p{color:red} .a{color:blue} #i{color:green!important} table td{padding:4px} ul > li{margin:0} h1 + p{margin:0 0 8px} li:first-child{font-weight:bold} [data-ogsc] .x{color:red} u + .body .y{color:red} body{background:#fafafa;margin:0} .c{color:var(--x)} .d{background:url(x.png) #fff}</style><body class="body"><p class="a" id="i" style="color:black">x</p><p class="a" style="color:black">y</p><p>z</p><table><tr><td>c</td></tr></table><ul><li class="x y">1</li><li>2</li></ul><h1>H</h1><p class="c">P</p><p class="d">d</p></body>'),
+        `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="background-color:#fafafa;margin:0"><p style="color:green">x</p><p style="color:black">y</p><p style="color:red">z</p><table><tbody><tr><td style="padding:4px">c</td></tr></tbody></table><ul><li style="margin:0;font-weight:bold">1</li><li style="margin:0">2</li></ul><h1>H</h1><p style="margin:0 0 8px">P</p><p style="color:red;background-color:#fff">d</p></body></html>`);
+      // Text the markup would draw without screened words: list markers with letters or chosen numbers, items without
+      // text; bidi controls in text and alt; images by declared size against the words beside them.
+      assert.equal(screenedHtml('<ol start="3" type="A"><li></li><li>x</li><li value="7">y</li><li><span style="display:none">z</span></li></ol><ul type="square" style="list-style-type:lower-alpha"><li></li></ul><ol style="list-style:upper-roman inside"><li style="list-style-type:decimal">q</li></ol>'),doc('<ol><li>x</li><li>y</li></ol><ul></ul><ol><li style="list-style-type:decimal">q</li></ol>'));
+      assert.equal(screenedHtml('<p>\u202Eonisac sllip\u202C <img src="https://x.invalid/a.png" width="10" height="10" alt="\u202Etla\u202C"> \u2066d\u2069 e\u200Ff</p>'),doc('<p>onisac sllip <img src="https://x.invalid/a.png" width="10" height="10" alt="tla"> d e\u200Ff</p>'));
+      assert.equal(screenedText('\u202Erekram\u202C \u202Aa\u202B\u202D\u2068b\u2069\u200E'),'rekram ab\u200E');
+      // Images count by the size a client draws them at: the larger of attribute and style, a minimum never kept, a
+      // full-width picture when undeclared; words count only when their characters draw. A 200 x 200 logo needs no
+      // words; every further 600 x 300 needs 25, so a banner with a caption is refused and a hero with copy is not.
+      const words=Array.from({length:25},(_,i)=>`word${i}`).join(' ');
+      for (const html of ['<img src="https://x.invalid/hero.png" width="600" height="400"><p>Click here</p>','<img src="https://x.invalid/hero.png" width="600" height="300"><p>Click here</p>','<img src="https://x.invalid/hero.png"><p>Click here</p>',
+        '<img src="https://x.invalid/hero.png" style="width:100%"><p>Click here</p>','<img src="https://x.invalid/hero.png" width="1" height="1" style="width:600px;height:400px"><p>Click here</p>','<img src="https://x.invalid/hero.png" width="600" height="400" style="width:1px;height:1px"><p>Click here</p>',
+        `<img src="https://x.invalid/a.png" width="300" height="300"><img src="https://x.invalid/b.png" width="300" height="300"><p>${words.slice(0,60)}</p>`,`<img src="https://x.invalid/hero.png" width="600" height="400"><p>${words.slice(0,120)}</p>`,
+        `<img src="https://x.invalid/hero.png"><p>${'\u115F '.repeat(25)}</p>`,`<img src="https://x.invalid/hero.png"><p>${'\u3164\uFFA0\u1160 '.repeat(25)}</p>`,`<img src="https://x.invalid/hero.png"><p>${'\u200B\u00AD\u2800 '.repeat(25)}</p>`,`<img src="https://x.invalid/hero.png"><p>${words}</p><p>${'\u115F '.repeat(30)}</p>`.replace(words,words.slice(0,60))])
+        await assert.rejects(async()=>screenedHtml(html),{code:'CONTENT_IMAGE_ONLY'},html);
+      for (const html of ['<img src="https://x.invalid/logo.png" width="140" height="40"><p>Your code is 123456.</p>','<img src="https://x.invalid/logo.png" width="140"><p>Your code is 123456.</p>','<img src="https://x.invalid/logo.png" width="200" height="200"><p>Hi</p>',
+        `<img src="https://x.invalid/hero.png" width="600" height="400"><p>${words} and a few more words beside it</p>`,`<img src="https://x.invalid/hero.png"><p>${words} and a few more words beside it</p>`,'<img src="https://x.invalid/hero.png" width="1" height="1" style="min-width:600px;min-height:400px"><p>Click here</p>',
+        '<img src="https://x.invalid/p.png" width="300" height="300"><p>Your order of the blue chair has shipped and arrives on Monday, track it from your account page today.</p>']) assert.ok(screenedHtml(html).includes('<img'),html);
+      assert.equal(screenedHtml('<img src="https://x.invalid/l.png" width="140" height="40" style="min-width:600px;min-height:400px;max-width:100%;height:auto"><p>Hi</p>'),doc('<img src="https://x.invalid/l.png" width="140" height="40" style="max-width:100%;height:auto"><p>Hi</p>'));
+      assert.deepEqual([visibleWords('a b \u115F \u3164 c1 \u200B d'),visibleWords('\u115F\u1160\u3164\uFFA0'),visibleWords('日本語 テスト')],[4,0,2]);
+      // Nothing in the delivered copy reorders boxes: no dir or direction on tables, rows, cells or anything else, no
+      // override element, no float, position, transform, flex, grid or writing mode.
+      assert.equal(screenedHtml('<html dir="rtl"><body dir="rtl"><table dir="rtl" style="direction:rtl"><tr dir="rtl"><td dir="rtl" style="direction:rtl;text-align:right">o</td><td>n</td></tr></table><p dir="rtl" style="direction:rtl;float:left;writing-mode:vertical-rl;order:2;flex-direction:row-reverse;display:flex">x <bdi>y</bdi> <bdo dir="rtl">z</bdo></p></body></html>'),
+        doc('<table><tbody><tr><td style="text-align:right">o</td><td>n</td></tr></tbody></table><p>x <bdi>y</bdi> z</p>'));
+      // Attachments: the name, declared type and bytes must agree with a standard extension; markup, SVG and mail are
+      // refused whatever they are called; inline attachments must be raster images; names lose format characters.
+      const {screenedAttachment,screenedName}=await import('./src/screened-html.js');
+      const bytes={png:new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3]),jpeg:new Uint8Array([0xff,0xd8,0xff,0xe0]),svg:Buffer.from('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><text>pitch</text></svg>'),pdf:Buffer.from('%PDF-1.4\n1 0 obj'),txt:Buffer.from('hello'),mail:Buffer.from('From: a@b\nMIME-Version: 1.0\nContent-Type: text/html\n\n<p>x</p>'),html:Buffer.from('\ufeff  <!DOCTYPE html><p>x</p>'),zip:new Uint8Array([0x50,0x4b,0x03,0x04,0,0])};
+      const refusal=(filename:string,type:string,body:keyof typeof bytes,inline=false)=>{try{screenedAttachment(filename,type,bytes[body],inline);return undefined;}catch(error){return (error as {code:string}).code;}};
+      assert.deepEqual([refusal('logo.png','image/png','png',true),refusal('logo.png','image/png','svg',true),refusal('logo.jpg','image/png','png',true),refusal('logo.jpg','image/jpeg','jpeg',true),refusal('logo.gif','image/gif','png'),refusal('invoice.pdf','application/pdf','pdf'),refusal('invoice.pdf','application/octet-stream','pdf'),refusal('invoice.pdf','application/pdf','txt'),refusal('invoice.pdf','application/pdf','pdf',true),
+        refusal('notes.txt','text/plain','txt'),refusal('notes.txt','text/plain','svg'),refusal('notes.txt','text/plain','mail'),refusal('notes.txt','text/plain','html'),refusal('notes.txt','text/plain','png'),refusal('data.xyz','application/octet-stream','txt'),refusal('noext','text/plain','txt'),refusal('mail.eml','message/rfc822','mail'),refusal('logo.svg','image/svg+xml','svg'),refusal('report.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document','zip'),refusal('report.docx','application/zip','zip'),refusal('re\u202Eport.txt','text/plain','txt'),refusal('payload.png. ','image/png','png',true)],
+        [undefined,'ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_CONTENT_MISMATCH',undefined,'ATTACHMENT_CONTENT_MISMATCH',undefined,undefined,'ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_TYPE_UNSCREENABLE',
+        undefined,'ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE',undefined,'ATTACHMENT_CONTENT_MISMATCH',undefined,undefined]);
+      assert.equal(screenedName('re\u202Eport\u200B\u115F\u200D.txt'),'report.txt');
+      // An unspecified type is delivered as the extension's; a declared one is kept as declared.
+      assert.deepEqual([screenedAttachment('re\u202Eport.txt','application/octet-stream',bytes.txt,false),screenedAttachment('scan.pdf','application/pdf; name=x',bytes.pdf,false)],[{filename:'report.txt',contentType:'text/plain'},{filename:'scan.pdf',contentType:'application/pdf; name=x'}]);
+      await assert.rejects(async()=>screenedHtml('<div>'.repeat(257)),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
+      await assert.rejects(async()=>screenedHtml(`<style>${'*{padding:1px}'.repeat(3000)}</style>${'<p>t</p>'.repeat(5000)}`),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
+      // Ordinary templates: the delivered copy keeps their text, loses sheets and comments, and screens in one request
+      // with the visible passage; as submitted (the trusted path) they screen the same way.
+      for (const [name,{html,expect}] of Object.entries(screenCorpus())) {
+        const copy=screenedHtml(html);
+        assert.ok(!/<style|<!--|<script|<o:|<v:|<xml/.test(copy) && screenedHtml(copy)===copy,`${name}: delivered copy`);
+        for (const phrase of expect) assert.ok(copy.includes(phrase),`${name}: ${phrase} delivered`);
+        for (const variant of [copy,html]) {
+          const start:number=bodies.length;
+          assert.equal((await screenSnapshot(runtime,{...s,kind:'marketing',html:variant,text:expect.join('. ')},true))?.spam,.01,name);
+          assert.equal(bodies.length-start,1,`${name}: one classifier request`);
+          for (const phrase of expect) assert.ok(bodies.at(-1)!.includes(phrase),`${name}: ${phrase}`);
+          assert.ok(!bodies.at(-1)!.includes('PixelsPerInch') && !bodies.at(-1)!.includes('OfficeDocumentSettings'),`${name}: markup noise`);
+        }
+        assert.ok(bodies.at(-2)!.replace(/\s+/g,'').includes(reading(copy)),`${name}: screened as delivered`);
       }
       const calls=bodies.length;await assert.rejects(screenSnapshot(runtime,{...s,kind:'marketing',html:'a'.repeat(40000)},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
       assert.equal(bodies.length,calls);
@@ -8493,6 +8664,81 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       t.diagnostic(`Required screen: ${positions.length}/${positions.length} neutral markers classified; over-budget trees refused without a classifier call`);
     }));
+  });
+
+  test('probation mail is delivered as the copy the screen read',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2'),{screenedHtml,screenedText}=await import('./src/screened-html.js');
+      const wid=runtime.config.workspaceId,acct='112223330003',origin='https://screen.synthetic.invalid';
+      runtime.config.hostedSendCaps.firstWeek=10000;
+      const key=ok(await local('POST','/v1/api-keys',{name:'screened copy',permissions:['send','read']}),201);
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('screened.invalid',$1,$1,'verified')`,[wid]);
+      const store=new Map<string,{body:Uint8Array;contentType:string}>();
+      runtime.storage={put:async(key,body,contentType)=>{store.set(key,{body,contentType});},get:async key=>store.get(key)??null,delete:async()=>{}};
+      const b64=(s:string|Uint8Array)=>Buffer.from(s).toString('base64'), svgBytes='<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><text>SampleMarker</text></svg>';
+      const upload=async(filename:string,contentType:string,content:string|Uint8Array,inline?:string)=>ok(await local('POST','/v1/attachments',{filename,contentType,content:b64(content),...(inline?{disposition:'inline',contentId:inline}:{})}),201).id as string;
+      const svg=await upload('logo.svg','image/svg+xml',svgBytes,'logo'), svgAsPng=await upload('logo.png','image/png',svgBytes,'logo2'), png=await upload('logo.png','image/png',new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,13]),'logo3');
+      const pdf=await upload('in\u202Evoice.pdf','application/pdf','%PDF-1.4\n%fixture\n'), fakePdf=await upload('invoice.pdf','application/pdf','not a pdf');
+      const screened=new Map<string,string[]>(), delivered=new Map<string,{html?:string;text?:string;files?:string[]}>();
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),origin);const {subject,body}=JSON.parse(String(init?.body)).state.email;screened.set(subject,[...screened.get(subject)??[],body]);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker')?0.99:0.01}}});});
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};const c=cmd.input.Content.Simple;delivered.set(c.Subject.Data,{html:c.Body.Html?.Data,text:c.Body.Text?.Data,files:c.Attachments?.map((a:any)=>a.FileName)});return {MessageId:randomUUID()};});
+      const salted=`<p>Hello</p><p>${[...'SampleMarker'].map((c,i)=>`${c}<span style="display:none">z${i}</span>`).join('')}</p>`;
+      const copy='Your appointment is confirmed for Tuesday at ten. Reply to this message if you need to change the time or the place.';
+      type Draft={subject:string;html?:string;text?:string;attachments?:string[]};
+      const mail:Draft[]=[{subject:'hidden',html:`<p>${copy}</p><div style="font-size:0;opacity:0;color:#fff">SampleMarker</div>`},{subject:'undisplayed',html:`<style>.x{display:none}</style><p>${copy}</p><div class="x">SampleMarker</div>`},
+        {subject:'variable',html:`<style>.o{--shown:"SampleMarker"}.o::before{content:var(--shown)}</style><p class="o"></p><p>${copy}</p>`},{subject:'outlook',html:`<!--[if mso]><p>SampleMarker</p><![endif]--><p>${copy}</p>`},{subject:'salted',html:salted},
+        // Text surfaces beyond the HTML: the subject and text part are delivered without the bidi controls that would
+        // draw them reversed; list markers draw only what was screened; a table keeps its cells in document order;
+        // an attachment goes out only when its name, type and bytes agree, never as markup, never inline unless it is
+        // a raster image, under a name without format characters; a message whose images (by the size a client draws
+        // them at, counting only visible words beside them) outweigh its words is refused, a logo beside a short
+        // message is not.
+        {subject:'\u202Erekram elpmas\u202C',text:'\u202ErekraMelpmaS\u202C Reply to confirm.',html:`<p>${copy}</p>`},
+        {subject:'markers',html:`<ol start="19" type="A"><li></li><li></li></ol><p>${copy}</p>`},
+        {subject:'rtlTable',html:`<table dir="rtl" style="direction:rtl"><tr dir="rtl">${[...'onisac'].map(c=>`<td dir="rtl" style="direction:rtl">${c}</td>`).join('')}</tr></table><p dir="rtl">${copy}</p>`},
+        {subject:'svgInline',html:`<img src="cid:logo" alt="Receipt" width="120" height="40"><p>${copy}</p>`,attachments:[svg]},
+        {subject:'svgAsPng',html:`<img src="cid:logo2" alt="Receipt" width="120" height="40"><p>${copy}</p>`,attachments:[svgAsPng]},
+        {subject:'fakePdf',html:`<p>${copy}</p>`,attachments:[fakePdf]},
+        {subject:'imageOnly',html:'<img src="https://cdn.brand.example/hero.png" width="600" height="400"><p>Click here</p>'},
+        {subject:'banner',html:'<img src="https://cdn.brand.example/hero.png" width="600" height="300"><p>Click here</p>'},
+        {subject:'minSized',html:'<img src="https://cdn.brand.example/hero.png" width="1" height="1" style="min-width:600px;min-height:400px"><p>Click here</p>'},
+        {subject:'styledSize',html:'<img src="https://cdn.brand.example/hero.png" width="1" height="1" style="width:600px;height:400px"><p>Click here</p>'},
+        {subject:'fillerWords',html:`<img src="https://cdn.brand.example/hero.png"><p>${'\u115F '.repeat(25)}</p>`},
+        {subject:'logoShort',html:'<img src="cid:logo3" width="140" height="40"><p>Your code is 123456.</p>',text:'Your code is 123456.',attachments:[png,pdf]},
+        ...Object.entries(screenCorpus()).map(([subject,{html}])=>({subject,html:html.replace(/data:image\/png;base64,[A-Za-z0-9+/=]+/,'https://cdn.brand.example/chart.png')}))];
+      const ids=ok(await local('POST','/v1/emails/batch',{emails:mail.map(m=>({from:'a@screened.invalid',to:'success@simulator.amazonses.com',...m}))},'live',{authorization:`Bearer ${key.secret}`}),202).data.map((x:Json)=>x.id);
+      const report=await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate:initialGate()});
+      const rows=(await db.query('SELECT subject,status,error_code FROM sending_emails WHERE id=ANY($1)',[ids])).rows as {subject:string;status:string;error_code:string|null}[];
+      const outcome:Record<string,string>=Object.fromEntries(rows.map(r=>[r.subject,r.error_code??r.status]));
+      // Hidden text is screened and shown; text a client would draw from a sheet or a conditional comment is neither
+      // screened nor delivered; filler salted into a word is dropped with its hiding element, so the word is read.
+      // Every delivered copy is the normalized one, and the classifier read exactly its text.
+      assert.deepEqual({...outcome},{hidden:'CONTENT_REJECTED_SPAM',undisplayed:'accepted',variable:'accepted',outlook:'accepted',salted:'CONTENT_REJECTED_SPAM','\u202Erekram elpmas\u202C':'accepted',markers:'accepted',rtlTable:'accepted',
+        svgInline:'ATTACHMENT_TYPE_UNSCREENABLE',svgAsPng:'ATTACHMENT_TYPE_UNSCREENABLE',fakePdf:'ATTACHMENT_CONTENT_MISMATCH',imageOnly:'CONTENT_IMAGE_ONLY',banner:'CONTENT_IMAGE_ONLY',minSized:'accepted',styledSize:'CONTENT_IMAGE_ONLY',fillerWords:'CONTENT_IMAGE_ONLY',logoShort:'accepted',
+        ...Object.fromEntries(Object.keys(screenCorpus()).map(name=>[name,'accepted']))});
+      assert.equal(report.sent,mail.length-9);
+      const reading=(html:string)=>html.replace(/<[^>]*>/g,'').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').normalize('NFKC').replace(/[\p{Cf}\p{Mn}\s]/gu,'');
+      for (const {subject,html,text} of mail) {
+        const sent=delivered.get(screenedText(subject));
+        if (outcome[subject]!=='accepted') { assert.equal(sent,undefined,`${subject}: not delivered`); continue; }
+        // The classifier's subject field is the delivered subject; its body carries the delivered HTML text and text part.
+        const saw=screened.get(screenedText(subject))!.join('').replace(/\s+/g,'');
+        assert.equal(sent!.html,screenedHtml(html!),`${subject}: delivered as screened`);
+        assert.equal(sent!.text,text===undefined?undefined:screenedText(text),`${subject}: text part as screened`);
+        for (const field of [sent!.html!,sent!.text??'']) assert.ok(saw.includes(reading(field)),`${subject}: screened as delivered`);
+        assert.ok(!/[\u202a-\u202e\u2066-\u2069]/.test(sent!.html!+(sent!.text??'')+screenedText(subject)),`${subject}: no bidi controls delivered`);
+        assert.ok(!sent!.html!.toLowerCase().includes('samplemarker') && !/<style|<!--|<script/.test(sent!.html!),`${subject}: nothing a client draws beyond its text`);
+        for (const phrase of screenCorpus()[subject]?.expect ?? []) assert.ok(sent!.html!.includes(phrase),`${subject}: ${phrase}`);
+      }
+      assert.deepEqual(delivered.get('rekram elpmas'),{html:`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><p>${copy}</p></body></html>`,text:'rekraMelpmaS Reply to confirm.',files:[]});
+      assert.ok(delivered.get('markers')!.html!.includes(`<ol></ol><p>${copy}</p>`) && delivered.get('undisplayed')!.html!.includes(copy) && delivered.get('variable')!.html!.includes(copy));
+      assert.ok(!/\bdir=|direction:/.test(delivered.get('rtlTable')!.html!) && delivered.get('rtlTable')!.html!.includes('<td>o</td><td>n</td>') && screened.get('rtlTable')!.join('').includes('onisac'));
+      assert.ok(!delivered.get('minSized')!.html!.includes('min-') && delivered.get('minSized')!.html!.includes('width="1" height="1"'));
+      assert.deepEqual([...delivered.get('logoShort')!.files!].sort(),['invoice.pdf','logo.png']);
+    });
   });
 
   test('only old or BYO unmatched feedback acks after a short retry; hosted and unavailable writes still retry',()=>import('./src/adapters/feedback-queue.js').then(({settleFeedbackMessage})=>{
