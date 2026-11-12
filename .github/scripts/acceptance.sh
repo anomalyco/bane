@@ -78,8 +78,10 @@ case ${ACCEPTANCE_QUARANTINE:-} in
   *) echo "ACCEPTANCE_QUARANTINE must be unset, only or all" >&2; exit 2 ;;
 esac
 if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then mkdir -p "$ACCEPTANCE_JUNIT"; fi
-shard integration 8787 '' 4569 "${integration_filter[@]}" & integration=$!
-shard simulated 8788 _sim 4570 "${simulated_filter[@]}" & simulated=$!
+# Two API ports, then two object-storage ports. Override them when another checkout's suite is running on this machine.
+read -r api_port sim_port storage_port sim_storage_port <<< "${ACCEPTANCE_PORTS:-8787 8788 4569 4570}"
+shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & integration=$!
+shard simulated "$sim_port" _sim "$sim_storage_port" "${simulated_filter[@]}" & simulated=$!
 rc=0
 wait "$integration" || rc=$?
 wait "$simulated" || rc=$?

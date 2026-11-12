@@ -332,7 +332,7 @@ function stageSection(target: Stage, today: Window, baseline: Window[], shas: Ma
     today.gateway ? table(['Code', 'Last 24 h', 'Daily average before'], Object.entries(today.gateway).map(([code, count]) => {
       const days = baseline.filter(day => day.gateway);
       return [`\`${code}\``, count, days.length ? (days.reduce((sum, day) => sum + (day.gateway![code] ?? 0), 0) / days.length).toFixed(1) : '–'];
-    })) : `_Not read: set NIGHTLY_AWS_PROFILE_${target.name.toUpperCase()}._`, '',
+    })) : `_Not read: NIGHTLY_AWS_PROFILE_${target.name.toUpperCase()} is unset, or its AWS session has expired (aws sso login)._`, '',
   ];
   return lines.join('\n');
 }
