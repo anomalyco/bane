@@ -1,7 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import type { Runtime } from './core.js';
 import { log } from './core.js';
-import { enqueue } from './jobs.js';
 import { campaignActive, pauseHostedSending } from './states.js';
 import { expireDomainClaims } from './operations.js';
 
@@ -188,21 +187,24 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff}`));
   await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
-  await runtime.db.transaction(async tx => {
-    const unused = await tx.execute<{ id: string; storage_key: string; workspace_id: string; source_template_asset_id: string | null }>(sql`WITH old AS (
+  // In retention batches like every other table: a fixed 50 rows an hour fell behind any installation retiring more than
+  // about 1,200 uploads a day, so their objects and the workspace's stored-attachment usage were never released.
+  await drain('unused_attachments', () => sql`WITH old AS (
       SELECT a.id FROM sending_attachments a WHERE a.created_at < ${cutoff}
-        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.attachment_id = a.id)
-      LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.workspace_id, a.source_template_asset_id`);
-    for (const object of unused.rows) if (!object.source_template_asset_id) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
-    const unusedTemplateAssets = await tx.execute<{ storage_key: string; workspace_id: string }>(sql`WITH old AS (
+        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.workspace_id = a.workspace_id AND l.attachment_id = a.id)
+      LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED
+    ), gone AS (DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id, a.source_template_asset_id
+    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
+      FROM gone WHERE source_template_asset_id IS NULL
+    ) SELECT count(*)::int AS n FROM gone`);
+  await drain('unused_template_assets', () => sql`WITH old AS (
       SELECT a.id FROM template_assets a WHERE a.created_at < ${cutoff}
         AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)
         AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
-      LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id`);
-    for (const object of unusedTemplateAssets.rows) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
-  });
+      LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED
+    ), gone AS (DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id
+    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
+    ) SELECT count(*)::int AS n FROM gone`);
   await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   const complete=inboxComplete && Date.now()<deadline;
   log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
