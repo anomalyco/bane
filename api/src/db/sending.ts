@@ -25,6 +25,8 @@ export type EmailSnapshot = {
   unsubscribeUrl?: string;
   /** Bane-authored notice with a recipient-only capability; reads withhold it. */
   sealed?: boolean;
+  /** Sent from a receiving address or inbox: a reply, a new conversation, a forward or a mail-client submission. Reading it needs mailbox access. */
+  mailbox?: boolean;
 };
 export type CampaignDraft = {
   regionPinned?: boolean;

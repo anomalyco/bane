@@ -2,6 +2,7 @@ import { addressGlob } from './routing-match.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { ApiError, id, type DbExecutor } from './core.js';
 import { mailboxAddresses, mailboxes, mailboxWriteLanes, mailMessages, type MailAddress, type SendLimits } from './db/mailbox.js';
+import { mailText } from './mailbox-text.js';
 
 export type Scope = { workspaceId: string };
 /** SES assigns the wire Message-ID independently of Bane's durable receipt. */
@@ -12,12 +13,16 @@ export async function lockMailboxLane(tx: DbExecutor, workspaceId:string, lane: 
 }
 export const ADDRESS = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
-/** Message-IDs compare without angle brackets or surrounding whitespace; case is preserved (RFC 5322 local parts are case-sensitive). */
+const utf8 = new TextEncoder();
+/**
+ * Message-IDs compare without angle brackets or surrounding whitespace; case is preserved (RFC 5322 local parts are case-sensitive).
+ * An ID is at most one header line, 998 bytes as stored, which is also what its index holds: a longer one is not an ID.
+ */
 export function normalizeMessageId(value: string | null | undefined): string | null {
   if (!value) return null;
   const match = value.match(/<([^<>\s]+)>/);
   const result = (match ? match[1]! : value.trim().replace(/^<|>$/g, '')).trim();
-  return result && result.length <= 998 && !/\s/.test(result) ? result : null;
+  return result && result.length <= 998 && !/\s/.test(result) && utf8.encode(mailText(result)).length <= 998 ? result : null;
 }
 export function messageIdList(value: string | null | undefined): string[] {
   if (!value) return [];
