@@ -45,9 +45,16 @@ async function saveAsset(runtime: Runtime, identity: Actor, metadata: Attachment
   try { const [row] = await runtime.db.insert(templateAssets).values({ id: assetId, workspaceId: identity.workspaceId, ...input, contentId: input.contentId ?? null, size: bytes.length, storageKey, checksum: hash }).returning(); return Asset.parse(row); }
   catch (error) { await runtime.storage.delete(storageKey).catch(() => undefined); throw error; }
 }
+// The cursor regex bounds each field on its own; a real date also fits its month (February 29 only in a leap year), or
+// Postgres refuses it with 22008 and the page request is a 500. Date.parse is no check: it rolls February 31 into March.
+const calendarDay = (value: string) => {
+  const year = Number(value.slice(0, 4)), month = Number(value.slice(5, 7)), day = Number(value.slice(8, 10));
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  return day <= (month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31);
+};
 function readTemplateCursor(value?: string) {
   if (!value) return null;
-  try { const parsed = z.tuple([z.string().regex(/^(?!0000)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])[ T](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:0\d|1[0-5])(?::?[0-5]\d)?)$/), z.string().min(1).max(120)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))); return { at: parsed[0], id: parsed[1] }; }
+  try { const parsed = z.tuple([z.string().regex(/^(?!0000)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])[ T](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:0\d|1[0-5])(?::?[0-5]\d)?)$/).refine(calendarDay), z.string().min(1).max(120)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))); return { at: parsed[0], id: parsed[1] }; }
   catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned template cursor with the same filters.', 'cursor'); }
 }
 function templateCursor(rows: (typeof templates.$inferSelect)[], limit: number) { const last = rows[limit - 1]; return rows.length > limit && last ? Buffer.from(JSON.stringify([last.updatedAt, last.id])).toString('base64url') : null; }

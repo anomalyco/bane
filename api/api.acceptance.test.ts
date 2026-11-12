@@ -10067,8 +10067,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
       for (const cursor of ['1.5', '1e10', '99999999999']) error(await local('GET', `/v1/routing/versions?cursor=${cursor}`), 422, 'INVALID_CURSOR');
       ok(await local('GET', '/v1/routing/versions?cursor=5'));
-      for (const at of ['x', '0000-01-01 00:00:00+00', '2026-13-01 00:00:00+00', '2026-01-01 00:00:00+99']) error(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`), 422, 'INVALID_CURSOR');
-      ok(await local('GET', `/v1/templates?cursor=${b64(['2026-11-12 17:42:19.355123+00', 'tpl_cursor'])}`));
+      for (const at of ['x', '0000-01-01 00:00:00+00', '2026-13-01 00:00:00+00', '2026-01-01 00:00:00+99', '2026-02-31 00:00:00+00', '2026-02-29 00:00:00+00', '2026-04-31 00:00:00+00', '1900-02-29 00:00:00+00']) error(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`), 422, 'INVALID_CURSOR');
+      for (const at of ['2026-11-12 17:42:19.355123+00', '2024-02-29 12:00:00.5+05:30', '2000-02-29T00:00:00Z', '2026-01-31 23:59:59+0530']) ok(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`));
       for (const rank of [1.5, 1e12]) error(await local('GET', `/v1/inbound/overview?cursor=${b64(['host.example', rank, 'match', 'id'])}`), 422, 'INVALID_CURSOR');
       error(await local('GET', '/v1/inbound/events?after=9999999999999999999'), 422, 'INVALID_CURSOR');
       // A version cursor past the integer range starts from the newest version.
