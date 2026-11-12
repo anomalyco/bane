@@ -74,6 +74,13 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
+test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
+  const {parseInboundMime}=await import('./src/mailbox-ingest.js');
+  const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
+  const forward='Subject: forwarded\r\nContent-Type: message/rfc822\r\n\r\n';
+  assert.ok(await parseInboundMime(Buffer.from(forward+base)));
+  assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
+});
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
   const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';

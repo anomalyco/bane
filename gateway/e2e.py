@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import shutil
 import smtplib
 import socket
@@ -140,6 +141,11 @@ def real_services():
             S3_ACCESS_KEY_ID="fixture",
             S3_SECRET_ACCESS_KEY=pw,
             MAILGW_API_TOKEN=key,
+            API_BASE_URL=url,
+            AUTH_ALLOWED_EMAILS='operator@example.com',
+            AUTH_ALLOWED_DOMAINS='example.com',
+            GOOGLE_CLIENT_ID='fixture',
+            GOOGLE_CLIENT_SECRET='fixture',
         )
         run(["node", "--import", "tsx", "src/migrate.ts"], cwd=api, env=env)
         prk = hmac.digest(bytes(32), secret.encode(), "sha256")
@@ -180,7 +186,7 @@ def real_services():
             DATABASE_URL=db.replace("postgres@", "fixture_listener@"),
             MAILGW_HEALTH_PORT="0",
         )
-        yield
+        yield lambda:run(['node','--import','tsx','--test','--test-name-pattern=^mail gateway:', 'api.acceptance.test.ts'],cwd=api,env=env)
         REAL.clear()
 
 
@@ -404,6 +410,9 @@ def admission(tmp):
         for accepted, login in [(True, ALIAS), (False, USER)]:
             with smtplib.SMTP_SSL("localhost", p["SMTPS"], context=CTX, timeout=5) as c:
                 c.login(login, PASS)
+                if accepted:
+                    c.mail(ALIAS);c.rcpt('first@example.invalid');c.rcpt('second@example.invalid')
+                    assert c.data(RAW)[0]==451, 'recipient budget must reject the whole submission'
                 c.mail(ALIAS)
                 c.rcpt("other@example.invalid")
                 assert c.data(RAW)[0] == (250 if accepted else 451)
@@ -528,7 +537,7 @@ def imaptest(tmp, p, stress=False):
             "noop=30",
             "append=20",
             "fetch=30",
-            "logout=5",
+            "logout=0", # stress established sessions; handshake admission is tested separately
         ]
         if stress
         else ["test=/scripts", "clients=3"]
@@ -682,6 +691,7 @@ def memory(tmp):
         rss = lambda: int(run(["ps", "-o", "rss=", "-p", str(pid)]).strip())
         base = 0
         for i in range(272):
+            time.sleep(.11) # stay inside the production per-IP accept budget
             c = connect(p["IMAPS"])
             stack.callback(c.shutdown)
             ok(c.select("INBOX"))
@@ -694,6 +704,26 @@ def memory(tmp):
             f"IDLE measured {(final - base) / 256:.1f} KiB/connection (process RSS {base} -> {final} KiB, 16 -> 272 TLS IDLE sockets; excludes kernel)",
             flush=True,
         )
+
+
+def large_folder(tmp):
+    # Ordinary indexed mailbox workload in the disposable database only. Distinct
+    # memberships and raw keys; no saved PoC traffic or external addresses.
+    with gateway(tmp) as (p,pid), connect(p['IMAPS']) as c:
+        ok(c.create('Capacity'));ok(c.append('Capacity',None,None,RAW))
+        sql("""BEGIN;
+        CREATE TEMP TABLE sample AS SELECT e.*,m.workspace_id,m.thread_id,m.size_bytes,m.raw_bucket FROM inbox_entries e JOIN inbox_folders f USING(inbox_id,role) JOIN mail_messages m ON m.id=e.message_id WHERE custom_path='Capacity';
+        INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle,size_bytes,raw_bucket,raw_key) SELECT 'bench-'||i,workspace_id,thread_id,'inbound','kept',size_bytes,raw_bucket,'k/default/bench-'||i||'.eml' FROM sample,generate_series(2,50001)i;
+        INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,modseq) SELECT inbox_id,'bench-'||i,workspace_id,thread_id,'inbound',true,internal_date,modseq FROM sample,generate_series(2,50001)i;
+        INSERT INTO inbox_entries SELECT inbox_id,role,i,'bench-'||i,modseq,false,internal_date FROM sample,generate_series(2,50001)i;
+        UPDATE inbox_folders SET total=50001,uid_next=50002 WHERE custom_path='Capacity';COMMIT;""",'fixture_observer')
+        rss=lambda:int(run(['ps','-p',str(pid),'-o','rss=']).strip())
+        base=rss();start=time.perf_counter();assert ok(c.select('Capacity'))==[b'50001'];cold=time.perf_counter()-start;delta=rss()-base
+        samples=[]
+        for _ in range(20):
+            start=time.perf_counter();assert ok(c.uid('SEARCH',None,'UNSEEN'))==[b'1'];ok(c.uid('FETCH','50001','(UID FLAGS RFC822.SIZE)'));samples.append((time.perf_counter()-start)*1000)
+        p95=sorted(samples)[18];print(f'CAPACITY 50001 entries, SELECT {cold:.3f}s, selected RSS delta {delta/1024:.1f} MiB, p95 SEARCH+FETCH {p95:.1f}ms',flush=True)
+        assert cold<5 and delta<96*1024 and p95<250, 'capacity budget exceeded'
 
 
 def budgets(tmp):
@@ -730,6 +760,8 @@ def budgets(tmp):
         measure("SELECT", 1, lambda: ok(a.select("Budget")))
         ok(b.select("Budget"))
         measure("FETCH flags", 0, lambda: ok(a.fetch("1", "(UID FLAGS)")))
+        assert measure("FETCH headers",0,lambda:ok(a.fetch('1','BODY.PEEK[HEADER]')))[0][1] == RAW.split(b'\r\n\r\n')[0]+b'\r\n\r\n'
+        assert measure("SEARCH subject",1,lambda:ok(a.uid('SEARCH',None,'SUBJECT','caf'))) == [b'1']
         assert (
             measure("FETCH body PEEK", 0, lambda: ok(a.fetch("1", "BODY.PEEK[]")))[0][1]
             == RAW
@@ -747,6 +779,9 @@ def budgets(tmp):
                 assert b"\\Seen" in c.readline()
 
         measure("IDLE wake, 2 sessions", 1, wake)
+        sql("UPDATE inbox_state SET protocol_passwords=protocol_passwords+1 WHERE inbox_id='mbx_fixture'",'fixture_observer')
+        for c in (a,b):
+            c.send(b'DONE\r\n');assert c.readline().startswith(b'i OK')
         sql(
             "SELECT inbox_revoke_password('default','mbx_fixture','app_fixture')",
             "fixture_observer",
@@ -762,6 +797,32 @@ def budgets(tmp):
             raise AssertionError("revoked password survived warm login cache")
 
 
+def shutdown(tmp):
+    with gateway(tmp) as (p,pid):
+        c=connect(p['IMAPS']);s=smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=5)
+        try:
+            s.ehlo();os.kill(pid,signal.SIGTERM)
+            assert c.readline().startswith(b'* BYE') and s.getreply()[0]==421
+        finally:
+            c.shutdown();s.close()
+
+
+def quotas(tmp):
+    with gateway(tmp) as (p,_),connect(p['IMAPS']) as c:
+        ok(c.create('Quota'));ok(c.select('Quota'))
+        try:
+            for column in ('quota_messages','quota_bytes'):
+                sql(f"UPDATE mailboxes SET {column}=1 WHERE id='mbx_fixture'")
+                if column=='quota_messages' and int(sql("SELECT messages FROM inbox_state WHERE inbox_id='mbx_fixture'"))==0:
+                    ok(c.append('Quota',None,None,RAW))
+                before=ok(c.search(None,'ALL'))
+                assert c.append('Quota',None,None,RAW)[0]=='NO'
+                assert ok(c.search(None,'ALL'))==before
+                sql(f"UPDATE mailboxes SET {column}=NULL WHERE id='mbx_fixture'")
+        finally:
+            sql("UPDATE mailboxes SET quota_bytes=NULL,quota_messages=NULL WHERE id='mbx_fixture'")
+
+
 def main():
     global CTX
     if not __debug__:
@@ -771,7 +832,7 @@ def main():
     run(["cargo", "build", "--locked", "--bins", "--examples"], timeout=300)
     success = []
     failed = []
-    with real_services(), tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
+    with real_services() as acceptance, tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
         tmp = Path(d).resolve()
         run(
             [
@@ -799,8 +860,10 @@ def main():
         with gateway(tmp) as (p, _):
             for name, fn in [
                 ("TLS/STARTTLS", lambda: tls(p)),
+                *([('API acceptance',acceptance)] if acceptance else []),
                 ("submission", lambda: mail(p)),
                 ("admission", lambda: admission(tmp)),
+                ('shutdown',lambda:shutdown(tmp)),
                 ("differential", lambda: client_flow(p["IMAPS"]) == reference(tmp)),
                 ("IDLE/UIDVALIDITY", lambda: changes(p)),
                 ("literals/MIME", lambda: framing(p)),
@@ -809,7 +872,7 @@ def main():
                 ("imaptest scripts", lambda: imaptest(tmp, p)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
-                *([("DB budgets", lambda: budgets(tmp))] if REAL else []),
+                *([('quotas',lambda:quotas(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
             ]:
                 if len(sys.argv) > 1 and name not in sys.argv[1:]:
                     continue

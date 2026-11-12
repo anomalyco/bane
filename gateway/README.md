@@ -14,7 +14,7 @@ Requirements: stable Rust with edition 2024, Python 3.11+, OpenSSL 3, swaks, Neo
 
 ## Scope and handoff
 
-`core` has no sockets or timers: an IMAP or SMTP session consumes validated commands and returns reply octets and transport actions. `mailgw` owns TLS, deadlines, admission and a coalescing change signal. The memory fixture binds **only to loopback**, on 993/143 and 465/587 by default. `MAILGW_CERT`, `MAILGW_KEY` and `MAILGW_FIXTURE_PASSWORD` are required. IMAP stays off unless `MAILGW_IMAP_ENABLED=true`. This is a synthetic single-inbox adapter, not an authentication service.
+`core` has no sockets or timers: an IMAP or SMTP session consumes validated commands and returns reply octets and transport actions. `mailgw` owns TLS, deadlines, admission and a coalescing change signal. Prefer implicit TLS on **993 (IMAP)** and **465 (SMTP)**; clients using 143/587 must require STARTTLS. The memory fixture binds **only to loopback**. `MAILGW_CERT`, `MAILGW_KEY` and `MAILGW_FIXTURE_PASSWORD` are required. IMAP stays off unless `MAILGW_IMAP_ENABLED=true`. This is a synthetic single-inbox adapter, not an authentication service.
 
 The IMAP subset uses rev1 grammar, LITERAL+, SASL-IR, UIDPLUS, MOVE, IDLE, NAMESPACE, ID and SPECIAL-USE. It does **not** advertise full IMAP4rev2, UTF8=ACCEPT, CONDSTORE or QRESYNC. Before enabling rev2, cover its required extensions (notably ESEARCH, extended LIST, BINARY and UTF-8 mailbox handling) and run the rev2 suite. No client should be offered a capability just to pass discovery.
 
