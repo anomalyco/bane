@@ -3,7 +3,7 @@ import { digest, type Runtime } from './core.js';
 import { jevQuestions } from './screen.js';
 import { visibleMail } from './inbox-content.js';
 import { safeForwardHtml } from './mailbox-send.js';
-import { compileRitual, runRitual, RitualError, MESSAGE_STEPS, MESSAGE_BYTES, type Diagnostic, type RitualIR, type Intent } from './ritual-engine.js';
+import { compileRitual, runRitual, RitualError, MESSAGE_STEPS, MESSAGE_BYTES, type Diagnostic, type RitualIR, type Intent, type TimelineStep } from './ritual-engine.js';
 import { closest, type EndpointType } from './ritual-schema.js';
 import { matchRouting, plusBase, type RoutingInput } from './routing-match.js';
 import type { mailMessages, mailAttachments } from './db/mailbox.js';
@@ -261,6 +261,7 @@ export async function ritualPipeline(
       steps: number;
       error: string | null;
       actions: Intent[];
+      timeline: TimelineStep[];
     }[] = [];
   const runs = base.recipients.map((r, i) => {
     const d: RitualDecision = (changes[r.address] = {
@@ -277,7 +278,7 @@ export async function ritualPipeline(
       const opt=optIn(r.address,r.route), deps=['ritual:'+key,bindingKey(binding),...inputsFor(ir,opt)];
       if(deps.some(k=>!active(k))){
         const error='A sender list or Omen opt-in required by this ritual lost receiving approval.';
-        fail(error);if(preview)trace.push({recipient:r.address,kind,key,scores:{},steps:0,lines:[],error,actions:[]});return false;
+        fail(error);if(preview)trace.push({recipient:r.address,kind,key,scores:{},steps:0,lines:[],error,actions:[],timeline:[]});return false;
       }
       const grants=[...new Set(deps.map(owner).filter((id):id is string=>id!==null))];
       const scores: Record<string, number | boolean> = Object.create(null);
@@ -308,7 +309,9 @@ export async function ritualPipeline(
         junk: d.junk,
         now: email.receivedAt,
       };
-      const result = runRitual(ir, email, ctx, scores, lists, MESSAGE_STEPS - steps);
+      // Dry runs record the evaluation step by step; delivery never pays for it.
+      const timeline: TimelineStep[] | undefined = preview ? [] : undefined;
+      const result = runRitual(ir, email, ctx, scores, lists, MESSAGE_STEPS - steps, timeline);
       steps += result.steps;
       bytes += result.bytes;
       const error = result.error ?? (bytes > MESSAGE_BYTES ? 'Message output budget exceeded' : null);
@@ -317,7 +320,7 @@ export async function ritualPipeline(
       }
       const actions=error?[]:result.intents;
       if (preview)
-        trace.push({ recipient: r.address, kind, key, scores, steps: result.steps, lines: result.trace, error, actions });
+        trace.push({ recipient: r.address, kind, key, scores, steps: result.steps, lines: result.trace, error, actions, timeline: timeline ?? [] });
       for (const [index,a] of actions.entries()) {
         if (a.ref) {
           const id = p.refs[a.ref];

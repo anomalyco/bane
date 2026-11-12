@@ -1,4 +1,4 @@
-import { Link } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { basicSetup } from 'codemirror'
 import { javascript } from '@codemirror/lang-javascript'
@@ -7,14 +7,19 @@ import { linter, lintGutter, type Diagnostic as LintDiagnostic } from '@codemirr
 import { EditorView } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
-import { Alert, Button, Checkbox, DataTable, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, StatusBadge, Tabs, Textarea, type Column } from '../../components/ui'
+import { Alert, Button, Checkbox, DataTable, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, type Column } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ritualTemplates } from '../../../../api/src/ritual-schema'
+import { concepts } from './concepts'
+import { useOverview } from './overview'
+import { ConceptLine } from './parts'
+import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
+import './receiving.css'
 
 type Binding = { ritual: string; target: string; continue: boolean }
 type Config = { rituals: { key: string; source: string }[]; attachments: Binding[]; senderLists: Record<string, string[]>; evaluateDomains: string[]; evaluateRoutes: string[] }
@@ -22,10 +27,6 @@ type Saved = { version: number; config: Config }
 type Problem = { ritual?: string; line: number; column: number; endLine?: number; endColumn?: number; message: string; hint?: string }
 type Check = { ok: boolean; diagnostics: Problem[]; calls: string[]; omens: string[]; questions: Record<string, string>; lists: string[] }
 type Completion = { label: string; detail: string; info: string; apply?: string; type: string }
-type Intent = { op: string; ref?: string; body?: unknown; value?: string }
-type TraceRow = { recipient: string; key: string; steps: number; lines: number[]; scores: Record<string, number | boolean>; error: string | null; actions: Intent[] }
-type Recipient = { address: string; inboxes?: string[]; webhooks?: string[]; labels?: string[]; junk?: boolean; dropped?: boolean; warnings?: string[]; actions?: Record<string, unknown[]> }
-type DryRun = { version: number; steps: number; trace: TraceRow[]; recipients: Recipient[] }
 
 const blank = () => `export default function route(email, ctx) {\n  \n}\n`
 const listsToText = (lists: Record<string, string[]>) => Object.entries(lists).map(([name, entries]) => `${name}: ${entries.join(', ')}`).join('\n')
@@ -51,9 +52,6 @@ const offset = (view: EditorView, line: number, column: number) => {
   const l = view.state.doc.line(Math.min(Math.max(1, line), view.state.doc.lines))
   return Math.min(l.from + Math.max(0, column - 1), l.to)
 }
-const actionText = (a: Intent) => a.ref?.startsWith('inbox:') ? `inbox.deliver("${a.ref.slice(6)}")`
-  : a.ref ? `endpoints.${a.ref.slice(9)}(${a.body === undefined ? '' : JSON.stringify(a.body)})`
-  : `${a.op}(${a.value === undefined ? '' : JSON.stringify(a.value)})`
 
 /** CodeMirror with workspace completions and live diagnostics from checkRitual. */
 function Editor({ value, change, completions, check }: { value: string; change: (s: string) => void; completions: Completion[]; check: (source: string) => Promise<Problem[]> }) {
@@ -90,7 +88,10 @@ function Editor({ value, change, completions, check }: { value: string; change: 
 
 export function RitualsPage() {
   const { canAdminister } = useWorkspaceAccess()
+  const [params] = useSearchParams()
+  const routeLocation = useLocation()
   const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: canAdminister })
+  const overview = useOverview({ limit: 1 })
   const [saved, setSaved] = useState<Saved | null>(null)
   const [loadError, setLoadError] = useState<Error | null>(null)
   const [key, setKey] = useState('')
@@ -105,10 +106,12 @@ export function RitualsPage() {
   const [problems, setProblems] = useState<Problem[]>([])
   const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null)
   const [pending, setPending] = useState(false)
-  const [mode, setMode] = useState<'mime' | 'messageId'>('mime')
-  const [sample, setSample] = useState('')
-  const [result, setResult] = useState<DryRun | null>(null)
-  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const recent = useRecentMail()
+  const [picked, setChoice] = useState<EmailChoice | null>(null)
+  const [as, setAs] = useState('')
+  const [answers, setAnswers] = useState<Record<string, number>>({})
+  const dry = useDryRun()
+  const tryRef = useRef<HTMLElement>(null)
   const listsRef = useRef<Record<string, string[]>>({})
   listsRef.current = textToLists(lists)
   const keyRef = useRef(key)
@@ -120,11 +123,14 @@ export function RitualsPage() {
     request<{ completions: Completion[] }>('/v1/rituals/typings', { signal: ac.signal }).then(t => setCompletions(t.completions)).catch(() => {})
     request<Saved>('/v1/rituals', { signal: ac.signal }).then(s => {
       setSaved(s); setBindings(s.config.attachments); setLists(listsToText(s.config.senderLists)); setDomains(s.config.evaluateDomains.join(', '))
-      const first = s.config.rituals[0]
-      setKey(first?.key ?? 'triage'); setSource(first?.source ?? ritualTemplates.find(t => t.id === 'junk-newsletters')!.source())
+      // ?key= opens that ritual, ?new=1 starts one; otherwise the first.
+      const wanted = params.get('key'), first = params.get('new') ? undefined : s.config.rituals.find(r => r.key === wanted) ?? s.config.rituals[0]
+      setKey(first?.key ?? (s.config.rituals.length ? '' : 'triage')); setSource(first?.source ?? ritualTemplates.find(t => t.id === 'junk-newsletters')!.source())
     }).catch(e => { if (!ac.signal.aborted) setLoadError(e as Error) })
     return () => ac.abort()
-  }, [canAdminister])
+  }, [canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
+  // #try and #attach links from Receiving land on their section once it exists.
+  useEffect(() => { if (saved && routeLocation.hash) requestAnimationFrame(() => document.getElementById(routeLocation.hash.slice(1))?.scrollIntoView({ block: 'start' })) }, [saved, routeLocation.hash])
 
   // The edited ritual keeps its place, so an untouched page is not "changed".
   const config = useMemo<Config | null>(() => saved && ({
@@ -155,18 +161,22 @@ export function RitualsPage() {
       setNotice({ tone: 'danger', text: errorText(e) })
     } finally { setPending(false) }
   }
-  async function dryRun() {
-    if (!config) return
-    setPending(true); setResult(null); setNotice(null)
-    // Dry runs never ask Jev: the answers typed here stand in for it, keyed by question.
-    const scores = Object.fromEntries(Object.entries(answers).filter(([name, v]) => v.trim() !== '' && check?.questions[name]).map(([name, v]) => [check!.questions[name]!, Math.min(1, Math.max(0, Number(v) || 0))]))
-    try { setResult(await request<DryRun>('/v1/rituals/test', { method: 'POST', body: { config, [mode]: sample, ...(Object.keys(scores).length ? { scores } : {}) } })) }
-    catch (e) { setNotice({ tone: 'danger', text: errorText(e) }); setProblems((e instanceof ApiError ? e.details as Problem[] | undefined : undefined) ?? []) }
-    finally { setPending(false) }
+  // Try runs only this ritual, unsaved, as if it were attached to the address the email was sent to.
+  const choice = picked ?? defaultChoice(recent.data, (addresses.data ?? []).find(a => !a.expiresAt)?.address ?? '')
+  const recipient = (choice.mode === 'sample' ? choice.to : as || (choice.mode === 'recent' ? choice.to ?? '' : (choice.mime.match(/^to:\s*(?:.*<)?([^\s<>,]+@[^\s<>,]+)/im)?.[1] ?? ''))).trim().toLowerCase()
+  const omens = check?.omens ?? []
+  async function tryIt() {
+    if (!config || !key || !recipient.includes('@')) return
+    const input = traceInput(choice, choice.mode === 'sample' ? undefined : recipient)
+    if (!input) return
+    // Jev is never asked in a try: the answers set here stand in for it, keyed by question.
+    const scores = Object.fromEntries(omens.filter(name => check?.questions[name]).map(name => [check!.questions[name]!, answers[name] ?? 0.5]))
+    await dry.run({ ...input, to: [recipient], config: { ...config, attachments: [{ ritual: key, target: recipient, continue: false }] }, ...(Object.keys(scores).length ? { scores } : {}) })
+    requestAnimationFrame(() => tryRef.current?.querySelector('.trace-out')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }))
   }
 
-  if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title="Rituals" backTo="/receiving" /><EmptyState title="Only owners and admins can manage rituals" /></div>
-  if (loadError) return <div className="stack inbound-stack"><PageHeader title="Rituals" backTo="/receiving" /><ErrorState error={loadError} onRetry={() => location.reload()} /></div>
+  if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title="Rituals" backTo="/receiving?tab=rituals" /><EmptyState title="Only owners and admins can manage rituals" /></div>
+  if (loadError) return <div className="stack inbound-stack"><PageHeader title="Rituals" backTo="/receiving?tab=rituals" /><ErrorState error={loadError} onRetry={() => location.reload()} /></div>
   const targets = (addresses.data ?? []).flatMap(a => [{ label: `${a.address} (inbox)`, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
   const targetName = (value: string) => targets.find(t => t.value === value)?.label.replace(/ \(inbox\)$/, '') ?? value
   const move = (i: number, by: number) => { const a = [...bindings]; const [item] = a.splice(i, 1); a.splice(i + by, 0, item!); setBindings(a) }
@@ -181,20 +191,13 @@ export function RitualsPage() {
       <IconButton label="Detach" onClick={() => setBindings(bindings.filter((_, i) => i !== b.i))}>×</IconButton>
     </span> },
   ]
-  const traceColumns: Column<TraceRow>[] = [
-    { key: 'recipient', label: 'Recipient', render: r => r.recipient },
-    { key: 'ritual', label: 'Ritual', width: 140, render: r => <code>{r.key}</code> },
-    { key: 'scores', label: 'Omens', width: 160, render: r => Object.entries(r.scores).map(([k, v]) => `${k} ${typeof v === 'number' ? v.toFixed(2) : v}`).join(' · ') || '—' },
-    { key: 'actions', label: 'Actions', render: r => r.error ? <span className="ritual-error">{r.error}</span> : r.actions.length ? <code className="ritual-actions">{r.actions.map(actionText).join('\n')}</code> : <span className="muted">None</span> },
-    { key: 'steps', label: 'Steps', width: 80, align: 'right', render: r => r.steps },
-  ]
-  const outcome = (r: Recipient) => r.dropped ? 'Dropped' : r.junk ? 'Junk' : 'Delivered'
+  const recipients = (addresses.data ?? []).filter(a => !a.expiresAt).map(a => a.address)
   return <div className="stack inbound-stack">
-    <PageHeader title="Rituals" backTo="/receiving" actions={<>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/endpoints">Endpoints</Link>
+    <PageHeader title="Rituals" backTo="/receiving?tab=rituals" actions={<>
+      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=endpoints">Endpoints</Link>
       <Button variant="primary" disabled={pending || !dirty || !key} onClick={() => void save()}>Save</Button>
     </>} />
-    <p className="muted">Scripts that run when mail reaches an inbox or address.</p>
+    <ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} />
     {notice && <Alert tone={notice.tone} onDismiss={() => setNotice(null)}>{notice.text}</Alert>}
     {problems.length > 0 && <ul className="ritual-problems">{problems.map((p, i) => <li key={i}><code>{p.ritual ? `${p.ritual}:` : ''}{p.line}:{p.column}</code> {p.message}{p.hint ? <span className="muted"> {p.hint}</span> : null}</li>)}</ul>}
     {saved && <>
@@ -202,10 +205,10 @@ export function RitualsPage() {
         <Field label="Ritual">
           <Select value={saved.config.rituals.some(r => r.key === key) ? key : ''} onValueChange={v => {
             const r = saved.config.rituals.find(x => x.key === v)
-            setKey(r?.key ?? ''); setSource(r?.source ?? blank()); setResult(null)
+            setKey(r?.key ?? ''); setSource(r?.source ?? blank()); dry.clear()
           }} options={[...saved.config.rituals.map(r => ({ label: r.key, value: r.key })), { label: 'New ritual', value: '' }]} />
         </Field>
-        <Field label="Key"><Input value={key} onChange={e => setKey(e.target.value.toLowerCase())} placeholder="triage" /></Field>
+        <Field label="Key" hint="Lowercase letters, digits and hyphens."><Input value={key} onChange={e => setKey(e.target.value.toLowerCase())} placeholder="triage" /></Field>
         <Field label="Start from a template">
           <Select value="" onValueChange={id => { const t = ritualTemplates.find(x => x.id === id); if (t) setSource(t.source(completions.find(c => c.detail.startsWith(`${t.needs} ·`))?.label.replace(/^endpoints\.|^endpoints\["|"\]$/g, ''))) }}
             options={[{ label: 'Choose…', value: '' }, ...ritualTemplates.map(t => ({ label: t.name, value: t.id }))]} />
@@ -216,44 +219,44 @@ export function RitualsPage() {
         ? <>No problems{check.calls.length ? <> · calls <code>{check.calls.join(', ')}</code></> : null}{check.omens.length ? <> · omens <code>{check.omens.join(', ')}</code></> : null}</>
         : (p => <>Line {p.line}, column {p.column}: {p.message}{p.hint ? ` ${p.hint}` : ''}{check.diagnostics.length > 1 ? ` (+${check.diagnostics.length - 1} more)` : ''}</>)(check.diagnostics[0]!)}</p>
 
-      <SectionHeader title="Runs on" />
-      <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
-        empty={<EmptyState title="Not attached yet" description="Pick an inbox or address below. The first ritual that acts stops the chain unless “Run the next one too” is on." />} />
-      <div className="ritual-attach">
-        <Field label={`Attach ${key || 'this ritual'} to`}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an inbox or address', value: '' }, ...targets]} /></Field>
-        <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
-        <Button disabled={!target || !key || bindings.some(b => b.target === target && b.ritual === key)} onClick={() => { setBindings([...bindings, { ritual: key, target, continue: next }]); setTarget('') }}>Attach</Button>
-      </div>
+      {/* The sections below appear with the first check (it names the omens to answer) and recent mail, so nothing shifts in later. */}
+      {check !== null && (recent.data !== undefined || !!recent.error) && <>
+      <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
+        <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
+        <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Jev isn’t asked.`} />
+        <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
+        <div className="ritual-try__options">
+          {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to" hint="The address the ritual is attached to for this try."><Input id="ritual-try-to" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
+          {omens.map(name => <Field key={name} label={<>If <code>{name}</code> answers <strong className="ritual-try__score">{(answers[name] ?? 0.5).toFixed(2)}</strong></>} hint={check?.questions[name]}>
+            <input className="ritual-try__range" type="range" min={0} max={1} step={0.05} value={answers[name] ?? 0.5} onChange={e => { setAnswers({ ...answers, [name]: Number(e.target.value) }); dry.clear() }} aria-label={`Answer for ${name}`} />
+          </Field>)}
+        </div>
+        <div className="cluster"><Button variant="primary" loading={dry.pending} disabled={!key || !recipient.includes('@') || (check !== null && !check.ok)} onClick={() => void tryIt()}>Run {key || 'ritual'}</Button>
+          {check && !check.ok && <span className="ritual-error">Fix the problem above first.</span>}</div>
+        <div className="trace-out">{dry.error ? <Alert tone="danger">{dry.error}</Alert> : dry.result && <TraceView result={dry.result} sources={{ [key]: source }} overview={overview.data} inboxes={new Map((addresses.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />}</div>
+      </section>
 
-      <div className="ritual-settings">
+      <section id="attach" className="section section--bordered stack" aria-labelledby="ritual-attach">
+        <SectionHeader title={<span id="ritual-attach">Runs on</span>} />
+        <ConceptLine line="Attach a ritual to an address or alias. Up to three run in order; the first that acts stops the rest unless “Run the next one too” is on." />
+        <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
+          empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual only runs on mail to the addresses it’s attached to." />} />
+        <div className="ritual-attach">
+          <Field label={`Attach ${key || 'this ritual'} to`}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an address', value: '' }, ...targets]} /></Field>
+          <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
+          <Button disabled={!target || !key || bindings.some(b => b.target === target && b.ritual === key)} onClick={() => { setBindings([...bindings, { ritual: key, target, continue: next }]); setTarget('') }}>Attach</Button>
+        </div>
+      </section>
+
+      <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
         <Field label="Sender lists" hint={<>One per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
           <Textarea rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
-        <Field label="Domains that may ask omens" hint="Receiving hosts whose mail Jev may read to answer omen questions. Elsewhere omens answer 0 or false.">
+        <Field label="Domains that may ask omens" hint="Receiving hosts whose mail Jev may read to answer omen questions. Elsewhere omens answer their default.">
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder="reply.example.com" />
         </Field>
-      </div>
-
-      <SectionHeader title="Dry run" />
-      <p className="muted">Runs the unsaved rituals on an email. Nothing is delivered, saved or sent to Jev.</p>
-      <Tabs label="Email source" value={mode} onValueChange={v => { setMode(v as typeof mode); setSample(''); setResult(null) }} items={[{ value: 'mime', label: 'Paste an email' }, { value: 'messageId', label: 'Stored message' }]} />
-      {mode === 'mime'
-        ? <Textarea aria-label="Email to test" rows={6} spellCheck={false} value={sample} onChange={e => setSample(e.target.value)} placeholder={'To: support@example.com\nFrom: customer@example.net\nSubject: Refund for order 4821\n\nHi, I would like a refund.'} />
-        : <Input aria-label="Stored message ID" value={sample} onChange={e => setSample(e.target.value)} placeholder="msg_…" />}
-      {!!check?.omens.length && <div className="ritual-answers">{check.omens.map(name => <Field key={name} label={<>If <code>{name}</code> answers</>} hint={check.questions[name]}>
-        <Input inputMode="decimal" placeholder="0–1" value={answers[name] ?? ''} onChange={e => setAnswers({ ...answers, [name]: e.target.value })} />
-      </Field>)}</div>}
-      <div><Button disabled={pending || !sample.trim()} onClick={() => void dryRun()}>Run</Button></div>
-      {result && <section aria-live="polite" className="stack">
-        <DataTable columns={traceColumns} rows={result.trace} rowKey={r => `${r.recipient}/${r.key}`} empty={<EmptyState title="No ritual ran" description="No attached ritual matches these recipients." />} />
-        <ul className="ritual-outcomes">{result.recipients.map(r => <li key={r.address}>
-          <StatusBadge status={outcome(r)} tone={r.dropped ? 'danger' : r.junk ? 'warning' : 'success'} /> <span>{r.address}</span>
-          {!r.dropped && <span className="muted"> · {r.inboxes?.length ?? 0} inbox{r.inboxes?.length === 1 ? '' : 'es'}, {Object.values(r.actions ?? {}).flat().length} endpoint call{Object.values(r.actions ?? {}).flat().length === 1 ? '' : 's'}</span>}
-          {r.labels?.length ? <span className="muted"> · labels {r.labels.join(', ')}</span> : null}
-          {r.warnings?.map(w => <span key={w} className="ritual-error"> · {w}</span>)}
-        </li>)}</ul>
-        <p className="muted">{result.steps} steps in total, on version {result.version}.</p>
-      </section>}
+      </section>
+      </>}
     </>}
   </div>
 }

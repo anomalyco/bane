@@ -27,7 +27,7 @@ function messageState(message: InboxMessage): { label: string; tone: Tone } {
   return message.read ? { label: 'Read', tone: 'neutral' } : { label: 'Unread', tone: 'info' }
 }
 
-function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const navigate = useNavigate()
   const domains = useApiDef(queries.inboundDomains(), { enabled: open })
   const hosts = receivingHosts(domains.data)
@@ -84,7 +84,7 @@ export function AgentInboxesPage() {
   const q = search.trim(), cursor = pagination.cursor
   const inboxes = useApiQuery(['agent-inboxes', q, cursor ?? null], (api, signal) => api.inboxes.list({ search: q || undefined, cursor }, signal), { interval: 30_000, keepPrevious: true })
   return <div className="stack inbound-stack">
-    <PageHeader title="Agent inboxes" backTo="/receiving" actions={<>
+    <PageHeader title="Agent inboxes" backTo="/receiving?kind=inbox" actions={<>
       <Input className="receiving-search" type="search" aria-label="Search inboxes" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />
       {canAdminister && <Button variant="primary" onClick={() => setCreating(true)}>New inbox</Button>}
     </>} />

@@ -1045,6 +1045,7 @@ export function createMockApi(): BaneApi {
         return inboundMessage(s, message)
       })),
       webhooks: signal => run(signal, false, s => (s.mailboxWebhooks ??= demoMailboxAccess().webhooks).map(inboundWebhook)),
+      webhookPage: (input, signal) => run(signal, false, s => ({ data: (s.mailboxWebhooks ??= demoMailboxAccess().webhooks).map(inboundWebhook).filter(h => !input.addressId || (h.eventTypes.includes('message.received') && (h.addressIds === null || h.addressIds.includes(input.addressId)))), nextCursor: null })),
       webhook: (webhookId, signal) => run(signal, false, s => inboundWebhook(find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'))),
       createWebhook: ({ addressIds, headers, ...input }, signal) => run(signal, true, s => {
         try { if (new URL(input.url).protocol !== 'https:') throw new Error() } catch { invalid('url', 'Enter an HTTPS endpoint URL.') }
