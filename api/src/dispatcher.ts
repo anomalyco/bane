@@ -251,7 +251,8 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     FROM queued_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
     ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
       CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap) p`:sql``}
-    WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL ${liveMx?sql`AND (cap IS NULL OR cap-coalesce(b.used,0)>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held FROM queued_owners`;
+    WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL AND hosted_sponsor_hold(q.workspace_id) IS DISTINCT FROM 'pause'
+      ${liveMx?sql`AND (cap IS NULL OR cap-coalesce(b.used,0)>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held FROM queued_owners`;
   // A single small, admitted transactional envelope needs no external preflight. For an idle
   // MX lane only, run the SAME durable claim on the locked fair selection. Both UPDATEs below
   // are disjoint: Postgres must never update the same email twice in one WITH statement.
@@ -546,7 +547,15 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       SELECT workspace_id, email, suppressed, suppression_reason, deleted_at, marketing_consent FROM audience_contacts
       WHERE (workspace_id, email) IN (SELECT workspace_id, email FROM dest)
       ORDER BY workspace_id,email FOR UPDATE
-    ), pinned_routes AS MATERIALIZED (
+    ), ${runtime.config.multiTenant ? sql`sponsor_state AS MATERIALIZED (
+      -- A sponsor's full pause holds every stream of its other workspaces (migration 231 hosted_sponsor_hold): share-lock
+      -- the sibling connections, in id order and before the election's own connection row, so a pause committing now is
+      -- seen; a restrict reaches dispatch through hosted_marketing_held. Exempt workspaces neither inherit nor pass it on.
+      SELECT me.id AS workspace_id,sp.paused_at IS NOT NULL AND sp.resume_pending_at IS NULL AS paused
+      FROM workspaces me JOIN workspaces o ON o.quota_sponsor=me.quota_sponsor AND o.id<>me.id AND NOT o.exempt_hosted_quotas
+      JOIN provider_connections sp ON sp.workspace_id=o.id AND sp.kind='shared'
+      WHERE me.id IN (SELECT workspace_id FROM input) AND me.quota_sponsor IS NOT NULL AND NOT me.exempt_hosted_quotas ORDER BY sp.id FOR SHARE OF sp
+    ), ` : sql``}pinned_routes AS MATERIALIZED (
       ${runtime.config.multiTenant ? sql`SELECT keys.*,r.* FROM (SELECT DISTINCT workspace_id,split_part(sender,'@',2) AS host FROM input WHERE binding IS NOT NULL) keys
         CROSS JOIN LATERAL ${regionalSender(runtime,sql`keys.workspace_id`,sql`keys.host`)} r` : sql`SELECT 1`}
     ), eligibility AS MATERIALIZED (
@@ -598,7 +607,8 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       FROM input x JOIN eligibility el ON el.id = x.id JOIN budget b ON b.id=x.id
       WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
         ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=x.workspace_id AND pc.paused_at IS NULL
-          AND NOT (x.held_stream AND hosted_marketing_held(x.workspace_id)) FOR SHARE)` : sql``}
+          AND NOT (x.held_stream AND hosted_marketing_held(x.workspace_id)) FOR SHARE)
+          AND NOT EXISTS (SELECT 1 FROM sponsor_state ss WHERE ss.workspace_id=x.workspace_id AND ss.paused)` : sql``}
       RETURNING e.id,e.workspace_id,e.status,e.region,e.simulated,e.error_code,e.suppression_reason,e.dispatch_version
     ), token AS (
       INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, email)

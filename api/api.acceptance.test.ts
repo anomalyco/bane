@@ -8429,10 +8429,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('second-reader',$1,'reader@example.net','subscribed')`, [other]);
       await gradedSender(db, other, 10000);
       const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: 'news@second.example', to: 'reader@example.net', subject: 'Hello', text: 'Fixture', kind }, 'live', { 'X-Bane-Workspace': other });
+      await db.query(`UPDATE provider_connections SET pool_tenant_name='bane-probation-second' WHERE id=$1`, [other]);
+      await db.query(`UPDATE provider_connection_regions SET tenant_state='ready' WHERE connection_id=$1`, [other]);
+      const { runDispatcher } = await import('./src/dispatcher.js'), { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => cmd instanceof GetAccountCommand ? { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 100000, SentLast24Hours: 0 } } : { MessageId: randomUUID() });
+      // Review round 3: a sibling's transactional mail queued before the sponsor's full pause stays queued (it used to send).
+      const queued = ok(await send('transactional'), 202).id;
       await runtime.db.execute(pauseHostedByOperator(f.wid, 'Synthetic complaint review'));
+      assert.equal((await runDispatcher(runtime, { region: REGION, accountId: f.pool, lanes: 1 })).sent, 0);
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [queued])).rows[0].status, 'queued');
       assert.match(error(await send('transactional'), 409, 'HOSTED_SENDING_PAUSED').message, /another workspace of this account/, 'It used to admit mail from the new workspace.');
       // An operator's resume of the paused workspace is what lifts it.
       await runtime.db.execute(resumeHostedSending(f.wid, { reason: 'Reviewed synthetic hold', percent: 100, caps: runtime.config.hostedSendCaps }));
+      await db.query('UPDATE sending_emails SET lease_until=NULL WHERE id=$1', [queued]);
+      assert.equal((await runDispatcher(runtime, { region: REGION, accountId: f.pool, lanes: 1 })).sent, 1, 'The resume releases it.');
       ok(await send('transactional'), 202);
       // A sibling's marketing hold holds this workspace's marketing too; transactional mail flows.
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: true, step: 'restrict' }));
