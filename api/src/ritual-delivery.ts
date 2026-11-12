@@ -26,6 +26,12 @@ const gate = async (db: DbExecutor, w: string, h: ClaimedWebhook, claim?: Claim)
   parked AS (UPDATE mailbox_webhook_deliveries x SET status='paused',last_error='ENDPOINT_PAUSED',updated_at=now() FROM g
     WHERE g.paused AND g.current AND x.workspace_id=${w} AND x.id=${h.delivery_id} AND x.generation=${h.generation} AND x.status='pending')
   SELECT * FROM g`)).rows[0];
+/** Node's errors for a connection that never carried the request: refused, no route, a failed name lookup or TLS handshake.
+ * Nothing left, so the outcome is known and a retry cannot duplicate. A reset or a timeout may follow a sent request and
+ * stays unknown; a Worker's fetch reports none of these codes, and an unreachable origin answers it with a 52x instead. */
+const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID']);
+const notSent = (e: unknown) => e instanceof Error && NOT_SENT.has(String((e as { code?: unknown }).code));
 /** A transport deferral (the timeout breaker) happens before anything leaves: it keeps the attempts already spent. */
 const keepAttempts = (e: unknown) => e instanceof JobDeferred ? new JobDeferred(e.availableAt, e.payload, true) : e;
 /**
@@ -84,6 +90,7 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
     // The breaker deferred it: nothing left, so the fence's count of attempts goes back down.
     if (e instanceof JobDeferred) { await runtime.db.execute(sql`UPDATE mail_action_attempts SET state='retry',attempts=greatest(attempts-1,0) WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`); throw keepAttempts(e); }
     if (e instanceof ApiError) { await mark('retry'); throw e.retryable ? new ActionRetry(e.code) : e; }
+    if (notSent(e)) { await mark('retry'); throw new ActionRetry('DESTINATION_UNREACHABLE'); }
     await mark('unknown');
     if (replaySafe(fence.policy)) throw new ActionRetry('ACTION_UNKNOWN');
     throw new ApiError(422, 'ACTION_UNKNOWN', 'No response; this endpoint does not replay unknown outcomes.');
