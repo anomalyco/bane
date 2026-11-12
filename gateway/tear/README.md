@@ -41,11 +41,18 @@ cargo run --release -- edges 3 --remote                    # Remote with faults,
 cargo run --release -- random 200000 40 --seed "$(date +%Y%m%d)"
 cargo run --release -- random 20000 30 --remote --split --sessions 3 --seed "$(date +%Y%m%d)"
 cargo run --release -- random 20000 30 --remote --shared-kid --sessions 3
+cargo run --release -- random 300 30 --remote --bulk               # 1,000-UID batches, mid-command faults
+cargo run --release -- random 5000 30 --remote --uploads --sessions 4 --shared-kid   # upload lanes
 cargo run --release -- smtp 50000 40 && cargo run --release -- smtp 5000 40 --remote
 cargo run --release -- dovecot 1000 25                     # Docker; about 5 min (amd64 emulation on a Mac)
 ```
 
-`--seconds N` bounds any run by time. `--no-silent`, `--no-faults`, `--no-folders` and
+`--bulk` adds 1,000-message deliveries and `COPY/MOVE 1:*`, so STORE, COPY, MOVE and EXPUNGE
+run in several batches; with faults, a batch fails (`fail-batch`), the process dies after one
+(`crash-batch`), another writer expunges between two (`race-batch`) or a response is lost
+(`lose-response`). `--uploads` splits APPEND into `append-begin`/`append-end` so up to four
+sessions hold upload reservations against the credential, inbox and workspace lanes; the
+2 s reservation timeout runs on a paused clock. `--seconds N` bounds any run by time. `--no-silent`, `--no-faults`, `--no-folders` and
 `--minimal` shrink the alphabet (the `.SILENT` control from the spike is `--no-silent`).
 
 ## Reading a failure
@@ -65,6 +72,7 @@ transcript (synthetic or redacted, never real mail) replays with `transcript FIL
 | A refused APPEND (TRYCREATE) kept its spool and upload reservation; the credential's next APPEND could not get one | 3 steps | Release APPEND spool when command handling refuses its destination (upstream, concurrently); Test that a refused APPEND releases its upload reservation |
 | A command whose update found the selected folder deleted sent `* BYE`, then a tagged OK, and kept the connection open | 4 steps | Close the session after a command whose update finds the folder gone |
 | SMTP: a clock stepping back across midnight reopened the Memory sink's day and month caps | 13 steps | Keep SMTP cap windows from moving backwards on a clock step |
+| `STORE 1:*`/`COPY 1:*` over 1,000 UIDs answered `NO [LIMIT]` ("mark all read", "select all → delete", "empty Trash"), and a plain EXPUNGE expunged a whole folder in one statement | 5 steps (`--bulk`) | Run large protocol mutations in 1,000-UID batches inside one command; Refresh each thread once per protocol mutation batch |
 
 ## Documented differences and limits
 
@@ -79,6 +87,11 @@ transcript (synthetic or redacted, never real mail) replays with `transcript FIL
   follows the RFC here; 299 of 300 conformance traces match on Dovecot, all 300 on the gateway.
 - A slot announced by EXISTS whose FETCH then finds it gone stays unknown to the client until
   the next update (RFC 2180 4.1); the model tracks those slots instead of expecting data.
+- A COPY retried after a process crash runs on a new connection with a new ticket and copies
+  again (at-least-once across a crash; IMAP has no client idempotency key). On the same
+  connection, a retry replays every committed batch.
+- A Remote EXPUNGE (and CLOSE) names the UIDs its snapshot holds; a message another session
+  copied in, `\Deleted`, after that snapshot waits for the next EXPUNGE.
 - Not reached: the 5 s store deadline and 1 s admission sleep (wall clock inside the
   adapter), 2048-row pages and 5000-UID batches (too slow per step; covered by e2e), two
   gateway versions at once.

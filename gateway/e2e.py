@@ -776,17 +776,26 @@ def large_folder(tmp):
             assert ok(sibling.select('Capacity'))==[b'50001']
             assert ok(sibling.uid('FETCH','50001','(UID FLAGS)'))
         ok(c.create('CopyRetry'))
-        for _ in range(2):
-            assert c.uid('COPY','1:*','CopyRetry')[0]=='NO'
-            assert c.uid('STORE','1:*','+FLAGS.SILENT','(\\Flagged)')[0]=='NO'
-        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='0'
-        assert ok(c.uid('SEARCH',None,'FLAGGED'))==[b'']
+        c.sock.settimeout(180)
+        # Over 1,000 UIDs run in 1,000-UID batches inside one command (real clients send
+        # "select all" as one 1:* and do not split on NO). Each batch is one bounded statement.
+        mutations=lambda:[float(x) for x in sql("SELECT coalesce(sum(calls),0)||' '||coalesce(max(max_exec_time),0) FROM pg_stat_statements WHERE query LIKE '%mailgw_mutate(%' OR query LIKE '%mailgw_copy_once(%'",'fixture_observer').split()]
+        def batched(name,fn,statements,budget):
+            n0,_=mutations();base=rss();start=time.perf_counter();fn();elapsed=time.perf_counter()-start
+            n1,slowest=mutations();used=int(n1-n0);grown=(rss()-base)/1024
+            print(f'50k {name}: {elapsed:.2f}s, {used} batch statements, slowest {slowest:.0f} ms, RSS +{grown:.1f} MiB',flush=True)
+            assert used==statements,(name,used);assert elapsed<budget and slowest<5000 and grown<96,(name,elapsed,slowest,grown)
+        batched('COPY 1:*',lambda:ok(c.uid('COPY','1:*','CopyRetry')),51,60)
+        batched('STORE 1:* flagged',lambda:ok(c.uid('STORE','1:*','+FLAGS.SILENT','(\\Flagged)')),51,60)
+        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='50001'
+        assert len(ok(c.uid('SEARCH',None,'FLAGGED'))[0].split())==50001
         # Replay the actual ticket from a successful bounded command (as after
         # a lost private RPC response). No second allocation; same COPYUID.
         ok(c.uid('COPY','1','CopyRetry'))
         replay=sql("""SELECT mailgw_copy_once('default','mbx_fixture',r.kid,src.role,dst.role,ARRAY[1]::bigint[],r.nonce,r.issued,r.request_hash)=r.answer
-        FROM mailgw_copy_receipts r,inbox_folders src,inbox_folders dst WHERE r.kid='app_fixture' AND src.custom_path='Capacity' AND dst.custom_path='CopyRetry' AND r.answer->>'validity'=dst.uid_validity::text""",'fixture_observer');assert replay=='t',replay
-        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='1'
+        FROM mailgw_copy_receipts r,inbox_folders src,inbox_folders dst WHERE r.kid='app_fixture' AND src.custom_path='Capacity' AND dst.custom_path='CopyRetry' AND r.answer->>'validity'=dst.uid_validity::text
+        AND jsonb_array_length(r.answer->'pairs')=1 AND r.answer->'pairs'->0->>0='1'""",'fixture_observer');assert replay=='t',replay
+        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='50002'
         for name,op,count in [
             ('header sync',lambda:sum(isinstance(v,tuple) and b'From: alias@example.invalid' in v[1] for v in ok(c.uid('FETCH','1:*','(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])'))),50001),
             ('compound',lambda:len(ok(c.uid('SEARCH',None,'OR','FROM','alias','SUBJECT','none'))[0].split()),50001),
@@ -794,6 +803,28 @@ def large_folder(tmp):
             ('text',lambda:len(ok(c.uid('SEARCH',None,'TEXT','dot'))[0].split()),50001),
         ]:
             start=time.perf_counter();assert op()==count,name;elapsed=time.perf_counter()-start;print(f'50k {name}: {elapsed:.2f}s',flush=True);assert elapsed<12
+        # "Mark all read" and "empty Trash" on 50k folders: one command each, batched.
+        ok(c.uid('STORE','1:*','-FLAGS.SILENT','(\\Seen)'))
+        def mark_all_read():
+            assert sum(b'\\Seen' in v for v in ok(c.uid('STORE','1:*','+FLAGS','(\\Seen)')) if isinstance(v,bytes))==50001
+        # Another tenant's inbox stays responsive while the batches run (they yield between
+        # batches and hold the inbox fence one statement at a time).
+        with connect(p['IMAPS'],'load0@example.invalid',PASS+'0') as n,ThreadPoolExecutor(max_workers=1) as pool:
+            ok(n.select('INBOX'));job=pool.submit(batched,'mark all read',mark_all_read,51,60);other=[]
+            while not job.done():
+                start=time.perf_counter();ok(n.select('INBOX'));other.append((time.perf_counter()-start)*1000);time.sleep(.05)
+            job.result();p95=sorted(other)[int(.95*(len(other)-1))]
+            print(f'50k mark all read: other tenant SELECT p95 {p95:.1f} ms over {len(other)} samples',flush=True);assert p95<250
+        assert ok(c.uid('SEARCH',None,'UNSEEN'))==[b'']
+        assert ok(c.select('CopyRetry'))==[b'50002']
+        batched('MOVE 1:* to Trash',lambda:ok(c.uid('MOVE','1:*','Trash')),51,60)
+        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='0'
+        assert ok(c.select('Trash'))==[b'50002']
+        batched('empty Trash: mark deleted',lambda:ok(c.uid('STORE','1:*','+FLAGS.SILENT','(\\Deleted)')),51,60)
+        batched('empty Trash: EXPUNGE',lambda:ok(c.expunge()),51,60)
+        assert sql("SELECT total FROM inbox_folders WHERE inbox_id='mbx_fixture' AND role='trash'",'fixture_observer')=='0'
+        assert ok(c.select('Capacity'))==[b'50001']
+        c.sock.settimeout(25)
         # Two other active inboxes select ordinary large folders and read metadata
         # concurrently. Assert both the measured footprint and the victim's latency.
         with contextlib.ExitStack() as clients,ThreadPoolExecutor(max_workers=2) as pool:

@@ -52,6 +52,8 @@ jobs:
           run random 20000 30 --remote --seed "$seed"
           run random 20000 30 --remote --shared-kid --sessions 3 --seed "$seed"
           run random 20000 30 --remote --split --sessions 3 --seed "$seed"
+          run random 2000 30 --remote --bulk --seed "$seed"
+          run random 20000 30 --remote --uploads --sessions 4 --shared-kid --seed "$seed"
           run smtp 50000 40 --seed "$seed"
           run smtp 5000 40 --remote --seed "$seed"
           run dovecot 1000 25 --seed "$seed"
