@@ -47,7 +47,7 @@ psql postgresql://…@127.0.0.1:5432/tear_admission -c "DO \$\$ BEGIN EXECUTE fo
 export TEAR_DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_admission
 ```
 
-## Pull-request run (about 35 s after the build)
+## Pull-request run (about 20–35 s after the build)
 
 ```sh
 cd api/tear/admission && cargo run --release -- ci
@@ -66,11 +66,11 @@ Pass `--seed N` to rotate the walks.
 | Command | Size | Time (M-series Mac) |
 |---|---:|---:|
 | `cargo run --release -- edges 3 --profile recv` | 3,364 edges, 9,662 steps | about 26 s |
-| `cargo run --release -- edges 4 --profile recv` | 20,992 edges, 80,174 steps | about 3 min |
+| `cargo run --release -- edges 4 --profile recv` | 20,992 edges, 80,174 steps | about 2 min |
 | `cargo run --release -- edges 2 --profile send` | 2,399 edges, 4,738 steps | about 30 s |
-| `cargo run --release -- edges 3 --profile send --budget 600` | 46,794 edges, 137,923 steps | about 10 min |
+| `cargo run --release -- edges 3 --profile send --budget 600` | 46,794 edges, 137,923 steps | about 10 min (8 min covers 84%) |
 | `cargo run --release -- edges 5 --profile upload` | 1,221 edges, 5,434 steps | about 10 s |
-| `cargo run --release -- random 2000 30 --profile P --seed $(date +%s)` | 60,000 steps | 1–3 min |
+| `cargo run --release -- random 2000 30 --profile P --seed $(date +%s)` | 60,000 steps | 1–2 min |
 
 - `space N --profile P` prints the core graph's size per depth without touching the database.
 - `boundaries` replays only the bug witnesses and boundary traces.
