@@ -41,7 +41,33 @@ Sending and receiving checkpoint independently. Pulumi provisions the mail contr
    done
    ```
 
-   Expected: `true` twice. The deploy role's other inline policy, `bane-deploy`, is [infra/aws-shared/deploy-role-policy.json](../infra/aws-shared/deploy-role-policy.json): the SES reads, the `bane.mx` identities, the `bane-runtime` user and its three policies, and the two mail-gateway roles. Apply it the same way (`--policy-name bane-deploy`, substituting only `YOUR_AWS_ACCOUNT_ID`) whenever it changes, and compare the live document with the file afterwards. The role may create the two gateway roles and write the execution role's inline policy, but no other role or policy, and it may not change any role's trust policy, attach managed policies or set permissions boundaries; a change to the gateway trust policy in `infra/pulumi/mail-gateway.ts` is applied by an administrator before the deploy. The acceptance suite checks the document for those bounds.
+   Expected: `true` twice. The rest of what `bane-deploy` may do is checked in next to that file and applied the same way, in this order, after the receiving grant (the stack cannot update the gateway roles until the boundary exists and the deploy policy allows attaching it):
+
+   ```bash
+   set -euo pipefail
+   export AWS_PAGER=''
+   file=$(mktemp); trap 'rm -f "$file"' EXIT
+   render() { sed -e "s/YOUR_AWS_ACCOUNT_ID/$account/g" -e "s/YOUR_STAGE/$stage/g" "infra/aws-shared/$1" >"$file"; }
+   for stage in dev production; do
+     case "$stage" in dev) account=905840579680;; production) account=009882681002;; esac
+     profile=bane-$stage
+     test "$(aws --profile "$profile" sts get-caller-identity --query Account --output text)" = "$account"
+     # 1. The gateway boundary, once; later changes are a new default version by an administrator, never by CI.
+     render gateway-boundary-policy.json
+     aws --profile "$profile" iam create-policy --policy-name bane-gateway-boundary --policy-document "file://$file" --description 'Ceiling for the bane-mail-gateway task and execution roles' >/dev/null
+     # 2. The deploy role's own inline policy.
+     render deploy-role-policy.json
+     aws --profile "$profile" iam put-role-policy --role-name bane-deploy --policy-name bane-deploy --policy-document "file://$file"
+     aws --profile "$profile" iam get-role-policy --role-name bane-deploy --policy-name bane-deploy --query PolicyDocument --output json | jq -e --slurpfile expected "$file" '. == $expected[0]'
+     # 3. and 4. The two attached gateway policies: a new default version each.
+     for name in resources network; do
+       render "gateway-deploy-$name-policy.json"
+       aws --profile "$profile" iam create-policy-version --policy-arn "arn:aws:iam::$account:policy/deploy/bane-gateway-$name" --policy-document "file://$file" --set-as-default >/dev/null
+     done
+   done
+   ```
+
+   Expected: `true` twice again. On the next deploy Pulumi attaches `bane-gateway-boundary` to `bane-mail-gateway-task` and `bane-mail-gateway-execution`; until it does, keep that deploy from running against an account without the boundary. The deploy role may create those two roles and write the execution role's inline policy only with that boundary attached; it cannot remove or replace it, delete the roles, change any trust policy, attach managed policies, or edit `bane-gateway-boundary`, `bane-runtime-boundary` or `bane-operator`. A change to the gateway trust policy in `infra/pulumi/mail-gateway.ts` is applied by an administrator before the deploy. The acceptance suite evaluates the four deploy documents together with both boundaries.
 
    Verify the existing runtime **permissions boundary** permits the new bucket reads (`s3:GetBucketPolicy`, `s3:GetBucketPublicAccessBlock`, `s3:GetLifecycleConfiguration`) and the read-only topic/subscription calls. If the boundary blocks them, amend that boundary on the same resource/region, not the runtime write grants. Only an operator may [bootstrap the reviewed empty Ohio set on a fresh account](../infra/aws-shared/README.md); never replace a set serving mail.
 

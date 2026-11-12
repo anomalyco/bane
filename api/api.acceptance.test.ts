@@ -87,34 +87,90 @@ test('Cloudflare routing: every API route reaches the Worker before static asset
     assert.deepEqual(paths.filter(p=>!first(p)),[],`${file} serves these API routes from static assets`);
   }
 });
-test('deploy role documents: the Pulumi role manages only the runtime user, its policies and the two gateway roles, and cannot widen any role',async()=>{
-  const account='905840579680',render=async(file:string)=>JSON.parse((await readFile(new URL(`../infra/aws-shared/${file}`,import.meta.url),'utf8')).replaceAll('YOUR_AWS_ACCOUNT_ID',account).replaceAll('YOUR_STAGE_ORIGIN','https://dev.bane.mx')) as {Statement:IamStatement[]};
-  const statements=[...(await render('deploy-role-policy.json')).Statement,...(await render('receiving-deploy-policy.json')).Statement];
-  const role=(name:string)=>`arn:aws:iam::${account}:role/${name}`,policy=(name:string)=>`arn:aws:iam::${account}:policy/${name}`;
-  const allows=(action:string,resource:string,context:Record<string,string|string[]>={})=>iamAllows(statements,action,resource,context);
-  // The gateway roles: create them, and write an inline policy on the execution role only.
-  for(const name of ['bane-mail-gateway-task','bane-mail-gateway-execution']){
-    assert.equal(allows('iam:CreateRole',role(name)),true,name);
+test('deploy role documents: every principal the deploy role can create or change is boundary-limited, and no IAM privilege-escalation path is open',async()=>{
+  const account='905840579680',stage='dev',arn=(service:string,rest:string)=>`arn:aws:${service}::${account}:${rest}`;
+  const render=async(file:string)=>JSON.parse((await readFile(new URL(`../infra/aws-shared/${file}`,import.meta.url),'utf8')).replaceAll('YOUR_AWS_ACCOUNT_ID',account).replaceAll('YOUR_STAGE',stage).replaceAll('YOUR_STAGE_ORIGIN','https://dev.bane.mx')) as {Statement:IamStatement[]};
+  // The deploy role's complete permission set: its inline policies plus the two attached gateway policies.
+  const deploy=(await Promise.all(['deploy-role-policy.json','receiving-deploy-policy.json','gateway-deploy-resources-policy.json','gateway-deploy-network-policy.json'].map(render))).flatMap(d=>d.Statement);
+  const gatewayBoundary=(await render('gateway-boundary-policy.json')).Statement;
+  const role=(name:string)=>arn('iam',`role/${name}`),user=(name:string)=>arn('iam',`user/${name}`),policy=(name:string)=>arn('iam',`policy/${name}`),ohio=(service:string,rest:string)=>`arn:aws:${service}:us-east-2:${account}:${rest}`;
+  const boundary={gateway:policy('bane-gateway-boundary'),runtime:policy('bane-runtime-boundary')},admin='arn:aws:iam::aws:policy/AdministratorAccess';
+  const allows=(action:string,resource:string,context:Record<string,string|string[]>={})=>iamAllows(deploy,action,resource,context);
+  const gatewayRoles=['bane-mail-gateway-task','bane-mail-gateway-execution'];
+  // 1. What the Pulumi program needs, exactly: the gateway roles under their boundary, the execution role's
+  //    inline policy while that boundary is attached, ECS passing, the runtime user under its boundary.
+  for(const name of gatewayRoles){
+    assert.equal(allows('iam:CreateRole',role(name),{'iam:PermissionsBoundary':boundary.gateway}),true,name);
+    assert.equal(allows('iam:PutRolePermissionsBoundary',role(name),{'iam:PermissionsBoundary':boundary.gateway}),true,name);
     assert.equal(allows('iam:PassRole',role(name),{'iam:PassedToService':'ecs-tasks.amazonaws.com'}),true,name);
-    assert.equal(allows('iam:PassRole',role(name),{'iam:PassedToService':'lambda.amazonaws.com'}),false,name);
-    for(const action of ['iam:AttachRolePolicy','iam:DetachRolePolicy','iam:UpdateAssumeRolePolicy','iam:PutRolePermissionsBoundary','iam:DeleteRolePermissionsBoundary'])
-      assert.equal(allows(action,role(name),{'iam:PolicyARN':'arn:aws:iam::aws:policy/AdministratorAccess'}),false,`${action} ${name}`);
+    for(const action of ['iam:GetRole','iam:TagRole','iam:ListRolePolicies','iam:GetRolePolicy','iam:ListAttachedRolePolicies']) assert.equal(allows(action,role(name)),true,`${action} ${name}`);
   }
-  assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-execution')),true);
-  assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-task')),false,'the task role stays empty');
-  // No other role, user or policy: a deploy cannot mint itself a new principal or rewrite the operator's.
-  for(const name of ['bane-backdoor','bane-deploy','bane-runtime-escalation','OrganizationAccountAccessRole']) for(const action of ['iam:CreateRole','iam:PutRolePolicy','iam:AttachRolePolicy','iam:UpdateAssumeRolePolicy','iam:DeleteRole'])
-    assert.equal(allows(action,role(name),{'iam:PolicyARN':'arn:aws:iam::aws:policy/AdministratorAccess'}),false,`${action} ${name}`);
-  for(const name of ['bane-runtime-boundary','bane-operator','bane-gateway-resources','deploy/bane-gateway-network']) for(const action of ['iam:CreatePolicyVersion','iam:SetDefaultPolicyVersion','iam:DeletePolicy','iam:CreatePolicy'])
-    assert.equal(allows(action,policy(name)),false,`${action} ${name}`);
+  assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-execution'),{'iam:PermissionsBoundary':boundary.gateway}),true);
+  assert.equal(allows('iam:DeleteRolePolicy',role('bane-mail-gateway-execution'),{'iam:PermissionsBoundary':boundary.gateway}),true);
   for(const name of ['bane-runtime','bane-runtime-ohio','bane-runtime-trusted']) assert.equal(allows('iam:CreatePolicyVersion',policy(name)),true,name);
-  assert.equal(allows('iam:CreateUser',`arn:aws:iam::${account}:user/bane-runtime`,{'iam:PermissionsBoundary':policy('bane-runtime-boundary')}),true);
-  assert.equal(allows('iam:CreateUser',`arn:aws:iam::${account}:user/bane-runtime`,{'iam:PermissionsBoundary':policy('other')}),false);
-  assert.equal(allows('iam:CreateUser',`arn:aws:iam::${account}:user/bane-other`,{'iam:PermissionsBoundary':policy('bane-runtime-boundary')}),false);
-  for(const action of ['iam:CreateLoginProfile','iam:CreateOpenIDConnectProvider','iam:CreateSAMLProvider','iam:CreateServiceLinkedRole']) assert.equal(allows(action,'*'),false,action);
-  // Receiving: the rule set stays operator-activated.
+  assert.equal(allows('iam:CreateUser',user('bane-runtime'),{'iam:PermissionsBoundary':boundary.runtime}),true);
+  assert.equal(allows('iam:PutUserPolicy',user('bane-runtime'),{'iam:PermissionsBoundary':boundary.runtime}),true);
+  for(const action of ['iam:CreateAccessKey','iam:DeleteAccessKey','iam:ListAccessKeys','iam:GetUser']) assert.equal(allows(action,user('bane-runtime')),true,action);
+  assert.equal(allows('ecs:RegisterTaskDefinition',ohio('ecs','task-definition/bane-mail-gateway:9')),true);
+  assert.equal(allows('ecs:UpdateService',ohio('ecs','service/bane-mail-gateway/bane-mail-gateway')),true);
   assert.equal(allows('ses:CreateReceiptRule','*',{'aws:RequestedRegion':'us-east-2'}),true);
-  for(const action of ['ses:SetActiveReceiptRuleSet','ses:CreateReceiptRuleSet','ses:DeleteReceiptRuleSet','ses:DeleteReceiptRule']) assert.equal(allows(action,'*',{'aws:RequestedRegion':'us-east-2'}),false,action);
+  // 2. The two gateway roles exist only under their boundary: no creation without it or with another one, no
+  //    inline policy on a role that lacks it (a missing key fails StringEquals and matches StringNotEquals),
+  //    never a managed policy, a trust change, a deletion (so no recreation) or a boundary removal.
+  for(const name of gatewayRoles){
+    for(const ctx of [{},{'iam:PermissionsBoundary':boundary.runtime},{'iam:PermissionsBoundary':admin}] as Record<string,string>[]){
+      assert.equal(allows('iam:CreateRole',role(name),ctx),false,`CreateRole ${name} ${JSON.stringify(ctx)}`);
+      assert.equal(allows('iam:PutRolePermissionsBoundary',role(name),ctx),false,`PutRolePermissionsBoundary ${name} ${JSON.stringify(ctx)}`);
+      assert.equal(allows('iam:PutRolePolicy',role(name),ctx),false,`PutRolePolicy ${name} ${JSON.stringify(ctx)}`);
+    }
+    for(const action of ['iam:AttachRolePolicy','iam:DetachRolePolicy','iam:UpdateAssumeRolePolicy','iam:UpdateRole','iam:UpdateRoleDescription','iam:DeleteRole','iam:DeleteRolePermissionsBoundary'])
+      assert.equal(allows(action,role(name),{'iam:PermissionsBoundary':boundary.gateway,'iam:PolicyARN':admin}),false,`${action} ${name}`);
+    assert.equal(allows('iam:PassRole',role(name),{'iam:PassedToService':'lambda.amazonaws.com'}),false,name);
+  }
+  assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-task'),{'iam:PermissionsBoundary':boundary.gateway}),false,'the task role stays empty');
+  // 3. No other role, user, group, policy or trust anchor, and no self-service on the boundaries.
+  for(const name of ['bane-backdoor','bane-deploy','bane-runtime-escalation','OrganizationAccountAccessRole']) for(const action of ['iam:CreateRole','iam:PutRolePolicy','iam:AttachRolePolicy','iam:UpdateAssumeRolePolicy','iam:DeleteRole','iam:PutRolePermissionsBoundary'])
+    assert.equal(allows(action,role(name),{'iam:PermissionsBoundary':boundary.gateway,'iam:PolicyARN':admin}),false,`${action} ${name}`);
+  for(const name of ['bane-gateway-boundary','bane-runtime-boundary','bane-operator','deploy/bane-gateway-resources','deploy/bane-gateway-network','bane-anything']) for(const action of ['iam:CreatePolicyVersion','iam:SetDefaultPolicyVersion','iam:DeletePolicy','iam:DeletePolicyVersion','iam:CreatePolicy'])
+    assert.equal(allows(action,policy(name)),false,`${action} ${name}`);
+  for(const ctx of [{},{'iam:PermissionsBoundary':boundary.gateway}] as Record<string,string>[]) for(const action of ['iam:CreateUser','iam:PutUserPermissionsBoundary','iam:PutUserPolicy','iam:AttachUserPolicy'])
+    assert.equal(allows(action,user('bane-runtime'),{...ctx,'iam:PolicyARN':admin}),false,`${action} bane-runtime ${JSON.stringify(ctx)}`);
+  for(const action of ['iam:CreateUser','iam:CreateAccessKey','iam:AttachUserPolicy','iam:PutUserPolicy','iam:CreateLoginProfile','iam:UpdateLoginProfile','iam:DeleteUserPermissionsBoundary'])
+    assert.equal(allows(action,user('bane-other'),{'iam:PermissionsBoundary':boundary.runtime,'iam:PolicyARN':admin}),false,action);
+  assert.equal(allows('iam:DeleteUserPermissionsBoundary',user('bane-runtime')),false);
+  for(const action of ['iam:CreateGroup','iam:AttachGroupPolicy','iam:PutGroupPolicy','iam:AddUserToGroup','iam:CreateLoginProfile','iam:CreateOpenIDConnectProvider','iam:CreateSAMLProvider','iam:CreateServiceLinkedRole','iam:CreateInstanceProfile','iam:SetDefaultPolicyVersion','sts:AssumeRole'])
+    assert.equal(allows(action,'*'),false,action);
+  // 4. The rest of the privilege-escalation catalog: nothing passes a role to another service or runs code
+  //    under one, nothing reads secret values or mail, and the receiving set stays operator-activated.
+  for(const [action,resource,context] of [
+    ['iam:PassRole',role('bane-mail-gateway-execution'),{'iam:PassedToService':'ec2.amazonaws.com'}],['iam:PassRole',role('bane-mail-gateway-task'),{'iam:PassedToService':'cloudformation.amazonaws.com'}],
+    ['lambda:CreateFunction','*',{}],['lambda:UpdateFunctionCode','*',{}],['lambda:AddPermission','*',{}],['ec2:RunInstances','*',{}],['cloudformation:CreateStack','*',{}],['glue:CreateDevEndpoint','*',{}],['glue:UpdateDevEndpoint','*',{}],
+    ['datapipeline:CreatePipeline','*',{}],['sagemaker:CreateNotebookInstance','*',{}],['codebuild:CreateProject','*',{}],['ssm:SendCommand','*',{}],['ssm:StartSession','*',{}],['ec2-instance-connect:SendSSHPublicKey','*',{}],
+    ['ecs:RunTask','*',{}],['ecs:StartTask','*',{}],['ecs:ExecuteCommand','*',{}],['sts:AssumeRole',role('bane-backdoor'),{}],['sts:GetFederationToken','*',{}],
+    ['secretsmanager:GetSecretValue',ohio('secretsmanager',`secret:bane/${stage}/mail-gateway/db-url-abcdef`),{}],['secretsmanager:PutSecretValue',ohio('secretsmanager',`secret:bane/${stage}/mail-gateway/api-token-abcdef`),{}],
+    ['secretsmanager:GetSecretValue',`arn:aws:secretsmanager:us-east-1:604439173067:secret:bane/${stage}/DATABASE_URL-abcdef`,{}],
+    ['s3:GetObject',`arn:aws:s3:::bane-${account}-mail-us-east-2/workspaces/ws_00000000000000000000000000000000/raw/x.eml`,{'aws:RequestedRegion':'us-east-2','s3:ResourceAccount':account}],
+    ['s3:PutObject',`arn:aws:s3:::bane-${account}-mail-us-east-2/staging/x`,{'aws:RequestedRegion':'us-east-2','s3:ResourceAccount':account}],['s3:DeleteBucket',`arn:aws:s3:::bane-${account}-mail-us-east-2`,{'aws:RequestedRegion':'us-east-2','s3:ResourceAccount':account}],
+    ['ses:SetActiveReceiptRuleSet','*',{'aws:RequestedRegion':'us-east-2'}],['ses:CreateReceiptRuleSet','*',{'aws:RequestedRegion':'us-east-2'}],['ses:DeleteReceiptRuleSet','*',{'aws:RequestedRegion':'us-east-2'}],['ses:DeleteReceiptRule','*',{'aws:RequestedRegion':'us-east-2'}],
+    ['ses:SendEmail',ohio('ses','identity/bane.mx'),{}],['ses:CreateEmailIdentity',ohio('ses','identity/customer.example'),{}],['sns:Publish',ohio('sns','bane-inbound'),{}],
+    ['ecr:PutImage',ohio('ecr','repository/bane-mail-gateway'),{}],['logs:GetLogEvents',ohio('logs','log-group:/ecs/bane-mail-gateway:*'),{}],
+  ] as [string,string,Record<string,string>][]) assert.equal(allows(action,resource,context),false,`${action} ${resource}`);
+  // 5. The ceiling: a gateway role that somehow carried an unlimited inline policy still cannot act beyond the
+  //    boundary (effective permission = boundary AND identity), so RegisterTaskDefinition + PassRole leads nowhere.
+  const unlimited:IamStatement[]=[{Effect:'Allow',Action:'*',Resource:'*'}];
+  const effective=(action:string,resource:string,context:Record<string,string|string[]>={})=>iamAllows(gatewayBoundary,action,resource,context)&&iamAllows(unlimited,action,resource,context);
+  for(const [action,resource,context] of [
+    ['secretsmanager:GetSecretValue',ohio('secretsmanager',`secret:bane/${stage}/mail-gateway/db-url-85nCDD`),{}],['secretsmanager:GetSecretValue',ohio('secretsmanager',`secret:bane/${stage}/mail-gateway/tls-key-FGXaxS`),{}],
+    ['ecr:GetAuthorizationToken','*',{'aws:RequestedRegion':'us-east-2'}],['ecr:BatchGetImage',ohio('ecr','repository/bane-mail-gateway'),{}],['logs:PutLogEvents',ohio('logs','log-group:/ecs/bane-mail-gateway:log-stream:gateway/bane-mail-gateway/abc'),{}],
+  ] as [string,string,Record<string,string>][]) assert.equal(effective(action,resource,context),true,`${action} ${resource}`);
+  for(const [action,resource,context] of [
+    ['iam:CreateUser',user('x'),{}],['iam:AttachRolePolicy',role('bane-mail-gateway-execution'),{}],['iam:CreateAccessKey',user('bane-runtime'),{}],['sts:AssumeRole',role('bane-deploy'),{}],['sts:GetCallerIdentity','*',{}],
+    ['s3:GetObject',`arn:aws:s3:::bane-${account}-mail-us-east-2/workspaces/ws_00000000000000000000000000000000/raw/x.eml`,{'aws:RequestedRegion':'us-east-2'}],['s3:ListBucket',`arn:aws:s3:::bane-${account}-mail-us-east-2`,{}],
+    ['ses:SendEmail',ohio('ses','identity/bane.mx'),{}],['ses:UpdateReceiptRule','*',{}],['sns:Publish',ohio('sns','bane-inbound'),{}],['ecs:RegisterTaskDefinition','*',{}],['ecs:UpdateService','*',{}],['ecs:RunTask','*',{}],
+    ['secretsmanager:GetSecretValue',`arn:aws:secretsmanager:us-east-1:604439173067:secret:bane/${stage}/DATABASE_URL-abcdef`,{}],['secretsmanager:GetSecretValue',ohio('secretsmanager',`secret:bane/${stage==='dev'?'production':'dev'}/mail-gateway/db-url-abcdef`),{}],
+    ['secretsmanager:PutSecretValue',ohio('secretsmanager',`secret:bane/${stage}/mail-gateway/db-url-85nCDD`),{}],['ecr:GetAuthorizationToken','*',{'aws:RequestedRegion':'us-east-1'}],['ecr:BatchGetImage',ohio('ecr','repository/other'),{}],['ecr:PutImage',ohio('ecr','repository/bane-mail-gateway'),{}],
+    ['logs:PutLogEvents',ohio('logs','log-group:/other:log-stream:x'),{}],['logs:GetLogEvents',ohio('logs','log-group:/ecs/bane-mail-gateway:log-stream:gateway/bane-mail-gateway/abc'),{}],['ec2:DescribeInstances','*',{}],['lambda:CreateFunction','*',{}],
+  ] as [string,string,Record<string,string>][]) assert.equal(effective(action,resource,context),false,`${action} ${resource}`);
 });
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');

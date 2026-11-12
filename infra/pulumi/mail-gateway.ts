@@ -81,8 +81,11 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   const assumeRolePolicy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole",
     Principal: { Service: "ecs-tasks.amazonaws.com" }, Condition: { StringEquals: { "aws:SourceAccount": account },
       ArnLike: { "aws:SourceArn": `arn:aws:ecs:us-east-2:${account}:*` } } }] });
-  const task = new aws.iam.Role(`${name}-task`, { name: `${name}-task`, assumeRolePolicy, tags }, iamOpts);
-  const execution = new aws.iam.Role(`${name}-execution`, { name: `${name}-execution`, assumeRolePolicy, tags }, iamOpts);
+  // Operator-owned ceiling for both roles (infra/aws-shared/gateway-boundary-policy.json): the deploy
+  // role may create them and write the execution role's inline policy only with this boundary attached.
+  const permissionsBoundary = `arn:aws:iam::${account}:policy/bane-gateway-boundary`;
+  const task = new aws.iam.Role(`${name}-task`, { name: `${name}-task`, assumeRolePolicy, permissionsBoundary, tags }, iamOpts);
+  const execution = new aws.iam.Role(`${name}-execution`, { name: `${name}-execution`, assumeRolePolicy, permissionsBoundary, tags }, iamOpts);
   const executionAccess = new aws.iam.RolePolicy(`${name}-execution`, {
     name, role: execution.name,
     policy: pulumi.jsonStringify({ Version: "2012-10-17", Statement: [

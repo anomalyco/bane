@@ -1,0 +1,145 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "elasticloadbalancing:SetSecurityGroups",
+        "elasticloadbalancing:SetSubnets",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:ModifyListener",
+        "elasticloadbalancing:ModifyListenerAttributes",
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags"
+      ],
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-2:YOUR_AWS_ACCOUNT_ID:loadbalancer/net/bane-mail-gateway/*",
+        "arn:aws:elasticloadbalancing:us-east-2:YOUR_AWS_ACCOUNT_ID:listener/net/bane-mail-gateway/*/*",
+        "arn:aws:elasticloadbalancing:us-east-2:YOUR_AWS_ACCOUNT_ID:targetgroup/bane-mail-gateway-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:DescribeCapacityReservation",
+        "elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:DescribeListenerAttributes",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetGroupAttributes",
+        "elasticloadbalancing:DescribeTags",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeNetworkAcls",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-2"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:CreateSubnet",
+        "ec2:CreateRouteTable",
+        "ec2:CreateInternetGateway",
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": [
+        "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:vpc/*",
+        "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:subnet/*",
+        "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:route-table/*",
+        "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:internet-gateway/*",
+        "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/bane:purpose": "mail-gateway"
+        },
+        "StringLike": {
+          "aws:RequestTag/Name": "bane-mail-gateway-*"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSubnet",
+        "ec2:CreateRouteTable",
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:vpc/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/bane:purpose": "mail-gateway"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "CreateVpc",
+            "CreateSubnet",
+            "CreateRouteTable",
+            "CreateInternetGateway",
+            "CreateSecurityGroup"
+          ],
+          "aws:RequestTag/bane:purpose": "mail-gateway"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVpcAttribute",
+        "ec2:ModifyVpcAttribute",
+        "ec2:ModifySubnetAttribute",
+        "ec2:AttachInternetGateway",
+        "ec2:AssociateRouteTable",
+        "ec2:ReplaceRouteTableAssociation",
+        "ec2:CreateRoute",
+        "ec2:ReplaceRoute",
+        "ec2:DeleteRoute",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/bane:purpose": "mail-gateway"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:YOUR_AWS_ACCOUNT_ID:security-group-rule/*"
+    }
+  ]
+}

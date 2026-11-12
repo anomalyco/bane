@@ -4,17 +4,26 @@
     {
       "Sid": "SesRead",
       "Effect": "Allow",
-      "Action": ["ses:Describe*", "ses:List*", "ses:Get*"],
+      "Action": [
+        "ses:Describe*",
+        "ses:List*",
+        "ses:Get*"
+      ],
       "Resource": "*"
     },
     {
       "Sid": "SesBaneIdentities",
       "Effect": "Allow",
       "Action": [
-        "ses:CreateEmailIdentity", "ses:DeleteEmailIdentity", "ses:GetEmailIdentity",
-        "ses:PutEmailIdentityMailFromAttributes", "ses:PutEmailIdentityDkimAttributes",
-        "ses:PutEmailIdentityFeedbackAttributes", "ses:PutEmailIdentityConfigurationSetAttributes",
-        "ses:TagResource", "ses:UntagResource"
+        "ses:CreateEmailIdentity",
+        "ses:DeleteEmailIdentity",
+        "ses:GetEmailIdentity",
+        "ses:PutEmailIdentityMailFromAttributes",
+        "ses:PutEmailIdentityDkimAttributes",
+        "ses:PutEmailIdentityFeedbackAttributes",
+        "ses:PutEmailIdentityConfigurationSetAttributes",
+        "ses:TagResource",
+        "ses:UntagResource"
       ],
       "Resource": [
         "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/bane.mx",
@@ -27,26 +36,50 @@
       "Sid": "RuntimeUser",
       "Effect": "Allow",
       "Action": [
-        "iam:GetUser", "iam:TagUser", "iam:UntagUser", "iam:DeleteUser",
-        "iam:ListAttachedUserPolicies", "iam:ListUserPolicies", "iam:GetUserPolicy", "iam:PutUserPolicy", "iam:DeleteUserPolicy",
-        "iam:AttachUserPolicy", "iam:DetachUserPolicy",
-        "iam:CreateAccessKey", "iam:DeleteAccessKey", "iam:ListAccessKeys", "iam:UpdateAccessKey"
+        "iam:GetUser",
+        "iam:TagUser",
+        "iam:UntagUser",
+        "iam:DeleteUser",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListUserPolicies",
+        "iam:GetUserPolicy",
+        "iam:PutUserPolicy",
+        "iam:DeleteUserPolicy",
+        "iam:AttachUserPolicy",
+        "iam:DetachUserPolicy",
+        "iam:CreateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:ListAccessKeys",
+        "iam:UpdateAccessKey"
       ],
       "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:user/bane-runtime"
     },
     {
       "Sid": "RuntimeUserWithBoundary",
       "Effect": "Allow",
-      "Action": ["iam:CreateUser", "iam:PutUserPermissionsBoundary"],
+      "Action": [
+        "iam:CreateUser",
+        "iam:PutUserPermissionsBoundary"
+      ],
       "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:user/bane-runtime",
-      "Condition": {"StringEquals": {"iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary"}}
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary"
+        }
+      }
     },
     {
       "Sid": "RuntimePolicies",
       "Effect": "Allow",
       "Action": [
-        "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicy", "iam:DeletePolicyVersion",
-        "iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:TagPolicy"
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:TagPolicy"
       ],
       "Resource": [
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime",
@@ -55,11 +88,17 @@
       ]
     },
     {
-      "Sid": "GatewayRoles",
+      "Sid": "GatewayRolesRead",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:TagRole", "iam:UntagRole", "iam:ListRoleTags",
-        "iam:ListRolePolicies", "iam:GetRolePolicy", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole"
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRoleTags",
+        "iam:ListRolePolicies",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
       ],
       "Resource": [
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
@@ -67,10 +106,35 @@
       ]
     },
     {
-      "Sid": "GatewayExecutionPolicy",
+      "Sid": "GatewayRolesWithBoundary",
       "Effect": "Allow",
-      "Action": ["iam:PutRolePolicy", "iam:DeleteRolePolicy"],
-      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "GatewayExecutionPolicyWithinBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
+        }
+      }
     },
     {
       "Sid": "PassToEcs",
@@ -80,7 +144,11 @@
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
       ],
-      "Condition": {"StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}}
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
     },
     {
       "Sid": "ProtectDeployRole",
@@ -91,26 +159,90 @@
     {
       "Sid": "ProtectOperatorPolicies",
       "Effect": "Deny",
-      "Action": ["iam:CreatePolicy*", "iam:DeletePolicy*", "iam:SetDefaultPolicyVersion", "iam:TagPolicy", "iam:UntagPolicy"],
+      "Action": [
+        "iam:CreatePolicy*",
+        "iam:DeletePolicy*",
+        "iam:SetDefaultPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
       "Resource": [
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-operator",
-        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary"
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
       ]
     },
     {
-      "Sid": "NoRoleTrustOrManagedPolicyChanges",
+      "Sid": "NoPrincipalOrTrustChanges",
       "Effect": "Deny",
       "Action": [
-        "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:UpdateRoleDescription",
-        "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary", "iam:CreateServiceLinkedRole",
-        "iam:CreateLoginProfile", "iam:CreateOpenIDConnectProvider", "iam:CreateSAMLProvider", "iam:CreateGroup", "iam:CreateInstanceProfile"
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:DeleteRole",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:DeleteUserPermissionsBoundary",
+        "iam:CreateServiceLinkedRole",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:CreateSAMLProvider",
+        "iam:CreateGroup",
+        "iam:AttachGroupPolicy",
+        "iam:PutGroupPolicy",
+        "iam:AddUserToGroup",
+        "iam:CreateInstanceProfile",
+        "iam:SetDefaultPolicyVersion",
+        "iam:CreateVirtualMFADevice",
+        "iam:DeactivateMFADevice",
+        "iam:UploadSSHPublicKey",
+        "iam:UploadServerCertificate",
+        "iam:CreateServiceSpecificCredential",
+        "iam:UpdateSSHPublicKey",
+        "sts:AssumeRole"
       ],
       "Resource": "*"
     },
     {
+      "Sid": "OnlyTheGatewayBoundaryOnRoles",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "OnlyTheRuntimeBoundaryOnUsers",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:PutUserPermissionsBoundary",
+        "iam:PutUserPolicy",
+        "iam:AttachUserPolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary"
+        }
+      }
+    },
+    {
       "Sid": "TaskRoleStaysEmpty",
       "Effect": "Deny",
-      "Action": ["iam:PutRolePolicy", "iam:DeleteRolePolicy"],
+      "Action": [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
       "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task"
     }
   ]
