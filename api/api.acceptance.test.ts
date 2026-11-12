@@ -7879,6 +7879,138 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
+    // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`, to=address();
+      const email=ok(await local('POST','/v1/emails/send',mail({to})),202), provider=unique('fixture-provider');
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,provider,topicArn]);
+      const item={topicArn,region:REGION,messageId:unique('sns'),message:{eventType:'Bounce',mail:{messageId:provider,sendingAccountId:account},bounce:{bounceType:'Permanent',bounceSubType:'General',bouncedRecipients:[{emailAddress:to}]}}};
+      // The SNS route without a queue opened the receipt for its recovery job.
+      await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+      const job={id:unique('job'),attempts:1,workspaceId:wid};
+      // The worker stores the event and status, then is evicted before its suppression transaction.
+      const dying={...runtime,db:new Proxy(runtime.db,{get:(target,key)=>key==='transaction'?async()=>{throw new Error('worker evicted');}:Reflect.get(target,key)})};
+      await assert.rejects(operationJobs['operation.ses']!(dying as typeof runtime,item,job));
+      assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE id=$1',[email.id])).rows,[{status:'bounced'}]);
+      // The queue delivers the same notification: it processes the open receipt, so it owns the suppression.
+      assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+      await operationJobs['operation.ses']!(runtime,item,{...job,attempts:2});
+      assert.deepEqual((await db.query('SELECT processed_at IS NOT NULL AS processed FROM operation_sns_receipts WHERE topic_arn=$1 AND message_id=$2',[topicArn,item.messageId])).rows,[{processed:true}]);
+      assert.deepEqual((await db.query('SELECT suppressed,suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,to.toLowerCase()])).rows,[{suppressed:true,suppression_reason:'hard_bounce'}]);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_email_events WHERE workspace_id=$1 AND external_id=$2',[wid,`${topicArn}:${item.messageId}`])).rows[0].n,1);
+    });
+  });
+
+  test('MX: a validation-suppressed recipient never outranks a delivery or bounce SES reported for the same email', async t => {
+    // tear witness (api/tear/ses --ext): accept e2, q d2, q v2.
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      const cases=(['Delivery','Bounce'] as const).flatMap(outcome=>(['batch','job'] as const).flatMap(path=>[false,true].map(validationFirst=>({outcome,path,validationFirst,kept:address(),dropped:address()}))));
+      const sent:Json[]=[];
+      for (const c of cases) sent.push(ok(await local('POST','/v1/emails/send',mail({to:c.kept,cc:[c.dropped]})),202));
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const feedback=(provider:string,kind:string,detail:Json)=>({topicArn,region:REGION,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:provider,sendingAccountId:account},[kind.toLowerCase()]:detail}});
+      for (const [i,{outcome,path,validationFirst,kept,dropped}] of cases.entries()) {
+        const email=sent[i]!, provider=unique('fixture-provider');
+        await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,provider,topicArn]);
+        const validation=feedback(provider,'Bounce',{bounceType:'Permanent',bounceSubType:'EmailValidationSuppressed',bouncedRecipients:[{emailAddress:dropped}]});
+        const other=outcome==='Delivery'?feedback(provider,'Delivery',{recipients:[kept]}):feedback(provider,'Bounce',{bounceType:'Permanent',bounceSubType:'General',bouncedRecipients:[{emailAddress:kept}]});
+        for (const item of validationFirst?[validation,other]:[other,validation]) {
+          if (path==='batch') assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+          else {
+            await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+            await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
+          }
+        }
+        const label=`${outcome} via ${path}, validation ${validationFirst?'first':'last'}`;
+        assert.deepEqual((await db.query('SELECT status,error_code,suppression_reason FROM sending_emails WHERE id=$1',[email.id])).rows,
+          [{status:outcome==='Delivery'?'delivered':'bounced',error_code:null,suppression_reason:null}],label);
+        assert.deepEqual((await db.query('SELECT suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,dropped.toLowerCase()])).rows,[{suppression_reason:'email_validation'}],label);
+      }
+    });
+  });
+
+  test('MX: a Worker with the pre-153 rank table cannot restore suppressed or skip a delivery, and the repair fixes older rows', async t => {
+    // tear witnesses (api/tear/ses): accept e2, q d2, old q v2; accept e2, q v2, old q d2.
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const {rank}=await import('./src/sending.js');
+      // The table a Worker deployed before migration 153 embeds; its statements are otherwise the same.
+      const current={...rank}, old={...current,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
+      const asOld=async<T>(work:()=>Promise<T>)=>{Object.assign(rank,old);try{return await work();}finally{Object.assign(rank,current);}};
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      const recipients=Array.from({length:9},()=>[address(),address()] as const);
+      const sent:Json[]=[];
+      for (const [kept,dropped] of recipients) sent.push(ok(await local('POST','/v1/emails/send',mail({to:kept,cc:[dropped]})),202));
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const providers=sent.map(()=>unique('fixture-provider'));
+      for (const [i,email] of sent.entries()) await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,providers[i],topicArn]);
+      const feedback=(i:number,kind:string,detail:Json)=>({topicArn,region:REGION,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:providers[i]!,sendingAccountId:account},[kind.toLowerCase()]:detail}});
+      const validation=(i:number)=>feedback(i,'Bounce',{bounceType:'Permanent',bounceSubType:'EmailValidationSuppressed',bouncedRecipients:[{emailAddress:recipients[i]![1]}]});
+      const delivery=(i:number)=>feedback(i,'Delivery',{recipients:[recipients[i]![0]]});
+      const bounce=(i:number)=>feedback(i,'Bounce',{bounceType:'Permanent',bounceSubType:'General',bouncedRecipients:[{emailAddress:recipients[i]![0]}]});
+      type Item=ReturnType<typeof feedback>;
+      const batch=async(item:Item)=>assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+      const job=async(item:Item)=>{
+        await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+        await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
+      };
+      const row=async(i:number)=>(await db.query('SELECT status,error_code,suppression_reason FROM sending_emails WHERE id=$1',[sent[i].id])).rows[0];
+      // The current version commits the outcome first; the old one then commits the validation suppression.
+      await batch(delivery(0)); await asOld(()=>batch(validation(0)));
+      await job(bounce(1)); await asOld(()=>job(validation(1)));
+      // The current version suppresses first; the old one skips the delivery (5 < 6), which the event trigger applies.
+      await batch(validation(2)); await asOld(()=>batch(delivery(2)));
+      await job(validation(3)); await asOld(()=>job(delivery(3)));
+      // Both in one old batch: the old winner is the validation suppression.
+      await asOld(async()=>assert.deepEqual(await ingestFeedbackBatch(runtime,[delivery(4),validation(4)]),[{ok:true},{ok:true}]));
+      // An earlier error code survives an old validation suppression.
+      await db.query(`UPDATE sending_emails SET error_code='SES_ACCEPTANCE_UNKNOWN' WHERE id=$1`,[sent[5].id]);
+      await asOld(()=>batch(validation(5)));
+      assert.deepEqual(await row(0),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(1),{status:'bounced',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(2),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(3),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(4),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(5),{status:'suppressed',error_code:'SES_ACCEPTANCE_UNKNOWN',suppression_reason:'email_validation'});
+      for (const i of [0,1,2,3,4,5]) assert.deepEqual((await db.query('SELECT suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,recipients[i]![1].toLowerCase()])).rows,[{suppression_reason:'email_validation'}]);
+
+      // Rows the old version left before migration 153: the outcome event stored, then 'suppressed'
+      // written over it. Migration 154's repair derives the status from the stored events.
+      const stored=async(i:number,type:string)=>db.query('INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES($1,$2,$3,$4,false)',[unique('event'),wid,sent[i].id,type]);
+      const suppress=async(i:number)=>db.query(`UPDATE sending_emails SET status='suppressed',suppression_reason='email_validation',error_code='EMAIL_VALIDATION_SUPPRESSED' WHERE id=$1`,[sent[i].id]);
+      await stored(6,'delivery'); await stored(6,'validation_suppressed'); await suppress(6);
+      await stored(7,'bounce'); await stored(7,'delivery'); await stored(7,'validation_suppressed'); await suppress(7);
+      // A genuinely validation-suppressed email (no outcome for a sent recipient) stays suppressed.
+      await stored(8,'validation_suppressed'); await suppress(8);
+      // A stale code on a superseded suppression (bounced, EMAIL_VALIDATION_SUPPRESSED), as the old coalesce left it.
+      const stale=unique('email').replace(/[^a-z0-9]/g,'').slice(0,40);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,error_code,provider_id)
+        SELECT $2,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,false,'bounced','EMAIL_VALIDATION_SUPPRESSED',$3 FROM sending_emails WHERE id=$1`,[sent[8].id,`email_${stale}`,unique('provider')]);
+      assert.deepEqual((await row(6)).status,'suppressed');
+      const repair=async()=>{for(let cursor:string|null='';cursor!==null;)cursor=(await db.query('SELECT repair_feedback_status($1,$2) AS c',[cursor,wid])).rows[0].c;};
+      await repair();
+      assert.deepEqual(await row(6),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(7),{status:'bounced',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(8),{status:'suppressed',error_code:'EMAIL_VALIDATION_SUPPRESSED',suppression_reason:'email_validation'});
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[`email_${stale}`])).rows,[{status:'bounced',error_code:null}]);
+      // Idempotent: a second pass changes nothing.
+      const before=(await db.query('SELECT id,status,error_code,suppression_reason,updated_at FROM sending_emails WHERE workspace_id=$1 ORDER BY id',[wid])).rows;
+      await repair();
+      assert.deepEqual((await db.query('SELECT id,status,error_code,suppression_reason,updated_at FROM sending_emails WHERE workspace_id=$1 ORDER BY id',[wid])).rows,before);
+    });
+  });
+
   test('MX: multi-recipient SES feedback uses real destinations, yesterday’s volume and the last operator resume', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const { ingestFeedbackBatch } = await import('./src/operations.js');
