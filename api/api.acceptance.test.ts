@@ -8362,6 +8362,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await f.resume(100);
       assert.equal((await drain()).sent, 1);
       assert.equal((await status()).marketing, 'accepted');
+      // The standing's holds fence dispatch the same way: an operator's marketing hold placed after admission.
+      const { applyChange } = await import('./src/standing.js');
+      const later = ok(await send('marketing'), 202).id;
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: true, step: 'restrict' }));
+      assert.equal((await drain()).sent, 0);
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [later])).rows[0].status, 'queued');
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: false, step: 'warn' }));
+      await db.query('UPDATE sending_emails SET lease_until=NULL WHERE id=$1', [later]);
+      assert.equal((await drain()).sent, 1);
     });
   });
   test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking', async t => {

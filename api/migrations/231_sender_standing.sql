@@ -188,6 +188,13 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
      max(hour) FILTER(WHERE running+least(incoming,p.cap)>p.cap OR (marketing>0 AND running+least(marketing,m.cap)>m.cap))+interval '24 hours' AS reset FROM usage) u
 $$;
 
+-- The one hold test admission (above), campaign launch and dispatch share (230 defined it for the connection's own
+-- hold): the standing's restrict or pause unless an owner released it, an operator's hold, or a hold from before the
+-- standing shipped.
+CREATE OR REPLACE FUNCTION hosted_marketing_held(wid text) RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT coalesce((SELECT pc.marketing_held_at IS NOT NULL OR coalesce(s.marketing_hold OR (s.step IN ('restrict','pause') AND NOT coalesce(s.release_until>now() AND s.release_percent IS NOT NULL,false)),false)
+    FROM provider_connections pc LEFT JOIN sender_standing s ON s.workspace_id=pc.workspace_id WHERE pc.workspace_id=wid AND pc.kind='shared'),false)
+$$;
 -- Bursts follow the limit too: clamp(limit ÷ 20, 50, 500) a minute per workspace, half that per domain.
 CREATE OR REPLACE FUNCTION hosted_minute_cap(wid text) RETURNS int LANGUAGE sql STABLE AS $$
   SELECT greatest(least(500,greatest(50,coalesce(CASE WHEN w.send_cap_override_expires_at IS NULL OR w.send_cap_override_expires_at>now() THEN w.send_cap_override END,s.daily_limit,100)/20)),

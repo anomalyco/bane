@@ -38,7 +38,7 @@ const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
   connection: z.object({ region: z.string(), paused: z.boolean(), resuming: z.boolean(), pauseReason: z.string().nullable(), tenantGeneration: z.number().int(),
-    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLED']), generation: z.number().int(), appliedAt: z.string() }))
+    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLING', 'DISABLED']).describe('DISABLING: Bane asked AWS and does not know the outcome yet, so it treats the tenant as possibly disabled.'), generation: z.number().int(), appliedAt: z.string() }))
       .describe('What Bane last applied to each regional SES tenant (none: never switched, so enabled).') }).nullable(),
   domains: z.array(z.object({ name: z.string(), region: z.string().nullable(), pool: z.string(), dkim: z.boolean(), mailFrom: z.boolean(), dmarc: z.string().nullable() })),
   members: z.array(z.object({ userId: z.string(), email: z.string(), role: z.string() })), siblings: z.array(z.object({ id: z.string(), name: z.string() })),

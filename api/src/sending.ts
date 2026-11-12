@@ -1479,8 +1479,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
     // The standing's restrict or an operator's hold, or a marketing hold placed before the standing took over.
     const [held] = (await db.execute<{ reason: string | null }>(sql`SELECT CASE WHEN s.workspace_id IS NULL OR NOT (s.marketing_hold OR s.step IN ('restrict','pause')) THEN pc.marketing_hold_reason END AS reason
       FROM provider_connections pc LEFT JOIN sender_standing s ON s.workspace_id=pc.workspace_id
-      WHERE pc.workspace_id=${a.workspaceId} AND pc.kind='shared' AND (pc.marketing_held_at IS NOT NULL OR s.marketing_hold
-        OR (s.step IN ('restrict','pause') AND NOT coalesce(s.release_until>now() AND s.release_percent IS NOT NULL,false)))`)).rows;
+      WHERE pc.workspace_id=${a.workspaceId} AND pc.kind='shared' AND hosted_marketing_held(pc.workspace_id)`)).rows;
     if (held) throw marketingHeld(held.reason);
   }
   if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
