@@ -5568,6 +5568,43 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
 
+// Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
+// node-postgres lets query parameters redirect it, and never established that the database was
+// disposable. tear/disposable.ts is the rule every tear host imports.
+test('a tear host refuses redirecting URLs, databases not marked disposable and databases holding foreign data', async t => {
+  const { disposableUrl, assertDisposable, DISPOSABLE } = await import('./tear/disposable.js');
+  const { execFile } = await import('node:child_process'), { fileURLToPath } = await import('node:url');
+  for (const url of ['postgresql://tear:x@127.0.0.1/tear?host=192.0.2.1&port=5432', 'postgresql://tear:x@127.0.0.1:1/tear?hostaddr=192.0.2.1',
+    'postgresql://tear:x@127.0.0.1/tear?options=-c%20search_path%3Dpublic', 'postgresql://tear:x@127.0.0.1/tear?', 'postgresql://tear:x@192.0.2.1:5432/tear',
+    'postgresql://tear:x@localhost.example.com/tear', 'mysql://tear:x@127.0.0.1/tear', 'not a url', undefined]) assert.throws(() => disposableUrl(url), /^Error: tear host:/, String(url));
+  for (const url of ['postgresql://tear:x@127.0.0.1:5432/tear', 'postgres://tear:x@localhost/tear', 'postgresql://tear:x@[::1]:5432/tear']) assert.equal(disposableUrl(url), url);
+  const client = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+  await client.connect(); cleanup(t, () => client.end());
+  const check = () => assertDisposable(text => client.query(text));
+  // The acceptance database is shared by every scenario and carries no marker.
+  await assert.rejects(check(), /not marked disposable/);
+  // Marked, but holding a workspace tear did not create: still refused. Rolled back.
+  await client.query('BEGIN');
+  try {
+    await client.query(`DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), '${DISPOSABLE}'); END $$`);
+    await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
+    await assert.rejects(check(), /holds [1-9]\d* workspaces/);
+  } finally { await client.query('ROLLBACK'); }
+  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
+  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
+      (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
+    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
+  });
+  const unmarked = await host(FIXTURE_DATABASE_URL!);
+  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
+  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
+  const refused = await host(redirected.toString());
+  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+});
+
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
   const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
   const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_SHADOW:'false',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};
@@ -6031,6 +6068,220 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         while (pending.length) await Promise.all(pending.splice(0));
       } } finally { globalThis.fetch = previousFetch; }
       assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
+    });
+  });
+  // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
+  // lease, claim, send, record and the next lease, which found nothing and ended the run.
+  test('a dispatcher lease that passes the last owner wraps to the first, so a run never stops with mail due', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      // A region of its own: this workspace is its only owner, so a one-row lease's cursor is
+      // the last owner, exactly as with 24 owners and the normal 24-row lease.
+      const region = 'te-cursor-1', status = async (ids: string[]) => (await db.query('SELECT status FROM sending_emails WHERE id=ANY($1) ORDER BY id', [ids])).rows.map(r => r.status);
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=ANY($1)', [ids, region]);
+      const gate = initialGate();
+      const report = await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate });
+      assert.deepEqual(await status(ids), ['accepted', 'accepted', 'accepted'], 'One run drains every due row.');
+      assert.equal(report.sent, 3);
+      // A cursor left by the previous run must not end the next run before it reaches the first owner.
+      const later = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=$1', [later, region]);
+      gate.ownerCursor = runtime.config.workspaceId;
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, gate })).sent, 1);
+      assert.deepEqual(await status([later]), ['accepted']);
+      // With every remaining row leased elsewhere the run still ends after one pass.
+      const held = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query("UPDATE sending_emails SET region=$2, lease_until=now()+interval '2 minutes' WHERE id=$1", [held, region]);
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate })).claimed, 0);
+      assert.deepEqual(await status([held]), ['queued']);
+    });
+  });
+  // Review of #52 (P1): the wrap above counted a lease as progress even when the local
+  // marketing allowance released every row it leased, so 24 unaffordable owners were leased
+  // and released until the run's time budget (237 leases in 500 ms, then a non-idle report
+  // that re-armed the Durable Object at once).
+  test('a lease the marketing allowance cannot afford ends the run as a quota hold in a bounded number of statements', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const region = 'te-allowance-1', w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent;
+      // 24 owners (one lease's worth), each with one two-recipient marketing envelope.
+      const owners = Array.from({ length: 24 }, (_, i) => `${w}-o${String(i).padStart(2, '0')}`), later = `${w}-o24`;
+      const pair = ok(await local('POST', '/v1/emails/send', mail({ to: [address(), address()] })), 202).id;
+      const single = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [[...owners, later]]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+        SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [[...owners, later], region]);
+      const clone = (ids: string[], template: string) => db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||md5(o||e.id),o,e.actor_key_id,$2,e.from_address,e.to_addresses,'[]','[]',e.subject,jsonb_set(jsonb_set(e.snapshot,'{kind}','"marketing"'),'{region}',to_jsonb($2::text)),e.simulated
+        FROM sending_emails e,unnest($1::text[]) o WHERE e.id=$3`, [ids, region, template]);
+      await clone(owners, pair);
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // One campaign credit left (a cached, current sample): every envelope needs two.
+      const max = 100, gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const queued = async (o: string[]) => (await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=ANY($1) AND region=$2 AND status='queued' AND lease_until IS NULL`, [o, region])).rows[0].n;
+      for (const lanes of [1, 2]) {
+        const run = counted(), started = Date.now();
+        const report = await runDispatcher(run.runtime, { region, lanes, batchSize: 24, gate: gate(1), until: Date.now() + 5000 });
+        assert.equal(report.sent, 0);
+        assert.equal(report.idle, true, 'An unaffordable pass is an idle hold, not unfinished work that re-arms at once.');
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, 'It retries when the quota sample can change.');
+        // Per lane: the page, its release, and the lease past the last owner; nothing more.
+        t.diagnostic(`ALLOWANCE-HOLD lanes ${lanes}: ${run.statements()} statements in ${Date.now() - started} ms`);
+        assert.ok(run.statements() <= 3 * lanes, `${run.statements()} statements with ${lanes} lane(s)`);
+        assert.equal(await queued(owners), 24, 'Nothing was claimed, and no lease is left behind.');
+      }
+      // Four concurrent shards splitting four credits (one each): the same bound on every shard.
+      const shards = [0, 1, 2, 3].map(() => counted());
+      const reports = await Promise.all(shards.map((run, index) => runDispatcher(run.runtime, { region, lanes: 1, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 })));
+      t.diagnostic(`ALLOWANCE-HOLD shards: ${shards.map(run => run.statements()).join(',')} statements`);
+      for (const [index, report] of reports.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(shards[index]!.statements() <= 3, `shard ${index}: ${shards[index]!.statements()} statements`);
+      }
+      assert.equal(await queued(owners), 24);
+      // A later owner's affordable one-recipient envelope is still reached and sent.
+      await clone([later], single);
+      // Its own send key, so the claim's origin check passes for that owner.
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'later',$1,'bane_later','["send"]','[]')`, [`${later}-key`, later]);
+      await db.query('UPDATE sending_emails SET actor_key_id=$2 WHERE workspace_id=$1', [later, `${later}-key`]);
+      const [{ email }] = (await db.query('SELECT to_addresses->>0 AS email FROM sending_emails WHERE workspace_id=$1', [later])).rows;
+      await db.query("INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ($1,$2,$3,'subscribed')", [`${later}-contact`, later, email]);
+      const run = counted();
+      const report = await runDispatcher(run.runtime, { region, lanes: 1, batchSize: 24, gate: gate(1), until: Date.now() + 5000 });
+      assert.equal(report.sent, 1);
+      assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE workspace_id=$1', [later])).rows, [{ status: 'accepted' }]);
+      assert.equal(await queued(owners), 24);
+      t.diagnostic(`ALLOWANCE-HOLD later owner: ${run.statements()} statements`);
+      assert.ok(run.statements() <= 8, `${run.statements()} statements`);
+    });
+  });
+  // Recheck of #52 (P1): one owner's full page set no owner cursor, so the no-progress check
+  // never ran (24 two-recipient envelopes and one credit: 133 leases / 266 statements in 500 ms,
+  // idle false). (P2): the fair page took every owner's oversized head, so the hold starved the
+  // affordable mail behind it (24 one-recipient followers left queued, idle). The lease now skips
+  // the specific envelopes the allowance cannot afford, and a batch that advanced nothing ends.
+  test('the allowance skips specific unaffordable envelopes: one owner\'s full page holds, and mail behind oversized heads sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent, max = 100;
+      const template = ok(await local('POST', '/v1/emails/send', mail()), 202).id, contacts = [address(), address()];
+      // Owners with their own send key and two subscribed contacts; each owner's envelopes are
+      // queued oldest first with the given recipient counts and streams.
+      const seed = async (region: string, owners: string[], envelopes: { cost: number; kind?: string }[]) => {
+        await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [owners]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+          SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [owners, region]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT o||'-key',o,'owner',o||'-key','bane_owner','["send"]','[]' FROM unnest($1::text[]) o`, [owners]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT o||'-c'||n,o,($2::text[])[n],'subscribed' FROM unnest($1::text[]) o,generate_series(1,2) n`, [owners, contacts]);
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+          SELECT 'email_'||md5(o||x.n),o,o||'-key',$2,e.from_address,x.dest,'[]','[]',e.subject,
+            jsonb_set(jsonb_set(jsonb_set(e.snapshot,'{kind}',to_jsonb(x.kind)),'{region}',to_jsonb($2::text)),'{to}',x.dest),e.simulated,clock_timestamp()-interval '1 hour'+x.n*interval '1 second'
+          FROM sending_emails e,unnest($1::text[]) o,jsonb_to_recordset($4::jsonb) x(n int,kind text,dest jsonb) WHERE e.id=$3`,
+          [owners, region, template, JSON.stringify(envelopes.map((v, n) => ({ n, kind: v.kind ?? 'marketing', dest: contacts.slice(0, v.cost) })))]);
+      };
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // `credits` marketing recipients left in a cached, current sample.
+      const gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const state = async (region: string) => (await db.query(`SELECT count(*) FILTER (WHERE status='queued' AND lease_until IS NULL)::int AS free,
+        count(*) FILTER (WHERE status='queued')::int AS queued, count(*) FILTER (WHERE status='accepted')::int AS accepted,
+        count(*) FILTER (WHERE status='accepted' AND jsonb_array_length(to_addresses)>1)::int AS oversized FROM sending_emails WHERE region=$1`, [region])).rows[0];
+      const run = async (label: string, region: string, credits: number | 'blind', options: { lanes?: number } = {}) => {
+        const counter = counted(), started = Date.now();
+        const report = await runDispatcher(counter.runtime, { region, lanes: options.lanes ?? 1, batchSize: 24, gate: credits === 'blind' ? initialGate() : gate(credits), until: Date.now() + 5000 });
+        t.diagnostic(`ALLOWANCE-SKIP ${label}: sent ${report.sent}, ${counter.statements()} statements in ${Date.now() - started} ms, idle ${report.idle}`);
+        assert.equal(report.idle, true, `${label}: a quota hold is idle, not unfinished work that re-arms at once`);
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, `${label}: it retries when the quota sample can change`);
+        return { report, statements: counter.statements() };
+      };
+
+      // P1: one owner, 24 two-recipient envelopes (a full page), one credit.
+      const solo = 'te-allowance-2', soloOwner = [`${w}-solo`];
+      await seed(solo, soloOwner, Array.from({ length: 24 }, () => ({ cost: 2 })));
+      for (const lanes of [1, 2]) {
+        const { report, statements } = await run(`one owner, ${lanes} lane(s)`, solo, 1, { lanes });
+        assert.equal(report.sent, 0);
+        assert.ok(statements <= 2 * lanes, `${statements} statements with ${lanes} lane(s)`);
+        assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      }
+      // Leased before the allowance is known (a fresh database sample, no gate yet): the page
+      // comes back unaffordable once, the next lease skips it, and the run ends.
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at) VALUES ($1,$2,1000,$3,$4,clock_timestamp())`,
+        [soloOwner[0], solo, max, max - sesDailyReserve(max, percent) - 1]);
+      const blind = await run('one owner, blind first lease', solo, 'blind');
+      assert.equal(blind.report.sent, 0); assert.ok(blind.statements <= 4, `${blind.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      // Four shards, two lanes each, splitting four credits: the same bound on every shard.
+      const shards = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: solo, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP one owner, four shards: ${shards.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of shards.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 4, `shard ${index}: ${statements} statements`);
+      }
+      // The same owner's affordable envelope behind the 24 is reached and sent.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT 'email_'||md5(e.id||'follower'),e.workspace_id,e.actor_key_id,e.region,e.from_address,$2,'[]','[]',e.subject,jsonb_set(e.snapshot,'{to}',$2),e.simulated,clock_timestamp()
+        FROM sending_emails e WHERE e.workspace_id=$1 ORDER BY e.created_at LIMIT 1`, [soloOwner[0], JSON.stringify(contacts.slice(0, 1))]);
+      const follower = await run('one owner, follower', solo, 1);
+      assert.equal(follower.report.sent, 1); assert.ok(follower.statements <= 8, `${follower.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 1, oversized: 0 });
+
+      // P2: 24 owners (one lease's worth), each with an older two-recipient head and a
+      // one-recipient follower. Each new sample's credit sends one follower; no head is sent.
+      const deep = 'te-allowance-3', owners = Array.from({ length: 24 }, (_, i) => `${w}-h${String(i).padStart(2, '0')}`);
+      await seed(deep, owners, [{ cost: 2 }, { cost: 1 }]);
+      let sent = 0;
+      for (const [label, lanes] of [['heads', 1], ['heads, next idle cycle', 1], ['heads, two lanes', 2]] as const) {
+        const { report, statements } = await run(label, deep, 1, { lanes });
+        assert.equal(report.sent, 1, `${label}: the credit sends an affordable follower`); sent += 1;
+        assert.ok(statements <= 8 * lanes, `${label}: ${statements} statements`);
+        assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+      }
+      // Four shards, one credit each: no shard sends more than its share or spins, and the mail
+      // one shard held while a sibling leased is released for the next run.
+      const parallel = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: deep, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP heads, four shards: sent ${parallel.map(s => s.report.sent).join(',')}; ${parallel.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of parallel.entries()) {
+        assert.ok(report.sent <= 1, `shard ${index} sent ${report.sent}`); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 16, `shard ${index}: ${statements} statements`);
+      }
+      const shardSent = parallel.reduce((n, s) => n + s.report.sent, 0); sent += shardSent;
+      assert.ok(shardSent >= 1, 'The shards send affordable followers');
+      assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+
+      // The reserve: transactional followers behind oversized marketing heads spend the 11
+      // recipients the account has left; the marketing heads, needing two of one credit, wait.
+      const reserve = 'te-allowance-4', tx = Array.from({ length: 24 }, (_, i) => `${w}-t${String(i).padStart(2, '0')}`);
+      await seed(reserve, tx, [{ cost: 2 }, { cost: 1, kind: 'transactional' }]);
+      const priority = await run('transactional behind heads', reserve, 1);
+      assert.equal(priority.report.sent, sesDailyReserve(max, percent) + 1);
+      assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
