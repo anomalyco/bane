@@ -20,8 +20,8 @@ async function dashboardFile(request: Request, path: string, response: Response)
   if (!['GET', 'HEAD'].includes(request.method) || response.status !== 200) return response;
   // The public docs (the Docs page reads the 1.7 MB OpenAPI document) are the same for every reader: compress them too.
   // Exactly these paths: a longer one that only starts like them is a dashboard route, with its own answer below.
-  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/[^/]+)$/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
-  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(path)) return response;
+  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/[^/]+)$/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
+  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(path)) return response;
   const html = response.headers.get('content-type')?.startsWith('text/html');
   const asset = path.startsWith('/assets/') && !html, font = path.startsWith('/fonts/') && !html;
   if (!html && !asset && !font) return response;
@@ -63,7 +63,7 @@ try {
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });
   const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
-    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
+    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
     return assets(c, async () => {
       const response = await dashboard(c, next);
       if (response) c.res = response;

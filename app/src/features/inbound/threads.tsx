@@ -11,6 +11,7 @@ import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
 import { addressName, cleanName, full, idempotencyFor, nameOf, Sender, when } from './shared'
+import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
@@ -65,7 +66,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   return <li id={`message-${message.id}`} className="mailbox-message" data-direction={outbound ? 'outbound' : 'inbound'} data-unread={unread || undefined} data-reply-target={isTarget || undefined}>
     <article className="mailbox-message__card">
       <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
-        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : nameOf(message.from)}</bdi></strong><bdi className="muted"><PrivateAddress value={message.from.address} /></bdi></span>
+        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : <Sender value={message.from} />}</bdi></strong>{(outbound || nameParts(message.from.name, message.from.address)) && <bdi className="muted"><PrivateAddress value={message.from.address} /></bdi>}</span>
         <span className="mailbox-message__meta">
           {unread && <StatusBadge status="New" tone="info" />}
           {outbound && <StatusBadge status={label(message.status)} tone={statusTone(message.status)} />}
@@ -73,9 +74,9 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         </span>
       </button>
       <p className="mailbox-message__context">
-        <span>to {recipients.length ? recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) || !person.name ? <PrivateAddress value={person.address} /> : person.name}</span>) : '—'}</span>
+        <span>to {recipients.length ? recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) ? <PrivateAddress value={person.address} /> : <Sender value={person} />}</span>) : '—'}</span>
         {showAddresses && <span>via <AddressList values={message.addressIds.map(id => addressName(addresses, id))} /></span>}
-        {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : nameOf(parent.from)}</a> · {when(parent.receivedAt)}</span>
+        {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : <Sender value={parent.from} />}</a> · {when(parent.receivedAt)}</span>
           : message.inReplyTo ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message</span> : null}
       </p>
       {expanded ? <>
@@ -133,7 +134,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
   }, [focusMessage, messages])
   const isExpanded = (message: InboundMessage) => expanded[message.id] ?? (message.id === lastId || messages.length <= 3 || message.read === false)
   const toggle = (message: InboundMessage) => setExpanded(current => ({ ...current, [message.id]: !isExpanded(message) }))
-  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }))
+  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }), undefined, false, true, [thread.id, stateAddress])
   const act = (patch: Omit<InboundThreadPatch, 'addressId'>) => { update.mutateAsync(patch).catch(() => undefined) }
   async function loadOlder() {
     if (!olderCursor) return
@@ -153,7 +154,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
       <IconButton variant="ghost" className="mailbox-back" label="Back to conversations" onClick={onBack}><ArrowLeft size={16} /></IconButton>
       <div className="mailbox-conversation__title">
         <h2>{thread.subject || '(no subject)'}</h2>
-        <p className="muted">{thread.messageCount} message{thread.messageCount === 1 ? '' : 's'}{people.length > 0 && ` · with ${people.map(nameOf).join(', ')}`}</p>
+        <p className="muted">{thread.messageCount} message{thread.messageCount === 1 ? '' : 's'}{people.length > 0 && <> · with {people.map((person, i) => <span key={person.address}>{i > 0 && ', '}<Sender value={person} /></span>)}</>}</p>
         {(!addressId || (flags && flags.labels.length > 0)) && <span className="mailbox-labels">
           {!addressId && <AddressLabels ids={thread.addressIds} addresses={addresses} />}
           {flags?.labels.map(item => <span key={item} className="mailbox-label">{item}</span>)}
@@ -193,7 +194,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const [chosen, setChosen] = useState('')
   const [automated, setAutomated] = useState<string | null>(null)
   const key = useRef({ key: '', body: '' })
-  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued')
+  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued', false, true, thread.id)
   useEffect(() => { setText(''); setReplyAll(false); send.reset(); key.current = { key: '', body: '' } }, [thread.id]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setChosen('') }, [target.id])
   // A message linked to several addresses needs an explicit sender; the API refuses to guess (ADDRESS_REQUIRED).

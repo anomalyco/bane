@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react'
 import { X } from 'lucide-react'
 import { Button, IconButton } from '../../components/ui'
+import { Match } from './parts'
 
 // The API's rules for aliases (UpdateInboundAddress): valid lowercase addresses of at most 254 characters,
 // on exactly the address's own domain, at most 50 per address, and none on temporary addresses.
@@ -97,9 +98,9 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
     <label className="ui-field__label" id={labelId} htmlFor={id}>Aliases</label>
     {value.list.length > 0 && <ul className="alias-list" aria-labelledby={labelId}>
       {value.list.map(alias => <li key={alias} data-unsaved={!saved.includes(alias) || undefined}>
-        <code>{alias.slice(0, alias.lastIndexOf('@'))}<wbr />{alias.slice(alias.lastIndexOf('@'))}</code>
+        <Match value={alias} />
         {!saved.includes(alias) && <span className="alias-list__note">Not saved</span>}
-        <IconButton ref={node => { if (node) removers.current.set(alias, node); else removers.current.delete(alias) }} size="sm" label={`Remove ${alias}`} disabled={disabled} onClick={() => remove(alias)}><X size={14} aria-hidden="true" /></IconButton>
+        <IconButton ref={node => { if (node) removers.current.set(alias, node); else removers.current.delete(alias) }} size="sm" label="Remove alias" disabled={disabled} onClick={() => remove(alias)}><X size={14} aria-hidden="true" /></IconButton>
       </li>)}
     </ul>}
     <div className="alias-add">
