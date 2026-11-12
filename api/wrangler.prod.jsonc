@@ -18,6 +18,8 @@
     "BANE_MAIL_BUCKET": "bane-prod-mail",
     "BANE_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://bane.mx",
+    "ACCOUNT_ISSUER": "https://account.anoma.ly",
+    "ACCOUNT_CLIENT_ID": "bane-production",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",
     // Anomaly owns bane.mx itself (adopted by scripts/adopt-platform-domain.ts). Every other workspace is refused.

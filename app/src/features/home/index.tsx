@@ -4,6 +4,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { Button, LoadingRegion, Skeleton } from '../../components/ui'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { AnomalyLogo } from '../../components/AnomalyLogo'
+import { AccountSignIn } from '../../components/AccountSignIn'
 import { request } from '../../data/live'
 import { number, percent } from '../../lib/format'
 import './home.css'
@@ -78,7 +79,8 @@ export function HomeHeader({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, '
     <nav className="home-nav" aria-label="Site">
       <a href="/docs">Docs</a>
       <ThemeToggle />
-      <Button onClick={onSignIn} disabled={busy} onPointerDown={onSignInIntent}>Sign in</Button>
+      <AccountSignIn />
+      <Button onClick={onSignIn} disabled={busy} onPointerDown={onSignInIntent}>Sign in with Google</Button>
     </nav>
   </header>
 }

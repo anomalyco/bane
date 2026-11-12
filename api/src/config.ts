@@ -10,6 +10,9 @@ const values = z.object({
   MAILGW_API_TOKEN: optional(z.string().min(32)),
   PREVIOUS_BETTER_AUTH_SECRET: optional(z.string().min(32)),
   GOOGLE_CLIENT_ID: optional(z.string().min(1)),
+  ACCOUNT_ISSUER: optional(z.url({ protocol: /^https$/ })),
+  ACCOUNT_CLIENT_ID: optional(z.string().min(1)),
+  ACCOUNT_CLIENT_PRIVATE_KEY: optional(z.string().min(1)),
   GOOGLE_CLIENT_SECRET: optional(z.string().min(1)),
   AUTH_ALLOWED_EMAILS: z.string().default(''),
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
@@ -105,6 +108,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     } catch { throw new ApiError(503,'CONFIG_INVALID','DOMAIN_CONNECT_PRIVATE_KEY must be an RSA-2048 private key in PEM format.'); }
   }
   if (Boolean(v.GOOGLE_CLIENT_ID) !== Boolean(v.GOOGLE_CLIENT_SECRET)) throw new ApiError(503, 'CONFIG_INVALID', 'Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither.');
+  const accountClient = v.ACCOUNT_ISSUER && v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { issuer: v.ACCOUNT_ISSUER, id: v.ACCOUNT_CLIENT_ID, key: v.ACCOUNT_CLIENT_PRIVATE_KEY } : undefined;
+  if ((v.ACCOUNT_ISSUER || v.ACCOUNT_CLIENT_ID || v.ACCOUNT_CLIENT_PRIVATE_KEY) && !accountClient) throw new ApiError(503, 'CONFIG_INVALID', 'Account sign-in requires an issuer, client ID and private key.');
   if (v.PREVIOUS_BETTER_AUTH_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BETTER_AUTH_SECRET.');
   const allowedEmails = list(v.AUTH_ALLOWED_EMAILS).map(e => e.toLowerCase());
   const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS.toLowerCase());
@@ -130,6 +135,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,
+    accountClient,
     encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),
     previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',

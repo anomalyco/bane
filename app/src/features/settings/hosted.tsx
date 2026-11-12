@@ -13,6 +13,7 @@ import { MutationError } from './shared'
 import { WebhooksSection } from './webhooks'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
+import { AccountSignIn } from '../../components/AccountSignIn'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -115,6 +116,7 @@ function AccountRows() {
     <Row title="Email">{session.identity.email || '—'}</Row>
     <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
+    <AccountSignIn link />
   </div>
 }
 // Members and invitations appear together once both are known, so the second table never pushes down.

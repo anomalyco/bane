@@ -4,6 +4,7 @@ import { APIError, getOAuthState } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { google, verifyGoogleIdToken } from 'better-auth/social-providers';
 import { jwt } from 'better-auth/plugins';
+import { accountPlugin } from './account-provider.js';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, exists, gt, inArray, ne, sql } from 'drizzle-orm';
@@ -96,7 +97,7 @@ export async function membershipForApprovedUser(db: DbExecutor, userId: string, 
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
 type DeniedSignup = { email: string; name: string; hostedDomain: string | null };
-export function createAuth(runtime: Runtime, options?: string | { consentWorkspace?: string; consentInboxes?:string[]; receiving?:boolean; mcp?: boolean; onDenied?: (user: DeniedSignup) => void }) {
+export function createAuth(runtime: Runtime, options?: string | { accountCallback?: URL; consentWorkspace?: string; consentInboxes?:string[]; receiving?:boolean; mcp?: boolean; onDenied?: (user: DeniedSignup) => void }) {
   requireConfigured(runtime);
   const consentWorkspace = typeof options === 'string' ? options : options?.consentWorkspace;
   const includeMcp = typeof options === 'object' && options?.mcp === true;
@@ -113,7 +114,8 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
   const googleProvider = google({ clientId: runtime.config.googleClientId!, clientSecret: runtime.config.googleClientSecret! });
   // Better Auth intentionally drops input:false fields from mapProfileToUser. Only
   // its verified OAuth lifecycle gate can supply this protected database field.
-  const profiles = new WeakMap<object, { email: string; subject: string; hostedDomain: string | null; returning: boolean }>();
+  const client = runtime.config.multiTenant && runtime.config.accountClient;
+  const profiles = new WeakMap<object, { provider: 'google' | 'account'; email: string; subject: string; hostedDomain: string | null }>();
   const profileFor = (context: object | null) => {
     const profile = context && profiles.get(context);
     if (!profile) throw new APIError('FORBIDDEN', { code: 'GOOGLE_IDENTITY_REQUIRED', message: 'An approved Google identity is required.' });
@@ -147,7 +149,7 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
   return betterAuth({
     appName: 'Bane', baseURL: origin, basePath: '/api/auth', secret: runtime.config.authSecret,
     database,
-    plugins: includeMcp ? [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace,typeof options==='object'?options.consentInboxes:undefined,typeof options==='object'&&options.receiving===true)] : [],
+    plugins: [...(client ? [accountPlugin(runtime, client, typeof options === 'object' ? options.accountCallback : undefined)] : []), ...(includeMcp ? [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace,typeof options==='object'?options.consentInboxes:undefined,typeof options==='object'&&options.receiving===true)] : [])],
     trustedOrigins: [origin],
     emailAndPassword: { enabled: false, disableSignUp: true },
     socialProviders: {
@@ -172,18 +174,22 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
       changeEmail: { enabled: false }, deleteUser: { enabled: false },
       validateUserInfo: ({ user, source }, context) => {
         const profile = source.oauth?.profile;
+        if (client && source.method === 'oauth' && source.oauth?.providerId === 'account' && typeof profile?.subject === 'string' && user.email && user.emailVerified && (source.action === 'link-account' || source.action === 'sign-in')) {
+          profiles.set(context, { provider: 'account', subject: profile.subject, email: user.email, hostedDomain: null });
+          return;
+        }
         if (source.method !== 'oauth' || source.oauth?.providerId !== 'google' || source.action === 'link-account' ||
           typeof profile?.sub !== 'string' || !profile.sub || typeof profile.email !== 'string' ||
           user.email?.toLowerCase() !== profile.email.toLowerCase() || user.emailVerified !== true ||
           profile.email_verified !== true || (!runtime.config.multiTenant && !approvedGoogleIdentity(runtime, profile.email, profile.email_verified, profile.hd))) {
           return { error: 'GOOGLE_ACCESS_DENIED', errorDescription: 'This Google identity is not approved.' };
         }
-        profiles.set(context, { email: profile.email.toLowerCase(), subject: profile.sub, hostedDomain: typeof profile.hd === 'string' ? profile.hd.toLowerCase() : null, returning: source.action === 'sign-in' });
+        profiles.set(context, { provider: 'google', email: profile.email.toLowerCase(), subject: profile.sub, hostedDomain: typeof profile.hd === 'string' ? profile.hd.toLowerCase() : null });
       },
     },
     session: { expiresIn: 7 * day, updateAge: day, cookieCache: { enabled: true, maxAge: 60 } },
     account: {
-      accountLinking: { enabled: false, disableImplicitLinking: true }, encryptOAuthTokens: true,
+      accountLinking: { enabled: Boolean(client), disableImplicitLinking: true }, encryptOAuthTokens: true,
       storeAccountCookie: false, storeStateStrategy: 'database', skipStateCookieCheck: false,
     },
     advanced: {
@@ -200,24 +206,24 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
       user: {
         create: { before: async (user, context) => {
           const profile = profileFor(context);
-          if (user.email.toLowerCase() !== profile.email || user.emailVerified !== true) throw new APIError('FORBIDDEN');
+          if (profile.provider !== 'google' || user.email.toLowerCase() !== profile.email || user.emailVerified !== true) throw new APIError('FORBIDDEN');
           return { data: { ...user, googleHostedDomain: profile.hostedDomain } };
         } },
         update: { before: async (user, context) => {
           const profile = profileFor(context);
-          if (user.email !== undefined && user.email.toLowerCase() !== profile.email) throw new APIError('FORBIDDEN');
+          if (profile.provider !== 'google' || (user.email !== undefined && user.email.toLowerCase() !== profile.email)) throw new APIError('FORBIDDEN');
           return { data: { ...user, googleHostedDomain: profile.hostedDomain } };
         } },
       },
       account: {
         create: { before: async (account, context) => {
           const profile = profileFor(context);
-          if (account.providerId !== 'google' || account.accountId !== profile.subject) throw new APIError('FORBIDDEN');
+          if (account.providerId !== profile.provider || account.accountId !== profile.subject) throw new APIError('FORBIDDEN');
           return { data: { ...account, ...noTokens } };
         } },
         update: { before: async (account, context) => {
-          profileFor(context);
-          if (account.providerId !== undefined && account.providerId !== 'google') throw new APIError('FORBIDDEN');
+          const profile = profileFor(context);
+          if (account.providerId !== undefined && account.providerId !== profile.provider) throw new APIError('FORBIDDEN');
           return { data: { ...account, ...noTokens } };
         } },
       },
@@ -315,7 +321,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, meas
 
 // The dashboard exposes no password, profile-update, account-linking, or session
 // JWT endpoints. The separate MCP allowlist owns only OAuth protocol endpoints.
-const SignIn = z.object({ provider: z.literal('google'), callbackURL: z.string().optional(), newUserCallbackURL: z.string().optional(), errorCallbackURL: z.string().optional(), disableRedirect: z.boolean().optional() }).strict();
+const SignIn = z.object({ provider: z.enum(['google', 'account']), callbackURL: z.string().optional(), newUserCallbackURL: z.string().optional(), errorCallbackURL: z.string().optional(), disableRedirect: z.boolean().optional() }).strict();
 export function registerGoogleAuth(app: App) {
   app.on(['GET', 'POST', 'OPTIONS'], '/api/auth/*', async (c, next) => {
     const path = c.req.path.slice('/api/auth'.length);
@@ -323,15 +329,24 @@ export function registerGoogleAuth(app: App) {
     requireConfigured(c.env);
     c.header('Cache-Control', 'no-store');
     const method = c.req.method;
+    const client = c.env.config.multiTenant && c.env.config.accountClient;
+    if (path === '/account-config' && method === 'GET') return c.json({ issuer: client ? client.issuer : null });
     if (path === '/error' && method === 'GET') return c.redirect(`${new URL(c.env.config.publicUrl).origin}/?auth=error`, 302);
-    if (!((path === '/sign-in/social' && method === 'POST') || (path === '/callback/google' && method === 'GET') ||
+    if (!((path === '/sign-in/social' && method === 'POST') || (path === '/callback/google' && method === 'GET') || (client && ((path === '/link-social' && method === 'POST') || (path === '/callback/account' && method === 'GET'))) ||
       (path === '/get-session' && method === 'GET') || (path === '/sign-out' && method === 'POST'))) {
       throw new ApiError(404, 'NOT_FOUND', 'Authentication endpoint was not found.');
     }
     if (method === 'POST') requireDashboardOrigin(c.env, c.req.raw.headers);
-    if (path === '/sign-in/social') {
+    if (path === '/sign-in/social' || path === '/link-social') {
       const input = SignIn.safeParse(await c.req.raw.clone().json().catch(() => null));
-      if (!input.success) throw new ApiError(422, 'AUTH_INPUT_INVALID', 'Use Google browser sign-in without custom scopes or identity fields.');
+      if (!input.success || (!client && input.data.provider === 'account') || (path === '/link-social' && input.data.provider !== 'account')) throw new ApiError(422, 'AUTH_INPUT_INVALID', 'Use a configured browser sign-in provider.');
+      if (path === '/link-social') {
+        const headers = c.req.raw.headers;
+        const live = await createAuth(c.env).api.getSession({ headers, query: { disableCookieCache: true, disableRefresh: true } });
+        if (headers.has('authorization') || !live || Date.now() - live.session.createdAt.getTime() > 300_000 || !await approvedUser(c.env, live.user.id, c.env.db, live.session)) {
+          throw new ApiError(403, 'RECENT_LOGIN_REQUIRED', 'Sign in to your workspace again before connecting an account.');
+        }
+      }
       await reserveSignIn(c.env,c.req.raw.headers);
     }
     if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work))) return c.json(null);
@@ -344,7 +359,7 @@ export function registerGoogleAuth(app: App) {
       return c.redirect(`${new URL(c.env.config.publicUrl).origin}/?auth=not_approved`, 302);
     };
     try {
-      const result = await timed(c, 'auth-ritual-db', () => createAuth(c.env, { onDenied: user => { denied = user; } }).handler(c.req.raw));
+      const result = await timed(c, 'auth-ritual-db', () => createAuth(c.env, { accountCallback: path === '/callback/account' ? new URL(c.req.url) : undefined, onDenied: user => { denied = user; } }).handler(c.req.raw));
       // Provider errors may contain arbitrary descriptions: never send them to a browser or log.
       const location = result.headers.get('location');
       if (denied && location && new URL(location, c.env.config.publicUrl).searchParams.has('error')) return notApproved();

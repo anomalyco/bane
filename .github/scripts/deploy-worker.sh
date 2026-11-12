@@ -10,10 +10,10 @@ set +x
 umask 077
 secrets_file=$(mktemp "${RUNNER_TEMP:?}/bane-app-secrets.XXXXXX.json")
 trap 'rm -f -- "$secrets_file"' EXIT
-for name in BETTER_AUTH_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET TYPESAFE_API_KEY; do
+for name in BETTER_AUTH_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done
-jq -n '$ENV | {BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TYPESAFE_API_KEY}' > "$secrets_file"
+jq -n '$ENV | {BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ACCOUNT_CLIENT_PRIVATE_KEY, TYPESAFE_API_KEY}' > "$secrets_file"
 args+=(--secrets-file "$secrets_file")
 if [[ -n ${AUTH_ALLOWED_EMAILS:-} ]]; then args+=(--var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"); fi
 if [[ -n ${AUTH_ALLOWED_DOMAINS:-} ]]; then args+=(--var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"); fi

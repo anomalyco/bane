@@ -9,6 +9,7 @@ import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
+import { AccountSignIn } from '../components/AccountSignIn'
 import { chunk } from '../lib/preloadable'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
@@ -201,7 +202,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // not_approved: a verified Google account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
-    : authResult === 'error' ? <Alert tone="danger">Google sign-in didn’t finish. It may have been cancelled; try again.</Alert>
+    : authResult === 'error' ? <Alert tone="danger">Sign-in didn’t finish. To connect your Anomaly account, sign in with Google and open Settings → Account.</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited Google account to review it. You join only after you confirm.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
@@ -215,6 +216,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
         <h2>Sign in with Google</h2>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue with Google</Button>
+        <AccountSignIn />
       </> : <>
         <h2>Couldn’t check your session</h2>
         <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>

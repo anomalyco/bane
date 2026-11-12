@@ -36,6 +36,7 @@ export interface Config {
   mailGatewayToken?:string;
   previousAuthSecret?: string;
   googleClientId?: string;
+  accountClient?: { issuer: string; id: string; key: string };
   googleClientSecret?: string;
   allowedEmails: string[];
   allowedDomains: string[];

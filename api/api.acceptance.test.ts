@@ -1026,6 +1026,47 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         return { cookie, org };
       };
       const a = await newOwner(ownerEmail);
+      await mx.test('account sign-in binds a subject only after explicit workspace-session linking', async subtest => {
+        const issuer = 'https://account.example.invalid';
+        const rp = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+        const op = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+        runtime.config.accountClient = { issuer, id: 'fixture', key: JSON.stringify({ ...rp.privateKey.export({format:'jwk'}), kid:'rp' }) };
+        let subject = unique('subject'), nonce = '', invalidNonce = false;
+        subtest.mock.method(globalThis, 'fetch', async (input: string, init: RequestInit) => {
+          switch (new URL(input).pathname) {
+            case '/.well-known/openid-configuration': return Response.json({ issuer, authorization_endpoint: issuer+'/authorize', token_endpoint: issuer+'/token', jwks_uri: issuer+'/keys', userinfo_endpoint: issuer+'/userinfo', authorization_response_iss_parameter_supported:true });
+            case '/keys': return Response.json({ keys: [{ ...op.publicKey.export({format:'jwk'}), kid:'op', alg:'ES256' }] });
+            case '/token': {
+              const form = new URLSearchParams(String(init.body));
+              assert.ok(form.get('code_verifier')); assert.ok(form.get('client_assertion'));
+              const now = Math.floor(Date.now()/1000);
+              const part = (v: object) => Buffer.from(JSON.stringify(v)).toString('base64url');
+              const jwt = part({ alg:'ES256', kid:'op' })+'.'+part({ iss:issuer, aud:'fixture', sub:subject, nonce:invalidNonce?'wrong':nonce, iat:now, exp:now+60, email:ownerEmail, email_verified:true, hd:'example.com' });
+              const signature = sign('sha256', Buffer.from(jwt), {key:op.privateKey,dsaEncoding:'ieee-p1363'});
+              return Response.json({ token_type:'Bearer', access_token:'fixture', id_token:jwt+'.'+signature.toString('base64url') });
+            }
+            default: throw Error('Unexpected OIDC endpoint');
+          }
+        });
+        async function flow(link = false) {
+          const start = await local('POST', link?'/api/auth/link-social':'/api/auth/sign-in/social', {provider:'account',callbackURL:origin+'/',disableRedirect:true}, link?a.cookie:undefined);
+          const auth = new URL(ok(start).url); nonce = auth.searchParams.get('nonce')!;
+          assert.ok(nonce); assert.equal(auth.searchParams.get('code_challenge_method'),'S256');
+          const cookies = start.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');
+          const query = new URLSearchParams({state:auth.searchParams.get('state')!,code:'fixture',iss:issuer});
+          return local('GET', '/api/auth/callback/account?'+query, undefined, cookies);
+        }
+        try {
+          assert.equal((await flow()).headers.get('location'),origin+'/?auth=error');
+          assert.equal((await flow(true)).headers.get('location'),origin+'/');
+          const session = (await flow()).headers.getSetCookie().find(c=>c.startsWith('__Host-bane.session_token='));
+          assert.ok(session); assert.equal(ok(await local('GET','/v1/me',undefined,session.split(';')[0])).workspaceId,a.org.id);
+          invalidNonce = true;
+          assert.ok(!(await flow()).headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
+          subject = unique('different-subject'); invalidNonce = false;
+          assert.equal((await flow()).headers.get('location'),origin+'/?auth=error');
+        } finally { delete runtime.config.accountClient; }
+      });
       const unsolicited = ok(await local('POST', `${base}/invitations`, { email: otherEmail, role: 'member' }, a.cookie), 201);
       const b = await newOwner(otherEmail); // No link: exactly one personal workspace, despite the pending invitation.
       assert.notEqual(a.org.id, b.org.id); assert.notEqual(a.org.slug, b.org.slug);
