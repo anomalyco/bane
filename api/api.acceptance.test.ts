@@ -8296,6 +8296,46 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: an operator lifts a bounce suppression in Bane and in the SES tenant list, so a fixed sign-in address gets mail again', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local}) => {
+      const {liftSuppression}=await import('./scripts/lift-suppression.js'),{runDispatcher}=await import('./src/dispatcher.js');
+      const wid=runtime.config.workspaceId, account='111122223333', domain='lift.example', to='New.Hire@Example.net';
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[domain,wid]);
+      const tenants:string[]=[], { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
+        assert.ok(cmd instanceof SendEmailCommand); tenants.push(String(cmd.input.TenantName)); return {MessageId:unique('fake-ses')};
+      });
+      const send=async()=>{
+        const queued=ok(await local('POST','/v1/emails/send',mail({from:`no-reply@${domain}`,to,subject:'Verify your email'})),202);
+        await runDispatcher(runtime,{region:REGION,accountId:account});
+        return ok(await local('GET',`/v1/emails/${queued.id}`)).status;
+      };
+      // What a hard bounce of an earlier sign-in email leaves behind: no public API lifts it (contact edits, consent,
+      // delete and re-create all keep it), so every later sign-in email to the address is suppressed.
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES($1,$2,$3,true,'hard_bounce',now())`,[unique('con'),wid,to.toLowerCase()]);
+      assert.equal(await send(),'suppressed');
+      const removed:string[]=[];let caller=account;
+      const ses=(region:string)=>({account:async()=>caller,remove:async(address:string,tenant:string)=>{removed.push(`${region}/${tenant}/${address}`);return address===to;}});
+      const lift=()=>liftSuppression(db,[wid,to,'--reason','The mailbox exists now'],ses);
+      await assert.rejects(liftSuppression(db,[wid,to],ses),/Usage:/);
+      caller='999999999999'; await assert.rejects(lift(),/Nothing was changed/); caller=account;
+      assert.equal(await send(),'suppressed','A failed SES removal leaves Bane unchanged.');
+      const details=await lift();
+      // The tenant the dispatcher sent with; SES keeps the address's original case, Bane its lowercase.
+      assert.equal(tenants.length,0);
+      assert.equal(await send(),'accepted');
+      assert.deepEqual(removed,[`${REGION}/${tenants[0]}/${to}`,`${REGION}/${tenants[0]}/${to.toLowerCase()}`]);
+      assert.deepEqual(details.sesRemoved,[{region:REGION,tenant:tenants[0]}]);
+      assert.deepEqual((await db.query(`SELECT details->>'reason' reason,details->>'suppressionReason' was FROM hosted_operator_audit WHERE workspace_id=$1 AND action='lift-suppression'`,[wid])).rows,[{reason:'The mailbox exists now',was:'hard_bounce'}]);
+      await assert.rejects(lift(),/not suppressed/);
+      await db.query(`UPDATE audience_contacts SET suppressed=true,suppression_reason='complaint' WHERE workspace_id=$1 AND email=$2`,[wid,to.toLowerCase()]);
+      await assert.rejects(lift(),/complaint suppression is not lifted/);
+    });
+  });
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
     // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
     await simulatedSesFixture(t,async ({runtime,local,db})=>{
