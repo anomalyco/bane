@@ -35,7 +35,10 @@ shard() (
   export ACCOUNT_ISSUER="https://127.0.0.1:$((PORT+1000))" BANE_TEST_SIGNING_KEY="$HOME/fixture.pem" NODE_EXTRA_CA_CERTS="$HOME/fixture.crt"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' -keyout "$BANE_TEST_SIGNING_KEY" -out "$NODE_EXTRA_CA_CERTS" 2>/dev/null
   node --import tsx scripts/fixture-issuer.ts > "$HOME/issuer.log" 2>&1 & pids+=("$!")
-  ../.github/s3-fixture/node_modules/.bin/s3rver -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
+  # The emulator normalizes bucket paths differently from the AWS SDK; like the previous fixture,
+  # it checks object operations here, not SigV4 calculations.
+  # This release packages the CLI module but omits its bin entry point.
+  node -e 'require("../.github/s3-fixture/node_modules/@20minutes/s3rver/lib/cli").parseAsync([process.argv[0], "s3rver", ...process.argv.slice(1)]).catch(error => { console.error(error.message); process.exitCode = 1; })' -- -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --allow-mismatched-signatures --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
   node --import tsx src/server.ts > "$HOME/server.log" 2>&1 & pids+=("$!")
   # The simulated shard runs its job handlers inside rollback-only transactions.
   # A second worker updating those tables can deadlock with queryBudget's DDL.

@@ -128,6 +128,33 @@ test('mail gateway: receipt parser distinguishes readable forwards from unparsed
   assert.ok(await parseInboundMime(Buffer.from(forward+base)));
   assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
 });
+test('S3 fixture: object round trips and reserved part headers keep the service available',async t=>{
+  const {createRequire}=await import('node:module'),{spawn}=await import('node:child_process'),{once}=await import('node:events');
+  const {mkdtemp,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
+  const fixture=createRequire(new URL('../.github/s3-fixture/package.json',import.meta.url)).resolve('@20minutes/s3rver');
+  const directory=await mkdtemp(join(tmpdir(),'bane-storage-'));
+  const child=spawn(process.execPath,['-e',`const S3rver=require(${JSON.stringify(fixture)});new S3rver({address:'127.0.0.1',port:0,directory:process.argv[1],vhostBuckets:false,allowMismatchedSignatures:true,silent:true,configureBuckets:[{name:'fixture'}]}).run().then(address=>process.send({port:address.port}));`,directory],{stdio:['ignore','ignore','pipe','ipc']});
+  let log='';child.stderr!.on('data',chunk=>{log=(log+String(chunk)).slice(-4000);});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null){child.kill();await once(child,'exit');}await rm(directory,{recursive:true,force:true});});
+  const [{port}]=await once(child,'message',{signal:AbortSignal.timeout(5000)});
+  const {S3Client,PutObjectCommand,GetObjectCommand,CopyObjectCommand,ListObjectsV2Command,DeleteObjectCommand}=await import('@aws-sdk/client-s3');
+  const endpoint=`http://127.0.0.1:${port}`,client=new S3Client({endpoint,region:'us-east-1',forcePathStyle:true,credentials:{accessKeyId:'S3RVER',secretAccessKey:'S3RVER'}});
+  t.after(()=>client.destroy());
+  const key='workspaces/fixture/att/attachment_fixture',body='synthetic object bytes';
+  await client.send(new PutObjectCommand({Bucket:'fixture',Key:key,Body:body,ContentType:'text/plain'}));
+  assert.equal(await (await client.send(new GetObjectCommand({Bucket:'fixture',Key:key}))).Body!.transformToString(),body);
+  await client.send(new CopyObjectCommand({Bucket:'fixture',Key:'copy.txt',CopySource:`fixture/${key}`}));
+  const listing=await client.send(new ListObjectsV2Command({Bucket:'fixture'}));
+  assert.deepEqual(listing.Contents!.map(item=>item.Key).sort(),['copy.txt',key]);
+  for(const header of ['constructor: value','__proto__: value']){
+    const response=await fetch(`${endpoint}/fixture`,{method:'POST',headers:{'content-type':'multipart/form-data; boundary=fixture'},body:`--fixture\r\n${header}\r\nContent-Disposition: form-data; name="file"\r\n\r\nfixture\r\n--fixture--\r\n`,signal:AbortSignal.timeout(5000)});
+    assert.equal(response.status,400,log);await response.body?.cancel();
+    assert.equal(child.exitCode,null,log);
+  }
+  assert.equal(await (await client.send(new GetObjectCommand({Bucket:'fixture',Key:'copy.txt'}))).Body!.transformToString(),body);
+  for(const Key of [key,'copy.txt'])await client.send(new DeleteObjectCommand({Bucket:'fixture',Key}));
+  assert.equal((await client.send(new ListObjectsV2Command({Bucket:'fixture'}))).KeyCount,0);
+});
 test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
   const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
   const host = 'inbox.example.com';
@@ -3667,6 +3694,39 @@ describe('Dashboard API capabilities', () => {
       assert.equal(full.url, `${PUBLIC_ORIGIN}/campaigns/${campaign.id}/${state === 'failed' ? 'edit' : 'review'}`);
     }
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
+  });
+
+  test('block HTML: campaign and template validation bound parsing before changing drafts',async t=>{
+    const key=await keyFixture(t,{permissions:['send']});
+    const manager=await keyFixture(t,{permissions:['manage']});
+    const {validateBlockHtml,renderBlockHtml,renderBlockText,BlockContentError}=await import('./src/campaign-blocks.js');
+    const inputs=[
+      '<div>'.repeat(40_000),
+      '<p>'+'<code>'.repeat(3_000)+'text'+'</code>'.repeat(3_000)+'</p>',
+      '<p '+Array.from({length:300},(_,i)=>`a${i}="x"`).join(' ')+'>text</p>',
+      '<p>text</p>'.repeat(20_001),
+    ];
+    for(const html of inputs){
+      for(const [method,path,apiKey,body,code] of [
+        ['POST','/v1/campaigns',key.secret,{name:'Complex content',html},'CAMPAIGN_CONTENT_INVALID'],
+        ['PATCH','/v1/templates/tpl_fixture',manager.secret,{revision:1,draft:{name:'Complex content',html}},'TEMPLATE_CONTENT_INVALID'],
+      ] as const){
+        const start=performance.now();
+        error(await http(method,path,apiKey,body,{},20_000),422,code);
+        const ms=performance.now()-start;t.diagnostic(`${path}: ${Buffer.byteLength(html)} bytes rejected in ${Math.round(ms)} ms`);
+        assert.ok(ms<2000,'Block content validation must finish before its two-second request budget.');
+      }
+      for(const render of [validateBlockHtml,renderBlockHtml,renderBlockText])assert.throws(()=>render(html),BlockContentError);
+    }
+    for(const href of ['#','&#35;',' # ']){
+      const html=`<p><a href="${href}">Link</a></p>`;
+      assert.doesNotThrow(()=>validateBlockHtml(html));
+      assert.throws(()=>validateBlockHtml(html,{complete:true}),/placeholder/);
+    }
+    const html='<h1>Example</h1><p>Some <strong>formatted</strong> text.</p>';
+    assert.doesNotThrow(()=>validateBlockHtml(html,{complete:true}));
+    assert.ok(renderBlockHtml(html).includes('<strong>formatted</strong>'));
+    assert.equal(renderBlockText(html),'Example\n\nSome formatted text.');
   });
 
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
