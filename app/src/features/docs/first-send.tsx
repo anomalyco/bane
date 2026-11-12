@@ -51,7 +51,8 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
   const [language, setLanguage] = useState('curl')
   const to = identity?.email ?? 'you@example.com'
   const from = `hello@${domain?.name ?? 'acme.com'}`
-  const snippets = sendSnippets({ origin, apiKey, from, to })
+  // Until the installation's address is known (it always is once signed in), the examples stay empty.
+  const snippets = origin ? sendSnippets({ origin, apiKey, from, to }) : { curl: '', sdk: '' }
   return <section className="section stack developer-section" aria-label={title}>
     <SectionHeader title={title} />
     <div className="developer-client-bar">
