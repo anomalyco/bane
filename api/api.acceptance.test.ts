@@ -4018,6 +4018,20 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).state, 'canceled');
     error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, key.secret, {}), 409, 'CAMPAIGN_NOT_SENDING');
   });
+
+  test('missing personalization names the placeholder and the fallback that fixes it', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('personalize-list') });
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { subject: 'Hello', html: '<p>Hi {{name}}</p>', defaults: {} });
+    const test = error(await http('POST', `/v1/campaigns/${campaign.id}/test`, key.secret, { to: address() }), 422, 'MISSING_TEMPLATE_VARIABLE');
+    assert.match(test.message, /\{\{name\}\}/);
+    assert.match(test.message, /fallback/);
+    assert.doesNotMatch(test.message, /test-recipient/);
+    assert.equal(test.field, 'data.name');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/test`, key.secret, { to: address(), data: { name: 'Sample' } }), 202);
+    const withFallback = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<p>Hi {{name}}</p>', defaults: { name: 'there' } } }));
+    ok(await http('POST', `/v1/campaigns/${withFallback.id}/test`, key.secret, { to: address() }), 202);
+  });
 });
 
 describe('Dashboard API capabilities', () => {

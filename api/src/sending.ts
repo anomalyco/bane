@@ -643,7 +643,7 @@ function interpolate(source: string | undefined, values: Record<string, unknown>
   let result = ''; let offset = 0;
   for (const match of source.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)) {
     const key = match[1]!;
-    if (!Object.hasOwn(values, key) || values[key] === undefined || values[key] === null) throw new ApiError(422, 'MISSING_TEMPLATE_VARIABLE', `A value is required for ${key}.`, key);
+    if (!Object.hasOwn(values, key) || values[key] === undefined || values[key] === null) throw new ApiError(422, 'MISSING_TEMPLATE_VARIABLE', `This email uses {{${key}}} but has no value for it. Add a fallback value for ${key} (defaults.${key}).`, key);
     const value = html ? escaped(String(values[key])) : String(values[key]);
     const prefix = source.slice(offset, match.index);
     if (result.length + prefix.length + value.length > MAX_BODY) throw new ApiError(413, 'RENDERED_CONTENT_TOO_LARGE', 'A personalized body part exceeds 512 KiB characters. Reduce the content or repeated substitutions.');
@@ -1036,6 +1036,7 @@ async function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft
   const { renderBlockHtml, renderBlockText } = await loadCampaignBlocks();
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
+const RECIPIENT_CONTENT_ERRORS = new Set(['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE']);
 async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
@@ -1051,7 +1052,11 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
     return snapshot;
   } catch (error) {
     // Add only a contact identifier to known local validation failures; never rewrite database/provider errors.
-    if (error instanceof ApiError && ['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE'].includes(error.code)) throw new ApiError(error.status, error.code, `Contact ${contact.id}: ${error.message}`, 'contactId', error.retryable);
+    if (error instanceof ApiError && RECIPIENT_CONTENT_ERRORS.has(error.code)) {
+      // A test has no contact: name the sample data that fills the gap instead of an internal recipient id.
+      if (test && error.code === 'MISSING_TEMPLATE_VARIABLE') throw new ApiError(error.status, error.code, `This email uses {{${error.field}}} but the test has no value for it. Add a fallback value for ${error.field} (defaults.${error.field}) or a sample value (data.${error.field}).`, `data.${error.field}`, error.retryable);
+      throw new ApiError(error.status, error.code, test ? error.message : `Contact ${contact.id}: ${error.message}`, test ? error.field : 'contactId', error.retryable);
+    }
     throw error;
   }
 }
@@ -1425,6 +1430,8 @@ async function recipientChunk(db: DbExecutor, reviewId: string, cursor: number, 
 }
 function backgroundFailure(error: unknown) {
   const code = error instanceof ApiError ? error.code : 'CAMPAIGN_DEPENDENCY_FAILED';
+  // Content problems name the contact and the fix (no recipient data beyond its id); anything else stays generic.
+  if (error instanceof ApiError && RECIPIENT_CONTENT_ERRORS.has(code)) return { code, message: `${error.message} Correct it and send again.` };
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
 }
 // Send and schedule: freeze the audience and content now, reserve the recipients, and hand the one run job the rest.
