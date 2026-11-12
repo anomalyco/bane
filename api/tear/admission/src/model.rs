@@ -4,10 +4,14 @@
 //! in lock phases; when it needs a lock the other connection holds, it is `blocked` and resumes,
 //! against the then-latest committed state, at that connection's commit or abort.
 //!
-//! Receive side (`Recv`): one workspace, an hourly message window of `limit` messages, an ingest
-//! backlog of `backlog` jobs. A notification of a new message serializes on the workspace's window
-//! row, rechecks whether the receipt exists, and only then charges the window once; a notification
-//! of a known message never charges. Budget holds are released into a later window.
+//! Receive side (`Recv`): two hosted workspaces A < B, each with an hourly message window of `limit`
+//! messages and an ingest backlog of `backlog` active jobs; one notification can address both and
+//! handles them in workspace order. A notification of a new message serializes on the workspace's
+//! window row, rechecks whether the receipt exists, and only then charges the window once; a
+//! notification of a known message never charges. A reopen (new recipients) is coalesced into the
+//! receipt's pending ingest job, or needs backlog room (read under the window row), or is held and
+//! released later without a second charge. Every job producer respects the backlog. The global
+//! release never waits: holds whose workspace rows are locked are left for its next pass.
 //!
 //! Send side (`Send`): two hosted workspaces sharing a quota sponsor, three API keys (1 and 3 on
 //! workspace 1, 2 on workspace 2). Admission is one statement: key budget, idempotency claim,
@@ -17,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CONNS: [&str; 2] = ["W", "V"];
+/// Held connections; the receive profile also uses X (the send profile two).
+pub const CONNS: [&str; 3] = ["W", "V", "X"];
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(tag = "profile", rename_all = "lowercase")]
@@ -29,10 +34,16 @@ pub enum Model {
 
 // ---------------------------------------------------------------- receive side
 
+/// Workspace of a recipient letter: a, c and the numbered h001...h101 are A's, b is B's.
+fn ws_of(c: char) -> usize {
+    if c == 'b' { 1 } else { 0 }
+}
+pub const WS: [&str; 2] = ["A", "B"];
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Receipt {
     pub status: String,
-    /// Single-letter recipients (a, b) plus `h` of the numbered ones (0, 100 or 101).
+    /// Single-letter recipients plus `h` of the numbered ones (0, 100 or 101).
     pub letters: String,
     pub h: u8,
     pub retry: Option<i64>,
@@ -44,18 +55,50 @@ impl Receipt {
     fn count(&self) -> usize {
         self.letters.len() + self.h as usize
     }
+    fn set(&self) -> (String, u8) {
+        (self.letters.clone(), self.h)
+    }
 }
-fn rcpt(r: &str) -> (String, u8) {
+/// Per-workspace recipients of a recipient set, in workspace order.
+fn split_rcpt(r: &str) -> [(String, u8); 2] {
+    let mut out: [(String, u8); 2] = Default::default();
     match r {
-        "0" => (String::new(), 0),
-        "h" => (String::new(), 100),
-        "x" => (String::new(), 101),
+        "0" => {}
+        "h" => out[0].1 = 100,
+        "x" => out[0].1 = 101,
         _ => {
             let mut v: Vec<char> = r.chars().collect();
             v.sort();
             v.dedup();
-            (v.into_iter().collect(), 0)
+            for c in v {
+                out[ws_of(c)].0.push(c);
+            }
         }
+    }
+    out
+}
+
+/// Ingest jobs of one receipt: pending, and the recipients each running job claimed (oldest first).
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub struct Jobs {
+    pub pending: i64,
+    pub running: Vec<(String, u8)>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub struct RWs {
+    pub limit: i64,
+    pub backlog: i64,
+    pub window: Option<(i64, i64)>,
+    pub receipts: BTreeMap<String, Receipt>,
+    pub jobs: BTreeMap<String, Jobs>,
+}
+impl RWs {
+    fn active(&self) -> i64 {
+        self.jobs
+            .values()
+            .map(|j| j.pending + j.running.len() as i64)
+            .sum()
     }
 }
 
@@ -63,74 +106,94 @@ fn rcpt(r: &str) -> (String, u8) {
 pub struct RTxn {
     pub words: Vec<String>,
     pub phase: u8,
+    pub cursor: usize,
     pub blocked: bool,
     pub done: bool,
-    pub window_lock: bool,
-    pub turns_lock: bool,
-    pub receipt_locks: BTreeSet<String>,
-    /// Uncommitted effects.
+    /// window:X, turns:X, receipt:X:m, job:X:m, ignored:m; all exclusive.
+    pub locks: BTreeSet<String>,
+    /// Uncommitted effects: receipts by X:m, windows, ingest jobs added by X:m.
     pub receipts: BTreeMap<String, Receipt>,
-    pub window: Option<(i64, i64)>,
+    pub windows: [Option<(i64, i64)>; 2],
     pub jobs: BTreeMap<String, i64>,
-    /// release: receipts claimed (FOR UPDATE SKIP LOCKED) and the next one to process.
+    pub need_job: Vec<String>,
     pub claimed: Vec<String>,
-    pub cursor: usize,
+    pub queued: i64,
     pub result: Value,
+}
+impl RTxn {
+    fn new(words: &[&str]) -> Self {
+        RTxn {
+            words: words.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Recv {
-    pub limit: i64,
-    pub backlog: i64,
     /// Window clock (hours) and created_at clock (hours, also moved by `days`).
     pub h: i64,
     pub t: i64,
-    pub window: Option<(i64, i64)>,
-    pub receipts: BTreeMap<String, Receipt>,
-    pub jobs: BTreeMap<String, i64>,
+    pub ws: [RWs; 2],
     /// Staging objects recorded as ignored (a notification with no recipients).
     pub ignored: BTreeSet<String>,
     pub txns: BTreeMap<String, RTxn>,
 }
 
+const BACKLOG_HOLD: &str = "MAILBOX_RECEIVE_BACKLOG";
+const BUDGET_HOLD: &str = "MAILBOX_RECEIVE_BUDGET";
+
+fn key(x: usize, m: &str) -> String {
+    format!("{}:{m}", WS[x])
+}
+fn unkey(k: &str) -> (usize, &str) {
+    let (x, m) = k.split_once(':').unwrap();
+    (if x == "A" { 0 } else { 1 }, m)
+}
+
 impl Recv {
-    pub fn initial(limit: i64, backlog: i64) -> Self {
-        Recv {
+    pub fn initial(limits: [(i64, i64); 2]) -> Self {
+        let w = |(limit, backlog): (i64, i64)| RWs {
             limit,
             backlog,
+            ..Default::default()
+        };
+        Recv {
             h: 0,
             t: 0,
-            window: None,
-            receipts: BTreeMap::new(),
-            jobs: BTreeMap::new(),
+            ws: [w(limits[0]), w(limits[1])],
             ignored: BTreeSet::new(),
             txns: BTreeMap::new(),
         }
     }
-    fn other(&self, me: &str) -> impl Iterator<Item = (&String, &RTxn)> {
-        let me = me.to_owned();
-        self.txns.iter().filter(move |(k, _)| **k != me)
+    fn held(&self, me: &str, lock: &str) -> bool {
+        self.txns
+            .iter()
+            .any(|(k, t)| k != me && t.locks.contains(lock))
     }
-    fn window_held(&self, me: &str) -> bool {
-        self.other(me).any(|(_, t)| t.window_lock)
+    fn receipt(&self, k: &str) -> Option<&Receipt> {
+        let (x, m) = unkey(k);
+        self.ws[x].receipts.get(m)
     }
-    fn turns_held(&self, me: &str) -> bool {
-        self.other(me).any(|(_, t)| t.turns_lock)
+    fn jobs(&self, k: &str) -> Jobs {
+        let (x, m) = unkey(k);
+        self.ws[x].jobs.get(m).cloned().unwrap_or_default()
     }
-    fn receipt_held(&self, me: &str, m: &str) -> bool {
-        self.other(me).any(|(_, t)| t.receipt_locks.contains(m))
-    }
-    fn active(&self) -> i64 {
-        self.jobs.values().sum()
-    }
-    /// mail_receive_slot, called with the window lock held: backlog and window read after every
-    /// earlier admission committed. Returns the charged window, or None for a budget hold.
-    fn slot(&self) -> Option<(i64, i64)> {
-        if self.limit <= 0 || self.active() >= self.backlog {
+    /// mail_receive_slot with the window row held: the policy and backlog read after every earlier
+    /// admission committed, plus this transaction's own window charge and jobs.
+    fn slot(&self, x: usize, t: &RTxn) -> Option<(i64, i64)> {
+        let w = &self.ws[x];
+        let own: i64 = t
+            .jobs
+            .iter()
+            .filter(|(k, _)| unkey(k).0 == x)
+            .map(|(_, n)| n)
+            .sum();
+        if w.limit <= 0 || w.active() + own >= w.backlog {
             return None;
         }
-        match self.window {
-            Some((at, n)) if at == self.h => (n < self.limit).then_some((self.h, n + 1)),
+        match t.windows[x].or(w.window) {
+            Some((at, n)) if at == self.h => (n < w.limit).then_some((self.h, n + 1)),
             _ => Some((self.h, 1)),
         }
     }
@@ -139,210 +202,259 @@ impl Recv {
     fn advance(&mut self, me: &str) {
         let mut t = self.txns.remove(me).unwrap();
         t.blocked = false;
-        // Locks and effects are judged against the other connection's locks.
-        let blocked = loop {
-            match t.words[0].as_str() {
-                "accept" => {
-                    let (m, r) = (t.words[1].clone(), t.words[2].clone());
-                    let (letters, h) = rcpt(&r);
-                    match t.phase {
-                        // Fast path: a known message never touches the window.
-                        0 => {
-                            // No recipients: routes nothing and records the staging object as
-                            // ignored (its key is locked until commit).
-                            if letters.is_empty() && h == 0 {
-                                let key = format!("ignored:{m}");
-                                if !self.ignored.contains(&m) {
-                                    if self.receipt_held(me, &key) {
-                                        break true;
-                                    }
-                                    t.receipt_locks.insert(key);
-                                }
-                                t.result = json!({"queued": 0});
-                                break false;
-                            }
-                            t.phase = if self.receipts.contains_key(&m) { 2 } else { 1 };
-                        }
-                        // A new message: serialize on the window row, then recheck.
-                        1 => {
-                            if self.window_held(me) {
-                                break true;
-                            }
-                            t.window_lock = true;
-                            if self.receipts.contains_key(&m) {
-                                t.phase = 2;
-                                continue;
-                            }
-                            let mut rc = Receipt {
-                                status: "pending".into(),
-                                letters,
-                                h,
-                                retry: None,
-                                error: None,
-                                born: self.t,
-                            };
-                            t.receipt_locks.insert(m.clone());
-                            if rc.count() > 100 {
-                                rc.status = "failed".into();
-                                rc.error = Some("MAILBOX_RECEIVE_BUDGET".into());
-                            } else if let Some(w) = self.slot() {
-                                t.window = Some(w);
-                            } else {
-                                rc.status = "held".into();
-                                rc.error = Some("MAILBOX_RECEIVE_BUDGET".into());
-                                rc.retry = Some(self.h + 1);
-                            }
-                            let pending = rc.status == "pending";
-                            t.receipts.insert(m.clone(), rc);
-                            if !pending {
-                                t.result = json!({"queued": 0});
-                                break false;
-                            }
-                            t.phase = 3;
-                        }
-                        // A known message: reopen with new recipients, under the receipt row lock.
-                        2 => {
-                            if self.receipt_held(me, &m) {
-                                break true;
-                            }
-                            t.receipt_locks.insert(m.clone());
-                            let cur = self.receipts[&m].clone();
-                            let mut union: Vec<char> =
-                                cur.letters.chars().chain(letters.chars()).collect();
-                            union.sort();
-                            union.dedup();
-                            let union: String = union.into_iter().collect();
-                            let uh = cur.h.max(h);
-                            let covers =
-                                letters.chars().all(|c| cur.letters.contains(c)) && cur.h >= h;
-                            if cur.status != "failed" && !covers && union.len() + uh as usize <= 200
-                            {
-                                let status = if cur.status == "held" {
-                                    "held"
-                                } else {
-                                    "pending"
-                                };
-                                let rc = Receipt {
-                                    status: status.into(),
-                                    letters: union,
-                                    h: uh,
-                                    ..cur
-                                };
-                                t.receipts.insert(m.clone(), rc);
-                                if status == "pending" {
-                                    t.phase = 3;
-                                    continue;
-                                }
-                            }
-                            t.result = json!({"queued": 0});
-                            break false;
-                        }
-                        // Queue the ingest job: the backlog counter row.
-                        _ => {
-                            if self.turns_held(me) {
-                                break true;
-                            }
-                            t.turns_lock = true;
-                            *t.jobs.entry(m.clone()).or_default() += 1;
-                            t.result = json!({"queued": 1});
-                            break false;
-                        }
-                    }
-                }
-                "release" => {
-                    if t.phase == 0 {
-                        // Due holds, oldest retry first; rows another connection holds are skipped.
-                        let mut due: Vec<(i64, String)> = self
-                            .receipts
-                            .iter()
-                            .filter(|(m, r)| {
-                                r.status == "held"
-                                    && r.retry.is_some_and(|x| x <= self.h)
-                                    && !self.receipt_held(me, m)
-                            })
-                            .map(|(m, r)| (r.retry.unwrap(), m.clone()))
-                            .collect();
-                        due.sort();
-                        t.claimed = due.into_iter().map(|(_, m)| m).collect();
-                        for m in &t.claimed {
-                            t.receipt_locks.insert(m.clone());
-                        }
-                        t.phase = 1;
-                    }
-                    if t.cursor >= t.claimed.len() {
-                        t.result = json!(t.claimed.len());
-                        break false;
-                    }
-                    let m = t.claimed[t.cursor].clone();
-                    let mut rc = t
-                        .receipts
-                        .get(&m)
-                        .cloned()
-                        .unwrap_or_else(|| self.receipts[&m].clone());
-                    if t.phase == 1 {
-                        if self.t - rc.born >= 72 {
-                            rc.status = "failed".into();
-                            rc.error = Some("MAILBOX_BUDGET_HOLD_EXPIRED".into());
-                            rc.retry = None;
-                            t.receipts.insert(m, rc);
-                            t.cursor += 1;
-                            continue;
-                        }
-                        if self.window_held(me) {
-                            break true;
-                        }
-                        t.window_lock = true;
-                        // The slot sees this transaction's own earlier releases.
-                        let mut view = self.clone();
-                        view.window = t.window.or(self.window);
-                        for (k, n) in &t.jobs {
-                            *view.jobs.entry(k.clone()).or_default() += n;
-                        }
-                        match view.slot() {
-                            Some(w) => {
-                                t.window = Some(w);
-                                rc.status = "pending".into();
-                                rc.error = None;
-                                rc.retry = None;
-                                t.receipts.insert(m, rc);
-                                t.phase = 2;
-                            }
-                            None => {
-                                rc.retry = Some(self.h + 1);
-                                t.receipts.insert(m, rc);
-                                t.cursor += 1;
-                            }
-                        }
-                        continue;
-                    }
-                    if self.turns_held(me) {
-                        break true;
-                    }
-                    t.turns_lock = true;
-                    *t.jobs.entry(m).or_default() += 1;
-                    t.cursor += 1;
-                    t.phase = 1;
-                }
-                _ => unreachable!(),
-            }
+        let blocked = match t.words[0].as_str() {
+            "accept" | "legacy-accept" => self.advance_accept(me, &mut t),
+            "release" => self.advance_release(me, &mut t),
+            _ => unreachable!(),
         };
         t.blocked = blocked;
         t.done = !blocked;
         self.txns.insert(me.to_owned(), t);
     }
 
+    /// One SNS notification: receipts per workspace in workspace order, then their ingest jobs.
+    fn advance_accept(&mut self, me: &str, t: &mut RTxn) -> bool {
+        let m = t.words[1].clone();
+        let plan: Vec<(usize, (String, u8))> = split_rcpt(&t.words[2])
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (l, h))| !l.is_empty() || *h > 0)
+            .collect();
+        if plan.is_empty() {
+            // No recipients: routes nothing and records the staging object as ignored.
+            let lock = format!("ignored:{m}");
+            if !self.ignored.contains(&m) {
+                if self.held(me, &lock) {
+                    return true;
+                }
+                t.locks.insert(lock);
+            }
+            t.result = json!({"queued": 0});
+            return false;
+        }
+        while t.cursor < plan.len() {
+            let (x, (letters, h)) = plan[t.cursor].clone();
+            let k = key(x, &m);
+            match t.phase {
+                // Fast path: a known receipt is reopened, never charged.
+                0 => t.phase = if self.receipt(&k).is_some() { 2 } else { 1 },
+                // A new receipt: serialize on the workspace's window row, then recheck.
+                1 => {
+                    let lock = format!("window:{}", WS[x]);
+                    if self.held(me, &lock) {
+                        return true;
+                    }
+                    t.locks.insert(lock);
+                    if self.receipt(&k).is_some() {
+                        t.phase = 2;
+                        continue;
+                    }
+                    let mut rc = Receipt {
+                        status: "pending".into(),
+                        letters,
+                        h,
+                        retry: None,
+                        error: None,
+                        born: self.t,
+                    };
+                    if rc.count() > 100 {
+                        rc.status = "failed".into();
+                        rc.error = Some(BUDGET_HOLD.into());
+                    } else if let Some(w) = self.slot(x, t) {
+                        t.windows[x] = Some(w);
+                        t.need_job.push(k.clone());
+                    } else {
+                        rc.status = "held".into();
+                        rc.error = Some(BUDGET_HOLD.into());
+                        rc.retry = Some(self.h + 1);
+                    }
+                    t.locks.insert(format!("receipt:{k}"));
+                    t.receipts.insert(k, rc);
+                    t.cursor += 1;
+                    t.phase = 0;
+                }
+                // A known receipt: merge the new recipients under its row lock.
+                2 => {
+                    let lock = format!("receipt:{k}");
+                    if self.held(me, &lock) {
+                        return true;
+                    }
+                    t.locks.insert(lock);
+                    let cur = self.receipt(&k).unwrap().clone();
+                    let mut union: Vec<char> = cur.letters.chars().chain(letters.chars()).collect();
+                    union.sort();
+                    union.dedup();
+                    let union: String = union.into_iter().collect();
+                    let uh = cur.h.max(h);
+                    let covers = letters.chars().all(|c| cur.letters.contains(c)) && cur.h >= h;
+                    if cur.status == "failed" || covers || union.len() + uh as usize > 200 {
+                        t.cursor += 1;
+                        t.phase = 0;
+                        continue;
+                    }
+                    let mut rc = Receipt {
+                        letters: union,
+                        h: uh,
+                        ..cur.clone()
+                    };
+                    if cur.status == "held" {
+                        t.receipts.insert(k, rc);
+                        t.cursor += 1;
+                        t.phase = 0;
+                        continue;
+                    }
+                    rc.status = "pending".into();
+                    if self.jobs(&k).pending > 0 {
+                        // Coalesced into the receipt's pending job, which reads the merged recipients
+                        // when it is claimed (the job row is locked until commit).
+                        let lock = format!("job:{k}");
+                        if self.held(me, &lock) {
+                            return true;
+                        }
+                        t.locks.insert(lock);
+                        t.receipts.insert(k, rc);
+                        t.cursor += 1;
+                        t.phase = 0;
+                        continue;
+                    }
+                    t.receipts.insert(k, rc);
+                    t.phase = 3;
+                }
+                // A reopen that needs a new ingest job: the backlog, read under the window row.
+                _ => {
+                    let lock = format!("window:{}", WS[x]);
+                    if self.held(me, &lock) {
+                        return true;
+                    }
+                    t.locks.insert(lock);
+                    let w = &self.ws[x];
+                    let own: i64 = t
+                        .jobs
+                        .iter()
+                        .filter(|(k, _)| unkey(k).0 == x)
+                        .map(|(_, n)| n)
+                        .sum();
+                    let rc = t.receipts.get_mut(&k).unwrap();
+                    if w.active() + own >= w.backlog {
+                        rc.status = "held".into();
+                        rc.error = Some(BACKLOG_HOLD.into());
+                        rc.retry = Some(self.h + 1);
+                    } else {
+                        t.need_job.push(k.clone());
+                    }
+                    t.cursor += 1;
+                    t.phase = 0;
+                }
+            }
+        }
+        // Ingest jobs, in workspace order, under each workspace's backlog counter row.
+        while let Some(k) = t.need_job.first().cloned() {
+            let (x, _) = unkey(&k);
+            let lock = format!("turns:{}", WS[x]);
+            if self.held(me, &lock) {
+                return true;
+            }
+            t.locks.insert(lock);
+            *t.jobs.entry(k).or_default() += 1;
+            t.queued += 1;
+            t.need_job.remove(0);
+        }
+        t.result = json!({"queued": t.queued});
+        false
+    }
+
+    /// release_receive_budget_holds(NULL): never waits. Due holds another transaction holds are
+    /// skipped (SKIP LOCKED), and so are holds whose workspace window or backlog row is locked.
+    fn advance_release(&mut self, me: &str, t: &mut RTxn) -> bool {
+        if t.phase == 0 {
+            let mut due: Vec<(i64, usize, String)> = vec![];
+            for (x, w) in self.ws.iter().enumerate() {
+                for (m, r) in &w.receipts {
+                    if r.status == "held"
+                        && r.retry.is_some_and(|v| v <= self.h)
+                        && !self.held(me, &format!("receipt:{}", key(x, m)))
+                    {
+                        due.push((r.retry.unwrap(), x, m.clone()));
+                    }
+                }
+            }
+            due.sort();
+            t.claimed = due.into_iter().map(|(_, x, m)| key(x, &m)).collect();
+            for k in t.claimed.clone() {
+                t.locks.insert(format!("receipt:{k}"));
+            }
+            t.phase = 1;
+        }
+        let mut processed = 0;
+        for k in t.claimed.clone() {
+            let (x, _) = unkey(&k);
+            let mut rc = self.receipt(&k).unwrap().clone();
+            if self.t - rc.born >= 72 {
+                rc.status = "failed".into();
+                rc.error = Some("MAILBOX_BUDGET_HOLD_EXPIRED".into());
+                rc.retry = None;
+                t.receipts.insert(k, rc);
+                processed += 1;
+                continue;
+            }
+            let (window, turns) = (format!("window:{}", WS[x]), format!("turns:{}", WS[x]));
+            if self.held(me, &window) || self.held(me, &turns) {
+                continue;
+            }
+            t.locks.insert(window);
+            t.locks.insert(turns);
+            processed += 1;
+            let w = &self.ws[x];
+            let own: i64 = t
+                .jobs
+                .iter()
+                .filter(|(j, _)| unkey(j).0 == x)
+                .map(|(_, n)| n)
+                .sum();
+            let admit = if rc.error.as_deref() == Some(BACKLOG_HOLD) {
+                // Already charged when first admitted: only the backlog decides.
+                w.active() + own < w.backlog
+            } else {
+                match self.slot(x, t) {
+                    Some(win) => {
+                        t.windows[x] = Some(win);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if admit {
+                rc.status = "pending".into();
+                rc.error = None;
+                rc.retry = None;
+                *t.jobs.entry(k.clone()).or_default() += 1;
+            } else {
+                rc.retry = Some(self.h + 1);
+            }
+            t.receipts.insert(k, rc);
+        }
+        t.result = json!(processed);
+        false
+    }
+
     fn finish(&mut self, me: &str, commit: bool) -> BTreeMap<String, Value> {
         let t = self.txns.remove(me).unwrap();
         if commit {
-            self.receipts.extend(t.receipts);
-            if let Some(w) = t.window {
-                self.window = Some(w);
+            for (k, rc) in t.receipts {
+                let (x, m) = unkey(&k);
+                self.ws[x].receipts.insert(m.to_owned(), rc);
             }
-            for (m, n) in t.jobs {
-                *self.jobs.entry(m).or_default() += n;
+            for (x, w) in t.windows.iter().enumerate() {
+                if let Some(w) = w {
+                    self.ws[x].window = Some(*w);
+                }
             }
-            for k in t.receipt_locks {
-                if let Some(m) = k.strip_prefix("ignored:") {
+            for (k, n) in t.jobs {
+                let (x, m) = unkey(&k);
+                self.ws[x].jobs.entry(m.to_owned()).or_default().pending += n;
+            }
+            for l in t.locks {
+                if let Some(m) = l.strip_prefix("ignored:") {
                     self.ignored.insert(m.to_owned());
                 }
             }
@@ -363,30 +475,20 @@ impl Recv {
         woke
     }
 
+    fn probe(&self, words: &[&str]) -> bool {
+        let mut p = self.clone();
+        p.txns.insert("A".into(), RTxn::new(words));
+        p.advance("A");
+        !p.txns["A"].blocked
+    }
+
     pub fn enabled(&self, conn: Option<&str>, words: &[&str]) -> bool {
         let any_blocked = self.txns.values().any(|t| t.blocked);
         if let Some(c) = conn {
             return match words[0] {
                 "commit" | "abort" => self.txns.get(c).is_some_and(|t| t.done),
-                _ => {
-                    if self.txns.contains_key(c) {
-                        return false;
-                    }
-                    if !any_blocked {
-                        return true;
-                    }
-                    // Never two statements blocked at once: which waiter wins is PostgreSQL's choice.
-                    let mut probe = self.clone();
-                    probe.txns.insert(
-                        c.to_owned(),
-                        RTxn {
-                            words: words.iter().map(|s| s.to_string()).collect(),
-                            ..Default::default()
-                        },
-                    );
-                    probe.advance(c);
-                    !probe.txns[c].blocked
-                }
+                // Never two statements blocked at once: which waiter wins is PostgreSQL's choice.
+                _ => !self.txns.contains_key(c) && (!any_blocked || self.probe(words)),
             };
         }
         if any_blocked {
@@ -395,23 +497,18 @@ impl Recv {
         let open = !self.txns.is_empty();
         match words[0] {
             // Autocommit statements never wait: run them only when no lock they need is held.
-            "accept" | "release" => {
-                let mut probe = self.clone();
-                probe.txns.insert(
-                    "A".into(),
-                    RTxn {
-                        words: words.iter().map(|s| s.to_string()).collect(),
-                        ..Default::default()
-                    },
-                );
-                probe.advance("A");
-                !probe.txns["A"].blocked
+            "accept" | "legacy-accept" | "release" => self.probe(words),
+            "claim" => {
+                let k = key(if words[1] == "A" { 0 } else { 1 }, words[2]);
+                self.jobs(&k).pending > 0
             }
             "done" => {
-                let m = words[1];
-                let pending = self.receipts.get(m).is_some_and(|r| r.status == "pending");
-                !(pending && self.receipt_held("A", m))
-                    && !(self.jobs.get(m).copied().unwrap_or(0) > 0 && self.turns_held("A"))
+                let x = if words[1] == "A" { 0 } else { 1 };
+                let k = key(x, words[2]);
+                let pending = self.receipt(&k).is_some_and(|r| r.status == "pending");
+                !self.jobs(&k).running.is_empty()
+                    && !self.held("A", &format!("turns:{}", WS[x]))
+                    && !(pending && self.held("A", &format!("receipt:{k}")))
             }
             "hour" | "days" => !open,
             _ => false,
@@ -423,13 +520,7 @@ impl Recv {
             return match words[0] {
                 "commit" | "abort" => (json!("ok"), self.finish(c, words[0] == "commit")),
                 _ => {
-                    self.txns.insert(
-                        c.to_owned(),
-                        RTxn {
-                            words: words.iter().map(|s| s.to_string()).collect(),
-                            ..Default::default()
-                        },
-                    );
+                    self.txns.insert(c.to_owned(), RTxn::new(words));
                     self.advance(c);
                     let t = &self.txns[c];
                     (
@@ -444,27 +535,43 @@ impl Recv {
             };
         }
         let r = match words[0] {
-            "accept" | "release" => {
-                self.txns.insert(
-                    "A".into(),
-                    RTxn {
-                        words: words.iter().map(|s| s.to_string()).collect(),
-                        ..Default::default()
-                    },
-                );
+            "accept" | "legacy-accept" | "release" => {
+                self.txns.insert("A".into(), RTxn::new(words));
                 self.advance("A");
                 let r = self.txns["A"].result.clone();
                 self.finish("A", true);
                 r
             }
-            "done" => {
-                let m = words[1];
-                if let Some(r) = self.receipts.get_mut(m) {
-                    if r.status == "pending" {
-                        r.status = "processed".into();
-                    }
+            "claim" => {
+                // A runner claims the pending job, skipping one a transaction holds locked.
+                let x = if words[1] == "A" { 0 } else { 1 };
+                let k = key(x, words[2]);
+                if self.held("A", &format!("job:{k}")) {
+                    json!(0)
+                } else {
+                    let set = self.receipt(&k).map(Receipt::set).unwrap_or_default();
+                    let j = self.ws[x].jobs.get_mut(words[2]).unwrap();
+                    j.pending -= 1;
+                    j.running.push(set);
+                    json!(1)
                 }
-                json!(self.jobs.remove(m).unwrap_or(0))
+            }
+            "done" => {
+                // The oldest running job settles the receipt only if it is still pending with the
+                // recipients that job claimed (the store's fence), then completes.
+                let x = if words[1] == "A" { 0 } else { 1 };
+                let m = words[2];
+                let claimed = self.ws[x].jobs.get_mut(m).unwrap().running.remove(0);
+                if self.ws[x].jobs[m].pending == 0 && self.ws[x].jobs[m].running.is_empty() {
+                    self.ws[x].jobs.remove(m);
+                }
+                match self.ws[x].receipts.get_mut(m) {
+                    Some(r) if r.status == "pending" && r.set() == claimed => {
+                        r.status = "processed".into();
+                        json!(1)
+                    }
+                    _ => json!(0),
+                }
             }
             "hour" => {
                 self.h += 1;
@@ -481,21 +588,28 @@ impl Recv {
     }
 
     pub fn view(&self) -> Value {
-        let receipts: BTreeMap<&String, Value> = self
-            .receipts
-            .iter()
-            .map(|(m, r)| (m, json!([r.status, r.count(), r.retry, r.error])))
-            .collect();
-        let jobs: BTreeMap<&String, i64> = self
-            .jobs
-            .iter()
-            .filter(|(_, n)| **n > 0)
-            .map(|(m, n)| (m, *n))
-            .collect();
-        json!({
-            "window": match self.window { Some((at, n)) if at == self.h => n, _ => 0 },
-            "receipts": receipts, "active": self.active(), "jobs": jobs,
-        })
+        let mut out = serde_json::Map::new();
+        for (x, w) in self.ws.iter().enumerate() {
+            let receipts: BTreeMap<&String, Value> = w
+                .receipts
+                .iter()
+                .map(|(m, r)| (m, json!([r.status, r.count(), r.retry, r.error])))
+                .collect();
+            let jobs: BTreeMap<&String, Value> = w
+                .jobs
+                .iter()
+                .filter(|(_, j)| j.pending + j.running.len() as i64 > 0)
+                .map(|(m, j)| (m, json!([j.pending, j.running.len()])))
+                .collect();
+            out.insert(
+                WS[x].into(),
+                json!({
+                    "window": match w.window { Some((at, n)) if at == self.h => n, _ => 0 },
+                    "receipts": receipts, "active": w.active(), "jobs": jobs,
+                }),
+            );
+        }
+        Value::Object(out)
     }
 }
 
@@ -1072,7 +1186,10 @@ pub struct USlot {
 /// Stored-attachment quota: `room` more uploads fit. Usage counts live reservations and stored
 /// attachments; a reservation is taken before the put, exchanged for the attachment after it, and
 /// refunded (with a deletion of its object) when the upload does not finish. The sweeper deletes
-/// expired reservations and queues their objects' deletion.
+/// expired reservations and queues their objects' deletion. Every reservation that ends without
+/// its attachment leaves a durable tombstone; a day later the sweeper queues the object's deletion
+/// again unless an attachment holds it. That covers a late put left behind by a Worker that died
+/// before its refund, or by an older Worker whose refund queued nothing.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Upload {
     pub room: i64,
@@ -1085,6 +1202,8 @@ pub struct Upload {
     pub idem: BTreeMap<String, (String, bool)>,
     pub objects: BTreeSet<String>,
     pub deletes: BTreeSet<String>,
+    /// Cleanup obligations: object -> due (a day after its reservation ended).
+    pub tombstones: BTreeMap<String, bool>,
     pub next_obj: usize,
     pub next_label: usize,
 }
@@ -1100,24 +1219,30 @@ impl Upload {
             idem: BTreeMap::new(),
             objects: BTreeSet::new(),
             deletes: BTreeSet::new(),
+            tombstones: BTreeMap::new(),
             next_obj: 1,
             next_label: 1,
+        }
+    }
+    /// Delete the reservation, if any: usage drops and a tombstone records the cleanup obligation.
+    fn take(&mut self, obj: &str) {
+        if self.reservations.remove(obj).is_some() {
+            self.used -= 1;
+            self.tombstones.insert(obj.to_owned(), false);
         }
     }
     /// The finally block of an upload that did not publish its object: take the reservation if it
     /// is still there, and queue the object's deletion either way (the sweeper's deletion of an
     /// expired reservation may have run before this upload's put landed).
     fn refund(&mut self, obj: &str) {
-        if self.reservations.remove(obj).is_some() {
-            self.used -= 1;
-        }
+        self.take(obj);
         self.deletes.insert(obj.to_owned());
     }
     pub fn enabled(&self, slot: Option<&str>, words: &[&str]) -> bool {
         match (slot, words[0]) {
             (Some(s), "upload" | "upload-other") => !self.slots.contains_key(s),
-            (Some(s), "ok" | "fail") => self.slots.contains_key(s),
-            (None, "expire" | "sweep" | "purge") => true,
+            (Some(s), "ok" | "fail" | "crash") => self.slots.contains_key(s),
+            (None, "expire" | "sweep" | "purge" | "day") => true,
             (None, "delete") => self.attachments.contains_key(words[1]),
             _ => false,
         }
@@ -1158,10 +1283,13 @@ impl Upload {
                         json!("409:IDEMPOTENCY_CONFLICT")
                     };
                 }
-                if self.reservations.remove(&u.obj).is_none() {
+                if !self.reservations.contains_key(&u.obj) {
                     self.refund(&u.obj);
                     return json!("503:UPLOAD_EXPIRED");
                 }
+                // Publishing takes the reservation and stores the attachment in one transaction,
+                // so its tombstone never commits.
+                self.reservations.remove(&u.obj);
                 let label = format!("a{}", self.next_label);
                 self.next_label += 1;
                 self.attachments.insert(label.clone(), u.obj.clone());
@@ -1175,13 +1303,41 @@ impl Upload {
                 self.refund(&u.obj);
                 json!("500:INTERNAL_ERROR")
             }
+            (Some(s), "crash") => {
+                // The put lands and the Worker dies before finish or its refund.
+                let u = self.slots.remove(s).unwrap();
+                self.objects.insert(u.obj);
+                json!("crashed")
+            }
             (None, "expire") => {
                 for e in self.reservations.values_mut() {
                     *e = true;
                 }
                 json!("ok")
             }
+            (None, "day") => {
+                for e in self.reservations.values_mut() {
+                    *e = true;
+                }
+                for d in self.tombstones.values_mut() {
+                    *d = true;
+                }
+                json!("ok")
+            }
             (None, "sweep") => {
+                // Due tombstones first, then expired reservations (which leave new tombstones).
+                let due: Vec<String> = self
+                    .tombstones
+                    .iter()
+                    .filter(|(_, d)| **d)
+                    .map(|(o, _)| o.clone())
+                    .collect();
+                for o in due {
+                    self.tombstones.remove(&o);
+                    if !self.attachments.values().any(|a| *a == o) {
+                        self.deletes.insert(o);
+                    }
+                }
                 let expired: Vec<String> = self
                     .reservations
                     .iter()
@@ -1189,8 +1345,7 @@ impl Upload {
                     .map(|(o, _)| o.clone())
                     .collect();
                 for o in expired {
-                    self.reservations.remove(&o);
-                    self.used -= 1;
+                    self.take(&o);
                     self.deletes.insert(o);
                 }
                 json!("ok")
@@ -1212,7 +1367,7 @@ impl Upload {
     }
     pub fn view(&self) -> Value {
         json!({"used": self.used, "reservations": self.reservations.len(), "attachments": self.attachments.keys().collect::<Vec<_>>(),
-            "deletes": self.deletes.len(), "objects": self.objects.len()})
+            "deletes": self.deletes.len(), "tombstones": self.tombstones.len(), "objects": self.objects.len()})
     }
 }
 
@@ -1261,10 +1416,15 @@ impl Model {
 /// Action labels. `core` is the smaller alphabet for exhaustive edge coverage.
 pub fn alphabet(profile: &str, core: bool) -> Vec<String> {
     let mut out = vec![];
+    let conns: &[&str] = if profile == "recv" {
+        &CONNS
+    } else {
+        &CONNS[..2]
+    };
     let held = |out: &mut Vec<String>, stmts: &[String]| {
         for s in stmts {
             out.push(s.clone());
-            for c in CONNS {
+            for c in conns {
                 out.push(format!("{c} {s}"));
             }
         }
@@ -1279,8 +1439,9 @@ pub fn alphabet(profile: &str, core: bool) -> Vec<String> {
             }
             out.push(format!("{s} ok"));
             out.push(format!("{s} fail"));
+            out.push(format!("{s} crash"));
         }
-        out.extend(["expire", "sweep", "purge"].map(String::from));
+        out.extend(["expire", "sweep", "purge", "day"].map(String::from));
         for a in 1..=if core { 2 } else { 4 } {
             out.push(format!("delete a{a}"));
         }
@@ -1293,20 +1454,31 @@ pub fn alphabet(profile: &str, core: bool) -> Vec<String> {
             &["m1", "m2", "m3"]
         };
         let sets: &[&str] = if core {
-            &["a", "ab", "x"]
+            &["a", "ab", "b"]
         } else {
-            &["a", "ab", "b", "h", "x", "0"]
+            &["a", "ab", "b", "ac", "h", "x", "0"]
         };
         let mut stmts = vec![];
         for m in msgs {
             for r in sets {
                 stmts.push(format!("accept {m} {r}"));
             }
+            // The previous Worker's route SQL: one workspace per message (its row order is unspecified).
+            for r in if core {
+                &["ac"][..]
+            } else {
+                &["a", "ac", "h", "x"][..]
+            } {
+                stmts.push(format!("legacy-accept {m} {r}"));
+            }
         }
         stmts.push("release".into());
         held(&mut out, &stmts);
         for m in msgs {
-            out.push(format!("done {m}"));
+            for x in WS {
+                out.push(format!("claim {x} {m}"));
+                out.push(format!("done {x} {m}"));
+            }
         }
         out.push("hour".into());
         out.push("days".into());
@@ -1377,7 +1549,7 @@ pub fn alphabet(profile: &str, core: bool) -> Vec<String> {
             .map(String::from),
         );
     }
-    for c in CONNS {
+    for c in conns {
         out.push(format!("{c} commit"));
         out.push(format!("{c} abort"));
     }

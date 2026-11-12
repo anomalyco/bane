@@ -4,15 +4,18 @@
 //   {"op":"act","action":"W accept m1 a"}           one model action; returns {r, woke, view, safety}
 //
 // Profiles
-// - recv: the receive-side hourly window. SNS notifications run the real acceptInboundNotification
-//   (route statement plus the mail_receive_admit trigger); budget holds use the real
-//   release_receive_budget_holds; ingest completion and the passage of time are fixture steps.
+// - recv: the receive-side hourly window and ingest backlog of two hosted workspaces A < B that one
+//   SNS message can address together. Notifications run the real acceptInboundNotification (the
+//   hosted route statement and its triggers); `legacy-accept` runs the previous Worker's route
+//   SQL (its reopen bound counts duplicates) against the same database; budget holds use the
+//   real global release_receive_budget_holds(NULL). Ingest claim and settle are fixture steps
+//   with the real settle fence (status pending and the claimed recipients unchanged).
 // - send: hosted send admission. POST /v1/emails/send and /v1/emails/batch go through the real app
 //   with a bearer API key (the single-statement atomic admission, key budget included); operator
 //   changes use the real scripts (set-hosted-limits, set-workspace-exemption) and SQL builders
 //   (pause/resume); dispatch outcomes change sending_emails.status so the real refund trigger runs.
 //
-// Connections W and V hold their statement's transaction open until a separate commit or abort
+// Connections W, V and X hold their statement's transaction open until a separate commit or abort
 // step, so a step can land between a statement's locks and its COMMIT. A statement waiting on
 // another of this host's backends is reported as "blocked". Unprefixed actions are autocommit
 // requests on a separate connection with a 500 ms lock timeout (the model never lets one wait).
@@ -55,13 +58,17 @@ const [{ createApp }, { nodeRuntime }, { acceptInboundNotification }, { setHoste
   import('../../scripts/set-hosted-limits.js'), import('../../scripts/set-workspace-exemption.js'), import('../../src/states.js'), import('../../src/core.js'), import('../../src/maintenance.js'),
   import('../../src/dispatch.js'),
 ]);
+// No egress: object storage points at a closed loopback port and fetch refuses every call, so an
+// unmodelled job or adapter fails locally instead of reaching a real endpoint.
+globalThis.fetch = (async (input: unknown) => { throw new Error(`tear host: network access refused (${String(input)})`); }) as typeof fetch;
 const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), GOOGLE_CLIENT_ID: 'tear-fixture', GOOGLE_CLIENT_SECRET: 'tear-fixture',
-  AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear' });
+  AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear',
+  S3_ENDPOINT: 'http://127.0.0.1:9' });
 const runtime = instance.runtime;
 const baseConfig = structuredClone({ ...runtime.config, aws: undefined });
 const app = createApp();
-const REGION = 'us-east-1', BUCKET = 'tear-fixture', TOPIC = `arn:aws:sns:${REGION}:111122223333:tear-inbound`;
-const POOL = '210987654321', FEEDBACK = `arn:aws:sns:${REGION}:${POOL}:tear-feedback`;
+const POOL = '210987654321', REGION = 'us-east-1', BUCKET = 'tear-fixture', TOPIC = `arn:aws:sns:${REGION}:${POOL}:tear-inbound`;
+const FEEDBACK = `arn:aws:sns:${REGION}:${POOL}:tear-feedback`;
 type Json = any;
 type Db = NodePgDatabase<Record<string, unknown>>;
 
@@ -71,13 +78,30 @@ async function client() {
   const pid = (await c.query('SELECT pg_backend_pid() pid')).rows[0].pid as number;
   // Count the round trips each request makes (the admission budget is one statement).
   const query = c.query.bind(c) as (...a: unknown[]) => unknown;
-  const counted = { n: 0 };
-  (c as Json).query = (...a: unknown[]) => { counted.n++; return query(...a); };
+  const counted = { n: 0, legacy: false };
+  (c as Json).query = (...a: unknown[]) => {
+    counted.n++;
+    if (counted.legacy) a[0] = legacySql(a[0]);
+    return query(...a);
+  };
   return { client: c, db: drizzle(c) as unknown as Db, pid, counted };
+}
+// The previous Worker's route statement (before 96c9c9f and this branch's ordering): the reopen
+// bound counted both recipient lists with duplicates, and receipts and jobs were not ordered.
+const ROUTE_BOUND = '(SELECT count(DISTINCT a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a))<=200';
+function legacySql(q: unknown): unknown {
+  const patch = (text: string) => {
+    if (!text.includes('INSERT INTO mail_receipts AS r')) return text;
+    if (!text.includes(ROUTE_BOUND)) throw new Error('tear host: the route statement changed; update legacySql');
+    return text.replace(ROUTE_BOUND, 'jsonb_array_length(r.recipients||excluded.recipients)<=200').replace(/ ORDER BY g\.workspace_id/g, '').replace(/ ORDER BY workspace_id,ses_message_id/g, '');
+  };
+  if (typeof q === 'string') return patch(q);
+  if (q && typeof q === 'object' && typeof (q as Json).text === 'string') return { ...(q as Json), text: patch((q as Json).text) };
+  return q;
 }
 type Conn = Awaited<ReturnType<typeof client>> & { name: string; open: boolean; pending?: Promise<void>; settled?: { ok: boolean; value: unknown } };
 const conns: Record<string, Conn> = {};
-for (const name of ['W', 'V']) conns[name] = { ...(await client()), name, open: false };
+for (const name of ['W', 'V', 'X']) conns[name] = { ...(await client()), name, open: false };
 const auto = await client(), checker = await client();
 await auto.client.query("SET lock_timeout='500ms'");
 
@@ -105,16 +129,20 @@ async function guardClock() {
 async function checkClock() { if (await realMinute() !== minute) throw new Error('tear host: the trace crossed a real minute boundary; rerun it'); }
 
 // ---------- fixtures ----------
+let tableSet: Set<string> | undefined;
+const tables_ = async () => tableSet ??= new Set((await auto.client.query('SELECT tablename FROM pg_tables WHERE schemaname=current_schema()')).rows.map(r => r.tablename as string));
 async function dropWorkspaces() {
   if (!ws.length) return;
   // One round trip: the ids are this host's own tear_adm_<hex> names.
-  if (ws.some(w => !/^tear_adm_[0-9a-f]{12}$/.test(w))) throw new Error('tear host: refusing to drop an unexpected workspace id');
+  if (ws.some(w => !/^tear_adm_[0-9a-f]{12}(_[ab])?$/.test(w))) throw new Error('tear host: refusing to drop an unexpected workspace id');
   const list = ws.map(w => `'${w}'`).join(',');
   const tables = ['mail_receipts', 'mail_receive_windows', 'mail_receive_limits', 'mail_ingest_turns', 'jobs', 'mailbox_domains', 'mailbox_regions', 'sending_emails',
     'sending_idempotency', 'hosted_usage_hourly', 'hosted_health_hourly', 'api_request_budgets', 'api_keys', 'domain_sending_bindings', 'domain_claims', 'operation_domains',
     'sending_stream_depth', 'job_schedule', 'hosted_operator_audit', 'ses_installation_settings', 'operation_unsubscribe_tokens',
-    'sending_upload_reservations', 'sending_attachments', 'sending_asset_usage', 'provider_connections'];
-  await auto.client.query(['BEGIN', ...tables.map(t => `DELETE FROM ${t} WHERE workspace_id IN (${list})`), `DELETE FROM workspaces WHERE id IN (${list})`, 'COMMIT'].join(';\n'));
+    'sending_upload_reservations', 'sending_upload_tombstones', 'sending_attachments', 'sending_asset_usage', 'provider_connections'];
+  const existing = await tables_();
+  await auto.client.query(['BEGIN', ...tables.filter(t => existing.has(t)).map(t => `DELETE FROM ${t} WHERE workspace_id IN (${list})`),
+    `DELETE FROM mail_ignored_staging WHERE ses_message_id LIKE '${ws[0]}%'`, `DELETE FROM workspaces WHERE id IN (${list})`, 'COMMIT'].join(';\n'));
   ws = [];
 }
 
@@ -129,26 +157,40 @@ async function reset(p: 'recv' | 'send' | 'upload', c: Json) {
   await view([]);
 }
 
-// recv: one single-tenant workspace receiving for one domain, with the configured limits.
-let host = '';
+// recv: hosted workspaces A and B (ids sort A < B), each receiving for its own domain through the
+// shared pool, with the configured limits. Recipients a and c (and the numbered h001...h101) are
+// A's, b is B's, so one message can create receipts in both.
+let hosts: string[] = [];
+const claims = new Map<string, string>();
 async function resetRecv() {
-  const w = 'tear_adm_' + hex(12); ws = [w];
-  Object.assign(runtime.config, structuredClone(baseConfig), { workspaceId: w, multiTenant: false });
-  host = `${w.replaceAll('_', '-')}.invalid`;
+  const base = 'tear_adm_' + hex(12);
+  ws = [`${base}_a`, `${base}_b`];
+  Object.assign(runtime.config, structuredClone(baseConfig), { workspaceId: ws[0], multiTenant: true });
+  hosts = ws.map(w => `${w.replaceAll('_', '-')}.invalid`);
+  claims.clear();
   const c = auto.client;
   await c.query('BEGIN');
-  await c.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
-  await c.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [`${w}_dom`, w, host, REGION]);
-  await c.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)', [w, REGION, BUCKET, TOPIC]);
-  await c.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,$2,$3)', [w, cfg.limit, cfg.backlog]);
+  await c.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier,legacy_names,inbound_topic_arn,inbound_bucket,receiving_state)
+    VALUES($1,$2,$3,'ready','trusted',false,$4,$5,'ready') ON CONFLICT(region) DO UPDATE SET inbound_topic_arn=excluded.inbound_topic_arn,inbound_bucket=excluded.inbound_bucket,receiving_state='ready'`, [REGION, POOL, FEEDBACK, TOPIC, BUCKET]);
+  for (const [i, w] of ws.entries()) {
+    const host = hosts[i]!, limit = cfg.limits[i];
+    await c.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
+    await c.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`, [w, REGION, POOL]);
+    await c.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,receiving_host,receiving_proved_at,receiving_identity_at)
+      VALUES($1,$2,$2,'verified','active',$1,now(),now())`, [host, w]);
+    await c.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$3,$4)', [`${w}_dom`, host, w, REGION]);
+    await c.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all,receiving_host) VALUES($1,$2,$3,$4,$5,'active','store',$4)`, [`${w}_mdom`, w, `${w}_dom`, host, REGION]);
+    await c.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,$2,$3)', [w, limit[0], limit[1]]);
+  }
   await c.query('COMMIT');
 }
 const sesId = (m: string) => `${ws[0]}_${m}`;
 const recipients = (r: string): string[] => {
   if (r === '0') return [];
-  if (r === 'h' || r === 'x') return Array.from({ length: r === 'h' ? 100 : 101 }, (_, i) => `h${String(i + 1).padStart(3, '0')}@${host}`);
-  return [...r].map(ch => `${ch}@${host}`).sort();
+  if (r === 'h' || r === 'x') return Array.from({ length: r === 'h' ? 100 : 101 }, (_, i) => `h${String(i + 1).padStart(3, '0')}@${hosts[0]}`);
+  return [...r].map(ch => `${ch}@${hosts[ch === 'b' ? 1 : 0]}`).sort();
 };
+const wsOf = (x: string) => ws[x === 'A' ? 0 : 1]!;
 
 // send: hosted (multi-tenant, regional, trusted pool) workspaces W1 and W2 that share a quota
 // sponsor, each with a ready shared connection, a verified sender domain and one send key.
@@ -205,7 +247,7 @@ async function request(db: Db, method: string, path: string, key: string, body?:
 // POST /v1/attachments on its own connection with its own storage adapter, which suspends the
 // R2 put until `Ux ok` or `Ux fail`, so steps can land between reserve, put and finish.
 const LIMIT = 1024 * 1024 * 1024, SIZE = 3, SLOTS = ['U1', 'U2', 'U3'];
-type Slot = { db: Awaited<ReturnType<typeof client>>; put?: { resolve: () => void; reject: (e: Error) => void; reached: () => void }; atPut?: Promise<void>; response?: Promise<unknown> };
+type Slot = { db: Awaited<ReturnType<typeof client>>; object?: string; put?: { resolve: () => void; reject: (e: Error) => void; reached: () => void }; atPut?: Promise<void>; response?: Promise<unknown> };
 const slots: Record<string, Slot> = {};
 for (const n of SLOTS) slots[n] = { db: await client() };
 // Objects stored and not deleted, labelled o1, o2, ... in the order their uploads reserved.
@@ -227,7 +269,7 @@ function slotRuntime(name: string) {
   const slot = slots[name]!;
   const storage = {
     put: (key: string) => new Promise<void>((resolve, reject) => {
-      objectLabel.set(key, `o${objectLabel.size + 1}`);
+      objectLabel.set(key, `o${objectLabel.size + 1}`); slot.object = objectLabel.get(key);
       slot.put!.reached();
       slot.put = { ...slot.put!, resolve: () => { written.add(key); resolve(); }, reject };
     }),
@@ -256,6 +298,14 @@ async function upload(name: string, key?: string, other = false) {
   if (first === 'at-put') return 'at-put';
   const r = await uploadResult(slot.response); slot.response = undefined; slot.put = undefined; return r;
 }
+// The put lands and the Worker dies before finish or its refund: the request never continues.
+function crash(name: string) {
+  const slot = slots[name]!;
+  if (!slot.response || !slot.put) throw new Error(`tear host: ${name} is not at its put`);
+  for (const key of objectLabel.keys()) if (!written.has(key) && objectLabel.get(key) === slot.object) written.add(key);
+  slot.response = undefined; slot.put = undefined;
+  return 'crashed';
+}
 async function resolvePut(name: string, ok: boolean) {
   const slot = slots[name]!;
   if (!slot.response || !slot.put) throw new Error(`tear host: ${name} is not at its put`);
@@ -269,7 +319,11 @@ function notification(m: string, r: string) {
   return { notificationType: 'Received', mail: { messageId: id, timestamp: new Date().toISOString(), source: 'sender@example.invalid', destination: to },
     receipt: { timestamp: new Date().toISOString(), recipients: to, action: { type: 'S3', bucketName: BUCKET, objectKey: `staging/${id}`, topicArn: TOPIC } } };
 }
-const accept = (db: Db, m: string, r: string) => async () => ({ queued: await acceptInboundNotification({ ...runtime, db } as Json, { topicArn: TOPIC, region: REGION, message: notification(m, r) }) });
+const accept = (c: Awaited<ReturnType<typeof client>>, m: string, r: string, legacy = false) => async () => {
+  c.counted.legacy = legacy;
+  try { return { queued: await acceptInboundNotification({ ...runtime, db: c.db } as Json, { topicArn: TOPIC, region: REGION, message: notification(m, r) }) }; }
+  finally { c.counted.legacy = false; }
+};
 
 // ---------- send actions ----------
 let emails: Record<string, string> = {}, counter = 0;
@@ -351,8 +405,8 @@ async function autoTxn<T>(fn: () => Promise<T>): Promise<unknown> {
 // The statement a held or autocommit action runs.
 function statement(words: string[], c: Awaited<ReturnType<typeof client>>): () => Promise<unknown> {
   const verb = words[0]!;
-  if (verb === 'accept') return accept(c.db, words[1]!, words[2]!);
-  if (verb === 'release') return async () => (await c.client.query('SELECT release_receive_budget_holds($1) n', [ws[0]])).rows[0].n;
+  if (verb === 'accept' || verb === 'legacy-accept') return accept(c, words[1]!, words[2]!, verb === 'legacy-accept');
+  if (verb === 'release') return async () => (await c.client.query('SELECT release_receive_budget_holds(NULL) n')).rows[0].n;
   if (['send', 'batch', 'idem', 'idem-other'].includes(verb)) return sendStatement(words, c);
   if (['limits', 'exempt', 'pause', 'resume'].includes(verb)) return () => operator(words, c);
   throw new Error(`unknown statement ${words.join(' ')}`);
@@ -363,7 +417,7 @@ async function act(action: string) {
   const words = action.split(' ');
   if (slots[words[0]!]) {
     const [name, verb, key] = words as [string, string, string];
-    const r = verb === 'upload' ? await upload(name, key) : verb === 'upload-other' ? await upload(name, key, true) : await resolvePut(name, verb === 'ok');
+    const r = verb === 'upload' ? await upload(name, key) : verb === 'upload-other' ? await upload(name, key, true) : verb === 'crash' ? crash(name) : await resolvePut(name, verb === 'ok');
     const safety: string[] = [];
     return { r, woke: {}, view: await view(safety), safety };
   }
@@ -393,11 +447,27 @@ const shift = async (interval: string, targets: [string, string][]) => {
 async function autoAct(words: string[]): Promise<unknown> {
   const [verb, a, b] = words as [string, string, string];
   switch (verb) {
-    case 'accept': return autoTxn(accept(auto.db, a, b));
+    case 'accept': case 'legacy-accept': return autoTxn(accept(auto, a, b, verb === 'legacy-accept'));
+    case 'claim': return autoTxn(async () => {
+      // An ingest runner claims the oldest pending job (skipping locked ones) and reads the
+      // receipt's recipients for it.
+      const w = wsOf(a), mid = sesId(b);
+      const { rows } = await auto.client.query(`WITH j AS (SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='pending' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED)
+        UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '10 minutes' FROM j WHERE jobs.id=j.id
+        RETURNING jobs.id,(SELECT recipients FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2) AS recipients`, [w, mid]);
+      if (!rows[0]) return 0;
+      claims.set(rows[0].id, JSON.stringify(rows[0].recipients));
+      return 1;
+    });
     case 'done': return autoTxn(async () => {
-      // The ingest job finished: the receipt is processed and its jobs leave the backlog.
-      await auto.client.query("UPDATE mail_receipts SET status='processed',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending'", [ws[0], sesId(a)]);
-      return (await auto.client.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status IN ('pending','running')", [ws[0], sesId(a)])).rowCount;
+      // The oldest running job finishes: it settles the receipt only if it is still pending with the
+      // recipients this job claimed (the store's fence), then completes.
+      const w = wsOf(a), mid = sesId(b);
+      const job = (await auto.client.query(`SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='running' ORDER BY created_at,id LIMIT 1`, [w, mid])).rows[0];
+      if (!job) return 'e:no-running-job';
+      const settled = (await auto.client.query("UPDATE mail_receipts SET status='processed',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending' AND recipients=$3::jsonb", [w, mid, claims.get(job.id)])).rowCount;
+      await auto.client.query("UPDATE jobs SET status='completed' WHERE id=$1", [job.id]);
+      return settled;
     });
     case 'release': return autoTxn(statement(words, auto));
     case 'hour': hours++; await shift('1 hour', [['mail_receive_windows', 'window_at'], ['mail_receipts', 'budget_retry_at'], ['mail_receipts', 'created_at'], ['hosted_usage_hourly', 'hour'], ['sending_emails', 'created_at'], ['api_request_budgets', 'window_start']]); return 'ok';
@@ -427,6 +497,12 @@ async function autoAct(words: string[]): Promise<unknown> {
       const set = b === 'sent' ? "status='sent',provider_id='tear-'||id" : b === 'suppressed' ? "status='suppressed'" : b === 'rejected' ? "status='rejected'" : "status='canceled'";
       return (await auto.client.query(`UPDATE sending_emails SET ${set} WHERE id=$1 AND status='queued'`, [id])).rowCount;
     });
+    case 'day': {
+      // A day passes for reservations and cleanup obligations.
+      await auto.client.query("UPDATE sending_upload_reservations SET expires_at=expires_at-interval '24 hours' WHERE workspace_id=$1 AND storage_key<>'tear-seed'", [ws[0]]);
+      if ((await tables_()).has('sending_upload_tombstones')) await auto.client.query("UPDATE sending_upload_tombstones SET delete_after=delete_after-interval '24 hours' WHERE workspace_id=$1", [ws[0]]);
+      return 'ok';
+    }
     case 'expire': await auto.client.query("UPDATE sending_upload_reservations SET expires_at=expires_at-interval '1 hour' WHERE workspace_id=$1 AND storage_key<>'tear-seed'", [ws[0]]); return 'ok';
     case 'sweep': await cleanup(runtime, 5_000); return 'ok';
     case 'purge': {
@@ -453,20 +529,27 @@ async function autoAct(words: string[]): Promise<unknown> {
 const hourIndex = (offset: number | null) => offset === null ? null : hours + Math.round(offset);
 async function view(safety: string[]) {
   if (profile === 'recv') {
-    const w = ws[0]!;
-    const { rows: [v] } = await checker.client.query(`SELECT
-      (SELECT jsonb_build_array(extract(epoch FROM window_at-date_trunc('hour',now()))/3600,messages) FROM mail_receive_windows WHERE workspace_id=$1) AS window,
-      (SELECT coalesce(jsonb_object_agg(ses_message_id,jsonb_build_array(status,jsonb_array_length(recipients),extract(epoch FROM budget_retry_at-date_trunc('hour',now()))/3600,error)),'{}') FROM mail_receipts WHERE workspace_id=$1) AS receipts,
-      (SELECT active FROM mail_ingest_turns WHERE workspace_id=$1) AS active,
-      (SELECT coalesce(jsonb_object_agg(m,n),'{}') FROM (SELECT payload->>'sesMessageId' m,count(*)::int n FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND status IN ('pending','running') GROUP BY 1) j) AS jobs`, [w]);
-    const label = (id: string) => id.slice(w.length + 1);
-    const window = v.window ? [hourIndex(v.window[0]), Number(v.window[1])] : null;
-    const receipts = Object.fromEntries(Object.entries(v.receipts).map(([k, [s, n, retry, e]]: Json) => [label(k), [s, n, hourIndex(retry), e]]));
-    const jobs = Object.fromEntries(Object.entries(v.jobs).map(([k, n]) => [label(k), n]));
-    const active = Number(v.active ?? 0), recount = Object.values(jobs).reduce((s: number, n) => s + Number(n), 0);
-    if (active !== recount) safety.push(`backlog counter ${active} != ${recount} pending ingest jobs`);
-    if (window && window[0] === hours && window[1]! > Math.max(cfg.limit, 0)) safety.push(`window ${window[1]} above the ${cfg.limit}-message limit`);
-    return { window: window && window[0] === hours ? window[1] : 0, receipts, active, jobs };
+    const out: Json = {};
+    for (const [i, w] of ws.entries()) {
+      const x = i ? 'B' : 'A', [limit, backlog] = cfg.limits[i];
+      const { rows: [v] } = await checker.client.query(`SELECT
+        (SELECT jsonb_build_array(extract(epoch FROM window_at-date_trunc('hour',now()))/3600,messages) FROM mail_receive_windows WHERE workspace_id=$1) AS window,
+        (SELECT coalesce(jsonb_object_agg(ses_message_id,jsonb_build_array(status,jsonb_array_length(recipients),extract(epoch FROM budget_retry_at-date_trunc('hour',now()))/3600,error)),'{}') FROM mail_receipts WHERE workspace_id=$1) AS receipts,
+        (SELECT active FROM mail_ingest_turns WHERE workspace_id=$1) AS active,
+        (SELECT coalesce(jsonb_object_agg(m,n),'{}') FROM (SELECT payload->>'sesMessageId' m,jsonb_build_array(count(*) FILTER (WHERE status='pending'),count(*) FILTER (WHERE status='running')) n
+          FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND status IN ('pending','running') GROUP BY 1) j) AS jobs`, [w]);
+      const label = (id: string) => id.slice(ws[0]!.length + 1);
+      const window = v.window ? [hourIndex(v.window[0]), Number(v.window[1])] : null;
+      const receipts = Object.fromEntries(Object.entries(v.receipts).map(([k, [st, n, retry, e]]: Json) => [label(k), [st, n, hourIndex(retry), e]]));
+      const jobs = Object.fromEntries(Object.entries(v.jobs).map(([k, n]) => [label(k), n]));
+      const active = Number(v.active ?? 0), recount = Object.values(jobs).reduce((t: number, n: Json) => t + n[0] + n[1], 0);
+      if (active !== recount) safety.push(`${x}: backlog counter ${active} != ${recount} active ingest jobs`);
+      if (active > Math.max(backlog, 0)) safety.push(`${x}: ${active} active ingest jobs above the backlog of ${backlog}`);
+      for (const [m, n] of Object.entries(jobs) as [string, number[]][]) if (n[0]! > 1) safety.push(`${x}: ${n[0]} pending ingest jobs for ${m}`);
+      if (window && window[0] === hours && window[1]! > Math.max(limit, 0)) safety.push(`${x}: window ${window[1]} above the ${limit}-message limit`);
+      out[x] = { window: window && window[0] === hours ? window[1] : 0, receipts, active, jobs };
+    }
+    return out;
   }
   if (profile === 'upload') {
     const w = ws[0]!;
@@ -474,14 +557,16 @@ async function view(safety: string[]) {
       (SELECT coalesce(sum(size),0) FROM sending_upload_reservations WHERE workspace_id=$1) + (SELECT coalesce(sum(size),0) FROM sending_attachments WHERE workspace_id=$1) AS recount,
       (SELECT coalesce(jsonb_agg(storage_key),'[]') FROM sending_upload_reservations WHERE workspace_id=$1 AND storage_key<>'tear-seed') AS reserved,
       (SELECT coalesce(jsonb_agg(jsonb_build_array(id,storage_key)),'[]') FROM sending_attachments WHERE workspace_id=$1) AS stored,
-      (SELECT coalesce(jsonb_agg(payload->>'key'),'[]') FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status IN ('pending','running')) AS deletes`, [w]);
+      (SELECT coalesce(jsonb_agg(payload->>'key'),'[]') FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status IN ('pending','running')) AS deletes,
+      ${(await tables_()).has('sending_upload_tombstones') ? "(SELECT coalesce(jsonb_agg(storage_key),'[]') FROM sending_upload_tombstones WHERE workspace_id=$1 AND storage_key<>'tear-seed')" : "'[]'::jsonb"} AS tombstones`, [w]);
     const usage = Number(v.usage ?? 0), seed = LIMIT - cfg.room * SIZE;
     if (usage !== Number(v.recount)) safety.push(`asset usage ${usage} != recount ${v.recount}`);
     if (usage > LIMIT) safety.push(`asset usage ${usage} above the ${LIMIT}-byte quota`);
-    const keysKept = new Set<string>([...v.reserved, ...v.stored.map((x: Json) => x[1]), ...v.deletes]);
-    for (const k of written) if (!keysKept.has(k)) safety.push(`stored object ${objectLabel.get(k)} has no attachment, reservation or pending delete job`);
+    // Every stored object has an owner or a durable deletion obligation (a queued job or a tombstone).
+    const keysKept = new Set<string>([...v.reserved, ...v.stored.map((x: Json) => x[1]), ...v.deletes, ...v.tombstones]);
+    for (const k of written) if (!keysKept.has(k)) safety.push(`stored object ${objectLabel.get(k)} has no attachment, reservation, pending deletion or tombstone`);
     const byId = Object.fromEntries(Object.entries(attachments).map(([l, id]) => [id, l]));
-    return { used: (usage - seed) / SIZE, reservations: v.reserved.length, attachments: v.stored.map((x: Json) => byId[x[0]] ?? '?').sort(), deletes: new Set(v.deletes).size, objects: written.size };
+    return { used: (usage - seed) / SIZE, reservations: v.reserved.length, attachments: v.stored.map((x: Json) => byId[x[0]] ?? '?').sort(), deletes: new Set(v.deletes).size, tombstones: v.tombstones.length, objects: written.size };
   }
   const { rows: [v] } = await checker.client.query(`SELECT
     (SELECT coalesce(jsonb_object_agg(workspace_id,u),'{}') FROM (SELECT workspace_id,jsonb_object_agg(round(extract(epoch FROM hour-date_trunc('hour',now()))/3600)::int,recipients) u FROM hosted_usage_hourly WHERE workspace_id=ANY($1) AND recipients<>0 GROUP BY 1) h) AS usage,

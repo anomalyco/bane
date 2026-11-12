@@ -14,30 +14,43 @@
 //!
 //! # Edge-case checklist
 //!
-//! Every item names the actions that reach it. W and V hold their statement's transaction open
-//! until a separate `commit` or `abort`; unprefixed actions are autocommit requests. `coverage` in
-//! every report counts the traces that reached each item; [-] items say why they are out of reach.
+//! Every item names the actions that reach it. W, V (and X on the receive side) hold their
+//! statement's transaction open until a separate `commit` or `abort`; unprefixed actions are
+//! autocommit requests. `coverage` in every report counts the traces that reached each item; [-]
+//! items say why they are out of reach.
 //!
-//! ## Receive side: the hourly window (profile recv)
+//! ## Receive side: the hourly window and the ingest backlog (profile recv)
+//! Two hosted workspaces A < B; recipients a and c (and h, x) are A's, b is B's, so `ab` is one
+//! SNS message creating receipts in both, handled in workspace order.
 //! - [x] r.dup-race: two notifications of the same new message in flight (`W accept m1 a`,
 //!   `V accept m1 a`, `W commit`): the second waits on the window row, then finds the receipt
 //!   and charges nothing. r.dup-race-abort: the first aborts, the second charges once.
 //! - [x] r.reopen-race: a reopen (new recipients) of a message whose first notification is in flight.
 //! - [x] r.new-race: two different new messages in flight serialize on the window row; the second
 //!   sees the first's charge and its ingest job (backlog) after the commit.
+//! - [x] r.multi: one message for both workspaces; r.release-race: the global release completes
+//!   while a multi-workspace notification waits (`W accept m3 a`, `V accept m3 ab`, `X release`):
+//!   the release skips the workspace whose rows are locked instead of waiting (it used to hold B's
+//!   window while waiting on A's: a deadlock).
 //! - [x] r.dup: SNS redelivery after commit (`accept m1 a` twice); r.reopen: added recipients
 //!   re-queue a processed receipt without charging; r.reopen-held / r.reopen-failed: a budget hold
 //!   stays held, a failed receipt is not reopened.
+//! - [x] r.coalesce: a reopen while the receipt's ingest job is pending adds no job (the job reads
+//!   the merged recipients when claimed); r.reopen-running: a reopen while the job runs adds one
+//!   if the backlog has room; r.reopen-backlog: otherwise the receipt is held; r.release-backlog:
+//!   a later release admits it without charging the window again; r.stale-claim: the running job
+//!   finds its claim stale and settles nothing, so no recipient is lost.
+//! - [x] r.legacy-reopen: the previous Worker's route statement (`legacy-accept`, its reopen bound
+//!   counted duplicates) reopens with the same result during old/new Worker overlap.
 //! - [x] r.limit-exact / r.limit-over: the window reaches exactly `limit`, the next new message is
-//!   held (cfg limit 1, 2, 3); r.limit-zero: limit 0 holds every message (cfg 3).
-//! - [x] r.backlog-full: `backlog` ingest jobs pending holds the next message; r.backlog-race: the
+//!   held; r.limit-zero: limit 0 holds every message (cfg 3).
+//! - [x] r.backlog-full: `backlog` active ingest jobs hold the next message; r.backlog-race: the
 //!   job that fills it is committed while the next notification waits.
 //! - [x] r.hour: the window resets in the next hour (`hour`).
 //! - [x] r.release / r.release-again: a due budget hold is released into a later window, or stays
 //!   held for another hour; r.release-expired / r.release-boundary: 71 hours old is released, 72 fails
 //!   (`days` is 70 hours, then one or two `hour`); r.release-skip: a hold another transaction holds
-//!   is skipped (SKIP LOCKED); r.release-race: a release pass waits on an in-flight admission.
-//!   Two release passes never wait on each other: the first locks every due hold (one fetch).
+//!   is skipped (SKIP LOCKED).
 //! - [x] r.huge: 101 recipients fail the budget, exactly 100 are accepted (`x`, `h`); r.empty: no
 //!   recipients routes nothing (`0`).
 //! - [x] r.abort: a statement rolled back (crash before commit) charges nothing.
@@ -83,16 +96,20 @@
 //!   the sweeper takes it (UPLOAD_EXPIRED), also after its deletion job already ran; an expired but
 //!   unswept reservation still finishes.
 //! - [x] u.delete: deleting an attachment frees its quota and queues its object's deletion.
+//! - [x] u.crash / u.tombstone: the put lands and the Worker dies before finish or refund (also
+//!   what an older Worker's refund amounts to); the tombstone left by the reservation's end queues
+//!   the object's deletion a day later (`day`, `sweep`) unless an attachment holds it.
 //!
 //! ## Out of reach, and why
 //! - [-] Clock skew and boundaries inside a transaction: admission uses the transaction's now(),
 //!   and the host moves time only between transactions by shifting stored timestamps.
-//! - [-] Old and new Worker overlap: both checks live in database functions and triggers, which a
-//!   migration replaces atomically; the Worker side of admission is one statement.
+//! - [-] Old and new Worker overlap is reached where a Worker-side change matters: `legacy-accept`
+//!   runs the previous route statement, and `crash` stands in for the previous upload refund. The
+//!   admission and release checks themselves are database functions and triggers.
 //! - [-] SES and webhook failures: admission makes no external call (R2 put failures: u.fail). The
 //!   receive byte reservation runs inside the ingest job after its S3 HEAD and is not driven here.
-//! - [-] A lost acknowledgement of the reservation's own commit: that orphan is the sweeper's
-//!   (an hour later), not injectable without a network fault.
+//! - [-] Lost ingest jobs (recoverMailReceipts) and the real job claim: `claim` and `done` are
+//!   fixture steps with the store's settle fence.
 //! - [-] Monthly caps: there are none; the hosted cap is a rolling 24 hours of UTC hour buckets.
 //! - [-] The per-minute dispatch burst cap, the SES 24-hour quota and BYO limits: dispatch area.
 //! - [-] Key revocation racing an admission, and grants: access area.
@@ -102,10 +119,11 @@
 //!   window, receipts, backlog and jobs; hourly usage, mails, key budgets, pending depth,
 //!   idempotency rows) equals the model's.
 //! - Host safety, independent of the model: the window never exceeds its limit; the backlog
-//!   counter equals its jobs; live usage equals the recipients of the still-charged mail admitted
-//!   in the window (refunds exact, nothing charged twice); stored-attachment usage equals its
+//!   counter equals its jobs and never exceeds the backlog, with at most one pending ingest job
+//!   per receipt; live usage equals the recipients of the still-charged mail admitted in the
+//!   window (refunds exact, nothing charged twice); stored-attachment usage equals its
 //!   reservations plus attachments and never exceeds the quota; every stored object has an
-//!   attachment, a reservation or a pending deletion.
+//!   attachment, a reservation, a pending deletion or a tombstone.
 mod fixture;
 mod model;
 
@@ -123,11 +141,12 @@ fn cfgs(profile: &str) -> Vec<Value> {
         return vec![json!({"room": 2}), json!({"room": 1})];
     }
     if profile == "recv" {
+        // Per-workspace [message limit, backlog] for A and B.
         vec![
-            json!({"limit": 2, "backlog": 2}),
-            json!({"limit": 1, "backlog": 5}),
-            json!({"limit": 3, "backlog": 1}),
-            json!({"limit": 0, "backlog": 5}),
+            json!({"limits": [[2, 2], [2, 2]]}),
+            json!({"limits": [[1, 5], [5, 1]]}),
+            json!({"limits": [[3, 1], [3, 1]]}),
+            json!({"limits": [[0, 5], [1, 1]]}),
         ]
     } else {
         vec![
@@ -142,7 +161,8 @@ fn initial(profile: &str, cfg: &Value) -> Model {
         return Model::Upload(Upload::initial(n("room")));
     }
     if profile == "recv" {
-        Model::Recv(Recv::initial(n("limit"), n("backlog")))
+        let l = |i: usize, j: usize| cfg["limits"][i][j].as_i64().unwrap_or(0);
+        Model::Recv(Recv::initial([(l(0, 0), l(0, 1)), (l(1, 0), l(1, 1))]))
     } else {
         let caps: Vec<i64> = cfg["caps"]
             .as_array()
@@ -170,22 +190,23 @@ const REGRESSIONS: &[(&str, usize, &[&str])] = &[
     (
         "recv",
         1,
-        &["W accept m1 x", "V accept m1 ab", "W commit", "V commit"],
+        &["W accept m1 x", "V accept m1 ac", "W commit", "V commit"],
     ),
-    // B. A notification waiting on the window row admitted past a full backlog (limit 1).
+    // B. A notification waiting on the window row admitted past a full backlog (backlog 1).
     (
         "recv",
         2,
         &["W accept m1 a", "V accept m2 a", "W commit", "V commit"],
     ),
-    // B. ... and so did a release pass waiting behind an admission.
+    // B. ... and so did a release pass behind an admission (now it skips the locked workspace).
     (
         "recv",
         2,
         &[
             "accept m1 a",
             "accept m2 a",
-            "done m1",
+            "claim A m1",
+            "done A m1",
             "hour",
             "W accept m3 a",
             "V release",
@@ -200,6 +221,70 @@ const REGRESSIONS: &[(&str, usize, &[&str])] = &[
         "upload",
         0,
         &["U1 upload", "expire", "sweep", "purge", "U1 ok"],
+    ),
+    // Review P1. A reopen queued another ingest job past the backlog (2 jobs, backlog 1); one
+    // arriving while the job runs is held and released later without a second charge.
+    ("recv", 2, &["accept m1 a", "accept m1 ac"]),
+    (
+        "recv",
+        2,
+        &[
+            "accept m1 a",
+            "claim A m1",
+            "accept m1 ac",
+            "done A m1",
+            "hour",
+            "release",
+            "claim A m1",
+            "done A m1",
+        ],
+    ),
+    // Review P2. The global release held B's window row while it waited on A's, behind an
+    // admission that then needed B's: a deadlock. It now skips the locked workspace.
+    (
+        "recv",
+        1,
+        &[
+            "accept m1 b",
+            "accept m2 b",
+            "hour",
+            "accept m1 a",
+            "accept m2 a",
+            "hour",
+            "W accept m3 a",
+            "V accept m3 ab",
+            "X release",
+            "W commit",
+            "X commit",
+            "V commit",
+        ],
+    ),
+    // Review P2. The previous Worker's route refused 100 known recipients plus one new.
+    (
+        "recv",
+        0,
+        &[
+            "accept m1 h",
+            "claim A m1",
+            "done A m1",
+            "legacy-accept m1 x",
+        ],
+    ),
+    // Review P2. A late put whose Worker died after the sweep's deletion ran left an orphan; a
+    // tombstone now queues its deletion a day later.
+    (
+        "upload",
+        0,
+        &[
+            "U1 upload",
+            "expire",
+            "sweep",
+            "purge",
+            "U1 crash",
+            "day",
+            "sweep",
+            "purge",
+        ],
     ),
 ];
 
@@ -647,6 +732,19 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
             if words[0] == "delete" && rs == "ok" {
                 add("u.delete");
             }
+            if words[0] == "crash" {
+                add("u.crash");
+                seen.push(vec!["crashed".into()]);
+            }
+            if words[0] == "day" {
+                seen.push(vec!["day".into()]);
+            }
+            if words[0] == "sweep"
+                && seen.iter().any(|w| w[0] == "day")
+                && seen.iter().any(|w| w[0] == "crashed")
+            {
+                add("u.tombstone");
+            }
             if words[0] == "sweep" {
                 seen.push(vec!["swept".into()]);
             }
@@ -659,23 +757,55 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
             continue;
         }
         if profile == "recv" {
-            let limit = cfg["limit"].as_i64().unwrap_or(0);
-            let backlog = cfg["backlog"].as_i64().unwrap_or(0);
+            let lim = |x: usize| {
+                (
+                    cfg["limits"][x][0].as_i64().unwrap_or(0),
+                    cfg["limits"][x][1].as_i64().unwrap_or(0),
+                )
+            };
+            let wsv = |x: usize| &view[["A", "B"][x]];
             if words[0] == "abort" {
                 add("r.abort");
             }
-            if limit > 0 && view["window"].as_i64() == Some(limit) {
-                add("r.limit-exact");
+            for x in 0..2 {
+                let (limit, backlog) = lim(x);
+                let v = wsv(x);
+                if limit > 0 && v["window"].as_i64() == Some(limit) {
+                    add("r.limit-exact");
+                }
+                for (_, r) in v["receipts"].as_object().into_iter().flatten() {
+                    match r[3].as_str() {
+                        Some("MAILBOX_RECEIVE_BACKLOG") => add("r.reopen-backlog"),
+                        Some("MAILBOX_BUDGET_HOLD_EXPIRED") => add("r.release-expired"),
+                        _ => {}
+                    }
+                }
+                let _ = backlog;
             }
+            let any_blocked = !blocked.is_empty();
             for (w, v, woke) in &finished {
-                let base: Vec<&str> = w.iter().map(String::as_str).take(3).collect();
-                if base.first() == Some(&"accept") {
-                    let (m, rset) = (base[1], base[2]);
-                    let receipt = &view["receipts"][m];
+                let verb = w[0].as_str();
+                if verb == "accept" || verb == "legacy-accept" {
+                    let (m, rset) = (w[1].as_str(), w[2].as_str());
+                    let touched: Vec<usize> = (0..2)
+                        .filter(|x| {
+                            if *x == 1 {
+                                rset.contains('b')
+                            } else {
+                                rset != "0" && rset != "b"
+                            }
+                        })
+                        .collect();
+                    if touched.len() == 2
+                        && (v["queued"].as_i64().unwrap_or(0) == 2
+                            || touched.iter().all(|x| !wsv(*x)["receipts"][m].is_null()))
+                    {
+                        add("r.multi");
+                    }
                     if *woke {
                         let holder = w.last().cloned().unwrap_or_default();
                         let after_abort = w.iter().any(|s| s == "after-abort");
-                        if holder.starts_with("accept ") && holder.split(' ').nth(1) == Some(m) {
+                        if holder.contains("accept ") && holder.split(' ').nth(1) == Some(m) {
                             if holder.split(' ').nth(2) == Some(rset) {
                                 add(if after_abort {
                                     "r.dup-race-abort"
@@ -685,119 +815,164 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                             } else {
                                 add("r.reopen-race");
                             }
-                        } else if holder.starts_with("accept ") {
+                        } else if holder.contains("accept ") {
                             add("r.new-race");
-                            // The holder's commit filled the backlog; the waiter is held.
                             if v["queued"] == json!(0)
-                                && rset != "x"
-                                && rset != "0"
-                                && view["active"].as_i64() >= Some(backlog)
-                                && !view["receipts"]
-                                    .as_object()
-                                    .is_some_and(|r| r.contains_key(m))
+                                && touched.iter().any(|x| {
+                                    wsv(*x)["active"].as_i64() >= Some(lim(*x).1)
+                                        && wsv(*x)["receipts"][m].is_null()
+                                })
                             {
                                 add("r.backlog-race");
                             }
                         }
                     }
-                    if rset == "x" && receipt[0] == "failed" {
+                    if rset == "x" && wsv(0)["receipts"][m][0] == "failed" {
                         add("r.huge");
                     }
-                    if rset == "h" && v["queued"] == json!(1) {
+                    if rset == "h" && v["queued"].as_i64() >= Some(1) {
                         add("r.huge");
                     }
                     if rset == "0" {
                         add("r.empty");
                     }
-                    let known = seen
-                        .iter()
-                        .any(|s| s.len() > 2 && s[0] == "accept" && s[1] == m);
-                    if known
-                        && v["queued"] == json!(0)
-                        && seen
-                            .iter()
-                            .any(|s| s[0] == "accept" && s[1] == m && s[2] == rset)
-                    {
-                        add("r.dup");
-                    }
-                    if known && v["queued"] == json!(1) {
-                        add("r.reopen");
-                    }
-                    if known
-                        && receipt[0] == "held"
-                        && seen
-                            .iter()
-                            .any(|s| s[0] == "accept" && s[1] == m && s[2] != rset)
-                    {
-                        add("r.reopen-held");
-                    }
-                    if known && receipt[0] == "failed" && rset != "x" {
-                        add("r.reopen-failed");
-                    }
-                    if !known && receipt[0] == "held" {
-                        if limit <= 0 {
-                            add("r.limit-zero");
-                        } else if view["active"].as_i64() >= Some(backlog) {
-                            add("r.backlog-full");
-                        } else {
-                            add("r.limit-over");
+                    for &x in &touched {
+                        let wv = wsv(x);
+                        let receipt = &wv["receipts"][m];
+                        let tag = ["A", "B"][x];
+                        let known = seen.iter().any(|s| {
+                            s.len() > 2
+                                && s[0].ends_with("accept")
+                                && s[1] == m
+                                && s.get(3).map(String::as_str) == Some(tag)
+                        });
+                        if known
+                            && v["queued"] == json!(0)
+                            && seen
+                                .iter()
+                                .any(|s| s[0].ends_with("accept") && s[1] == m && s[2] == rset)
+                        {
+                            add("r.dup");
+                        }
+                        if known && v["queued"].as_i64() >= Some(1) {
+                            add("r.reopen");
+                            if wv["jobs"][m][1].as_i64() > Some(0) {
+                                add("r.reopen-running");
+                            }
+                            if verb == "legacy-accept" {
+                                add("r.legacy-reopen");
+                            }
+                        }
+                        if known
+                            && v["queued"] == json!(0)
+                            && receipt[0] == "pending"
+                            && wv["jobs"][m][0] == json!(1)
+                            && seen
+                                .iter()
+                                .any(|s| s[0].ends_with("accept") && s[1] == m && s[2] != rset)
+                        {
+                            add("r.coalesce");
+                        }
+                        if known
+                            && receipt[0] == "held"
+                            && seen
+                                .iter()
+                                .any(|s| s[0].ends_with("accept") && s[1] == m && s[2] != rset)
+                        {
+                            add("r.reopen-held");
+                        }
+                        if known && receipt[0] == "failed" && rset != "x" {
+                            add("r.reopen-failed");
+                        }
+                        if !known && receipt[0] == "held" {
+                            let (limit, backlog) = lim(x);
+                            if limit <= 0 {
+                                add("r.limit-zero");
+                            } else if wv["active"].as_i64() >= Some(backlog) {
+                                add("r.backlog-full");
+                            } else {
+                                add("r.limit-over");
+                            }
+                        }
+                        if !known && time && v["queued"].as_i64() >= Some(1) {
+                            add("r.hour");
                         }
                     }
-                    if !known && time && v["queued"] == json!(1) {
-                        add("r.hour");
+                    for &x in &touched {
+                        let mut tag = w.clone();
+                        tag.truncate(3);
+                        tag.push(["A", "B"][x].into());
+                        seen.push(tag);
                     }
                 }
-                if base.first() == Some(&"release") {
-                    if *woke {
+                if verb == "release" {
+                    // The global release completed while another statement waited.
+                    if any_blocked {
                         add("r.release-race");
                     }
-                    let receipts = view["receipts"].as_object().cloned().unwrap_or_default();
-                    if v.as_i64().unwrap_or(0) > 0 && receipts.values().any(|r| r[0] == "pending") {
-                        add("r.release");
-                    }
-                    if receipts
-                        .values()
-                        .any(|r| r[0] == "held" && r[2].as_i64().is_some())
-                        && v.as_i64().unwrap_or(0) > 0
-                    {
-                        add("r.release-again");
-                    }
-                    if receipts
-                        .values()
-                        .any(|r| r[3] == "MAILBOX_BUDGET_HOLD_EXPIRED")
-                    {
-                        add("r.release-expired");
+                    if v.as_i64().unwrap_or(0) > 0 {
+                        for x in 0..2 {
+                            let rs = wsv(x)["receipts"].as_object().cloned().unwrap_or_default();
+                            if rs.values().any(|r| r[0] == "pending") {
+                                add("r.release");
+                            }
+                            if rs
+                                .values()
+                                .any(|r| r[0] == "held" && r[2].as_i64().is_some())
+                            {
+                                add("r.release-again");
+                            }
+                        }
                     }
                     if !open.is_empty()
-                        && open.values().any(|o| o[0] == "accept")
-                        && v.as_i64() == Some(0)
-                        && receipts.values().any(|r| r[0] == "held")
+                        && open.values().any(|o| o[0].ends_with("accept"))
+                        && (0..2).any(|x| {
+                            wsv(x)["receipts"]
+                                .as_object()
+                                .is_some_and(|r| r.values().any(|r| r[0] == "held"))
+                        })
                     {
                         add("r.release-skip");
                     }
+                    if seen
+                        .iter()
+                        .any(|s| s.len() > 2 && s[0] == "accept" && s[2] == "ac")
+                    {
+                        seen.push(vec!["release-after-reopen".into()]);
+                    }
                 }
-                seen.push(w.clone());
+                if verb == "done" && v == &json!(0) {
+                    add("r.stale-claim");
+                }
+                if verb != "accept" && verb != "legacy-accept" {
+                    seen.push(w.clone());
+                }
             }
             if words[0] == "hour" {
                 time = true;
             }
             // Effects of held statements show at their commit.
             if words[0] == "commit" || conn.is_none() {
-                let receipts = view["receipts"].as_object().cloned().unwrap_or_default();
-                if receipts
-                    .values()
-                    .any(|r| r[3] == "MAILBOX_BUDGET_HOLD_EXPIRED")
-                {
-                    add("r.release-expired");
-                }
-                if seen.iter().any(|w| w[0] == "release")
-                    && seen.iter().any(|w| w[0] == "days")
-                    && receipts
-                        .values()
-                        .any(|r| r[0] == "pending" && r[3].is_null())
-                    && time
-                {
-                    add("r.release-boundary");
+                for x in 0..2 {
+                    let rs = wsv(x)["receipts"].as_object().cloned().unwrap_or_default();
+                    if seen.iter().any(|w| w[0] == "release")
+                        && seen.iter().any(|w| w[0] == "days")
+                        && rs.values().any(|r| r[0] == "pending" && r[3].is_null())
+                        && time
+                    {
+                        add("r.release-boundary");
+                    }
+                    let prior = steps[..i].iter().any(|s| {
+                        s["observed"]["view"][["A", "B"][x]]["receipts"]
+                            .as_object()
+                            .is_some_and(|r| r.values().any(|r| r[3] == "MAILBOX_RECEIVE_BACKLOG"))
+                    });
+                    if prior
+                        && seen.iter().any(|w| w[0] == "release")
+                        && rs.values().any(|r| r[0] == "pending" && r[3].is_null())
+                    {
+                        add("r.release-backlog");
+                    }
                 }
             }
             if words[0] == "days" {
@@ -1114,6 +1289,13 @@ const CHECKLIST: &[&str] = &[
     "r.release-boundary",
     "r.release-skip",
     "r.release-race",
+    "r.release-backlog",
+    "r.multi",
+    "r.coalesce",
+    "r.reopen-backlog",
+    "r.reopen-running",
+    "r.stale-claim",
+    "r.legacy-reopen",
     "r.huge",
     "r.empty",
     "r.abort",
@@ -1158,6 +1340,8 @@ const CHECKLIST: &[&str] = &[
     "u.expire-late-put",
     "u.expired-unswept",
     "u.delete",
+    "u.crash",
+    "u.tombstone",
 ];
 fn checklist(runs: &[Value]) -> Value {
     let mut hits: BTreeMap<String, u64> = BTreeMap::new();
