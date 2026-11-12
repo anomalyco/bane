@@ -12,11 +12,11 @@ set +x
 umask 077
 secrets_file=$(mktemp "${RUNNER_TEMP:?}/bane-app-secrets.XXXXXX.json")
 trap 'rm -f -- "$secrets_file"' EXIT
-for name in BETTER_AUTH_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET TYPESAFE_API_KEY; do
+for name in BETTER_AUTH_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done
 # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
-app_secrets='$ENV | {BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TYPESAFE_API_KEY}'
+app_secrets='$ENV | {BETTER_AUTH_SECRET, ACCOUNT_CLIENT_PRIVATE_KEY, TYPESAFE_API_KEY}'
 
 # The IMAP/SMTP gateway's shared key (gateway/PHASE2.md). The stage's committed
 # bane:mailGatewayEnabled is the only switch, so neither state can fail open:

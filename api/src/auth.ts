@@ -116,8 +116,8 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
-    if (!Boolean(c.env.config.googleClientId && c.env.config.googleClientSecret && c.env.config.authSecret)) {
-      throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Google sign-in is not configured for this deployment.');
+    if (!c.env.config.accountClient && !Boolean(c.env.config.googleClientId && c.env.config.googleClientSecret && c.env.config.authSecret)) {
+      throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Dashboard sign-in is not configured for this deployment.');
     }
     if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
     const { getDashboardActor, requireDashboardOrigin } = await wrapModuleLoad(() => import('./google-auth.js'));

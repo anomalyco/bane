@@ -85,7 +85,7 @@ export function HomeHeader({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, '
 
 export function HomeActions({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 'onSignIn' | 'onSignInIntent' | 'busy'>) {
   return <div className="home-actions">
-    <Button variant="primary" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Start with Google</Button>
+    <Button variant="primary" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in to Bane</Button>
     <a className="ui-button ui-button--secondary ui-button--md" href="/docs">Docs <ArrowUpRight size={16} aria-hidden="true" /></a>
   </div>
 }
@@ -106,7 +106,7 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
         <h1>Email infrastructure done right.</h1>
         <p>One API on Amazon SES.</p>
         <HomeActions onSignIn={onSignIn} onSignInIntent={onSignInIntent} busy={busy} />
-        <p className="home-invite muted">Invite-only for now. Sign in with Google to request access.</p>
+        <p className="home-invite muted">Invite-only. Open your invitation or sign in with an approved account.</p>
         {notice}
       </section>
       {/* No board until there are figures to show: while they're withheld (available: false) or failing, the page goes straight to the capabilities. */}

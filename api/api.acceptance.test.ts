@@ -370,6 +370,53 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
   }
 });
 
+test('OIDC dashboard callback verifies the token, consumes bound state once and creates a revocable session', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const origin = 'https://dashboard.example.org', issuer = 'https://oidc-login.example.org';
+  const approved = `${randomUUID()}@example.org`, keys = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BETTER_AUTH_SECRET:'local-fixture-'.repeat(4), AUTH_ALLOWED_EMAILS:approved}),
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  let nonce = '', email = approved, verified = true;
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    assert.equal(new URL(url).origin,issuer);
+    switch(new URL(url).pathname) {
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys'});
+      case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
+      case '/token': {
+        const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
+        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:email,nonce,email,email_verified:verified}]
+          .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);
+  async function login() {
+    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+    assert.equal(start.status,200); const params=new URL((await start.json() as {url:string}).url).searchParams;
+    nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
+    const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state:params.get('state')!,iss:issuer});
+    assert.equal((await request(path,'GET')).headers.get('location'),origin+'/?auth=error');
+    const result=await request(path,'GET',cookie);
+    assert.equal((await request(path,'GET',cookie)).headers.get('location'),origin+'/?auth=error');
+    return result;
+  }
+  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE email=$1',[approved]);});
+  verified=false;assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  verified=true;email='someoneelse@example.org';assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  email=approved;const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request('/v1/me','GET',session)).status,200);
+  assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
+  assert.equal((await request('/v1/me','GET',session)).status,401);
+});
+
 test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
   const { drizzle } = await import('drizzle-orm/node-postgres');
   const { loadConfig } = await import('./src/config.js');
@@ -396,7 +443,6 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
   await db.query('BEGIN');
   try {
     assert.ok(manager);
-    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[manager.userId,'fixture',AUTH_EMAIL]);
     await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
     assert.deepEqual(protectedResourceMetadata(runtime).authorization_servers,[issuer]);
     assert.deepEqual(await (await run(token())).json(),['read']);

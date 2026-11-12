@@ -68,10 +68,10 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 | `DISPATCH_DAILY_HEADROOM_PERCENT` | Percent of the SES daily quota and of each Hosted workspace’s effective daily cap kept for transactional recipients (default `10`; `0` disables the reserve). Campaigns wait automatically for capacity. This does not split the per-second rate. |
 | `DISPATCH_SHARDS` | Cloudflare only: number of shards for self-hosted sending or the MX shared pool (configured to 4). Each paces 1/N of the regional target and holds up to six provider calls in flight. MX BYO accounts use one shard. |
 | `JOB_CONCURRENCY` | Optional active orchestration jobs (campaign runs, webhooks, maintenance) per process/invocation. Defaults to 2; capped at 8 for Docker/Node and 6 for Cloudflare. Mail dispatch is separate: the runner's in-process dispatcher, or `DISPATCH_SHARDS` Durable Objects on Cloudflare. |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Your installation's real Google OAuth **Web application** client credentials. See below. |
-| `AUTH_ALLOWED_EMAILS` | Comma-separated exact Google email addresses. Use this for personal Gmail accounts. |
+| `ACCOUNT_ISSUER`, `ACCOUNT_CLIENT_ID`, `ACCOUNT_CLIENT_PRIVATE_KEY` | HTTPS OIDC issuer (defaults to `https://account.anoma.ly`), confidential client ID, and server-only P-256 private JWK with `kid`. |
+| `ACCOUNT_ID_TOKEN_ALG` | Issuer's ID token algorithm: `ES256` (default) or `RS256`. Client assertions use ES256. |
+| `AUTH_ALLOWED_EMAILS` | Comma-separated exact addresses approved for signup. The issuer must assert `email_verified: true`. |
 | `DEFAULT_WORKSPACE_OWNERS` | Approved Google users with no memberships become owners of `default` on dashboard access only if their verified email is listed. Use comma-separated exact addresses, an empty value for none, or `*` (the default) for all approved users. |
-| `AUTH_ALLOWED_DOMAINS` | Optional comma-separated exact Google Workspace hosted domains, checked against Google's verified `hd` claim—not an email suffix. Either allowlist can approve a user; missing/empty lists deny everyone. All approved users are admins. |
 | `PUBLIC_URL` | Canonical external **origin**, without path, query, fragment, or credentials. HTTPS is required except for local sign-in/development at `localhost` and `127.0.0.1`. Docker default: `http://127.0.0.1:8793`; AWS provisioning requires a public HTTPS origin. |
 | `DEFAULT_SES_REGION` | Initial region, default `us-east-1`. Migration seeds the database once and also imports already-used regions to avoid stranding existing work. Subsequent region/default changes use the API, not this environment value. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Explicit server-only IAM credentials for SES discovery, provisioning, and live sending; the session token is optional for temporary credentials. No automatic role lookup or token renewal. |
@@ -87,17 +87,13 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 
 Keep `ENABLE_LIVE_SES=false` initially. `ADMIN_API_KEY`, public `WORKSPACE_ID`, and a separate `ENCRYPTION_KEY` are **not fresh-install settings**. There is no seeded production administrator: access comes only from an approved Google identity. See [upgrade restrictions](#secret-rotation-and-upgrades) before reusing an older database.
 
-## Google sign-in
+## Dashboard sign-in
 
-Each installation needs its own Google OAuth client. See Google's [OpenID Connect setup](https://developers.google.com/identity/openid-connect/openid-connect) and [OAuth production readiness guidance](https://developers.google.com/identity/protocols/oauth2/production-readiness/policy-compliance).
+Register a confidential web client with your OIDC issuer. Register `${PUBLIC_URL}/api/auth/callback/account` as its exact callback and `${PUBLIC_URL}/` as its post-logout URI. Upload the public P-256 JWK and select `private_key_jwt` (ES256). Supply the matching private JWK through your server secret manager. Use the same issuer and client settings for the API and job runner. A self-hosted issuer must support discovery, PKCE S256, signed ID tokens and the `openid email profile` scopes. Bane uses PAR when advertised.
 
-1. Configure the consent screen in your Google Cloud project. For personal Gmail or mixed users, choose an **External** audience. While the app is in **Testing**, add every intended account as a test user; publish to production when appropriate and complete any Google-required review. For a Workspace-only installation, an **Internal** audience can restrict access to that organization.
-2. Create an OAuth client with application type **Web application**. Add your exact `PUBLIC_URL` as an authorized JavaScript origin and `PUBLIC_URL/api/auth/callback/google` as an authorized redirect URI. For default Docker setup these are `http://127.0.0.1:8793` and `http://127.0.0.1:8793/api/auth/callback/google`.
-3. Copy the client ID and secret into the server's configuration. The login requests only `openid`, `email`, and `profile`; it does not request Gmail/mailbox access.
-4. Allow your intended identities with `AUTH_ALLOWED_EMAILS` or `AUTH_ALLOWED_DOMAINS`. Personal Gmail must be allowed by exact email; setting `AUTH_ALLOWED_DOMAINS=gmail.com` is not a substitute. Domain approval requires Google's Workspace `hd` claim. Never use wildcards.
-5. Start the app and sign in through its dashboard. Google consent audience/test-user approval and Bane's allowlist must **both** permit the account. Check the exact scheme, hostname, and port if Google reports a redirect mismatch.
+Set `AUTH_ALLOWED_EMAILS` before first sign-in. A new hosted user may also follow a pending invitation addressed to their verified email. The user explicitly accepts the invitation after sign-in. Domain-wide signup is disabled. Existing users retain their Bane IDs and workspace roles; the migration copies existing `(issuer, subject)` links. For a reviewed unconnected user, insert their Bane user ID, issuer and exact legacy email into `bane_legacy_claims` to permit a one-time verified-email claim. Review reassigned mailboxes before issuing approvals.
 
-Changing from Docker to Vite, or to a public HTTPS origin, requires matching `PUBLIC_URL` **and** Google origin/redirect entries. Fake Google client credentials are only useful for controlled mocked acceptance checks; they cannot complete normal browser login. A real Google login has not been verified by the local acceptance suite.
+Bane stores a hash of the browser's random session token and checks the session expiry and workspace membership in PostgreSQL. Signing out revokes the Bane session.
 
 ## Docker quickstart
 

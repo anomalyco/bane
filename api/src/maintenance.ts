@@ -123,7 +123,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
   // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
-  for (const table of ['auth_state_slots','auth_verification','oauth_client_assertion','oauth_access_token','auth_session','bane_resource_grants','bane_dpop_proofs']) {
+  for (const table of ['auth_state_slots','auth_verification','oauth_client_assertion','oauth_access_token','auth_session','bane_resource_grants','bane_dpop_proofs','bane_sessions','bane_login_flows']) {
     await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
   }
   // Do not cascade away an unexpired access token when its refresh token expires first.

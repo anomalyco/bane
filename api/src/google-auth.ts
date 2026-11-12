@@ -13,6 +13,7 @@ import { authAccount, authSession, authUser, googleAuthSchema } from './db/googl
 import { workspaceMembers } from './db/workspaces.js';
 import { memberships, onboardNewUser, pendingInvitation, Workspace, WorkspaceRole } from './workspaces.js';
 import { ConnectionSummary, connectionSummary } from './provider-connections.js';
+import { accountBrowserRoute, accountSessionActor, accountSessionUser } from './account-login.js';
 
 const day = 24 * 60 * 60;
 export async function reserveSignIn(runtime:Runtime, headers: Headers) {
@@ -262,6 +263,11 @@ export async function invitationRecipient(runtime: Runtime, headers: Headers) {
 // Authenticate the live Google session without selecting a workspace. The caller must authorize
 // the exact invitation or signed DNS return before changing anything on the user's behalf.
 export async function verifiedDashboardUser(runtime: Runtime, headers: Headers) {
+  if (runtime.config.accountClient) {
+    const user = !headers.has('authorization') && await accountSessionUser(runtime,headers);
+    if (!user) throw new ApiError(401,'AUTH_REQUIRED','Sign in to Bane.');
+    return {userId:user.id,email:user.email};
+  }
   if (headers.has('authorization')) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in Google session.');
   requireConfigured(runtime);
   if (!hasSessionCookie(headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
@@ -271,6 +277,7 @@ export async function verifiedDashboardUser(runtime: Runtime, headers: Headers) 
   return { userId: session.user.id, email: user.email };
 }
 export async function getDashboardActor(runtime: Runtime, headers: Headers, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders?: (headers: Headers) => void): Promise<Actor | null> {
+  if (runtime.config.accountClient) return measure('session-db',()=>accountSessionActor(runtime,headers));
   requireConfigured(runtime);
   if (!hasSessionCookie(headers)) return null;
   try {
@@ -318,6 +325,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, meas
 const SignIn = z.object({ provider: z.literal('google'), callbackURL: z.string().optional(), newUserCallbackURL: z.string().optional(), errorCallbackURL: z.string().optional(), disableRedirect: z.boolean().optional() }).strict();
 export function registerGoogleAuth(app: App) {
   app.on(['GET', 'POST', 'OPTIONS'], '/api/auth/*', async (c, next) => {
+    if (c.env.config.accountClient) return accountBrowserRoute(c);
     const path = c.req.path.slice('/api/auth'.length);
     if (isMcpAuthPath(path)) return next();
     requireConfigured(c.env);

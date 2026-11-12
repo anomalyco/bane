@@ -34,7 +34,11 @@ shard() (
   trap cleanup EXIT
   ../.github/s3-fixture/node_modules/.bin/s3rver -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
   node --import tsx src/server.ts > "$HOME/server.log" 2>&1 & pids+=("$!")
-  node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
+  # The simulated shard runs its job handlers inside rollback-only transactions.
+  # A second worker updating those tables can deadlock with queryBudget's DDL.
+  if [[ $1 == integration ]]; then
+    node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
+  fi
   # Start as soon as all fixtures are alive and the HTTP server accepts requests.
   for ((i=0; i<100; i++)); do
     kill -0 "${pids[@]}"

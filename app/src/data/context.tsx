@@ -157,26 +157,22 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
-  function googleUrl() {
+  function accountUrl() {
     // Assign path components rather than resolving an untrusted redirect parameter.
     const callback = new URL(window.location.origin)
     callback.pathname = window.location.pathname
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth')
-    const errorCallback = new URL(callback)
-    errorCallback.searchParams.set('auth', 'error')
-    // A new account goes straight to onboarding (its first step is known), unless it is joining by invitation link.
-    const onboarding = callback.pathname === '/' && !callback.searchParams.has('invitation') ? new URL('/onboarding', window.location.origin) : null
-    return request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href, ...(onboarding ? {newUserCallbackURL: onboarding.href} : {})}}).then(result => {
+    return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href}}).then(result => {
       const url = new URL(result.url)
-      if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com') throw new Error('Invalid Google sign-in redirect.')
+      if (url.protocol !== 'https:') throw new Error('Invalid sign-in redirect.')
       return url.href
     })
   }
   function prepareLogin(event: { button: number }) {
     if (busy || event.button !== 0) return
-    const url = googleUrl()
+    const url = accountUrl()
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
@@ -184,7 +180,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : googleUrl())) }
+    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl())) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -201,9 +197,9 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // not_approved: a verified Google account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
-    : authResult === 'error' ? <Alert tone="danger">Google sign-in didn’t finish. It may have been cancelled; try again.</Alert>
+    : authResult === 'error' ? <Alert tone="danger">Sign-in didn’t finish. Check that you used your invited or approved account.</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
-    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited Google account to review it. You join only after you confirm.</Alert>
+    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
@@ -212,9 +208,9 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
-        <h2>Sign in with Google</h2>
+        <h2>Sign in to Bane</h2>
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue with Google</Button>
+        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
       </> : <>
         <h2>Couldn’t check your session</h2>
         <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
