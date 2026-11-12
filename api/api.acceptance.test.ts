@@ -109,12 +109,74 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
+test('Cloudflare static files: only files the deployed build has get a cache lifetime',async()=>{
+  // Workers Assets answers a path that matches no file with the dashboard shell, under every _headers rule the path
+  // matches. The build therefore writes the cache rules itself, one per file it has (app/asset-headers.ts).
+  const {withFileRules,FILE_CACHE,MAX_RULES}=await import('../app/asset-headers.js');
+  const source=await readFile(new URL('../app/public/_headers',import.meta.url),'utf8');
+  const built=['assets/index-CxQdVBrk.js','assets/index-DTeZx0D0.css','assets/logs-Bq3k_9aZ.js','assets/inter-latin-Bv.T1~x.woff2'],fonts=['fonts/inter-latin.woff2','fonts/opentui-regular.woff2'];
+  // Cloudflare's reading of the file: a path, then its headers. * is any run, :name one segment, and every matching rule applies.
+  const sent=(headers:string,path:string)=>{
+    const out=new Map<string,string>();let applies=false;
+    for(const line of headers.split('\n').map(l=>l.trim())){
+      if(!line||line.startsWith('#'))continue;
+      if(line.startsWith('/')){applies=new RegExp('^'+line.replace(/[.+?^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/:[A-Za-z]\w*/g,'[^/]+')+'$').test(path);continue;}
+      const at=line.indexOf(':');
+      if(applies&&at>0){const name=line.slice(0,at).trim().toLowerCase(),value=line.slice(at+1).trim();out.set(name,out.has(name)?`${out.get(name)}, ${value}`:value);}
+    }
+    return out;
+  };
+  const {headers,uncached}=withFileRules(source,[...built,'index.html','constructor/index.js','theme.js',...fonts]);
+  assert.deepEqual(uncached,[]);assert.equal(sent(headers,'/constructor/index.js').get('cache-control'),undefined,'Only the directories with a lifetime get rules.');
+  for(const file of built)assert.equal(sent(headers,'/'+file).get('cache-control'),'public, max-age=31536000, immutable',file);
+  for(const file of fonts)assert.equal(sent(headers,'/'+file).get('cache-control'),FILE_CACHE.fonts,file);
+  assert.match(FILE_CACHE.fonts!,/^public, max-age=86400\b/);
+  // Another build's file, a longer and a shorter name, the directories, another case, a nested copy, a font no build has yet, dashboard routes.
+  for(const path of ['/assets/index-N3xtBu1d.js','/assets/index-CxQdVBrk.js.map','/assets/index-CxQdVBrk.j','/assets/','/assets','/ASSETS/index-CxQdVBrk.js','/assets/x/index-CxQdVBrk.js','/fonts/next.woff2','/fonts/','/index.html','/','/logs']){
+    assert.equal(sent(headers,path).get('cache-control'),undefined,`${path} keeps the revalidating default`);
+    assert.ok(sent(headers,path).get('content-security-policy'),`${path} keeps the security headers`);
+  }
+  for(const file of [...built,...fonts])assert.equal(sent(source,'/'+file).get('cache-control'),undefined,'The checked-in file gives no directory a lifetime of its own.');
+  // A name the rule syntax would read as a pattern gets no rule. Nor does a file past the rule limit, which Cloudflare would skip without a word.
+  const odd=['assets/a*-1.js','assets/:name-2.js','assets/has space-3.js','assets/sub/dir-4.js','fonts/a*.woff2'],strict=withFileRules(source,[...odd,...built]);
+  assert.deepEqual(strict.uncached,odd);
+  for(const path of ['/assets/abc-1.js','/assets/x-2.js','/assets/has','/assets/sub/dir-4.js','/fonts/abc.woff2'])assert.equal(sent(strict.headers,path).get('cache-control'),undefined,path);
+  const many=Array.from({length:150},(_,i)=>`assets/chunk-${i}.js`),capped=withFileRules(source,many);
+  assert.equal(capped.headers.split('\n').filter(line=>line.startsWith('/')).length,MAX_RULES);
+  assert.ok(capped.uncached.length>0);assert.deepEqual(capped.uncached,many.slice(-capped.uncached.length),'The files listed first keep their rules.');
+  assert.equal(sent(capped.headers,'/assets/chunk-0.js').get('cache-control'),FILE_CACHE.assets);
+});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
   const forward='Subject: forwarded\r\nContent-Type: message/rfc822\r\n\r\n';
   assert.ok(await parseInboundMime(Buffer.from(forward+base)));
   assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
+});
+test('review PR #84 P2: examples use the server’s canonical origin, never the page’s Host', async () => {
+  // P2: the dashboard's origin comes from /v1/me or /health (PUBLIC_URL). A page served under another Host is flagged
+  // (Docs then shows no examples), and an unknown origin is null (callers wait) rather than the page's own address.
+  const { canonicalOrigin, originOf } = await import('../app/src/lib/public-origin.js');
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', demo: false, page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
+  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', demo: false, page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: false, page: 'https://attacker.example' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', demo: false, page: 'https://bane.mx' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
+  assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
+});
+test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
+  // A bearer in a shell command stays in shell history and the process list.
+  const { mcpClients, mcpClientSteps, mcpSnippet, claudeAddCommand } = await import('./src/mcp-clients.js');
+  const url = 'https://bane.mx/mcp', bearer = 'bane_mbx_' + 'f'.repeat(64);
+  for (const client of mcpClients) {
+    const snippet = mcpSnippet(client, url, { bearer });
+    assert.doesNotMatch(snippet, /^\s*(?:claude|opencode|npx|curl)\b/, `${client} key setup must not be a command`);
+    assert.equal(JSON.stringify(JSON.parse(snippet)).includes(`Bearer ${bearer}`), true);
+    for (const step of mcpClientSteps(client, 'key')) assert.doesNotMatch(step, /\bterminal\b|\brun this\b/i, `${client}: ${step}`);
+  }
+  assert.equal(JSON.parse(mcpSnippet('claude', url, { bearer })).mcpServers.bane.headers.Authorization, `Bearer ${bearer}`);
+  assert.equal(mcpSnippet('claude', url, {}), claudeAddCommand(url));
+  assert.doesNotMatch(claudeAddCommand(url), /Bearer|Authorization/);
 });
 test('S3 fixture: object round trips and reserved part headers keep the service available',async t=>{
   const {createRequire}=await import('node:module'),{spawn}=await import('node:child_process'),{once}=await import('node:events');
@@ -386,6 +448,58 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
+  if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1,connectionTimeoutMillis:1000});
+  t.after(()=>pool.end());
+  const wid=unique('smtp'),bid=unique('mbx'),kid='app_'+randomUUID(),from=`box@${wid}.invalid`,key=randomUUID();
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid,mailGatewayToken:key}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await ensureRegionSettings(rt.db,rt.config);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[bid,wid,from.split('@')[1],REGION]);
+  await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'local:','fixture')",[wid,REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')",[bid,wid,from]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,from,bid]);
+  await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+  await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['smtp'])",[kid,bid]);
+  const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp();
+  async function submit(mime:string){
+    const body=JSON.stringify({op:'submit',kid,from,to:['sink@example.invalid'],content:Buffer.from(`From: ${from}\r\n${mime}`).toString('base64')});
+    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(body);
+    const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
+    return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body,headers}),rt);
+  }
+  for(const [label,mime] of [
+    ['plain','Subject: plain\r\n\r\nHello\r\n'],
+    ['attachment','Content-Type: application/octet-stream; name="bytes.bin"\r\nContent-Disposition: attachment; filename="bytes.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\nYnl0ZXM=\r\n'],
+    ['large text','Content-Type: text/plain\r\n\r\n'+('t'.repeat(998)+'\r\n').repeat(600)],
+  ] as const) await t.test(label,async()=>{
+    const res=await submit(mime),body=await res.json() as Json;assert.equal(res.status,200,JSON.stringify(body));
+    await (await import('./src/dispatcher.js')).dispatchDue(rt,REGION);
+    // The full harness also has a runner: it may already hold this message's lease.
+    for(const until=Date.now()+5000;;){
+      const {rows:[mail]}=await db.query('SELECT attempt_started_at,error_code FROM sending_emails WHERE id=$1 AND actor_key_id=$2',[body.id,kid]);
+      if(mail?.attempt_started_at)break;
+      assert.ok(!mail?.error_code && Date.now()<until,mail?.error_code??'no dispatch attempt');
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+  });
+  const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
+  const before=await usage();
+  for(const [quota,value] of [['quota_messages',before.messages],['quota_bytes',Number(before.bytes)+1]] as const){
+    await db.query(`UPDATE mailboxes SET ${quota}=$2 WHERE id=$1`,[bid,value]);
+    const full=await submit('Subject: no space\r\n\r\nNo send\r\n');assert.equal(full.status,507);
+    assert.equal(((await full.json()) as Json).error.code,'INBOX_OVER_QUOTA');assert.deepEqual(await usage(),before);
+    await db.query(`UPDATE mailboxes SET ${quota}=NULL WHERE id=$1`,[bid]);
+  }
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'sink@example.invalid',true)",[unique('contact'),wid]);
+  const denied=await submit('Subject: suppressed\r\n\r\nNo send\r\n');assert.equal(denied.status,422);
+  assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
+  await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
+  assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
+  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,3);
+});
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
   const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
@@ -563,6 +677,12 @@ describe('Public contract and authentication', () => {
     assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(healthReply.headers.get('referrer-policy'), 'no-referrer');
     assert.match(healthReply.headers.get('permissions-policy') ?? '', /camera=\(\)/);
+    // Review PR #84 P2: Docs builds every copyable example from this origin, so it must be PUBLIC_URL's, never the Host a
+    // proxy or default virtual host forwarded. A request naming an attacker's Host still gets the canonical origin.
+    assert.equal(health.origin, PUBLIC_ORIGIN);
+    const { request: rawRequest } = await import('node:http');
+    const spoofed = await new Promise<Json>((done, fail) => { const target = new URL('/health', BASE); rawRequest({ host: target.hostname, port: target.port, path: target.pathname, headers: { Host: 'attacker.example', 'X-Forwarded-Host': 'attacker.example', Accept: 'application/json' } }, res => { let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; }); res.on('end', () => { try { done(JSON.parse(body)); } catch (error) { fail(error); } }); }).on('error', fail).end(); });
+    assert.equal(spoofed.origin, PUBLIC_ORIGIN);
     const { publicFailureBucket, admissionPeer } = await import('./src/core.js');
     assert.equal(admissionPeer('2001:0db8:0:0::3'),admissionPeer('2001:db8::ffff:abcd'));
     assert.notEqual(admissionPeer('2001:db8:0:1::3'),admissionPeer('2001:db8::3'));
@@ -3535,6 +3655,8 @@ describe('Hosted MCP OAuth and tools', () => {
       await deliver(hidden,[b.id],'billing-private-needle',new Date(Date.now()+2000).toISOString());
       assert.equal((await success('listInboundThreads',{q:'invoice'})).data.length,1);
       const support=ok(await get(path,h));assert.deepEqual(support.messages.map((m:Json)=>m.id),[first.id,shared]);assert.equal(support.snippet,'Shared invoice');assert.deepEqual(support.addressIds,[a.id]);assert.ok(!JSON.stringify(support).includes(hidden));
+      // A conversation names who wrote its newest visible message, in the list and the thread alike.
+      assert.deepEqual(support.from,{name:null,address:'sender@example.net'});assert.deepEqual(ok(await get('/threads',h)).data.find((t:Json)=>t.id===threadId).from,{name:null,address:'sender@example.net'});
       assert.deepEqual(ok(await get('/threads?q=billing-private-needle',h)).data,[]);error(await get(`/messages/${hidden}`,h),404);error(await post(`${path}/reply`,{replyToMessageId:hidden,text:'hidden'},h),404);
       assert.equal((await success('getInboundMessage',{messageId:shared})).text,'Shared invoice');
       assert.deepEqual(ok(await get('/messages?q=billing-private-needle',h)).data,[]);
@@ -9323,6 +9445,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('dispatch leases return bounded inline snapshots and deliver deferred content intact',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const text='fixture '.repeat(12500), inputs=[text,'ordinary',text,text].map((body,i)=>({from:'from@example.invalid',to:address(),subject:`bounded-${i}`,text:body}));
+      ok(await local('POST','/v1/emails/batch',{emails:inputs}),202);
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send, delivered:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(cmd instanceof SendEmailCommand){const content=cmd.input.Content!.Simple!;delivered.push(content.Subject!.Data!);assert.equal(content.Body!.Text!.Data,inputs.find(v=>v.subject===content.Subject!.Data)?.text);}
+        return Reflect.apply(send,this,[cmd]);
+      });
+      const queries=t.mock.method(db,'query');
+      const result=await (await import('./src/dispatcher.js')).dispatchDue(runtime,REGION);
+      const leases=queries.mock.calls.filter(c=>(c.arguments[0] as any)?.text?.includes('queued_owners'));
+      assert.ok(leases.length);let leased=0;
+      for(const entry of leases){
+        const {rows}=await entry.result as unknown as pg.QueryResult;
+        const snapshots=rows.filter(r=>r.id).map(r=>r.snapshot);leased+=snapshots.length;
+        assert.ok(snapshots.reduce((n,s)=>n+Buffer.byteLength(JSON.stringify(s)),0)<=snapshots.length*65536,'oversize content reached the lease caller');
+      }
+      assert.equal(leased,inputs.length);assert.equal(result.sent,inputs.length);assert.deepEqual(delivered.sort(),inputs.map(v=>v.subject));
+    });
+  });
   test('query budget: API key admission, dispatch, acceptance and delivery at one and 100 envelopes',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {runDispatcher}=await import('./src/dispatcher.js'),{ingestFeedbackBatch}=await import('./src/operations.js');
@@ -10795,6 +10938,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
         const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);
+        // One config builder (mcp-clients.ts) for the API, the dashboard and Docs: plain /mcp, the key as a bearer header, and keys
+        // named for the inbox and client so several connections stay apart. OpenCode gets its V2 shape (mcp.servers).
+        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer bane_mbx_/);
+        assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
+        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
+        assert.deepEqual(opencode.config.mcp.servers.bane,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.bane,undefined);
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer bane_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
@@ -15222,6 +15372,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           const healthRes = await worker.fetch(new Request('https://dev.bane.mx/%68ealth'), {...env,ENABLE_LIVE_SES:'true',get HYPERDRIVE(){throw Error('liveness opened DB')}});
           assert.equal(healthRes.status, 200);
           assert.equal((await healthRes.json()).service, 'bane');
+          // Review PR #84 P2: the zero-dependency path also answers with PUBLIC_URL's origin, not the request's host.
+          assert.equal((await (await worker.fetch(new Request('https://attacker.example/health'), env)).json()).origin, 'https://dev.bane.mx');
           assert.equal([...loadedModules].some(u => /\\/src\\/app\\.[jt]s$/.test(u)), false, 'Encoded /health must take the zero-dep fast path.');
           admissionAllowed=false;assert.equal((await worker.fetch(new Request('https://dev.bane.mx/health/receiving'),env)).status,429);admissionAllowed=true;
 
