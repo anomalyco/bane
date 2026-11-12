@@ -1725,17 +1725,11 @@ export async function queueSimulatedFeedback(runtime: Runtime, accepted: { email
 // Shared by campaign workers and the dispatch claim. A queued origin cannot bootstrap membership.
 export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: SQL, direct = sql`false`) {
   const c = runtime.config;
-  if (c.accountClient) return sql`SELECT 1 FROM workspace_members m JOIN bane_users u ON u.id=m.user_id
+  return sql`SELECT 1 FROM workspace_members m JOIN bane_users u ON u.id=m.user_id
     JOIN bane_oidc_identities i ON i.user_id=u.id AND i.issuer=${c.accountIssuer}
     WHERE m.workspace_id=${workspaceId} AND m.user_id=${userId} AND u.email_verified
     AND (m.role IN ('owner','admin') OR (${c.multiTenant} AND m.role='member' AND ${direct}))
     AND (${c.multiTenant} OR ${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email)) LIMIT 1 FOR SHARE OF m,u,i`;
-  return sql`SELECT 1 FROM workspace_members m JOIN auth_user u ON u.id = m.user_id
-    JOIN auth_account g ON g.user_id = u.id AND g.provider_id = 'google' AND g.account_id <> ''
-    WHERE ${Boolean(c.googleClientId && c.googleClientSecret && c.authSecret)}::boolean AND m.workspace_id = ${workspaceId} AND m.user_id = ${userId}
-      AND (m.role IN ('owner', 'admin') ${c.multiTenant ? sql`OR (m.role = 'member' AND ${direct})` : sql``}) AND u.email_verified AND u.email <> ''
-      ${c.multiTenant ? sql`` : sql`AND (${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email) OR (u.google_hosted_domain <> '' AND ${JSON.stringify(c.allowedDomains)}::jsonb ? lower(u.google_hosted_domain)))`}
-    LIMIT 1 FOR SHARE OF m, u, g`;
 }
 export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; actorKeyId: string; campaignId?: string | null; snapshot: Pick<EmailSnapshot, 'from'> }) {
   // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.

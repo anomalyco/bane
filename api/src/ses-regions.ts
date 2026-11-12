@@ -4,7 +4,6 @@ import { actor, ApiError, assertSesConfigured, isSimulatedSes, errors, id, json,
 import { apiKeys, jobs } from './db/core.js';
 import { domains } from './db/operations.js';
 import { sesRegions } from './db/ses-regions.js';
-import { isApprovedUser } from './google-auth.js';
 import { approvedOriginUser } from './sending.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
@@ -115,7 +114,7 @@ export function registerSesRegions(app: App) {
   });
 }
 async function approvedOrigin(runtime: Runtime, keyId: string) {
-  if (keyId.startsWith('user_')) return runtime.config.multiTenant ? (await runtime.db.execute(approvedOriginUser(runtime, sql`${runtime.config.workspaceId}`, sql`${keyId.slice(5)}`))).rows.length > 0 : isApprovedUser(runtime, keyId.slice(5));
+  if (keyId.startsWith('user_')) return (await runtime.db.execute(approvedOriginUser(runtime, sql`${runtime.config.workspaceId}`, sql`${keyId.slice(5)}`))).rows.length > 0;
   if (keyId.startsWith('mcp_')) {
     const grant = await getMcpGrantActor(runtime, keyId);
     return !!grant && (!runtime.config.multiTenant || grant.workspaceId === runtime.config.workspaceId) && grant.permissions.includes('manage') && !grant.domains.length;

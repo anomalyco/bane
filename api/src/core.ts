@@ -42,10 +42,8 @@ export interface Config {
   authSecret: string;
   mailGatewayToken?:string;
   previousAuthSecret?: string;
-  googleClientId?: string;
   accountIssuer?: string;
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
-  googleClientSecret?: string;
   allowedEmails: string[];
   allowedDomains: string[];
   defaultWorkspaceOwners: '*' | string[];

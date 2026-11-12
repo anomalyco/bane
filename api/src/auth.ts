@@ -116,15 +116,13 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
-    if (!c.env.config.accountClient && !Boolean(c.env.config.googleClientId && c.env.config.googleClientSecret && c.env.config.authSecret)) {
+    if (!c.env.config.accountClient) {
       throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Dashboard sign-in is not configured for this deployment.');
     }
-    if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
-    const { getDashboardActor, requireDashboardOrigin } = await wrapModuleLoad(() => import('./google-auth.js'));
-    const dashboard = await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work), headers => {
-      for (const cookie of headers.getSetCookie()) c.header('set-cookie', cookie, { append: true });
-    });
-    if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
+    if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
+    const { getDashboardActor, requireDashboardOrigin } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
+    const dashboard = await timed(c,'session-db',()=>getDashboardActor(c.env,c.req.raw.headers));
+    if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
     c.set('actor', dashboard);
   }

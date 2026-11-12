@@ -54,8 +54,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
     switch (group) {
       case 'auth': return registerAuth;
       case 'auth-ui': {
-        const [{ registerMcpAuth }, { registerGoogleAuth }] = await Promise.all([import('./mcp-auth.js'), import('./google-auth.js')]);
-        return (target: App) => { registerMcpAuth(target); registerGoogleAuth(target); };
+        const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
+        return (target: App) => { registerMcpAuth(target); registerDashboardAuth(target); };
       }
       case 'audience': return (await import('./audience.js')).registerAudience;
       case 'audience-query': return (await import('./audience-query.js')).registerAudienceQuery;
@@ -223,15 +223,15 @@ export async function createOpenApiApp(): Promise<App> {
     doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
   }))), true);
   const [
-    { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
+    { registerMcpAuth }, { registerDashboardAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
     { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats }, { registerOverviewSetup },
   ] = await wrapModuleLoad(() => Promise.all([
-    import('./mcp-auth.js'), import('./google-auth.js'), import('./audience.js'), import('./audience-query.js'),
+    import('./mcp-auth.js'), import('./dashboard-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'),
   ]));
-  registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
+  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full);
   return full;

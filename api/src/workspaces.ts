@@ -1,10 +1,9 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
-import { authUser } from './db/google-auth.js';
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
-import { approvedGoogleIdentity, invitationRecipient, verifiedDashboardUser } from './google-auth.js';
+import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -19,7 +18,7 @@ const tags = ['Workspaces'];
 const base = '/v1/workspaces/current';
 
 // Accept only the invitation the verified recipient followed. Never overwrite an existing role.
-export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId: string, native: boolean) {
+export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId: string) {
   const result = await db.execute<{ workspace_id: string }>(sql`WITH pending AS (
     SELECT i.id FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
     WHERE i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
@@ -30,7 +29,7 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
   ), joined AS (
     INSERT INTO workspace_members (id, workspace_id, user_id, role) SELECT ${id('mem')}, workspace_id, ${userId}, role FROM claimed
     ON CONFLICT (workspace_id, user_id) DO NOTHING
-  ) UPDATE ${native ? sql`bane_users` : sql`auth_user`} u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
+  ) UPDATE bane_users u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
   return result.rows[0]?.workspace_id;
 }
 
@@ -132,11 +131,8 @@ export function registerWorkspaces(app: App) {
     const a = dashboardSession(c), { name } = c.req.valid('json');
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
-      const allowed = c.env.config.accountClient
-        ? await db.select({email:baneUsers.email}).from(baneUsers).where(and(eq(baneUsers.id,a.userId),eq(baneUsers.emailVerified,true))).for('update')
-            .then(([u]) => !!u && c.env.config.allowedEmails.includes(u.email.toLowerCase()))
-        : await db.select({email:authUser.email,verified:authUser.emailVerified,hd:authUser.googleHostedDomain}).from(authUser).where(eq(authUser.id,a.userId)).for('update')
-            .then(([u]) => !!u && approvedGoogleIdentity(c.env,u.email,u.verified,u.hd));
+      const [user] = await db.select({email:baneUsers.email}).from(baneUsers).where(and(eq(baneUsers.id,a.userId),eq(baneUsers.emailVerified,true))).for('update');
+      const allowed = user && c.env.config.allowedEmails.includes(user.email.toLowerCase());
       if (!allowed) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
       const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId });
       if (row) return row;
@@ -200,7 +196,7 @@ export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces/invitations/{id}/accept', operationId: 'acceptWorkspaceInvitation', tags, security, request: { params: IdParams }, responses: { 200: response(z.object({ workspaceId: z.string() })), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = await invitationRecipient(c.env, c.req.raw.headers), invitationId = c.req.valid('param').id;
-    const workspaceId = await claimInvitation(c.env.db, a.userId, a.email, invitationId, Boolean(c.env.config.accountClient));
+    const workspaceId = await claimInvitation(c.env.db, a.userId, a.email, invitationId);
     if (workspaceId) return c.json({ workspaceId }, 200);
     // Following the URL immediately after sign-in is an idempotent success, never a rejoin.
     const existing = await c.env.db.execute<{ workspace_id: string }>(sql`SELECT i.workspace_id FROM workspace_invitations i JOIN workspace_members m ON m.workspace_id = i.workspace_id AND m.user_id = ${a.userId} WHERE i.id = ${invitationId} AND i.email = ${a.email.toLowerCase()} AND i.status = 'accepted'`);

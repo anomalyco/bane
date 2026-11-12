@@ -6,7 +6,7 @@ const permissions: Permission[] = ['read', 'send', 'manage'];
 const audience = (runtime: Runtime) => new URL('/mcp', runtime.config.publicUrl).href;
 export function protectedResourceMetadata(runtime: Runtime) {
   return { resource: audience(runtime), authorization_servers: [runtime.config.accountIssuer],
-    scopes_supported: permissions.map(p => `bane:${p}`), bearer_methods_supported: ['header'] };
+    scopes_supported: [...permissions.map(p => `bane:${p}`),'bane:receiving'], bearer_methods_supported: ['header'] };
 }
 
 // Cache only completed public metadata. Each Worker request owns its fetches.
@@ -24,15 +24,15 @@ async function authority(issuer: string) {
 }
 
 export async function externalMcpGrant(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
-  const { rows: [grant] } = await db.execute<{workspace_id: string; role: string; permissions: Permission[]}>(sql`
-    SELECT g.workspace_id, m.role, g.permissions FROM bane_resource_grants g
+  const { rows: [grant] } = await db.execute<{workspace_id: string; role: string; permissions: Permission[]; receiving:boolean}>(sql`
+    SELECT g.workspace_id, m.role, g.permissions,g.receiving FROM bane_resource_grants g
     JOIN bane_oidc_identities i ON (g.issuer, g.subject) = (i.issuer, i.subject)
     JOIN workspace_members m ON m.workspace_id = g.workspace_id AND m.user_id = i.user_id
-    WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND g.expires_at > now()
+    WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked AND g.expires_at > now()
       AND m.role IN ('owner','admin','member') FOR SHARE OF g, i, m`);
   if (!grant) return null;
   const allowed = grant.permissions.filter(p => p !== 'manage' || grant.role !== 'member');
-  return allowed.length ? { keyId, grantId: keyId.slice(4), receivingConsent: false, workspaceId: grant.workspace_id, role: grant.role, permissions: allowed, domains: [], credential: 'mcp' } : null;
+  return allowed.length ? { keyId, grantId: keyId.slice(4), receivingConsent: grant.receiving, workspaceId: grant.workspace_id, role: grant.role, permissions: allowed, domains: [], credential: 'mcp' } : null;
 }
 
 export async function authorizeResource(runtime: Runtime, request: Request, handler: (actor: Actor) => Promise<Response>) {
@@ -69,10 +69,10 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   await runtime.db.execute(sql`WITH memberships AS (
     SELECT m.workspace_id, m.role FROM workspace_members m JOIN bane_oidc_identities i ON i.user_id=m.user_id
     WHERE i.issuer=${claims.iss} AND i.subject=${claims.sub} AND m.role IN ('owner','admin','member') LIMIT 2
-  ) INSERT INTO bane_resource_grants(id,issuer,subject,workspace_id,permissions,expires_at)
-    SELECT ${keyId},${claims.iss},${claims.sub},workspace_id,
+  ) INSERT INTO bane_resource_grants(id,issuer,subject,client_id,workspace_id,permissions,expires_at,receiving)
+    SELECT ${keyId},${claims.iss},${claims.sub},${claims.client_id},workspace_id,
       CASE WHEN role='member' THEN array_remove(${sql.param(allowed)}::text[],'manage') ELSE ${sql.param(allowed)}::text[] END,
-      to_timestamp(${claims.exp}) FROM memberships WHERE (SELECT count(*) FROM memberships)=1 ON CONFLICT DO NOTHING`);
+      to_timestamp(${claims.exp}),${scopes.has('bane:receiving')} FROM memberships WHERE (SELECT count(*) FROM memberships)=1 ON CONFLICT DO NOTHING`);
   const actor = await externalMcpGrant(runtime, keyId);
   return actor ? handler(actor) : denied(403);
 }
