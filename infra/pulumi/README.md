@@ -62,6 +62,8 @@ For a new stack, dispatch on `dev` with `init: true`, `preview: true`. Init crea
 
 `github/bane-<stage>` in the CI account still just assumes **`role/bane-deploy` in the stage account** for these resources. Put the two additional deploy policies below on that **assumed role**, not on the OIDC principal or `bane-runtime`. Substitute `ACCOUNT` / `STAGE` with `905840579680` / `dev` or `009882681002` / `production` throughout (not IAM policy variables). First ensure the account has the AWS service-linked roles `AWSServiceRoleForECS` and `AWSServiceRoleForElasticLoadBalancing`; create them once as an administrator if absent. Their ENI, target registration and discovery permissions do not belong on CI. Keep existing state/KMS/assume-role policies unchanged.
 
+The deploy role's own inline policy (`bane-deploy`: SES reads, the `bane.mx` identities, the `bane-runtime` user, its three policies and the two gateway roles) is [deploy-role-policy.json](../aws-shared/deploy-role-policy.json); apply it with the [operator step](../../docs/receiving-operations.md#one-time-operator-action--not-executed-during-development) next to the receiving grant. It names the two gateway roles exactly, writes an inline policy only on the execution role, and denies trust-policy and managed-policy changes on every role, so the gateway's trust policy in [mail-gateway.ts](mail-gateway.ts) is changed by an administrator, not by a deploy. Nothing else in this section grants IAM.
+
 **1. Stack-owned execution policy.** Pulumi creates an inline policy on the execution role with the permissions below. It uses the four secret ARNs directly; the suffixes here represent their generated identifiers. The task role has no identity policy.
 
 ```json
@@ -73,7 +75,7 @@ For a new stack, dispatch on `dev` with `init: true`, `preview: true`. Init crea
 ]}
 ```
 
-**2. Deploy policy: gateway resources and roles.** For create, refresh and updates; intentionally no teardown of protected resources, `RunTask`, image push, secret version management, `sns:Publish` or changes to the alerts topic. Name-scoped ECS permissions assume long service ARNs. The deployment waiter reads service deployments. `*` reads are APIs that lack resource-level authorization; restrict them to Ohio.
+**2. Deploy policy: gateway resources.** For create, refresh and updates; intentionally no teardown of protected resources, `RunTask`, image push, secret version management, `sns:Publish`, changes to the alerts topic or any IAM action (the role grants above live in the deploy role's own policy). Name-scoped ECS permissions assume long service ARNs. The deployment waiter reads service deployments. `*` reads are APIs that lack resource-level authorization; restrict them to Ohio.
 
 ```json
 {"Version":"2012-10-17","Statement":[
@@ -82,10 +84,7 @@ For a new stack, dispatch on `dev` with `init: true`, `preview: true`. Init crea
   {"Effect":"Allow","Action":["ecs:DescribeTaskDefinition","ecs:ListAccountSettings","logs:DescribeLogGroups"],"Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2"}}},
   {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:PutRetentionPolicy","logs:ListTagsForResource","logs:TagResource","logs:UntagResource"],"Resource":["arn:aws:logs:us-east-2:ACCOUNT:log-group:/ecs/bane-mail-gateway","arn:aws:logs:us-east-2:ACCOUNT:log-group:/ecs/bane-mail-gateway:*"]},
   {"Effect":"Allow","Action":["cloudwatch:PutMetricAlarm","cloudwatch:DescribeAlarms","cloudwatch:ListTagsForResource","cloudwatch:TagResource","cloudwatch:UntagResource"],"Resource":"arn:aws:cloudwatch:us-east-2:ACCOUNT:alarm:bane-mail-gateway-*"},
-  {"Effect":"Allow","Action":["secretsmanager:CreateSecret","secretsmanager:DescribeSecret","secretsmanager:GetResourcePolicy","secretsmanager:TagResource","secretsmanager:UntagResource"],"Resource":"arn:aws:secretsmanager:us-east-2:ACCOUNT:secret:bane/STAGE/mail-gateway/*"},
-  {"Effect":"Allow","Action":["iam:CreateRole","iam:GetRole","iam:ListRoleTags","iam:TagRole","iam:UntagRole","iam:ListRolePolicies","iam:GetRolePolicy","iam:ListAttachedRolePolicies"],"Resource":["arn:aws:iam::ACCOUNT:role/bane-mail-gateway-task","arn:aws:iam::ACCOUNT:role/bane-mail-gateway-execution"]},
-  {"Effect":"Allow","Action":"iam:PutRolePolicy","Resource":"arn:aws:iam::ACCOUNT:role/bane-mail-gateway-execution"},
-  {"Effect":"Allow","Action":"iam:PassRole","Resource":["arn:aws:iam::ACCOUNT:role/bane-mail-gateway-task","arn:aws:iam::ACCOUNT:role/bane-mail-gateway-execution"],"Condition":{"StringEquals":{"iam:PassedToService":"ecs-tasks.amazonaws.com"}}}
+  {"Effect":"Allow","Action":["secretsmanager:CreateSecret","secretsmanager:DescribeSecret","secretsmanager:GetResourcePolicy","secretsmanager:TagResource","secretsmanager:UntagResource"],"Resource":"arn:aws:secretsmanager:us-east-2:ACCOUNT:secret:bane/STAGE/mail-gateway/*"}
 ]}
 ```
 

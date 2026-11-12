@@ -87,6 +87,35 @@ test('Cloudflare routing: every API route reaches the Worker before static asset
     assert.deepEqual(paths.filter(p=>!first(p)),[],`${file} serves these API routes from static assets`);
   }
 });
+test('deploy role documents: the Pulumi role manages only the runtime user, its policies and the two gateway roles, and cannot widen any role',async()=>{
+  const account='905840579680',render=async(file:string)=>JSON.parse((await readFile(new URL(`../infra/aws-shared/${file}`,import.meta.url),'utf8')).replaceAll('YOUR_AWS_ACCOUNT_ID',account).replaceAll('YOUR_STAGE_ORIGIN','https://dev.bane.mx')) as {Statement:IamStatement[]};
+  const statements=[...(await render('deploy-role-policy.json')).Statement,...(await render('receiving-deploy-policy.json')).Statement];
+  const role=(name:string)=>`arn:aws:iam::${account}:role/${name}`,policy=(name:string)=>`arn:aws:iam::${account}:policy/${name}`;
+  const allows=(action:string,resource:string,context:Record<string,string|string[]>={})=>iamAllows(statements,action,resource,context);
+  // The gateway roles: create them, and write an inline policy on the execution role only.
+  for(const name of ['bane-mail-gateway-task','bane-mail-gateway-execution']){
+    assert.equal(allows('iam:CreateRole',role(name)),true,name);
+    assert.equal(allows('iam:PassRole',role(name),{'iam:PassedToService':'ecs-tasks.amazonaws.com'}),true,name);
+    assert.equal(allows('iam:PassRole',role(name),{'iam:PassedToService':'lambda.amazonaws.com'}),false,name);
+    for(const action of ['iam:AttachRolePolicy','iam:DetachRolePolicy','iam:UpdateAssumeRolePolicy','iam:PutRolePermissionsBoundary','iam:DeleteRolePermissionsBoundary'])
+      assert.equal(allows(action,role(name),{'iam:PolicyARN':'arn:aws:iam::aws:policy/AdministratorAccess'}),false,`${action} ${name}`);
+  }
+  assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-execution')),true);
+  assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-task')),false,'the task role stays empty');
+  // No other role, user or policy: a deploy cannot mint itself a new principal or rewrite the operator's.
+  for(const name of ['bane-backdoor','bane-deploy','bane-runtime-escalation','OrganizationAccountAccessRole']) for(const action of ['iam:CreateRole','iam:PutRolePolicy','iam:AttachRolePolicy','iam:UpdateAssumeRolePolicy','iam:DeleteRole'])
+    assert.equal(allows(action,role(name),{'iam:PolicyARN':'arn:aws:iam::aws:policy/AdministratorAccess'}),false,`${action} ${name}`);
+  for(const name of ['bane-runtime-boundary','bane-operator','bane-gateway-resources','deploy/bane-gateway-network']) for(const action of ['iam:CreatePolicyVersion','iam:SetDefaultPolicyVersion','iam:DeletePolicy','iam:CreatePolicy'])
+    assert.equal(allows(action,policy(name)),false,`${action} ${name}`);
+  for(const name of ['bane-runtime','bane-runtime-ohio','bane-runtime-trusted']) assert.equal(allows('iam:CreatePolicyVersion',policy(name)),true,name);
+  assert.equal(allows('iam:CreateUser',`arn:aws:iam::${account}:user/bane-runtime`,{'iam:PermissionsBoundary':policy('bane-runtime-boundary')}),true);
+  assert.equal(allows('iam:CreateUser',`arn:aws:iam::${account}:user/bane-runtime`,{'iam:PermissionsBoundary':policy('other')}),false);
+  assert.equal(allows('iam:CreateUser',`arn:aws:iam::${account}:user/bane-other`,{'iam:PermissionsBoundary':policy('bane-runtime-boundary')}),false);
+  for(const action of ['iam:CreateLoginProfile','iam:CreateOpenIDConnectProvider','iam:CreateSAMLProvider','iam:CreateServiceLinkedRole']) assert.equal(allows(action,'*'),false,action);
+  // Receiving: the rule set stays operator-activated.
+  assert.equal(allows('ses:CreateReceiptRule','*',{'aws:RequestedRegion':'us-east-2'}),true);
+  for(const action of ['ses:SetActiveReceiptRuleSet','ses:CreateReceiptRuleSet','ses:DeleteReceiptRuleSet','ses:DeleteReceiptRule']) assert.equal(allows(action,'*',{'aws:RequestedRegion':'us-east-2'}),false,action);
+});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
