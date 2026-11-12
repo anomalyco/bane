@@ -82,7 +82,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     summary: 'Every route mail can take, with its rituals and endpoints, in one read',
     description: 'One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rituals that run on it and where its mail goes. Also returns counts per kind, the rituals, the endpoints and the domains. Members and scoped keys see only their addresses.',
     request: { query: z.object({
-      kind: Kinds.optional(), origin: z.enum(['api', 'auto']).optional().describe('Addresses only: api (created on purpose) or auto (created by a catch-all).'),
+      kind: Kinds.optional(), origin: z.enum(['api', 'auto']).optional().describe('Filters address rows only: api (created on purpose) or auto (created by a catch-all). Other kinds are unaffected.'),
       domain: z.string().max(253).optional().describe('Receiving host, e.g. reply.acme.com.'), q: z.string().max(200).optional().describe('Matches the address, an alias or the display name.'),
       cursor: z.string().max(400).optional(), limit: z.coerce.number().int().min(1).max(100).default(50),
     }) },
@@ -122,7 +122,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
       SELECT (SELECT coalesce(jsonb_object_agg(k, n),'{}'::jsonb) FROM (SELECT CASE WHEN kind='address' AND origin='auto' THEN 'auto' ELSE kind END AS k, count(*)::int AS n FROM f GROUP BY 1) x) AS counts,
         (SELECT coalesce(jsonb_agg(p ORDER BY p.host, p.rank, p.match, p.id),'[]'::jsonb) FROM (
           SELECT f.id, f.kind, f.match, f.host, f.rank, f.address_id, f.route_id, f.domain_id FROM f
-          WHERE f.kind = ANY(${textArray(kinds)}) AND (${q.origin ?? null}::text IS NULL OR (f.kind='address' AND f.origin=${q.origin ?? null}))
+          WHERE f.kind = ANY(${textArray(kinds)}) AND (${q.origin ?? null}::text IS NULL OR f.kind<>'address' OR f.origin=${q.origin ?? null})
             AND (${after === null}::boolean OR (f.host, f.rank, f.match, f.id) > (${after?.host ?? ''}::text, ${after?.rank ?? 0}::int, ${after?.match ?? ''}::text, ${after?.id ?? ''}::text))
           ORDER BY f.host, f.rank, f.match, f.id LIMIT ${q.limit + 1}) p) AS page`)).rows[0]!;
     const page = rows.page.slice(0, q.limit), last = rows.page.length > q.limit ? page.at(-1)! : null;

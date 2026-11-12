@@ -16675,7 +16675,7 @@ export type GetInboundOverviewData = {
          */
         kind?: string;
         /**
-         * Addresses only: api (created on purpose) or auto (created by a catch-all).
+         * Filters address rows only: api (created on purpose) or auto (created by a catch-all). Other kinds are unaffected.
          */
         origin?: 'api' | 'auto';
         /**

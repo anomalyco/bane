@@ -9265,6 +9265,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const first = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1'), second = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1&cursor=' + first.routes.nextCursor);
         assert.deepEqual([first.routes.data[0].match, second.routes.data[0].match, second.routes.nextCursor], ['ov-drop@receive.example', 'ov-route@receive.example', null]);
         error(await local('GET', '/v1/inbound/overview?cursor=bogus'), 422, 'INVALID_CURSOR');
+        const mine = await call('GET', '/v1/inbound/overview?q=ov&kind=address,route&origin=api'), auto = await call('GET', '/v1/inbound/overview?q=ov&kind=address,route&origin=auto');
+        assert.deepEqual(mine.routes.data.map((r: Json) => r.match).sort(), ['ov-drop@receive.example', 'ov-route@receive.example', 'overview@receive.example'], 'origin filters address rows only; routes stay');
+        assert.deepEqual(auto.routes.data.map((r: Json) => r.kind), ['route', 'route']);
         const catchAll = (await call('GET', '/v1/inbound/overview?kind=catch_all')).routes.data.find((r: Json) => r.host === 'receive.example');
         assert.deepEqual([catchAll.kind, catchAll.route.id, catchAll.to[0].id], ['catch_all', compat.id, inbound.id]);
         const scoped = await call('POST', '/v1/inbound/keys', { name: 'overview reader', addressIds: [box2.id], permissions: ['read'] }, 201); secrets.add(scoped.secret);

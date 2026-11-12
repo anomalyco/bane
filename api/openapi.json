@@ -47359,10 +47359,10 @@
                 "api",
                 "auto"
               ],
-              "description": "Addresses only: api (created on purpose) or auto (created by a catch-all)."
+              "description": "Filters address rows only: api (created on purpose) or auto (created by a catch-all). Other kinds are unaffected."
             },
             "required": false,
-            "description": "Addresses only: api (created on purpose) or auto (created by a catch-all).",
+            "description": "Filters address rows only: api (created on purpose) or auto (created by a catch-all). Other kinds are unaffected.",
             "name": "origin",
             "in": "query"
           },
