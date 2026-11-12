@@ -4,7 +4,7 @@ import { nodeRuntime, postgresConnection } from './adapters/node.js';
 import { drain,drainJobs } from './dispatch.js';
 import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
-import { cleanup } from './maintenance.js';
+import { cleanup, reconcileUploads } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { mailboxHourly } from './mailbox-ingest.js';
@@ -53,6 +53,7 @@ try {
         }
         if (Date.now() - lastCleanup > 3600000) {
           await cleanup(runtime); lastCleanup = Date.now();
+          await reconcileUploads(runtime);
           try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
           await mailboxHourly(runtime);
         }

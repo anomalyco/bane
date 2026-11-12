@@ -11,7 +11,7 @@ import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, SuppressionEventData } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, AudienceSpec, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
@@ -951,9 +951,10 @@ async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInpu
   try { return await idempotent(c,a,{...input,size:bytes.length,checksum},async db=>AttachmentInfo.parse(await upload.finish(db)),undefined,upload.put); }
   finally { await upload.refund(); }
 }
+const UPLOAD_PUT_MS=10*60_000;
 function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:ReturnType<typeof validateAttachment>,bytes:Uint8Array,checksum:string,uploadedBy?:string){
-  const attachmentId=id('attachment'),storageKey=`${a.workspaceId}/attachments/${attachmentId}`;
-  let reserved=false;
+  const attachmentId=id('attachment'),storageKey=uploadKey(a.workspaceId,attachmentId);
+  let reserved=false,published=false;
   const take=(db:DbExecutor)=>db.execute(sql`DELETE FROM sending_upload_reservations WHERE workspace_id=${a.workspaceId} AND id=${attachmentId} RETURNING 1`);
   return {
     async put(){
@@ -964,17 +965,24 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
         await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
       });
       reserved=true;
-      await runtime.storage.put(storageKey,bytes,input.contentType);
+      // S3 cancels the put after ten minutes; an R2 binding put cannot be cancelled. A put that lands after
+      // its reservation and tombstone (158) are gone is deleted by the hourly storage reconciliation.
+      await runtime.storage.put(storageKey,bytes,input.contentType,AbortSignal.timeout(UPLOAD_PUT_MS));
     },
     async finish(db:DbExecutor){
       if(!(await take(db)).rowCount) throw new ApiError(503,'UPLOAD_EXPIRED','Upload reservation expired; retry the upload.',undefined,true);
+      // From here the attachment row may commit (even if the response is lost): keep the object.
+      published=true;
       const [row]=await db.insert(attachments).values({id:attachmentId,workspaceId:a.workspaceId,uploadedBy,...input,storageKey,checksum,size:bytes.length}).returning();return row!;
     },
     async refund(){
       if(!reserved)return;
-      // If final COMMIT succeeded (even if its response was lost), take returns no row:
-      // never delete a published object. The sweeper recovers crashes and DB outages.
-      await runtime.db.transaction(async db=>{if((await take(db)).rowCount) await enqueue(db,{workspaceId:a.workspaceId,type:'maintenance.deleteAttachment',payload:{key:storageKey}});}).catch(()=>log('warn',{code:'UPLOAD_RESERVATION_CLEANUP_DEFERRED'}));
+      // Never delete a published object: once finish took the reservation, the attachment row
+      // may have committed even if its response was lost. Any other ending deletes the object,
+      // also when the sweeper already took an expired reservation: its deletion can run before
+      // a slow put lands. If this never runs (a crash, a DB outage), the reservation's tombstone
+      // (158) queues the deletion a day later.
+      await runtime.db.transaction(async db=>{if((await take(db)).rowCount || !published) await enqueue(db,{workspaceId:a.workspaceId,type:'maintenance.deleteAttachment',payload:{key:storageKey}});}).catch(()=>log('warn',{code:'UPLOAD_RESERVATION_CLEANUP_DEFERRED'}));
     },
   };
 }

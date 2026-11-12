@@ -13,6 +13,11 @@ export type ReceivedNotification = {
 export const sesIdPattern=/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/;
 
 // Both live SNS and held envelopes pass through exactly the same ownership and receipt fences.
+// One statement can create receipts in several workspaces (and a replay, several messages). Its
+// receipts are written in workspace then message order, and each takes its workspace's window row
+// before the receipt (157); its ingest jobs then take backlog rows in workspace order (155). So two
+// route statements take window, receipt and backlog rows in one order, and the global hold release
+// never waits on any of them (156).
 async function route(runtime:Runtime,source:SQL,replay:boolean) {
   const hosted=runtime.config.multiTenant;
   const result=await runtime.db.execute<{trusted:boolean;n:number;held:number;seen:number}>(sql`WITH source AS MATERIALIZED (${source}), bound AS MATERIALIZED (
@@ -33,10 +38,11 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
           (SELECT FROM domain_sending_bindings sb WHERE sb.domain_id=d.id AND sb.connection_id=c.id AND sb.region=d.region))))` : sql`m.status IN ('provisioning','waiting_for_mx','active') AND (m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
   ), groups AS (SELECT bucket,mid,workspace_id,jsonb_agg(DISTINCT addr ORDER BY addr) AS recipients FROM matched GROUP BY 1,2,3),
   receipts AS (INSERT INTO mail_receipts AS r(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification)
-    SELECT g.workspace_id,s.mid,s.region,s.bucket,'workspaces/'||g.workspace_id||'/raw/'||s.mid||'.eml',g.recipients,s.notification FROM groups g JOIN source s USING(bucket,mid)
+    SELECT g.workspace_id,s.mid,s.region,s.bucket,'workspaces/'||g.workspace_id||'/raw/'||s.mid||'.eml',g.recipients,s.notification FROM groups g JOIN source s USING(bucket,mid) ORDER BY g.workspace_id,s.mid
     ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status=CASE WHEN r.status='held' THEN 'held' ELSE 'pending' END,processed_at=NULL
-    WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients AND jsonb_array_length(r.recipients||excluded.recipients)<=200 RETURNING workspace_id,ses_message_id,status
-  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' RETURNING 1),
+    WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients
+      AND (SELECT count(DISTINCT a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a))<=200 RETURNING workspace_id,ses_message_id,status
+  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' ORDER BY workspace_id,ses_message_id RETURNING 1),
   unmatched AS (SELECT e.bucket,e.mid,jsonb_agg(DISTINCT e.addr ORDER BY e.addr) AS recipients ${replay?sql``:sql`,jsonb_object_agg(e.addr,setup.owners) AS owners`} FROM env e
     ${replay?sql``:sql`JOIN LATERAL (SELECT jsonb_agg(wid) AS owners FROM (
       SELECT m.workspace_id AS wid FROM mailbox_domains m WHERE (e.wid=m.workspace_id OR e.kind='shared') AND m.region=e.region AND (m.name=e.host OR m.receiving_host=e.host)

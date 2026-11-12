@@ -2,7 +2,7 @@ import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { serialize, type DefaultTreeAdapterMap } from 'parse5';
 import { boundedHtmlFragment } from './bounded-html.js';
-import { ApiError, isSimulatedSes, digest, id, log, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, isSimulatedSes, digest, id, log, uploadKey, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import {mimeIndex} from './mailbox-mime-index.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
@@ -27,7 +27,7 @@ export type AttachmentInput = { content: string; filename: string; contentType?:
 type ResolvedAttachment = typeof sendingAttachments.$inferSelect;
 const ownsUpload = (wid: string, file: ResolvedAttachment) => file.sourceTemplateAssetId
   ? file.storageKey === `${wid}/templates/assets/${file.sourceTemplateAssetId}`
-  : file.storageKey === `${wid}/attachments/${file.id}` || file.storageKey === `${wid}/live/attachments/${file.id}`;
+  : file.storageKey === uploadKey(wid, file.id) || file.storageKey === `${wid}/attachments/${file.id}` || file.storageKey === `${wid}/live/attachments/${file.id}`;
 type MailboxRow = typeof mailboxes.$inferSelect;
 type MessageRow = typeof mailMessages.$inferSelect;
 const mailboxSender = (runtime:Runtime,from:string) => regionalSending(runtime)

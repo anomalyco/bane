@@ -7,6 +7,44 @@ import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
+const DAY_MS = 24 * 3600_000;
+
+/**
+ * Storage reconciliation, hourly after cleanup (the only retention step that calls storage). A put can
+ * land at any time (see Storage.put): after its reservation expired, after the sweeper's deletion ran
+ * and after the reservation's tombstone (158) was spent. The reconciler lists only the upload prefix
+ * (uploadKey), takes only keys of its exact grammar (uploads/<existing workspace>/attachment_<32 hex>)
+ * that are a day old and that no row references (storage_key_in_use), and queues their deletion; the
+ * same object found again later is queued again. The deletion job checks the key once more when it
+ * runs. Each run continues from a stored cursor and starts over at the end, so a large bucket is
+ * covered over several runs. Tombstones remain the fast path, and the only one for keys of the earlier
+ * layout (<workspace>/attachments/<id>), which this never lists.
+ */
+const UPLOAD_PREFIX = 'uploads/', UPLOAD_KEY = /^uploads\/[^/]+\/attachment_[0-9a-f]{32}$/, RECONCILE_PAGES = 20;
+export async function reconcileUploads(runtime: Runtime, budgetMs = 60_000) {
+  if (!runtime.storage.list) return 0;
+  try { return await reconcilePages(runtime, Date.now() + budgetMs); }
+  catch { log('warn', { code: 'UPLOAD_RECONCILE_FAILED', message: 'The next hourly run resumes the storage listing.' }); return 0; }
+}
+async function reconcilePages(runtime: Runtime, deadline: number) {
+  let queued = 0, after = (await runtime.db.execute<{ after: string }>(sql`SELECT after FROM sending_upload_reconcile WHERE id='uploads'`)).rows[0]?.after ?? '';
+  for (let page = 0; page < RECONCILE_PAGES && Date.now() < deadline; page++) {
+    const listed = await runtime.storage.list!(UPLOAD_PREFIX, after || undefined), old = Date.now() - DAY_MS, next = listed.cursor ?? '';
+    const keys = listed.objects.filter(o => UPLOAD_KEY.test(o.key) && o.uploaded.getTime() <= old).map(o => o.key);
+    const { rows: [r] } = await runtime.db.execute<{ moved: boolean; n: number }>(sql`WITH moved AS (
+        INSERT INTO sending_upload_reconcile(id,after) VALUES('uploads',${next}) ON CONFLICT(id) DO UPDATE SET after=excluded.after WHERE sending_upload_reconcile.after=${after} RETURNING 1),
+      orphans AS (SELECT key,split_part(key,'/',2) AS wid FROM unnest(${sql.param(keys)}::text[]) key WHERE EXISTS(SELECT FROM moved)
+        AND EXISTS(SELECT FROM workspaces w WHERE w.id=split_part(key,'/',2)) AND NOT storage_key_in_use(key)),
+      queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-orphan:'||key,'maintenance.deleteAttachment',wid,jsonb_build_object('key',key) FROM orphans
+        ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status IN ('completed','failed') RETURNING 1)
+      SELECT EXISTS(SELECT FROM moved) AS moved,(SELECT count(*)::int FROM queued) AS n`);
+    // Another reconciler moved the cursor: it owns this page.
+    if (!r?.moved) break;
+    queued += r.n; after = next;
+    if (!next) break;
+  }
+  return queued;
+}
 // Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
 const RETENTION_BUDGET_MS = 4 * 60_000;
 
@@ -75,6 +113,13 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     (SELECT id FROM sending_upload_reservations WHERE expires_at<=now() ORDER BY expires_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
     cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-cleanup:'||id,'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM expired)
     SELECT count(*)::int AS n FROM expired`);
+  // A day after a reservation ended without its attachment (158), delete its object once more: a late
+  // put may have landed after the first deletion. An attachment that holds the object is never touched.
+  await drain('upload_tombstones',()=>sql`WITH due AS (DELETE FROM sending_upload_tombstones WHERE id IN
+    (SELECT id FROM sending_upload_tombstones WHERE delete_after<=now() ORDER BY delete_after LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
+    cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-tombstone:'||d.id,'maintenance.deleteAttachment',d.workspace_id,jsonb_build_object('key',d.storage_key) FROM due d
+      WHERE NOT EXISTS(SELECT FROM sending_attachments a WHERE a.id=d.id AND a.storage_key=d.storage_key) ON CONFLICT(id) DO NOTHING)
+    SELECT count(*)::int AS n FROM due`);
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
   // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));

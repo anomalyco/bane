@@ -24,9 +24,16 @@ export interface Actor {
 export interface Storage {
   // Identity for reusable immutable bytes only, never pending request-bound I/O.
   readonly cacheScope?: object;
-  put(key: string, body: Uint8Array, contentType: string): Promise<void>;
+  /**
+   * `signal` cancels an S3 put; an R2 binding put cannot be cancelled once it starts (an already
+   * aborted signal still stops it). No backend bounds when a put can land, so the hourly cleanup
+   * reconciles storage against its records instead (maintenance.ts).
+   */
+  put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
   delete(key: string): Promise<void>;
+  /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
+  list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;
 }
 export interface Config {
   /** Requests per minute per credential. */
@@ -152,6 +159,11 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/**
+ * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts
+ * with a workspace ID or a mail class, and no workspace may be named `uploads` (migration 158).
+ */
+export const uploadKey = (workspaceId: string, attachmentId: string) => `uploads/${workspaceId}/${attachmentId}`;
 export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Actor {
   const value = c.get('actor');
   // Dashboard roles include content editing. A scoped machine grant is still bounded by its

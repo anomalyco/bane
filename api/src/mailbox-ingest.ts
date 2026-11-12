@@ -401,11 +401,18 @@ export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submissi
   catch { if(submission && performance.now()>=budget.deadline)throw new ApiError(503,'MIME_BUSY','Submission parser timed out.',undefined,true);return null; }
 }
 
-const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void) => {
+// A terminal write settles the receipt only as this attempt claimed it: still pending, with the same
+// recipients. A reopen while the job ran holds the receipt until the job ends (155), and a stale or
+// lapsed attempt must not retire the newer recipients. A failure also names the claim (settled_by):
+// the database fails a pending receipt only for its running job on that lease (164).
+const claimedBy=(recipients:string[])=>sql`${mailReceipts.status}='pending' AND ${mailReceipts.recipients}=${JSON.stringify(recipients)}::jsonb`;
+const claimToken=(job:Parameters<JobHandler>[2])=>`${job.id}|${job.leaseFence??''}`;
+const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void,claim:{recipients?:string[]}) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
   const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
   if(!receipt)return;
+  claim.recipients=receipt.recipients;
   if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
@@ -419,7 +426,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       const {CopyObjectCommand}=await loadIngestS3();
       await s3.send(new CopyObjectCommand({Bucket:receipt.bucket,Key:'quarantine/'+sesMessageId,CopySource:`${receipt.bucket}/${sourceKey}`,CopySourceIfMatch:receipt.notification.stagingEtag as string|undefined,TaggingDirective:'REPLACE'}));
       log('warn',{code:quarantine,workspaceId:scope.workspaceId,virus:verdicts.virus??'missing',spam:verdicts.spam??'missing'});
-      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),eq(mailReceipts.status,'pending')));
+      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString(),settledBy:claimToken(job)}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),claimedBy(receipt.recipients)));
       return;
     } finally {s3.destroy();}
   }
@@ -459,7 +466,10 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   try {
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,store.rawKey,receipt.recipients,initiallyKept?'kept':'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
-      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE),
+      // The window row before the receipt, the order every route statement takes them in (157).
+      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT r.reserved_bytes FROM (SELECT 1) one
+          LEFT JOIN LATERAL (SELECT FROM mail_receive_windows WHERE workspace_id=${scope.workspaceId} FOR UPDATE) w ON true
+          CROSS JOIN LATERAL (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE) r),
         policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
         debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=(SELECT bytes FROM policy)
           ON CONFLICT(workspace_id) DO UPDATE SET bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
@@ -558,7 +568,7 @@ export async function recoverMailReceipts(runtime: Runtime,continuation=false) {
     UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),status=CASE WHEN d.exhausted OR r.recovery_attempts>=3 THEN 'failed' ELSE 'pending' END,
       error=CASE WHEN d.exhausted THEN 'MAILBOX_INGEST_EXHAUSTED' WHEN r.recovery_attempts>=3 THEN 'MAILBOX_RECOVERY_EXHAUSTED' END,processed_at=CASE WHEN d.exhausted OR r.recovery_attempts>=3 THEN now() END
     FROM due d WHERE r.workspace_id=d.workspace_id AND r.ses_message_id=d.ses_message_id RETURNING r.workspace_id,r.ses_message_id,r.status),
-    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM recovered WHERE status='pending')
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM recovered WHERE status='pending' ORDER BY workspace_id,ses_message_id)
     SELECT count(*)::int AS n FROM recovered`);
   if(result.rows[0]!.n===100){
     if(continuation) throw new JobDeferred(new Date().toISOString());
@@ -596,14 +606,14 @@ const deleteMailObjects:JobHandler=async(runtime,payload,job)=>{
 };
 export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId)),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
-  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]);
+  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]),claim:{recipients?:string[]}={recipients:job.ingest?.recipients};
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());
   inProgress.add(key);
   try { await ingestJob(runtime,payload,job,size=>{
     const bytes=Math.min(PARSE_LIMIT,Math.max(256*1024,size));
     if(mimeBytes+bytes>PARSE_LIMIT)throw new JobDeferred(new Date(Date.now()+2000).toISOString());
     mimeBytes+=bytes;reserved=bytes;
-  }); }
+  },claim); }
   catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
     if (job.attempts<MAX_ATTEMPTS) {
@@ -613,7 +623,7 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'m
       if (error.status>=500 || error.status===429) throw new ApiError(503,error.code,'Mailbox ingestion temporarily unavailable.',undefined,true);
     }
     const code=error instanceof ApiError ? (error.code==='MAILBOX_ATTACHMENT_UPLOAD_FAILED'?'ATTACHMENT_UPLOAD_FAILED':error.code) : 'MAILBOX_INGEST_FAILED';
-    await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),eq(mailReceipts.status,'pending')));
+    await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString(),settledBy:claimToken(job)}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),claim.recipients?claimedBy(claim.recipients):eq(mailReceipts.status,'pending')));
     log('error',{code,workspaceId:job.workspaceId,jobId:job.id});
   } finally { mimeBytes-=reserved;inProgress.delete(key); }
 } };

@@ -2077,8 +2077,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await runtime.db.transaction(async tx=>{
             const scoped={...runtime,db:tx};
             assert.equal(await acceptInboundNotification(scoped,{topicArn:r.arn,region,message}),1);
-            const ingest=()=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts:1,workspaceId:wid});
-            const first=ingest(); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
+            // The first attempt runs the receipt's claimed job: only that claim may fail the receipt (164).
+            const {sql}=await import('drizzle-orm'),claimed=(await tx.execute<{id:string}>(sql`UPDATE jobs SET status='running' WHERE workspace_id=${wid} AND type='mailbox.ingest' AND payload->>'sesMessageId'=${oversized} AND status='pending' RETURNING id`)).rows[0]!.id;
+            const ingest=(id=unique('job'))=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id,attempts:1,workspaceId:wid});
+            const first=ingest(claimed); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
             const deferredAt=Date.now();
             try { await assert.rejects(ingest(),e=>e instanceof JobDeferred && Date.parse(e.availableAt)>=deferredAt+1_500 && Date.parse(e.availableAt)<=Date.now()+2_500); } finally {releaseHead(); await first;}
             await ingest();
@@ -9262,6 +9264,460 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await db.query('UPDATE mailbox_threads SET message_count=message_count+1,unread_count=unread_count+1 WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]);
     assert.deepEqual(await summary(),{message_count:2,unread_count:2});
   });
+  // Receive admission races (api/tear/admission). Two connections insert receipts the way the SNS
+  // route does; the mail_receive_admit trigger and the window and backlog it charges are under test.
+  const receiptRace=async(t:TestContext,limits:{messages:number;backlog:number})=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('rwin');
+    await a.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,$2,$3)',[w,limits.messages,limits.backlog]);
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_receive_limits','mail_ingest_turns'])await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);});
+    // The route's upsert, plus the ingest job it queues for a pending receipt. Returns the receipt's status
+    // after that job insert, which can hold it for the backlog (155); null when the upsert changed nothing.
+    const accept=async(c:pg.Client,mid:string,recipients:string[])=>{
+      const r=await c.query(`INSERT INTO mail_receipts AS r(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'tear-bucket','key',$4,'{}')
+        ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=excluded.recipients WHERE r.status<>'failed' AND NOT r.recipients @> excluded.recipients RETURNING status`,[w,mid,REGION,JSON.stringify(recipients)]);
+      if(r.rows[0]?.status!=='pending')return r.rows[0]?.status??null;
+      await c.query(`INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'mailbox.ingest',$2,$3)`,[unique('job'),w,JSON.stringify({sesMessageId:mid})]);
+      return (await c.query('SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid])).rows[0].status;
+    };
+    const pid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    // Run `second` on b while a holds its transaction open; commit a once b waits on a lock.
+    const race=async<T>(first:()=>Promise<unknown>,second:()=>Promise<T>)=>{
+      await a.query('BEGIN');
+      try {
+        await first();
+        const pending=(async()=>{await b.query('BEGIN');try{const v=await second();await b.query('COMMIT');return v;}catch(e){await b.query('ROLLBACK');throw e;}})();
+        let waiting=false;
+        for(let i=0;i<400&&!waiting;i++){waiting=(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+        assert.ok(waiting,'the second statement must wait on the first transaction');
+        await a.query('COMMIT');
+        return await pending;
+      } finally { await a.query('ROLLBACK'); }
+    };
+    const state=async()=>({window:Number((await a.query('SELECT messages FROM mail_receive_windows WHERE workspace_id=$1',[w])).rows[0]?.messages??0),
+      active:Number((await a.query('SELECT active FROM mail_ingest_turns WHERE workspace_id=$1',[w])).rows[0]?.active??0),
+      receipts:Object.fromEntries((await a.query('SELECT ses_message_id,status FROM mail_receipts WHERE workspace_id=$1',[w])).rows.map(r=>[r.ses_message_id,r.status]))});
+    return {a,b,w,accept,race,state};
+  };
+  // tear witness (4 steps): W accept m1 a, V accept m1 a, W commit, V commit -> the window was charged 2 for one message.
+  test('receive window: concurrent notifications of one new message charge the hourly window once',async t=>{
+    const {a,b,accept,race,state}=await receiptRace(t,{messages:5,backlog:5});
+    assert.equal(await race(()=>accept(a,'m1',['a@rwin.invalid']),()=>accept(b,'m1',['a@rwin.invalid'])),null);
+    assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending'}});
+    // A first notification that fails the 101-recipient budget charges nothing, and neither does its twin.
+    const many=Array.from({length:101},(_,i)=>`r${i}@rwin.invalid`);
+    assert.equal(await race(()=>accept(a,'m2',many),()=>accept(b,'m2',['a@rwin.invalid'])),null);
+    assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'failed'}});
+  });
+  // tear witnesses: W accept m1, V accept m2, W commit (backlog 1) -> m2 pending; and a release pass waiting
+  // behind an admission released past the backlog (8 steps). Since 156 the release does not wait at all.
+  test('receive backlog: an admission or release waiting on the window row counts the backlog committed meanwhile',async t=>{
+    const {a,b,w,accept,race,state}=await receiptRace(t,{messages:3,backlog:1});
+    // m2 waits on the window row, is charged, and its job insert finds m1's job filling the backlog.
+    assert.equal(await race(()=>accept(a,'m1',['a@rwin.invalid']),()=>accept(b,'m2',['a@rwin.invalid'])),'held');
+    assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'held'}});
+    // m1's job ends: the job end admits m2 into the freed slot without charging the window again (155).
+    await a.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1",[w]);
+    assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'pending'}});
+    // A release pass never waits (156): behind an in-flight admission it moves a due hold ten seconds back
+    // and counts it. Its own job insert would be checked under the backlog row the admission's job holds.
+    await a.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+      VALUES($1,'m4',$2,'tear-bucket','key','["a@rwin.invalid"]','{}','held','MAILBOX_RECEIVE_BUDGET',now()-interval '1 second')`,[w,REGION]);
+    const release=async()=>(await b.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n;
+    await a.query('BEGIN');
+    try { assert.equal(await accept(a,'m3',['a@rwin.invalid']),'held'); assert.equal(await release(),1); await a.query('COMMIT'); }
+    finally { await a.query('ROLLBACK'); }
+    assert.deepEqual(await state(),{window:3,active:1,receipts:{m1:'pending',m2:'pending',m3:'held',m4:'held'}});
+    assert.equal((await a.query("SELECT budget_retry_at>now() later FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='m4'",[w])).rows[0].later,true);
+  });
+  // tear witness (2 steps): accept m1 with 100 recipients, accept m1 with those plus one -> the reopen was refused.
+  test('receipt reopen: the 200-recipient bound counts the merged recipients once',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {acceptInboundNotification}=await import('./src/mailbox-receipts.js');
+      const wid=runtime.config.workspaceId,topicArn=`arn:aws:sns:${REGION}:111122223333:reopen-fixture`,bucket='reopen-fixture',host='reopen.invalid';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[unique('dom'),wid,host,REGION]);
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4) ON CONFLICT(workspace_id,region) DO UPDATE SET bucket=excluded.bucket,topic_arn=excluded.topic_arn',[wid,REGION,bucket,topicArn]);
+      const mid=unique('reopen'),to=(n:number)=>Array.from({length:n},(_,i)=>`r${String(i).padStart(3,'0')}@${host}`);
+      const notify=(recipients:string[])=>acceptInboundNotification(runtime,{topicArn,region:REGION,message:{notificationType:'Received',mail:{messageId:mid,timestamp:new Date().toISOString()},
+        receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
+      const count=async()=>(await db.query('SELECT jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0].n;
+      assert.equal(await notify(to(100)),1);
+      assert.equal(await notify(to(101)),0,'One new recipient reopens the receipt into its pending ingest job: 101 distinct recipients');
+      assert.equal(await count(),101);
+      assert.equal(await notify(to(101).map(a=>a.replace('@','x@'))),0,'202 distinct recipients exceed the bound');
+      assert.equal(await count(),101);
+    });
+  });
+  // Review of #57, P1 (tear witness, 2 steps: accept m1 a, accept m1 ac with backlog 1 -> a second ingest job).
+  test('receive backlog: a reopen joins the pending ingest job or waits for backlog room',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {acceptInboundNotification}=await import('./src/mailbox-receipts.js');
+      const wid=runtime.config.workspaceId,topicArn=`arn:aws:sns:${REGION}:111122223333:backlog-fixture`,bucket='backlog-fixture',host='backlog.invalid';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[unique('dom'),wid,host,REGION]);
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4) ON CONFLICT(workspace_id,region) DO UPDATE SET bucket=excluded.bucket,topic_arn=excluded.topic_arn',[wid,REGION,bucket,topicArn]);
+      await db.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,10,1) ON CONFLICT(workspace_id) DO UPDATE SET message_limit=10,backlog_limit=1',[wid]);
+      const mid=unique('expand'),to=(n:number)=>Array.from({length:n},(_,i)=>`r${String(i).padStart(3,'0')}@${host}`);
+      const notify=(n:number)=>acceptInboundNotification(runtime,{topicArn,region:REGION,message:{notificationType:'Received',mail:{messageId:mid,timestamp:new Date().toISOString()},
+        receipt:{timestamp:new Date().toISOString(),recipients:to(n),action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
+      const state=async()=>(await db.query(`SELECT r.status,r.error,jsonb_array_length(r.recipients) n,(SELECT active FROM mail_ingest_turns WHERE workspace_id=$1)::int active,
+        (SELECT messages FROM mail_receive_windows WHERE workspace_id=$1)::int charged,(SELECT count(*)::int FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND status IN ('pending','running')) jobs
+        FROM mail_receipts r WHERE r.workspace_id=$1 AND r.ses_message_id=$2`,[wid,mid])).rows[0];
+      // Successively larger notifications of one message: one job, which reads the merged recipients when claimed.
+      const queued=[];for(const n of [1,2,3,100,101,150])queued.push(await notify(n));
+      assert.deepEqual(queued,[1,0,0,0,0,0]);
+      assert.deepEqual(await state(),{status:'pending',error:null,n:150,active:1,charged:1,jobs:1});
+      // Once that job runs, a reopen needs a second one: with the backlog full it is held, recipients kept.
+      await db.query("UPDATE jobs SET status='running' WHERE workspace_id=$1 AND type='mailbox.ingest'",[wid]);
+      assert.equal(await notify(160),0);
+      assert.deepEqual(await state(),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:160,active:1,charged:1,jobs:1});
+      // The running job's claim (150 recipients) is stale: it settles nothing. Its end admits the hold into
+      // the freed backlog slot, without charging the hourly window a second time.
+      await db.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='mailbox.ingest'",[wid]);
+      assert.deepEqual(await state(),{status:'pending',error:null,n:160,active:1,charged:1,jobs:1});
+    });
+  });
+  // Review of #57, P2 (tear witness, 9 steps: ... W accept m3 a, V accept m3 ab, X release -> the release
+  // waited on A's window while holding B's, behind an admission that then needed B's: a deadlock).
+  test('receive release: the global pass skips a busy workspace instead of deadlocking with a multi-workspace admission',async t=>{
+    const g=await fixtureDatabase(t),adm=await fixtureDatabase(t),rel=await fixtureDatabase(t),base=unique('rdl'),A=base+'-a',B=base+'-b',ids=[A,B];
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_receive_limits','mail_ingest_turns'])await g.query(`DELETE FROM ${table} WHERE workspace_id=ANY($1)`,[ids]);});
+    const receipt=(c:pg.Client,w:string,mid:string,extra='')=>c.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification${extra?',status,error,budget_retry_at':''})
+      VALUES($1,$2,$3,'tear-bucket','key','["x@rdl.invalid"]','{}'${extra})`,[w,mid,REGION]);
+    await g.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,10,10),($2,10,1)',[A,B]);
+    await g.query("INSERT INTO mail_receive_windows(workspace_id,window_at,messages,bytes) SELECT w,date_trunc('hour',now()),0,0 FROM unnest($1::text[]) w",[ids]);
+    // B's backlog is full; both workspaces have a due hold, B's older, so the release visits B first.
+    await receipt(g,B,'busy');await g.query(`INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'mailbox.ingest',$2,'{"sesMessageId":"busy"}')`,[unique('job'),B]);
+    await receipt(g,B,'held-b',",'held','MAILBOX_RECEIVE_BUDGET',now()-interval '2 hours'");
+    await receipt(g,A,'held-a',",'held','MAILBOX_RECEIVE_BUDGET',now()-interval '1 hour'");
+    const waiting=async(c:pg.Client)=>{const pid=(await c.query('SELECT pg_backend_pid() pid')).rows[0].pid;return async()=>(await g.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';};
+    const admWaiting=await waiting(adm),relWaiting=await waiting(rel);
+    // A gate holds A's window row; one statement then creates new receipts in A and B, in workspace order.
+    await g.query('BEGIN');
+    try {
+      await g.query('UPDATE mail_receive_windows SET messages=messages WHERE workspace_id=$1',[A]);
+      const admission=adm.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification)
+        SELECT w,'multi',$2,'tear-bucket','key','["x@rdl.invalid"]','{}' FROM unnest($1::text[]) w ORDER BY w`,[ids,REGION]).then(()=>'ok',(e:Json)=>String(e.code));
+      for(let i=0;i<400&&!await admWaiting();i++)await new Promise(r=>setTimeout(r,5));
+      assert.ok(await admWaiting(),'the admission waits on A\'s window row');
+      // The global release finishes without waiting: B's hold stays held (backlog full); A's is skipped.
+      let settled=false;
+      const release=rel.query('SELECT release_receive_budget_holds(NULL) n').then(r=>({n:r.rows[0].n}),(e:Json)=>({error:String(e.code)})).finally(()=>{settled=true;});
+      for(let i=0;i<200&&!settled&&!await relWaiting();i++)await new Promise(r=>setTimeout(r,5));
+      assert.equal(await relWaiting(),false,'the release never waits on a workspace row');
+      await g.query('COMMIT');
+      const [released,admitted]=await Promise.all([release,admission]);
+      assert.ok('n' in released,`release failed: ${JSON.stringify(released)}`);
+      assert.equal(admitted,'ok');
+    } finally { await g.query('ROLLBACK'); }
+    // A's hold moved ten seconds back (busy rows); B's took a window slot, then was held for the full backlog.
+    const holds=(await g.query("SELECT workspace_id,ses_message_id,status,error,budget_retry_at>now() AS later FROM mail_receipts WHERE workspace_id=ANY($1) AND ses_message_id LIKE 'held-%' ORDER BY 1",[ids])).rows;
+    assert.deepEqual(holds.map(h=>[h.ses_message_id,h.status,h.error,h.later]),[['held-a','held','MAILBOX_RECEIVE_BUDGET',true],['held-b','held','MAILBOX_RECEIVE_BACKLOG',true]]);
+  });
+  // Review of #57, P2 (tear witness, 4 steps: accept m1 h, claim, done, legacy-accept m1 x -> the previous Worker's
+  // route refused 100 known recipients plus one new, and the new recipient never got the message).
+  test('receipt reopen: the previous Worker\'s duplicate-counting bound merges new recipients during overlap',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('rold');
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_ingest_turns'])await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);});
+    const to=(n:number,p='r')=>Array.from({length:n},(_,i)=>`${p}${String(i).padStart(3,'0')}@rold.invalid`);
+    // The upsert of the route before 96c9c9f: its bound counted old || new, duplicates included.
+    const legacy=(c:pg.Client,mid:string,recipients:string[])=>c.query(`INSERT INTO mail_receipts AS r(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'tear-bucket','key',$4,'{}')
+      ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status=CASE WHEN r.status='held' THEN 'held' ELSE 'pending' END,processed_at=NULL
+      WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients AND jsonb_array_length(r.recipients||excluded.recipients)<=200 RETURNING status`,[w,mid,REGION,JSON.stringify([...recipients].sort())]);
+    const count=async(mid:string)=>(await a.query('SELECT jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid])).rows[0].n;
+    assert.equal((await legacy(a,'m1',to(100))).rowCount,1);
+    await a.query("UPDATE mail_receipts SET status='processed' WHERE workspace_id=$1",[w]);
+    assert.deepEqual((await legacy(a,'m1',[...to(100),'new@rold.invalid'])).rows,[{status:'pending'}]);
+    assert.equal(await count('m1'),101);
+    // With another reopen in flight the bound is still exact: the subtraction waits for its commit.
+    assert.equal((await legacy(a,'m2',to(100))).rowCount,1);
+    const pid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    await a.query('BEGIN');
+    try {
+      await legacy(a,'m2',[...to(100),'y@rold.invalid','z@rold.invalid']);
+      const second=legacy(b,'m2',[...to(100),'w@rold.invalid']);
+      for(let i=0;i<400&&(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type!=='Lock';i++)await new Promise(r=>setTimeout(r,5));
+      await a.query('COMMIT');
+      assert.equal((await second).rowCount,1);
+    } finally { await a.query('ROLLBACK'); }
+    assert.equal(await count('m2'),103);
+  });
+  // The SNS route of a single-tenant installation for one synthetic receiving host, in a simulated SES fixture.
+  const inboundRoute=async(runtime:import('./src/core.js').Runtime,db:pg.Client,name:string,limits:{messages:number;backlog:number})=>{
+    const {acceptInboundNotification}=await import('./src/mailbox-receipts.js');
+    const wid=runtime.config.workspaceId,topicArn=`arn:aws:sns:${REGION}:111122223333:${name}-fixture`,bucket=name+'-fixture',host=name+'.invalid';
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[unique('dom'),wid,host,REGION]);
+    await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4) ON CONFLICT(workspace_id,region) DO UPDATE SET bucket=excluded.bucket,topic_arn=excluded.topic_arn',[wid,REGION,bucket,topicArn]);
+    await db.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,$2,$3) ON CONFLICT(workspace_id) DO UPDATE SET message_limit=excluded.message_limit,backlog_limit=excluded.backlog_limit',[wid,limits.messages,limits.backlog]);
+    const notify=(mid:string,local:string[])=>acceptInboundNotification(runtime,{topicArn,region:REGION,message:{notificationType:'Received',mail:{messageId:mid,timestamp:new Date().toISOString()},
+      receipt:{timestamp:new Date().toISOString(),recipients:local.map(l=>`${l}@${host}`),action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
+    const state=async(mid:string)=>(await db.query(`SELECT r.status,r.error,jsonb_array_length(r.recipients) n,(SELECT active FROM mail_ingest_turns WHERE workspace_id=$1)::int active,
+      (SELECT count(*)::int FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND status IN ('pending','running')) jobs
+      FROM mail_receipts r WHERE r.workspace_id=$1 AND r.ses_message_id=$2`,[wid,mid])).rows[0];
+    const end=(mid:string)=>db.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status IN ('pending','running')",[wid,mid]);
+    return {wid,host,bucket,topicArn,notify,state,end};
+  };
+  // Recheck of #57, R1 (tear witness, 5 steps: accept m1 a, claim, lose, accept m2 a, recover with backlog 1 ->
+  // two active ingest jobs). Lost-receipt recovery queued its job past the backlog.
+  test('receive backlog: lost-receipt recovery queues a job only within the backlog',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {recoverMailReceipts}=await import('./src/mailbox-ingest.js');
+      const {wid,notify,state,end}=await inboundRoute(runtime,db,'recover',{messages:10,backlog:1});
+      assert.equal(await notify('lost',['a']),1);
+      // Its job ends without settling the receipt (a dropped attempt); another message takes the backlog.
+      await end('lost');
+      assert.equal(await notify('occupies',['a']),1);
+      await db.query("UPDATE mail_receipts SET created_at=now()-interval '31 minutes' WHERE workspace_id=$1 AND ses_message_id='lost'",[wid]);
+      await recoverMailReceipts(runtime);
+      assert.deepEqual(await state('lost'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:1,active:1,jobs:1},'recovery waits for backlog room');
+      // When the other job ends, the job end admits the recovered receipt.
+      await end('occupies');
+      assert.deepEqual(await state('lost'),{status:'pending',error:null,n:1,active:1,jobs:1});
+    });
+  });
+  // Recheck of #57, R2 (tear witness, 4 steps: accept m1 a, claim, accept m1 ac, fail -> the reopen queued a
+  // second job, and the first job's final failure failed the reopened receipt).
+  test('receive backlog: a stale ingest failure cannot retire a reopen that arrived while its job ran',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+      const {wid,notify,state,end}=await inboundRoute(runtime,db,'stale',{messages:10,backlog:2});
+      const input=async(mid:string)=>(await runtime.db.execute<{input:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS input`)).rows[0]!.input;
+      // m1's job is claimed with one recipient (its final attempt); m2 takes the other backlog slot.
+      assert.equal(await notify('m1',['a']),1);
+      const claimed=await input('m1'),job=(await db.query("UPDATE jobs SET status='running',attempts=$3 WHERE workspace_id=$1 AND payload->>'sesMessageId'=$2 RETURNING id",[wid,'m1',MAX_ATTEMPTS])).rows[0].id;
+      assert.equal(await notify('m2',['a']),1);
+      // A reopen while the job runs waits for it, recipients merged.
+      assert.equal(await notify('m1',['a','b']),0);
+      assert.deepEqual(await state('m1'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:2,active:2,jobs:2});
+      // Backlog room alone does not release it while its job still runs: not the job end of another
+      // message, and not the hold release.
+      await end('m2');
+      await db.query("UPDATE mail_receipts SET budget_retry_at=now()-interval '1 second' WHERE workspace_id=$1 AND status='held'",[wid]);
+      await db.query('SELECT release_receive_budget_holds($1)',[wid]);
+      assert.deepEqual(await state('m1'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:2,active:1,jobs:1});
+      // The running job's final attempt fails (no AWS connection is configured): it retires nothing.
+      await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:'m1'},{id:job,workspaceId:wid,attempts:MAX_ATTEMPTS,ingest:claimed as import('./src/mailbox-ingest-input.js').IngestInput});
+      assert.deepEqual(await state('m1'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:2,active:1,jobs:1});
+      // Its end admits the reopen, and the new job reads both recipients.
+      await db.query("UPDATE jobs SET status='failed' WHERE id=$1",[job]);
+      assert.deepEqual(await state('m1'),{status:'pending',error:null,n:2,active:1,jobs:1});
+      assert.equal((await input('m1'))?.recipients.length,2);
+    });
+  });
+  // Recheck of #57, R3 (tear witness, 3 steps: accept m3 a, W accept m2 a, X accept m3 ac -> the reopen did not
+  // wait on the window row). A held-envelope replay batch and an ordinary reopen took the window and the
+  // receipt in opposite orders and deadlocked.
+  test('receive route: a held-envelope replay and a reopen of one of its messages do not deadlock',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{acceptInboundNotification,recoverHeldReceipts}=await import('./src/mailbox-receipts.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    const g=await fixtureDatabase(t),w=unique('rdead'),host=w+'.invalid',bucket=w,topicArn=`arn:aws:sns:${REGION}:111122223333:${w}`,dom=unique('dom');
+    runtime.config.workspaceId=w;runtime.config.multiTenant=false;
+    cleanup(t,async()=>{
+      for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_ingest_turns','mailbox_domains','mailbox_regions'])await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await g.query('DELETE FROM mail_receipt_holds WHERE bucket=$1',[bucket]);
+    });
+    await g.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    await g.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[w,REGION,bucket,topicArn]);
+    const to=(...local:string[])=>local.map(l=>`${l}@${host}`);
+    const notify=(mid:string,recipients:string[])=>acceptInboundNotification(runtime,{topicArn,region:REGION,message:{notificationType:'Received',mail:{messageId:mid,timestamp:new Date().toISOString()},
+      receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
+    // z-known was processed; held envelopes for a new message and for z-known with another recipient are due.
+    assert.equal(await notify('z-known',to('a')),1);
+    await g.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1",[w]);
+    await g.query("UPDATE mail_receipts SET status='processed',processed_at=now() WHERE workspace_id=$1",[w]);
+    for(const [mid,rcpt] of [['a-new',to('a')],['z-known',to('a','b')]] as const)
+      await g.query(`INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,binding_workspace,owners,recipients,notification,received_at,expires_at,next_check,status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,'{}',now(),now()+interval '48 hours',now()-interval '1 second','held')`,[bucket,mid,REGION,topicArn,w,JSON.stringify(Object.fromEntries(rcpt.map(a=>[a,[w]]))),JSON.stringify(rcpt)]);
+    const waiting=async()=>Number((await g.query("SELECT count(*) n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'WITH source AS MATERIALIZED%'")).rows[0].n);
+    const until=async(n:number,done=()=>false)=>{for(let i=0;i<400&&await waiting()<n&&!done();i++)await new Promise(r=>setTimeout(r,5));};
+    // A gate holds the window row; the replay batch waits on it, then the ordinary reopen of z-known.
+    await g.query('BEGIN');
+    let results:PromiseSettledResult<number>[];
+    try {
+      await g.query('UPDATE mail_receive_windows SET messages=messages WHERE workspace_id=$1',[w]);
+      const replay=recoverHeldReceipts(runtime);await until(1);
+      assert.equal(await waiting(),1,'the replay waits on the window row');
+      // Before 157 the reopen locked the receipt first and was chosen as the deadlock victim (40P01).
+      let settled=false;const reopen=notify('z-known',to('a','c')).finally(()=>{settled=true;});await until(2,()=>settled);
+      await g.query('COMMIT');
+      results=await Promise.allSettled([replay,reopen]);
+    } finally { await g.query('ROLLBACK'); }
+    assert.deepEqual(results.map(r=>r.status==='rejected'?String((r.reason as Json)?.cause?.code??(r.reason as Json)?.code??r.reason):'ok'),['ok','ok']);
+    const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
+    assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
+  });
+  // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
+  // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
+  // in the database, but the old invocation keeps running and still issues that write.
+  test('receive backlog: a previous Worker whose lease was retired cannot fail the reopened receipt',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+      const {wid,notify,state}=await inboundRoute(runtime,db,'overlap-lease',{messages:10,backlog:2});
+      const input=async(mid:string)=>(await runtime.db.execute<{input:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS input`)).rows[0]!.input as import('./src/mailbox-ingest-input.js').IngestInput;
+      // A previous Worker claims m1's job for its last attempt; its lease runs out while it still works.
+      assert.equal(await notify('m1',['a']),1);
+      const old=(await db.query("UPDATE jobs SET status='running',attempts=$2,lease_until=now()-interval '1 second' WHERE workspace_id=$1 AND payload->>'sesMessageId'='m1' RETURNING id",[wid,MAX_ATTEMPTS])).rows[0].id;
+      assert.equal(await notify('m1',['a','b']),0);
+      assert.deepEqual(await state('m1'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:2,active:1,jobs:1});
+      // The claim retires the exhausted lease (its failed CTE); the job end admits the reopen with a new job.
+      await db.query("UPDATE jobs SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL WHERE id=$1",[old]);
+      assert.deepEqual(await state('m1'),{status:'pending',error:null,n:2,active:1,jobs:1});
+      // The old invocation finishes with a permanent error: bane/dev's exact terminal write changes nothing.
+      const stale=await db.query('update "mail_receipts" set "status" = $1, "error" = $2, "processed_at" = $3 where ("mail_receipts"."workspace_id" = $4 and "mail_receipts"."ses_message_id" = $5 and "mail_receipts"."status" = $6)',
+        ['failed','MAILBOX_INGEST_FAILED',new Date().toISOString(),wid,'m1','pending']);
+      assert.equal(stale.rowCount,0);
+      assert.deepEqual(await state('m1'),{status:'pending',error:null,n:2,active:1,jobs:1});
+      // Nor can the current Worker's code acting for the retired claim; the replacement's own final failure settles it.
+      await assert.doesNotReject(mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:'m1'},{id:old,workspaceId:wid,attempts:MAX_ATTEMPTS,ingest:await input('m1')}));
+      assert.equal((await state('m1')).status,'pending');
+      const claimed=await input('m1');
+      const next=(await db.query("UPDATE jobs SET status='running',attempts=$2,lease_until=now()+interval '3 minutes' WHERE workspace_id=$1 AND payload->>'sesMessageId'='m1' AND status='pending' RETURNING id,lease_until::text AS fence",[wid,MAX_ATTEMPTS])).rows[0];
+      await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:'m1'},{id:next.id,workspaceId:wid,attempts:MAX_ATTEMPTS,leaseFence:next.fence,ingest:claimed});
+      assert.deepEqual((await db.query("SELECT status,error,jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='m1'",[wid])).rows,[{status:'failed',error:'AWS_NOT_CONFIGURED',n:2}]);
+    });
+  });
+  // Recheck of #57, R4 (tear witness, 5 steps: accept m1 a, accept m2 a, hour, W accept m3 a, release -> the busy
+  // workspace's hold was skipped uncounted). Due holds of a busy workspace stayed first in line on every pass.
+  test('receive release: holds of a busy workspace do not starve the due holds behind them',async t=>{
+    const g=await fixtureDatabase(t),rel=await fixtureDatabase(t),base=unique('rfair'),A=base+'-a',B=base+'-b',ids=[A,B];
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_receive_limits','mail_ingest_turns'])await g.query(`DELETE FROM ${table} WHERE workspace_id=ANY($1)`,[ids]);});
+    await g.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,1000,1000),($2,1000,1000)',[A,B]);
+    await g.query("INSERT INTO mail_receive_windows(workspace_id,window_at,messages,bytes) SELECT w,date_trunc('hour',now()),0,0 FROM unnest($1::text[]) w",[ids]);
+    // A full page of older due holds in A, then one in B.
+    await g.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+      SELECT $1,'held-'||lpad(i::text,3,'0'),$2,'tear-bucket','key','["x@rfair.invalid"]','{}','held','MAILBOX_RECEIVE_BUDGET',now()-interval '2 hours' FROM generate_series(1,100) i`,[A,REGION]);
+    await g.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+      VALUES($1,'idle',$2,'tear-bucket','key','["x@rfair.invalid"]','{}','held','MAILBOX_RECEIVE_BUDGET',now()-interval '1 hour')`,[B,REGION]);
+    const release=async()=>(await rel.query('SELECT release_receive_budget_holds(NULL) n')).rows[0].n;
+    const idle=async()=>(await g.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='idle'",[B])).rows[0].status;
+    // An admission in A holds its window row across two passes of the global release.
+    await g.query('BEGIN');
+    let passes:number[]=[];
+    try {
+      await g.query('UPDATE mail_receive_windows SET messages=messages WHERE workspace_id=$1',[A]);
+      passes=[await release(),await release()];
+    } finally { await g.query('ROLLBACK'); }
+    // The first pass counts the busy holds it moved back, so the caller continues at once; the next reaches B.
+    assert.deepEqual(passes,[100,1]);
+    assert.equal(await idle(),'pending');
+    // The busy holds are due again ten seconds later and keep their order.
+    assert.equal((await g.query("SELECT count(*)::int n FROM mail_receipts WHERE workspace_id=$1 AND status='held' AND budget_retry_at BETWEEN now() AND now()+interval '10 seconds'",[A])).rows[0].n,100);
+  });
+  // tear witness (5 steps): U1 upload, expire, sweep, purge, U1 ok -> the object outlived its reservation with no deletion queued.
+  test('attachment upload: a put that outlasts its swept reservation still queues the object for deletion',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js');
+      const wid=runtime.config.workspaceId;let stored='';
+      t.mock.method(runtime.storage,'put',async(key:string)=>{
+        stored=key;
+        // While the put is in flight the hourly sweeper expires the reservation and its deletion job runs.
+        const gone=await db.query("DELETE FROM sending_upload_reservations WHERE storage_key=$1 RETURNING id",[key]);
+        assert.equal(gone.rowCount,1,'the reservation commits before the put');
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status) VALUES($1,'maintenance.deleteAttachment',$2,$3,'completed')",['upload-cleanup:'+gone.rows[0].id,wid,JSON.stringify({key})]);
+      });
+      await assert.rejects(storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'slow.txt',contentType:'text/plain'},Buffer.from('slow')),{code:'UPLOAD_EXPIRED'});
+      assert.equal((await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status='pending' AND payload->>'key'=$2",[wid,stored])).rowCount,1);
+      assert.equal((await db.query('SELECT FROM sending_attachments WHERE workspace_id=$1',[wid])).rowCount,0);
+    });
+  });
+  // Review of #57, P2 (tear witness, 8 steps: U1 upload, expire, sweep, purge, U1 crash, day, sweep, purge -> a late
+  // put whose Worker died after the sweeper's deletion ran left its object with no durable record).
+  test('attachment upload: an unpublished object keeps a durable cleanup obligation even if its Worker dies',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js'),{cleanup}=await import('./src/maintenance.js');
+      const wid=runtime.config.workspaceId,puts:{key:string;signal:unknown}[]=[];let landed=false;
+      // The first put hangs (its Worker dies before finish and refund); later ones succeed.
+      t.mock.method(runtime.storage,'put',(key:string,_b:Uint8Array,_c:string,signal:unknown)=>{puts.push({key,signal});return puts.length===1?new Promise<void>(()=>{landed=true;}):Promise.resolve();});
+      void storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'late.txt',contentType:'text/plain'},Buffer.from('late')).catch(()=>{});
+      for(let i=0;i<400&&!landed;i++)await new Promise(r=>setTimeout(r,5));
+      assert.ok(landed);const [late]=puts;
+      assert.ok(late!.signal instanceof AbortSignal && !late!.signal.aborted,'the put is bounded by an abort signal');
+      // The hourly sweeper takes the expired reservation and its deletion runs before the put lands.
+      await db.query("UPDATE sending_upload_reservations SET expires_at=now()-interval '1 second' WHERE storage_key=$1",[late!.key]);
+      await cleanup(runtime);
+      await db.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND payload->>'key'=$2",[wid,late!.key]);
+      const tomb=async(key:string)=>(await db.query("SELECT delete_after>now()+interval '23 hours' AS later FROM sending_upload_tombstones WHERE storage_key=$1",[key])).rows;
+      assert.deepEqual(await tomb(late!.key),[{later:true}],'the reservation left a tombstone due a day later');
+      // A published upload leaves none, and a stale tombstone for it never deletes its object.
+      const published=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
+      assert.deepEqual(await tomb(puts[1]!.key),[]);
+      await db.query("INSERT INTO sending_upload_tombstones VALUES($1,$2,$3,now()-interval '1 second')",[published.id,wid,puts[1]!.key]);
+      await db.query("UPDATE sending_upload_tombstones SET delete_after=now()-interval '1 second' WHERE storage_key=$1",[late!.key]);
+      await cleanup(runtime);
+      const deletions=async(key:string)=>(await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status='pending' AND payload->>'key'=$2",[wid,key])).rowCount;
+      assert.equal(await deletions(late!.key),1,'the late object is queued for deletion again');
+      assert.equal(await deletions(puts[1]!.key),0,'a published object is never deleted');
+      assert.equal((await db.query('SELECT FROM sending_upload_tombstones WHERE workspace_id=$1',[wid])).rowCount,0);
+    });
+  });
+  // Recheck of #57, R5 (tear witness, 8 steps: U1 upload, expire, sweep, purge, day, purge, U1 crash, day -> a put
+  // that landed after its tombstone was spent left an object no record owned).
+  test('attachment upload: storage reconciliation deletes any upload object no record has owned for a day',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js'),{reconcileUploads}=await import('./src/maintenance.js'),{r2Storage}=await import('./src/adapters/storage.js');
+      const wid=runtime.config.workspaceId,day=86_400_000,objects=new Map<string,Date>();
+      t.mock.method(runtime.storage,'put',async(key:string)=>{objects.set(key,new Date());});
+      // The bucket as the hourly reconciliation lists it, two objects a page.
+      runtime.storage.list=async(prefix:string,after?:string)=>{
+        const keys=[...objects.keys()].filter(k=>k.startsWith(prefix)&&(!after||k>after)).sort();
+        return {objects:keys.slice(0,2).map(key=>({key,uploaded:objects.get(key)!})),cursor:keys.length>2?keys[1]:undefined};
+      };
+      const kept=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
+      const hex=()=>randomUUID().replaceAll('-','');
+      const old=new Date(Date.now()-2*day),orphan=`uploads/${wid}/attachment_${hex()}`,young=`uploads/${wid}/attachment_${hex()}`,asset=`${wid}/templates/assets/tasset_x`;
+      // The orphan's put landed after every record of its upload was gone; the young one may still be published.
+      for(const key of [...objects.keys()])objects.set(key,old);
+      objects.set(orphan,old);objects.set(young,new Date());objects.set(asset,old);
+      const deletions=async()=>(await db.query("SELECT payload->>'key' k FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status='pending' ORDER BY 1",[wid])).rows.map(r=>r.k);
+      await reconcileUploads(runtime);
+      assert.deepEqual(await deletions(),[orphan],'only the unowned upload object a day old is queued');
+      assert.equal(kept.id.length>0,true);
+      // Found again (a put landing after its deletion), it is queued again.
+      await db.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='maintenance.deleteAttachment'",[wid]);
+      await reconcileUploads(runtime);
+      assert.deepEqual(await deletions(),[orphan]);
+      // An R2 binding put cannot be cancelled once started, but an already aborted one never starts.
+      let started=0;
+      const r2=r2Storage({put:async()=>{started++;}} as unknown as R2Bucket);
+      await assert.rejects(r2.put('k',new Uint8Array(1),'text/plain',AbortSignal.abort()));
+      assert.equal(started,0);
+    });
+  });
+  // Recheck 2 of #57 (tear witness, 3 steps: foreign, day, purge -> reconciliation took a workspace named
+  // `attachments`'s kept mail, k/attachments/msg_*.eml, for an upload of workspace `k` and deleted it).
+  test('attachment upload: reconciliation and deletion never touch another key family or a referenced key',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js'),{reconcileUploads}=await import('./src/maintenance.js'),dispatch=await import('./src/dispatch.js');
+      const wid=runtime.config.workspaceId,day=86_400_000,old=()=>new Date(Date.now()-2*day),objects=new Map<string,Date>(),hex=()=>randomUUID().replaceAll('-','');
+      t.mock.method(runtime.storage,'put',async(key:string)=>{objects.set(key,new Date());});
+      t.mock.method(runtime.storage,'delete',async(key:string)=>{objects.delete(key);});
+      runtime.storage.list=async(prefix:string,after?:string)=>{
+        const keys=[...objects.keys()].filter(k=>k.startsWith(prefix)&&(!after||k>after)).sort();
+        return {objects:keys.slice(0,1000).map(key=>({key,uploaded:objects.get(key)!})),cursor:keys.length>1000?keys[999]:undefined};
+      };
+      // Kept mail of a workspace named `attachments`, stored by the local mail store and referenced by its message.
+      const kept=`k/attachments/msg_${hex()}.eml`,thread=unique('thr');
+      await db.query("INSERT INTO mail_threads(id,workspace_id) VALUES($1,'attachments')",[thread]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,raw_bucket,raw_key,lifecycle) VALUES($1,'attachments','inbound',$2,'local:',$3,'kept')",[unique('msg'),thread,kept]);
+      // Other families: a mail attachment, a template asset, a published upload, and an upload-shaped key that
+      // only a mail row references. All a day old and, but for the last two, without any sending record.
+      const published=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
+      const uploadKey=(await db.query('SELECT storage_key FROM sending_attachments WHERE id=$1',[published.id])).rows[0].storage_key;
+      const mailOwned=`uploads/${wid}/attachment_${hex()}`,orphan=`uploads/${wid}/attachment_${hex()}`;
+      await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,raw_bucket,raw_key,lifecycle) VALUES($1,'attachments','inbound',$2,'local:',$3,'kept')",[unique('msg'),thread,mailOwned]);
+      const others=[kept,`a/attachments/msg_${hex()}/b1/att_1`,`${wid}/templates/assets/tasset_${hex()}`,uploadKey,mailOwned];
+      for(const key of [...others,orphan])objects.set(key,old());
+      await reconcileUploads(runtime);
+      const queued=(await db.query("SELECT workspace_id w,payload->>'key' k FROM jobs WHERE type='maintenance.deleteAttachment' AND status='pending' AND payload->>'key'=ANY($1)",[[...others,orphan]])).rows;
+      assert.deepEqual(queued,[{w:wid,k:orphan}],'only the unowned object of the upload family is queued');
+      // The one deletion handler revalidates every key at deletion time. What b283ae6 queued for the kept mail
+      // (workspace k) is refused; a key that a row references is kept; the orphan is deleted.
+      const del=(w:string,key:string)=>dispatch.deleteAttachment(runtime,{key},{id:unique('job'),attempts:1,workspaceId:w});
+      await assert.rejects(del('k',kept),{code:'JOB_PAYLOAD_INVALID'});
+      for(const key of [uploadKey,mailOwned])await del(wid,key);
+      await del(wid,orphan);
+      assert.deepEqual(others.filter(k=>!objects.has(k)),[],'no object of another family or with a reference was deleted');
+      assert.equal(objects.has(orphan),false);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
@@ -9546,7 +10002,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')",[domain,wid,REGION]);
       const submit=(mid:string,recipients:string[],subject='Subject',scans:Json=cleanScans)=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{...scans,timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
-      const run=(type:string,p:Json,attempts=1)=>mailboxIngestJobs[type]!(runtime,p,{id:unique('job'),workspaceId:wid,attempts});
+      // An ingest run claims the receipt's job while the handler runs (only that claim may fail the receipt, 164),
+      // then leaves it pending as before.
+      const run=async(type:string,p:Json,attempts=1)=>{
+        const job=type==='mailbox.ingest'?(await db.query("UPDATE jobs SET status='running' WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='pending' RETURNING id",[wid,p.sesMessageId])).rows[0]?.id:undefined;
+        try { return await mailboxIngestJobs[type]!(runtime,p,{id:job??unique('job'),workspaceId:wid,attempts}); }
+        finally { if(job)await db.query("UPDATE jobs SET status='pending' WHERE id=$1 AND status='running'",[job]); }
+      };
       const raw=new Map<string,Buffer>(),quarantined:string[]=[],parts:Json[]=[],largeReads:string[]=[];let page=0,stageError='',quarantineDenied=false,interruptCopy=false,onTag:(()=>Promise<void>)|undefined,onGet:((mid:string)=>Promise<void>)|undefined;
       const old=new Date(Date.now()-2*3600_000),listed=(mid:string)=>({Key:'staging/'+mid,ETag:'"fixture"',LastModified:old});
       t.mock.method(S3Client.prototype,'send',async(cmd:any)=>{
@@ -9600,16 +10062,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('noisy workspace budgets do not suppress a neighbor and never fetch over-budget MIME',async()=>{
         assert.deepEqual((await db.query('SELECT * FROM mail_receive_policy($1)',[wid+'-no-row'])).rows,[{messages:5000,bytes:'2147483648',backlog:5000}]);
-        await db.query('UPDATE mail_receive_limits SET backlog_limit=0 WHERE workspace_id=$1',[wid]);assert.equal(await submit('blocked',['a@receive.example']),0);assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].error,'MAILBOX_RECEIVE_BUDGET');
+        await db.query('UPDATE mail_receive_limits SET backlog_limit=0 WHERE workspace_id=$1',[wid]);assert.equal(await submit('blocked',['a@receive.example']),0);assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].error,'MAILBOX_RECEIVE_BACKLOG');
         const other=wid+'-neighbor';await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,'healthy',$2,$3,'key','[]','{}')",[other,REGION,bucket]);assert.equal((await db.query('SELECT status FROM mail_receipts WHERE workspace_id=$1',[other])).rows[0].status,'pending');
         await db.query('UPDATE mail_receive_limits SET backlog_limit=50000,byte_limit=1 WHERE workspace_id=$1',[wid]);raw.set('big',Buffer.from('test'));await submit('big',['a@receive.example']);await run('mailbox.ingest',{sesMessageId:'big'});assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='big'",[wid])).rows[0].error,'MAILBOX_BYTE_BUDGET');await db.query('UPDATE mail_receive_limits SET byte_limit=68719476736 WHERE workspace_id=$1',[wid]);
+        // This fixture's run() calls handlers without ending their job rows, so no job end drains: the release admits it.
         await db.query("UPDATE mail_receipts SET budget_retry_at=now() WHERE workspace_id=$1 AND status='held'",[wid]);
         assert.equal((await db.query('SELECT release_receive_budget_holds($1) AS n',[wid])).rows[0].n,1);
         assert.equal((await db.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].status,'pending');
       });
       await t.test('deduplicated uploads are reclaimed without expiring the owned attachment',async()=>{
         const mime=Buffer.from('From: fixture@example.net\r\nMessage-ID: <same@fixture.invalid>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbody\r\n--p--\r\n');for(const mid of ['physical-1','physical-2']){raw.set(mid,mime);await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid});}
-        onTag=async()=>{assert.equal(await submit('physical-2',['b@receive.example']),1);};
+        // The reopen merges b while cleanup tags. (It joins the receipt's ingest job when one is pending, so the
+        // count of queued jobs is not the point here: the merged recipients are.)
+        onTag=async()=>{await submit('physical-2',['b@receive.example']);assert.deepEqual((await db.query("SELECT status,recipients FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='physical-2'",[wid])).rows,[{status:'pending',recipients:['a@receive.example','b@receive.example']}]);};
         const tx=t.mock.method(runtime.db,'transaction',()=>{throw Error('cleanup must not hold a transaction across S3');});
         try {await db.query("UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1 AND ses_message_id='physical-2'",[wid]);await assert.rejects(run('mailbox.cleanUploads',{}),(await import('./src/jobs.js')).JobDeferred);}finally{tx.mock.restore();onTag=undefined;}
         const orphan=parts.pop();assert.deepEqual(orphan?.tags?.TagSet,[{Key:'bane-kind',Value:'orphan'}]);assert.equal((await db.query('SELECT FROM mail_attachments WHERE workspace_id=$1 AND storage_key=$2',[wid,orphan!.tagged])).rowCount,0);
@@ -9676,7 +10141,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await recoverMailReceipts(runtime);assert.equal((await jobs('mailbox.ingest')).filter(j=>j.payload.sesMessageId.startsWith('lost-')).length,100);
       });
       await t.test('claimed ingest uses two DB trips with no files and three with files, including a reply',async it=>{
-        const {processJobs}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL) ON COMMIT DROP;CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change()');
+        const {processJobs}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL) ON COMMIT DROP;CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change();CREATE TRIGGER mail_ingest_admit BEFORE INSERT ON jobs FOR EACH ROW WHEN (NEW.type=\'mailbox.ingest\' AND NEW.status IN (\'pending\',\'running\')) EXECUTE FUNCTION mail_ingest_admit()');
         const queries=it.mock.method(pg.Client.prototype,'query');
         for(const [i,mid] of ['parent-count','reply-count'].entries()){
           raw.set(mid,Buffer.from(`From: a@example.net\r\nMessage-ID: <${mid}@example.net>\r\n${i?'In-Reply-To: <parent-count@example.net>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbytes\r\n--p--':'\r\nplain text'}`));let n=queries.mock.callCount();assert.equal(await submit(mid,['a@receive.example']),1);assert.equal(queries.mock.callCount()-n,1);
@@ -10601,7 +11066,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t,async({db,runtime})=>{
       const wid=runtime.config.workspaceId;
       assert.equal((await db.query("SELECT FROM pg_index WHERE indisvalid AND indexrelid IN ('jobs_ingest_due'::regclass,'jobs_ingest_workspace_head'::regclass)")).rowCount,2);
-      assert.equal((await db.query("SELECT FROM pg_trigger WHERE tgrelid='jobs'::regclass AND tgfoid='mail_ingest_head_change()'::regprocedure AND tgqual IS NOT NULL")).rowCount,3);
+      assert.equal((await db.query("SELECT FROM pg_trigger WHERE tgrelid='jobs'::regclass AND tgfoid='mail_ingest_head_change()'::regprocedure AND tgqual IS NOT NULL")).rowCount,2);
+      assert.equal((await db.query("SELECT FROM pg_trigger WHERE tgrelid='jobs'::regclass AND tgfoid='mail_ingest_admit()'::regprocedure AND tgqual IS NOT NULL")).rowCount,1,'the job insert counts itself (155)');
       const count=async()=>Number((await db.query('SELECT active FROM mail_ingest_turns WHERE workspace_id=$1',[wid])).rows[0]?.active??0);
       const base=await count();await db.query("INSERT INTO jobs(id,workspace_id,type,payload) VALUES($1,$1,'other','{}')",[wid]);assert.equal(await count(),base);
       await db.query("UPDATE jobs SET type='mailbox.ingest' WHERE id=$1",[wid]);assert.equal(await count(),base+1);await db.query('DELETE FROM jobs WHERE id=$1',[wid]);assert.equal(await count(),base);
@@ -10614,7 +11080,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await a.query(`CREATE SCHEMA ${schema}`);
       try {
         for(const c of [a,b])await c.query(`SET search_path TO ${schema}, public`);
-        await a.query(`CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL);CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change()`);
+        await a.query(`CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL);CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL);CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change();CREATE TRIGGER mail_ingest_admit BEFORE INSERT ON jobs FOR EACH ROW WHEN (NEW.type='mailbox.ingest' AND NEW.status IN ('pending','running')) EXECUTE FUNCTION mail_ingest_admit()`);
         await a.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'a'||i,'mailbox.ingest','A','{}'::jsonb,now()-interval '1 hour' FROM generate_series(1,50)i UNION ALL SELECT 'b','mailbox.ingest','B','{}',now() UNION ALL SELECT 'other','fixture.other','B','{}',now()-interval '2 hours'");
         const unavailable=drizzle(a),fault=t.mock.method(unavailable,'execute',()=>{throw Error('claim unavailable');});
         await assert.rejects(processJobs({...runtime,db:unavailable},{},1,1),/claim unavailable/);fault.mock.restore();
@@ -10644,7 +11110,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
   test('inbound claim leaves waiting ingest jobs unleased while sibling lanes serve other work',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
-      const {processJobs,enqueue}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL) ON COMMIT DROP;CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change()');
+      const {processJobs,enqueue}=await import('./src/jobs.js');await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP;CREATE TEMP TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL) ON COMMIT DROP;CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change();CREATE TRIGGER mail_ingest_admit BEFORE INSERT ON jobs FOR EACH ROW WHEN (NEW.type=\'mailbox.ingest\' AND NEW.status IN (\'pending\',\'running\')) EXECUTE FUNCTION mail_ingest_admit()');
       const wid=runtime.config.workspaceId;
       for(const type of ['mailbox.ingest','mailbox.ingest','fixture.other']) await enqueue(runtime.db,{type,workspaceId:wid,payload:{}});
       let release!:()=>void,enter!:()=>void;const signal=new Promise<void>(r=>{release=r;}),entered=new Promise<void>(r=>{enter=r;});
