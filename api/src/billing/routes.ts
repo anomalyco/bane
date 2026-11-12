@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { actor, actorMailAccess, ApiError, dashboardSession, errors, json, notFound, response, security, type Actor, type App, type Ctx, type DbExecutor } from '../core.js';
-import { mutate, operatorActor } from '../operator.js';
+import { mutate, operatorActor, operatorRequestHash, writeOperatorAudit } from '../operator.js';
 import { MicroCentsJson } from './money.js';
 import { readBilling } from './state.js';
 import { chargeSavedCardTopUp, createCardSetup, createCheckoutTopUp, getPayment, listPayments, refundTopUp, removePaymentMethod, setAutoRecharge } from './stripe.js';
@@ -323,16 +323,23 @@ function registerOperatorBilling(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/refunds', operationId: 'operatorRefundTopUp',
     request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ attemptId: z.string().min(1).max(100), amountCents: z.number().int().min(1).max(1_000_000).optional(), reason: Reason,
       ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(z.object({ refundId: z.string(), status: z.string() })), ...errors } }), async c => {
-    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json'), key = c.req.header('Idempotency-Key');
+    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json'), key = c.req.header('Idempotency-Key'), hash = operatorRequestHash(c, body);
     await existingWorkspace(c.env.db, wid);
     if (key) {
-      const { rows: [prior] } = await c.env.db.execute<{ response: { refundId: string; status: string } }>(sql`SELECT response FROM operator_idempotency WHERE operator_id=${operator.userId} AND key=${key}`);
-      if (prior) return c.json(prior.response, 200);
+      const { rows: [prior] } = await c.env.db.execute<{ request_hash: string; response: { refundId: string; status: string } }>(sql`SELECT request_hash,response FROM operator_idempotency WHERE operator_id=${operator.userId} AND key=${key}`);
+      if (prior) { if (prior.request_hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was used for a different request.'); return c.json(prior.response, 200); }
     }
-    const before = await accountOf(c.env.db, wid);
-    const refund = await refundTopUp(c.env, { workspaceId: wid, attemptId: body.attemptId, amountCents: body.amountCents, reason: body.reason, operator: `operator:${operator.userId}` });
-    return c.json(await mutate(c, operator, wid, body, async tx => ({ result: refund,
-      audit: { action: 'billing-refund', before, after: { ...(await accountOf(tx, wid)), refund }, reason: body.reason, ticketRef: body.ticketRef } })), 200);
+    // Stripe is called outside any transaction (package B holds the amount first). The audit row, and the key that makes
+    // a retry return this refund, commit in the transaction that writes the refund_hold ledger row: all or nothing.
+    const refund = await refundTopUp(c.env, { workspaceId: wid, attemptId: body.attemptId, amountCents: body.amountCents, reason: body.reason, operator: `operator:${operator.userId}`,
+      onHeld: async (tx, held) => {
+        const after = await accountOf(tx, wid), before = { ...after, balance_uc: (BigInt(after.balance_uc) + held.amountUc).toString() };
+        await writeOperatorAudit(tx, c, operator, wid, { action: 'billing-refund', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
+        if (key && !(await tx.execute(sql`INSERT INTO operator_idempotency(operator_id,key,request_hash,response) VALUES(${operator.userId},${key},${hash},${JSON.stringify({ refundId: held.refundId, status: 'held' })}::jsonb)
+          ON CONFLICT DO NOTHING RETURNING 1`)).rows.length) throw new ApiError(409, 'IDEMPOTENCY_IN_PROGRESS', 'A request with this Idempotency-Key is already refunding; read the refund before trying again.', undefined, true);
+      } });
+    if (key) await c.env.db.execute(sql`UPDATE operator_idempotency SET response=${JSON.stringify(refund)}::jsonb WHERE operator_id=${operator.userId} AND key=${key}`);
+    return c.json(refund, 200);
   });
 }
 

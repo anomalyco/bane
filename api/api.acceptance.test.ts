@@ -6719,6 +6719,20 @@ describe('Billing: API, MCP and notices', () => {
         assert.deepEqual([topup.kind, topup.description, topup.paymentId, typeof topup.invoiceUrl], ['topup', 'Credit added', first.attemptId, 'string']);
         const [paid] = page(await local('GET', '/v1/billing/payments'));
         assert.deepEqual([paid.id, paid.status, paid.card.last4, typeof paid.invoiceUrl, typeof paid.receiptUrl], [first.attemptId, 'succeeded', '4242', 'string', 'string']);
+        // An operator refund: the audit row and the Idempotency-Key commit in the transaction that holds the refund
+        // (same xmin as the refund_hold ledger row); a retry returns the refund, another body is refused, and a refusal
+        // leaves no audit row.
+        await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
+        const refundPath = `/v1/operator/billing/${wid}/refunds`, refundBody = { attemptId: first.attemptId, amountCents: 1000, reason: 'Customer asked for part of a top-up back' };
+        const refund = ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' }));
+        assert.match(refund.refundId, /^brf_/);
+        assert.deepEqual(ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' })), refund);
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900 }, 'live', { 'Idempotency-Key': 'refund-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+        const [hold] = (await db.query(`SELECT xmin::text AS x,paid_uc::text AS paid FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold'`, [wid])).rows;
+        const audits = async () => (await db.query(`SELECT xmin::text AS x,reason,before->>'balance_uc' AS before,after->>'balance_uc' AS after FROM hosted_operator_audit WHERE workspace_id=$1 AND action='billing-refund'`, [wid])).rows;
+        assert.deepEqual([hold.paid, await audits()], ['-1000000000', [{ x: hold.x, reason: refundBody.reason, before: '5000000000', after: '4000000000' }]]);
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900_000 }), 409, 'REFUND_EXCEEDS_BALANCE');
+        assert.equal((await audits()).length, 1, 'A refused refund leaves no audit row.');
         // The owner sets auto-recharge (the summary comes back), then removes the card, which turns it off.
         const on = ok(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1500, amountCents: 3000, monthlyCapCents: 30000 }));
         assert.deepEqual([on.state.autoRecharge, on.autoRecharge.enabled, on.autoRecharge.thresholdCents, on.autoRecharge.monthlyCapCents], ['on', true, 1500, 30000]);
