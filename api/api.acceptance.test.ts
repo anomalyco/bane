@@ -10926,6 +10926,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  test('a delivery attempt lost before its fence does not use up retryAttempts 0: the next claim sends it',async t=>{
+    // tear/delivery witness (retryAttempts 0): ingest m1 a, claim K m1:W, drop K, expire m1:W, run L m1:W.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'unsent',url:'https://example.com/unsent',retryAttempts:0}),201);
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='unsent'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_unsent',wid,hook,{id:'mev_unsent',type:'message.received',messageId:'msg_unsent',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_unsent','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_unsent\"}')",[wid]);
+      // The runner is lost right after its claim, before the fence: nothing leaves.
+      let statements=0;const transport=runtime.webhookFetch;let posts=0;
+      const lost=new Proxy(runtime.db,{get(target,p){const v=Reflect.get(target,p);return typeof v==='function'?(...a:unknown[])=>{if(statements++>=1)throw new Error('Synthetic lost runner');return v.apply(target,a);}:v;}});
+      try{
+        runtime.webhookFetch=async()=>{posts++;return {status:204};};
+        await assert.rejects(processJobs({...runtime,db:lost},mailboxEventJobs,1,1,20000,'webhooks'));
+        assert.deepEqual((await db.query("SELECT status,attempts FROM jobs WHERE id='job_unsent'")).rows[0],{status:'running',attempts:1});
+        await db.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id='job_unsent'");
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,1);
+        assert.deepEqual((await db.query("SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id='mwd_unsent'")).rows[0],{status:'delivered',last_error:null});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('a rate-limited delivery keeps its spent attempts: retries still end at 1 + retryAttempts',async t=>{
     // tear/delivery witness: rate W 1, ingest m1 a, run K m1:W, reply K 503, run K m1:W.
     await simulatedSesFixture(t,async({runtime,local,db})=>{

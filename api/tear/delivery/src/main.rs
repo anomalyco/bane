@@ -168,6 +168,9 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     (1, &["ingest m1 b", "claim K m1:U", "pause U", "go K"]),
     (1, &["ingest m1 b", "claim K m1:U", "expire m1:U", "run L m1:U", "reply L 410", "go K"]),
     (1, &["ingest m1 b", "run K m1:U", "reply K timeout", "ingest m2 b", "run K m2:U", "reply K timeout", "ingest m3 b", "run K m3:U", "reply K timeout", "run K m1:U"]),
+    // retryAttempts 0: a claim lost before the fence (nothing sent) dead-lettered the delivery.
+    (0, &["ingest m1 a", "claim K m1:W", "drop K", "expire m1:W", "run L m1:W"]),
+    (0, &["ingest m1 a", "claim K m1:W", "drop K", "expire m1:W", "claim L m1:W", "drop L", "expire m1:W", "run K m1:W"]),
     // A delivery held past retention was deleted silently; it is dead-lettered with a reason.
     (1, &["ingest m1 a", "pause W", "run K m1:W", "age m1:W", "prune", "prune"]),
     // Boundary: backoff 15 s x 4^n reaches its 12 h cap at the seventh attempt (retryAttempts 9).

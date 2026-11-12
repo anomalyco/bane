@@ -176,7 +176,12 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const claimStarted = Date.now();
       // The claim already charged the attempt before the isolate died. Retire exhausted
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
-      const exhausted=sql`j.attempts >= CASE WHEN j.type='mailbox.webhook' THEN coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int) WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'`;
+      // A fenced delivery (routed or a ritual action) counts the attempts that passed its fence. If
+      // its last claim never got there (the runner was lost before anything left), one more claim is
+      // allowed instead of dead-lettering mail that was never sent.
+      const exhausted=sql`j.attempts >= CASE WHEN j.type='mailbox.webhook' THEN coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int) WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'
+        AND NOT (j.type='mailbox.webhook' AND coalesce((j.payload->>'fenced')::boolean,false) AND j.attempts<=coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int)
+          AND NOT EXISTS(SELECT FROM mail_action_attempts a WHERE a.workspace_id=j.workspace_id AND a.delivery_id=j.payload->>'deliveryId' AND a.attempts>=j.attempts))`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
       const slots=pool==='webhooks'?0:Math.min(claimBatchSize,ingestSlots-ingestReserved);
       // Only the head of each class enters the preference sort. The expression matches
@@ -231,9 +236,10 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
       ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes',
-          -- An attempt whose runner is lost settles nothing. Record the endpoint's attempt budget at
-          -- its first claim, so the lease expiry after its last attempt dead-letters it.
-          payload = CASE WHEN jobs.type='mailbox.webhook' AND NOT jobs.payload ? 'maxAttempts' THEN jobs.payload||jsonb_build_object('maxAttempts',1+coalesce((SELECT h.retry_attempts FROM mailbox_webhook_deliveries d JOIN mailbox_webhooks h ON h.id=d.webhook_id WHERE d.workspace_id=jobs.workspace_id AND d.id=jobs.payload->>'deliveryId'),${WEBHOOK_ATTEMPTS - 1}::int)) ELSE jobs.payload END
+          -- An attempt whose runner is lost settles nothing. Record the endpoint's attempt budget (and
+          -- whether the delivery is fenced) at its first claim, so the lease expiry after its last
+          -- attempt dead-letters it.
+          payload = CASE WHEN jobs.type='mailbox.webhook' AND NOT jobs.payload ? 'maxAttempts' THEN jobs.payload||coalesce((SELECT jsonb_build_object('maxAttempts',1+h.retry_attempts,'fenced',d.routed OR d.payload ? 'ritualAction') FROM mailbox_webhook_deliveries d JOIN mailbox_webhooks h ON h.id=d.webhook_id WHERE d.workspace_id=jobs.workspace_id AND d.id=jobs.payload->>'deliveryId'),jsonb_build_object('maxAttempts',${WEBHOOK_ATTEMPTS}::int)) ELSE jobs.payload END
         FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest'
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
