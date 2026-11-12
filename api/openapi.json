@@ -20,20 +20,11 @@
       },
       {
         "title": "Receive (optional)",
-        "text": "Publish the receiving MX record from the domain page. Hosted Bane suggests a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
+        "text": "Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
       },
       {
         "title": "Reply",
         "text": "POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References."
-      }
-    ],
-    "x-guides": [
-      {
-        "id": "webhook-signatures",
-        "title": "Verify webhook signatures",
-        "language": "js",
-        "code": "import { createHmac, timingSafeEqual } from 'node:crypto'\n\n// secret: the webhook's signing secret (whsec_…). body: the raw request body, before JSON.parse.\nexport function verifyBaneWebhook(secret, headers, body) {\n  const id = headers['webhook-id'], timestamp = headers['webhook-timestamp']\n  if (!id || !timestamp || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false\n  const key = Buffer.from(secret.slice('whsec_'.length), 'base64')\n  const expected = createHmac('sha256', key).update(`${id}.${timestamp}.${body}`).digest()\n  return String(headers['webhook-signature'] ?? '').split(' ').some(part => {\n    const [version, signature = ''] = part.split(',')\n    const given = Buffer.from(signature, 'base64')\n    return version === 'v1' && given.length === expected.length && timingSafeEqual(given, expected)\n  })\n}",
-        "text": "Every webhook delivery (email events and inbound webhooks alike) carries Webhook-Id, Webhook-Timestamp (Unix seconds) and Webhook-Signature headers in the Standard Webhooks format. Compute HMAC-SHA256 over \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\" with the base64-decoded part of the signing secret after whsec_, and compare it in constant time to the value after v1, in Webhook-Signature. Reject timestamps more than five minutes old, and use Webhook-Id to skip a delivery you already handled. Standard Webhooks libraries (such as the standardwebhooks npm package) verify it too. The secret is shown once when you create a webhook; reveal or rotate it on the webhook’s page, or with revealWebhookSecret (from an API key you made: MCP approvals and agent tokens can only rotate it) and rotateWebhookSecret. Every reveal and rotation is recorded."
       }
     ]
   },
@@ -9867,6 +9858,25 @@
           "lastMessageAt": {
             "type": "string"
           },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ],
+            "description": "Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address."
+          },
           "addressIds": {
             "type": "array",
             "items": {
@@ -9883,6 +9893,7 @@
           "subject",
           "snippet",
           "lastMessageAt",
+          "from",
           "addressIds",
           "messageCount"
         ]
@@ -37475,8 +37486,10 @@
                     "enum": [
                       "opencode",
                       "claude",
+                      "cursor",
                       "generic"
-                    ]
+                    ],
+                    "description": "opencode, claude (Claude Code), cursor, or generic for any other MCP client."
                   },
                   "auth": {
                     "type": "string",

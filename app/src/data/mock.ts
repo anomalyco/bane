@@ -135,7 +135,7 @@ function inboundThread(state: DemoState, row: MailboxThreadDetail, addressId?: s
   const visible = inboundVisible(state, row, addressId)
   const last = visible.at(-1)
   if (!last) return null
-  return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
+  return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, from: last.from, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
 }
 const webhookView = <T extends { url: string; headers: Webhook['headers'] }>(webhook: T) => ({ ...webhook, url: '••••' + webhook.url.slice(-4), headers: webhook.headers ?? [] })
 const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => webhookView(webhook)

@@ -1,3 +1,4 @@
+import { webhookSignatureGuide } from './webhook-signature-guide.js';
 import type { App } from './core.js';
 
 type Json = Record<string, any>;
@@ -113,28 +114,11 @@ export const quickstart: { title: string; text: string; code?: string }[] = [
   { title: 'Add and verify your domain', text: 'In the dashboard, open Domains and add it, or call POST /v1/domains with {"name":"acme.com"}. Publish the DNS records it returns at your DNS provider. Sending works once GET /v1/domains/{id} reports sending: "verified", usually within minutes of the records resolving. A domain whose records are still unproven after 72 hours is released.' },
   { title: 'Create an API key', text: 'In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as BANE_API_KEY on your server and never ship it to a browser.' },
   { title: 'Send', text: '202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.', code: quickstartCurl },
-  { title: 'Receive (optional)', text: 'Publish the receiving MX record from the domain page. Hosted Bane suggests a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.' },
+  { title: 'Receive (optional)', text: 'Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.' },
   { title: 'Reply', text: 'POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References.' },
 ];
-// Guides beyond the first five minutes, shared by /docs (x-guides, each at its own #id), /docs.md and /llms.txt.
-const verifySignature = `import { createHmac, timingSafeEqual } from 'node:crypto'
-
-// secret: the webhook's signing secret (whsec_…). body: the raw request body, before JSON.parse.
-export function verifyBaneWebhook(secret, headers, body) {
-  const id = headers['webhook-id'], timestamp = headers['webhook-timestamp']
-  if (!id || !timestamp || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false
-  const key = Buffer.from(secret.slice('whsec_'.length), 'base64')
-  const expected = createHmac('sha256', key).update(\`\${id}.\${timestamp}.\${body}\`).digest()
-  return String(headers['webhook-signature'] ?? '').split(' ').some(part => {
-    const [version, signature = ''] = part.split(',')
-    const given = Buffer.from(signature, 'base64')
-    return version === 'v1' && given.length === expected.length && timingSafeEqual(given, expected)
-  })
-}`;
-export const guides: { id: string; title: string; text: string; code?: string; language?: string }[] = [
-  { id: 'webhook-signatures', title: 'Verify webhook signatures', language: 'js', code: verifySignature,
-    text: 'Every webhook delivery (email events and inbound webhooks alike) carries Webhook-Id, Webhook-Timestamp (Unix seconds) and Webhook-Signature headers in the Standard Webhooks format. Compute HMAC-SHA256 over "{Webhook-Id}.{Webhook-Timestamp}.{raw body}" with the base64-decoded part of the signing secret after whsec_, and compare it in constant time to the value after v1, in Webhook-Signature. Reject timestamps more than five minutes old, and use Webhook-Id to skip a delivery you already handled. Standard Webhooks libraries (such as the standardwebhooks npm package) verify it too. The secret is shown once when you create a webhook; reveal or rotate it on the webhook’s page, or with revealWebhookSecret (from an API key you made: MCP approvals and agent tokens can only rotate it) and rotateWebhookSecret. Every reveal and rotation is recorded.' },
-];
+// Guides beyond the first five minutes, for /docs.md and /llms.txt; the dashboard shows the same text as a Docs guide.
+export const guides: { id: string; title: string; text: string; code?: string; language?: string }[] = [webhookSignatureGuide];
 // Getting started first; account and installation plumbing last.
 const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Audience', 'Consent', 'ApiKeys', 'Inbound keys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
 const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
@@ -142,7 +126,6 @@ const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return i
 export function createOpenApiDocument(app: App) {
   const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0', description: 'Send, receive and reply to email on your own domains. 202 means queued, not delivered.' } }) as Json;
   document.info['x-quickstart'] = quickstart;
-  document.info['x-guides'] = guides;
   const used = [...new Set(operationEntries(document).map(entry => entry.operation.tags?.[0] ?? 'API'))];
   document.tags = used.sort((a, b) => tagRank(a) - tagRank(b)).map(name => ({ name }));
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {

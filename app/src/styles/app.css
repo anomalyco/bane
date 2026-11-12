@@ -169,6 +169,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .invitation-facts dt { color: var(--color-muted); }
 .invitation-facts dd { margin: 0; overflow-wrap: anywhere; }
 
+/* A quiet link from a concept to its guide in Docs. */
+.guide-link { flex: none; color: var(--color-muted); font-size: var(--text-xs); font-weight: var(--font-weight-regular); text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 3px; }
+.guide-link:hover { color: var(--color-text); }
 /* Phones and portrait tablets (AppShell, below 900 px): a top bar with the workspace and theme, the page, and a bottom
    tab bar. The document scrolls, not the page card, so the browser's own bars collapse and a tap on the status bar
    scrolls to the top. Safe-area insets keep everything clear of notches and the home indicator. */

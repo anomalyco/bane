@@ -160,8 +160,16 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   }
   // Keep the generated method's input/output tied to its key; no handwritten route or schema.
   const call = sdk[op] as (opts: Input<K>) => ReturnType<typeof sdk[K]>;
+  // A request that never got a response has no request ID: keep the error's name and cause code (never its message,
+  // which can carry the URL) so a transport failure says whether it was a timeout, a reset or a refused connection.
+  let transport: string | undefined;
   const result = await call({ ...input, client: input.client ?? client, signal: AbortSignal.timeout(ms), fetch: async (request: Request) => {
-    const response = await fetch(request);
+    let response: Response;
+    try { response = await fetch(request); } catch (error) {
+      const e = error as { name?: unknown; cause?: { code?: unknown; name?: unknown } };
+      transport = [e.name, e.cause?.code ?? e.cause?.name].filter(v => typeof v === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(v)).join(' ') || 'unknown';
+      throw error;
+    }
     if (state) state.requestId = response.headers.get('x-request-id');
     return response;
   }});
@@ -174,7 +182,7 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
     (result.response.ok ? successResponses : errorResponses).add(op);
   }
   // Never serialize SDK errors: request objects, tokens, and unrelated mail can all be sensitive.
-  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code);
+  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code ?? (transport && `(${transport})`));
   return result.data as Output<K>;
 }
 async function expectDenial(call: () => Promise<unknown>, status: number, code: string) {

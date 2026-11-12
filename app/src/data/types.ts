@@ -121,7 +121,7 @@ export interface Inbox {
   status: InboxStatus; createdAt: ISODate; expiresAt: ISODate; deleteAfter: ISODate; limits: { messages: number; bytes: number }
   send: { enabled: boolean; perDay: number; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
 }
-export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; credential?: { name: string; permissions: ('read' | 'modify')[] } }
+export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; send?: { enabled: boolean }; credential?: { name: string; permissions: ('read' | 'modify' | 'send')[] } }
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
   id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
@@ -135,7 +135,8 @@ export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
 export interface InboundAddressPatch { displayName?: string | null; aliases?: string[] }
 export type InboundThreadView = MailboxThreadView
-export interface InboundThread { id: string; subject: string; snippet: string; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
+/** from: the newest visible message's sender (absent on older API responses). */
+export interface InboundThread { id: string; subject: string; snippet: string; from?: MailAddress; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
 export interface InboundMessage {
   id: string; threadId: string; addressIds: string[]; direction: 'inbound' | 'outbound'; status: string
   from: MailAddress; to: MailAddress[]; cc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string
