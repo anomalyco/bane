@@ -106,16 +106,30 @@ export function reputationAlertText(input: { region: string; metric: Metric; lev
   return `${title}\n${percent(input.value)} now  ·  warning ${percent(warning)}  ·  at risk ${percent(risk)}\n<${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in Bane>`;
 }
 
-const deliver: JobHandler = async (runtime, payload) => {
+const deliver: JobHandler = async (runtime, payload, job) => {
   const url = runtime.config.reputationAlertUrl;
   if (!url) return;
   if(payload.code==='SES_IDENTITY_QUOTA_EXHAUSTED'){
     const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:`SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.`}),redirect:'manual',signal:AbortSignal.timeout(5000)});await r.body?.cancel();if(!r.ok)throw new ApiError(503,'REPUTATION_ALERT_FAILED','Quota alert delivery failed.',undefined,true);return;
   }
+  if (payload.code === 'HOSTED_EXEMPT_OVER_LINE') return post(url, exemptAlertText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl));
   const { region, metric, level, previous, value } = payload;
   if (typeof region !== 'string' || !(metric === 'bounceRate' || metric === 'complaintRate') || !LEVELS.includes(level as Level) || !LEVELS.includes(previous as Level) || typeof value !== 'number') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid reputation alert job.');
   const text = reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl });
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }), signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new ApiError(503, 'REPUTATION_ALERT_FAILED', `Slack rejected the reputation alert with HTTP ${response.status}.`, undefined, true);
 };
+async function post(url: string, text: string) {
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }), redirect: 'manual', signal: AbortSignal.timeout(10000) });
+  await response.body?.cancel();
+  if (!response.ok) throw new ApiError(503, 'REPUTATION_ALERT_FAILED', `Slack rejected the alert with HTTP ${response.status}.`, undefined, true);
+}
+const lineText: Record<string, string> = { complaints: 'spam complaints', screen: 'content-screen rejections', bounces: 'hard bounces' };
+/** A first-party (exempt) workspace crossed a pause line: Bane did not hold it, so a person has to look. */
+export function exemptAlertText(p: Record<string, unknown>, publicUrl: string) {
+  const n = (v: unknown) => Number(v ?? 0).toLocaleString('en-US');
+  return `:rotating_light: *First-party workspace over the ${lineText[String(p.line)] ?? 'reputation'} line* · ${String(p.workspaceId ?? '')}\n`
+    + `${n(p.bounces)} hard bounces and ${n(p.complaints)} complaints on ${n(p.sends)} sends; ${n(p.rejected)} of ${n(p.screened)} screened rejected. `
+    + `Bane did not ${p.scope === 'all' ? 'pause its sending' : 'hold its marketing'}: the workspace is exempt. Review it now; only an operator pauses it.\n<${publicUrl}|Bane>`;
+}
 export const reputationAlertJobs = { [JOB]: deliver };

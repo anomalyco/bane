@@ -257,6 +257,16 @@ export const tenantStatusDrift = () => sql`SELECT pc.workspace_id FROM provider_
   OR (pc.paused_at IS NOT NULL AND EXISTS (SELECT FROM provider_connection_regions r WHERE r.connection_id=pc.id AND r.tenant_state='ready'
     AND NOT EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.region=r.region AND t.applied='DISABLED' AND t.generation=pc.tenant_generation)))
   OR (pc.paused_at IS NULL AND EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')))`;
+/**
+ * An operator's pause after a review, in one statement with its audit row: the only way to pause an exempt (first-party)
+ * workspace. Re-arms a resume that is waiting for its tenants; bumps the generation so the SES tenants are disabled.
+ */
+export const pauseHostedByOperator = (wid: string, reason: string, via: 'script' | 'console' = 'script') => sql`WITH paused AS (
+    UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason='Hosted sending paused by Bane after a review.',resume_pending_at=NULL,tenant_generation=pc.tenant_generation+1
+    WHERE pc.workspace_id=${wid} AND pc.kind='shared' AND (pc.paused_at IS NULL OR pc.resume_pending_at IS NOT NULL) RETURNING pc.workspace_id
+  ), audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'pause-hosted-sending',jsonb_build_object('reason',${reason}::text,'via',${via}::text) FROM paused),
+  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})
+  SELECT workspace_id FROM paused`;
 export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: { firstWeek: number; secondWeek: number; mature: number } };
 /**
  * An operator resume, in one statement with its audit row. It lifts a pause or a marketing hold and starts a new

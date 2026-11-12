@@ -8116,8 +8116,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
-      await (await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[wid,'on','--reason','Exercise uncapped reputation checks']);
-      // An uncapped workspace is still subject to bounce and complaint holds.
+      // A raised limit is still subject to bounce and complaint holds (only an exempt, first-party workspace is not).
+      await setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','default','--reason','Exercise uncapped reputation checks']);
       // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
       const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
@@ -8202,7 +8202,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { checkHostedHealth } = await import('./src/maintenance.js'), { runDispatcher } = await import('./src/dispatcher.js');
       const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
       const f = await hostedHoldFixture(runtime, db);
-      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [f.wid]); // No burst cap in the way.
+      await db.query('UPDATE workspaces SET send_cap_override=200000 WHERE id=$1', [f.wid]); // No limit or burst cap in the way (an exempt workspace is never paused).
       const origin = 'https://screen.synthetic.invalid'; let spam = 0.01;
       Object.assign(runtime.config, { hostedScreen: true, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
       t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL) => { assert.equal(String(url), origin); return Response.json({ answers: { spam: { noul: spam } } }); });
@@ -8300,6 +8300,41 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [10000, null], 'The explicit 100% restore is the opt-out.');
       const audits = (await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='resume-hosted-sending' ORDER BY at`, [f.wid])).rows.map(r => [r.details.restorePercent, r.details.limitBefore, r.details.restoreCap]);
       assert.deepEqual(audits, [[50, 100, 50], [50, 10000, 5000], [50, 10000, 5000], [100, 10000, null]]);
+    });
+  });
+  test('MX: an exempt (first-party) workspace crosses every pause line and keeps sending transactional and marketing; operators are warned and only an operator pauses it', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { checkHostedHealth } = await import('./src/maintenance.js'), { setWorkspaceExemption } = await import('./scripts/set-workspace-exemption.js');
+      const { pauseHosted } = await import('./scripts/pause-hosted-sending.js'), { reputationAlertJobs } = await import('./src/reputation-alerts.js');
+      const f = await hostedHoldFixture(runtime, db);
+      // The exemption is operator-only (a script, no API) and audited with its reason.
+      await setWorkspaceExemption(db, [f.wid, 'on', '--reason', 'First-party sign-in email']);
+      assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-workspace-exemption'`, [f.wid])).rows[0].details, { old: false, new: true, reason: 'First-party sign-in email', via: 'script' });
+      // Every line at once: 100 hard bounces (10%) and 10 complaints (1%) on 1,000 sends; 50 of 100 screened rejected.
+      await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) VALUES($1,'-infinity',date_trunc('hour',now()),1000,100,10)`, [f.wid]);
+      await db.query(`INSERT INTO hosted_screen_hourly(workspace_id,epoch,hour,screened,rejected) VALUES($1,'-infinity',date_trunc('hour',now()),100,50)`, [f.wid]);
+      await checkHostedHealth(runtime); await checkHostedHealth(runtime);
+      assert.deepEqual((await db.query(`SELECT paused_at,marketing_held_at FROM provider_connections WHERE id=$1`, [f.wid])).rows[0], { paused_at: null, marketing_held_at: null });
+      assert.equal((await db.query(`SELECT FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${f.wid}`])).rowCount, 0, 'The SES tenants are left enabled.');
+      const send = (kind: 'transactional' | 'marketing') => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: 'Your sign-in code', text: 'Fixture', kind });
+      ok(await send('transactional'), 202); ok(await send('marketing'), 202);
+      assert.equal(ok(await local('GET', '/v1/me')).connection.sendingPause, null);
+      // The warning: one operator alert for the strongest line, once a day however often the check runs.
+      const [alert, ...more] = (await db.query(`SELECT payload FROM jobs WHERE workspace_id=$1 AND type='reputation.alert'`, [f.wid])).rows.map(r => r.payload);
+      assert.deepEqual([alert.code, alert.line, alert.scope, Number(alert.complaints), more.length], ['HOSTED_EXEMPT_OVER_LINE', 'complaints', 'all', 10, 0]);
+      await t.test('the alert reaches the operators\' Slack channel', async t => {
+        const posted: string[] = [];
+        t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => { assert.equal(String(url), 'https://hooks.slack.invalid/fixture'); posted.push(JSON.parse(String(init!.body)).text); return new Response('ok'); });
+        runtime.config.reputationAlertUrl = 'https://hooks.slack.invalid/fixture';
+        try { await reputationAlertJobs['reputation.alert'](runtime, alert, { id: 'job_alert', workspaceId: f.wid, attempts: 1 }); } finally { runtime.config.reputationAlertUrl = undefined; }
+        assert.match(posted[0]!, new RegExp(`First-party workspace over the spam complaints line.*${f.wid}[\\s\\S]*Bane did not pause its sending`));
+      });
+      // Only an operator pauses it, and only with a reason.
+      await assert.rejects(pauseHosted(db, [f.wid, '--reason', 'short']), /at least 10 characters/);
+      await pauseHosted(db, [f.wid, '--reason', 'Confirmed complaint spike']);
+      error(await send('transactional'), 409, 'HOSTED_SENDING_PAUSED');
+      assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='pause-hosted-sending'`, [f.wid])).rows[0].details, { reason: 'Confirmed complaint spike', via: 'script' });
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${f.wid}`])).rows[0].status, 'pending', 'An operator pause disables the SES tenants.');
     });
   });
   test('MX: a content-screen rejection keeps its charge against the limit; other rejections are refunded; scripts refuse to change anything without a reason', async t => {
@@ -8547,7 +8582,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
-      await (await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[wid,'on','--reason','Exercise real SES feedback ingestion']);
+      await (await import('./scripts/set-hosted-limits.js')).setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','default','--reason','Exercise real SES feedback ingestion']);
       const bcc=Array.from({length:49},(_,i)=>`bcc${i}@example.net`), simulator='success+fixture@simulator.amazonses.com';
       // 100 accepted envelopes yesterday: 4,999 real recipients plus one simulator. No sends today.
       await db.query(`WITH sent AS (INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,feedback_topic_arn,created_at)
