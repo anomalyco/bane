@@ -2624,6 +2624,24 @@ describe('Hosted MCP OAuth and tools', () => {
         }
         const hidden=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'hidden',permissions:['read']}}}},rpcHeaders)).result;
         assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
+        // tear witness (recheck of #51): with receiving consent but no manage, mailbox administration was listed although
+        // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
+        await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+        const receiving=await listed(true);
+        for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
+        assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
+        const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
+        const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
+        const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId))!;assert.ok(grantActor);
+        const dummy=(schema:Json|undefined)=>schema?.enum?.[0]??(schema?.format==='email'?'tear@example.com':[schema?.type].flat().includes('integer')?'1':String(schema?.pattern??'').includes('\\d')?'us-east-1':'tear-missing');
+        let gets=0;
+        for(const [name,op] of buildMcpCatalog(api)){
+          if(op.method!=='get')continue;gets++;
+          const path=op.path.replace(/\{([^}]+)\}/g,(_,field:string)=>encodeURIComponent(dummy((spec.paths[op.path].get.parameters??[]).find((p:Json)=>p.in==='path'&&p.name===field)?.schema)));
+          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor)).status;
+          assert.equal(receiving.has(name),status!==401&&status!==403,`${name}: listed=${receiving.has(name)}, REST ${status}`);
+        }
+        assert.ok(gets>=80,String(gets));
         // As a workspace member the same approval also loses the owner and admin areas.
         await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[runtime.config.workspaceId,consentId]);
         for(const codemode of [true,false]){

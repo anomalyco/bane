@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { dispatchAsActor,dispatchAsMailboxAccess } from './auth.js';
-import { ModuleLoadError, type Actor, type MailboxAccess, type App, type Runtime } from './core.js';
+import { actorMailAccess, ModuleLoadError, type Actor, type MailboxAccess, type App, type Runtime } from './core.js';
 import { withMcpAuthorization } from './mcp-auth.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
 import { describeAction, describeTool, resourceActions, resourceTools } from './mcp-resources.js';
@@ -80,14 +80,15 @@ function untrustedNotice(response: ObjectValue | undefined) {
 async function serve(app: App, request: Request, runtime: Runtime, principal: Actor|MailboxAccess, catalog: ReadonlyMap<string, McpOperation>): Promise<Response> {
   const base = new URL(runtime.config.publicUrl);
   const inbox='admin' in principal?principal:null;
-  const allowInbound='domains' in principal && principal.permissions.includes('manage') && !principal.domains.length;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  // A workspace grant sees, and may call, exactly the operations REST would authorize for it:
-  // the operation's REST permission (not its HTTP method), the member role and dashboard-only
-  // administration, plus explicit receiving consent for receiving administration.
-  const authorized = (op: McpOperation) => 'domains' in principal && !op.dashboardOnly && !(op.ownerOnly && principal.role === 'member') && (principal.permissions.includes('manage') || principal.permissions.includes(op.permission));
-  const operations = new Map([...catalog].filter(([, op]) => op.receiving ? (inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : 'receivingConsent' in principal && !!principal.receivingConsent && authorized(op)) : inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.inbound || allowInbound) && authorized(op)));
+  // A workspace grant sees, and may call, exactly the operations REST authorizes for it, using
+  // REST's own path guards (mailboxAuth via actorMailAccess, requireReceivingConsent, notMember),
+  // the operation's REST permission (not its HTTP method) and dashboard-only administration.
+  const authorized = (op: McpOperation) => 'domains' in principal && !op.dashboardOnly && (!op.mailbox || actorMailAccess(principal) !== null)
+    && (!op.receivingConsent || !principal.grantId || !!principal.receivingConsent) && !(op.ownerOnly && principal.role === 'member')
+    && (principal.permissions.includes('manage') || principal.permissions.includes(op.permission));
+  const operations = new Map([...catalog].filter(([, op]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : authorized(op)));
   const params = new URL(request.url).searchParams;
   const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());
   const codeMode = params.get('codemode') === 'true' || (params.get('codemode') !== 'false' && requested.includes('all'));

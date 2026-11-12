@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { domains } from './db/operations.js';
@@ -74,14 +74,6 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     c.set('mailboxAccess', value);
     await next();
   });
-}
-// Received mail a Bane credential can read: dashboard members read addressed mail; unrestricted manage credentials read
-// the whole workspace; everything else reads none. Used by mailboxAuth and the unified logs.
-function actorMailAccess(actor: Actor): MailboxAccess | null {
-  if (actor.domains.length) return null;
-  if (actor.role === 'member' && actor.credential === 'dashboard') return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: ['read', 'send'] };
-  if (!actor.permissions.includes('manage')) return null;
-  return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] };
 }
 
 // ---------- helpers ----------
@@ -497,12 +489,11 @@ import { registerMailObjects } from './mail-object-route.js';
 export function registerMailbox(app: App) {
   registerRouting(app);
   registerRituals(app);
-  app.use('/v1/inbound/*', mailboxAuth);
-  for (const path of ['policy','retired/*','domains/*','addresses/*','keys/*','webhooks/*','messages/:messageId/redeliver']) app.use('/v1/inbound/'+path,requireReceivingConsent);
-  app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
-
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
-  app.use('/v1/inboxes/*', mailboxAuth);
+  // mailboxRoute and receivingConsentRoute (core.ts) are the rules the MCP listing applies too.
+  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? mailboxAuth(c, next) : next());
+  app.use('/v1/inbound/*', (c, next) => receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
+  app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inbound/*', mailboxCreates);
   app.use('/v1/inboxes/*', mailboxCreates);
