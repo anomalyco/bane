@@ -4649,6 +4649,29 @@ describe('Dashboard API capabilities', () => {
     }
     error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'Name\nBcc: victim@example.com' })), 422);
     error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'billing@example.com' })),422);
+    // Lookalikes of @ < > as Unicode's confusables data folds them (compatibility forms, angle quotes, ornamental,
+    // mathematical and CJK angle brackets, the deprecated angle brackets NFD turns into them, dotted and doubled signs),
+    // enclosed a in every form (circled, negative circled, a combining enclosing mark over a Latin, mathematical or
+    // Cyrillic a), marks or format characters between the characters that matter, and the bidi controls that reorder
+    // a name read as an address or a route in clients.
+    for (const fromName of ['billing\uFF20example.com', 'billing\uFE6Bexample.com', 'Billing \uFF1Cbilling\uFF20example.com\uFF1E', 'PayPal \u2039security\u24D0paypal.com\u203A', 'Billing \u27E8billing\u24B6example.com\u27E9',
+      'security\u24D0paypal.com', 'security\u24B6paypal.com', 'security\u{1F150}paypal.com', 'securitya\u20DDpaypal.com', 'security\u{1D4B6}\u20DDpaypal.com', 'security\u0430\u20DDpaypal.com', 'securitya\u200D\u20DDpaypal.com',
+      'Billing \u2329billing\u232A', 'Billing \u3008billing\u3009', 'Billing \u276Ebilling\u276F', 'Billing \u02C2billing\u02C3', 'Billing \u22D6billing\u22D7', 'Billing \u226Abilling\u226B', 'Billing \u{1D236}billing\u{1D237}',
+      'billing\u034F\uFF20\uFE0Fexample.com', 'Support \u202Emoc.elpmaxe', 'Acme\u2066 Billing\u2069', 'Billing\u0085example'])
+      error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName })), 422, 'VALIDATION_FAILED');
+    // Ordinary names keep working: emoji joiner sequences and keycaps, non-Latin scripts (including the letters that are
+    // drawn as arrowheads, and CJK title brackets), other enclosed letters and the weak directional marks a mixed-script name may need.
+    for (const fromName of ['Acme Billing', 'Élodie 日本語', 'Acme 👩‍💻 Team', 'O\u2019Brien & Sons', 'Ärzte – Praxis', 'شركة أكمي\u200F Acme', 'Heart ❤\uFE0F Co', 'Team 1\uFE0F\u20E3', 'さくら Sakura', 'ᐃᓄᒃᑎᑐᑦ ᐸᐳ', '《新闻周刊》编辑部', 'Αθήνα \u24B7 Brand'])
+      ok(await http('POST', '/v1/emails/send', key.secret, mail({ fromName })), 202);
+    // Dispatch applies the same policy to names that were queued before it existed: the bare address is sent instead.
+    const { formattedSender } = await import('./src/sending.js');
+    assert.equal(formattedSender('sender@example.com', 'billing\uFF20example.com'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'security\u24D0paypal.com'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'securitya\u20DDpaypal.com'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'Support \u202Emoc.elpmaxe'), 'sender@example.com');
+    assert.equal(formattedSender('sender@example.com', 'Acme Billing'), '"Acme Billing" <sender@example.com>');
+    const template = await resource(t, key.secret, '/v1/templates', { name: unique('display-name') });
+    error(await http('PATCH', `/v1/templates/${template.id}`, key.secret, { revision: template.revision, draft: { ...template.draft, fromName: 'billing\uFF20example.com' } }), 422, 'VALIDATION_FAILED');
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     const marketing = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email, kind: 'marketing', subject: `${marker} marketing` })), 202);

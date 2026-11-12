@@ -24,7 +24,7 @@ import { assertHostedAllowance, hostedAllowance, hostedCost, type HostedAllowanc
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -100,7 +100,7 @@ async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: nu
 }
 const Address = mailAddress();
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
-const FromName = z.string().max(200).refine(v => !/[\x00-\x1f\x7f@<>]/.test(v), 'Sender name cannot contain an address, angle brackets, or control characters.');
+const FromName = senderDisplayName();
 const PreviewText = z.string().max(200).describe('Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.');
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
 const Data = z.record(z.string().max(120), Scalar).default({});
@@ -476,9 +476,9 @@ export function formattedSender(from: string, fromName?: string, foldMime = fals
   // Domain authorization always uses the bare address; formatting happens only at the MIME/SES boundary.
   Address.parse(from);
   if (!fromName) return from;
-  // Current admission validates FromName. Old queued display names are data,
-  // not a new admission: quote punctuation and omit unsafe control characters.
-  if (/[\x00-\x1f\x7f]/.test(fromName)) return from;
+  // Current admission validates FromName. A queued display name is data, not a new admission:
+  // one that no longer passes the policy is left out and the bare address is sent.
+  if (!FromName.safeParse(fromName).success) return from;
   if (/^[\x20-\x7e]+$/.test(fromName)) return `"${fromName.replace(/["\\]/g, '\\$&')}" <${from}>`;
   // RFC 2047 encoded words, each below 75 characters and never splitting a UTF-8 code point.
   const words: string[] = []; let chunk = '';

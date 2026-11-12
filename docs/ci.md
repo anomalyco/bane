@@ -24,6 +24,16 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 
 `build` and `acceptance` are required on `dev`.
 
+## When the dev E2E fails
+
+The deploy's `Report the dev E2E failure` job opens an issue labeled `dev-e2e` (or comments on the open one) with the failed steps, their errors and request IDs, and the bane-dev Worker's log lines for those requests. Those lines come from `wrangler tail`, which runs during the E2E; they are limited to the failed requests and to Bane's structured fields (level, code, operation, status, SQLSTATE, a 300-character message) because the issue is public. If the dev token cannot tail Workers, the issue says so and you search the request IDs in the Cloudflare dashboard instead.
+
+Production stays blocked, as before: it deploys only a commit whose dev E2E passed. To unblock:
+
+1. Read the issue: the failed step and request ID usually name the operation and the error code (a `40P01` is a deadlock: see the deadlock guard below).
+2. Fix forward in a PR. If the failure was flaky rather than a regression, say so in the issue and re-run the deploy for the same SHA.
+3. Close the issue once a dev E2E passes.
+
 ## Pre-merge invariants (`build`)
 
 `api/scripts/check-premerge.ts` runs in about five seconds. Run it locally from `api/` with `node --import tsx scripts/check-premerge.ts` (it compares against your merge-base with `dev`). Each failure is an annotation on the PR's Files tab.
