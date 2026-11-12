@@ -10,6 +10,7 @@ import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, 
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { chunk } from '../lib/preloadable'
+import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
 
@@ -223,10 +224,21 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     </div></main>}
   </SessionContext.Provider></ApiContext.Provider>
 }
-// The installation's public origin, for examples and connection URLs.
-export function usePublicOrigin() {
-  return useContext(SessionContext)?.identity?.origin || window.location.origin
+// The installation's canonical address (lib/public-origin.ts), for examples and connection URLs: PUBLIC_URL from
+// /v1/me when signed in, else from /health, never the page's own Host. null until known; foreign when the page is
+// open at another address.
+export function useCanonicalOrigin() {
+  const demo = useContext(ApiContext)?.mode === 'demo'
+  const identity = useContext(SessionContext)?.identity?.origin ?? null
+  const instance = useQuery({ queryKey: ['instance-origin'], enabled: !demo && !identity, staleTime: Infinity, gcTime: Infinity, retry: 2,
+    queryFn: async ({ signal }) => {
+      const response = await fetch('/health', { signal, headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error('Couldn’t load this installation’s address.')
+      return ((await response.json()) as { origin?: string }).origin ?? null
+    } })
+  return { ...canonicalOrigin({ identity, instance: instance.data, demo, page: window.location.origin }), error: identity ? null : instance.error, retry: () => void instance.refetch() }
 }
+export function usePublicOrigin(): string | null { return useCanonicalOrigin().origin }
 export function useApi() {
   const api = useContext(ApiContext)
   if (!api) throw new Error('ApiProvider is required')
