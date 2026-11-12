@@ -4,7 +4,8 @@ use anyhow::{Result, anyhow, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use mailgw_core::{
-    session::{Identity, Protocol},
+    imap::Imap,
+    session::{Identity, Protocol, Reply},
     smtp::{Submission, SubmitError, Submitter},
     store::{self, Applied, Change, Entry, Flags, Folder, FolderOp, MailStore, Mode},
 };
@@ -32,6 +33,10 @@ pub struct FolderMeta {
 pub struct Principal {
     #[serde(skip)]
     started: Option<Instant>,
+    /// Served from the 5 s login cache: its folder list can predate a folder another
+    /// connection created since.
+    #[serde(skip)]
+    cached: bool,
     pub kid: String,
     pub inbox: String,
     workspace: String,
@@ -219,6 +224,18 @@ impl Api {
                 .is_ok_and(|v| v.current(&p.inbox, s, Instant::now()))
         })
     }
+    /// One database notification: every change drops the wake cache; an auth change also
+    /// drops cached logins for that inbox. Then the inbox's sessions are woken.
+    pub fn notified(&self, events: &crate::hints::Hints, channel: &str, inbox: &str) {
+        if let Ok(mut m) = self.wakes.lock() {
+            m.clear()
+        }
+        let auth = channel == "bane_protocol_auth";
+        if auth {
+            self.invalidate(Some(inbox))
+        }
+        events.publish(Some(inbox), auth);
+    }
     pub fn invalidate(&self, inbox: Option<&str>) {
         if let Ok(mut c) = self.cache.lock() {
             self.revoked
@@ -253,6 +270,7 @@ impl Api {
         {
             let mut cached = v.clone();
             cached.started = started;
+            cached.cached = true;
             return Ok(cached);
         }
         let mut principal: Principal = serde_json::from_slice(
@@ -341,6 +359,9 @@ pub struct Store {
     selected: Option<String>,
     pub stamp: Instant,
     checkpoint: Option<(u32, u64)>,
+    /// The snapshot may be behind the API (a committed change whose refresh failed, a
+    /// failed SELECT, a cached login): the next command refreshes first.
+    dirty: bool,
     pub deadline: Instant,
 }
 impl Store {
@@ -351,6 +372,7 @@ impl Store {
     }
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
+        let cached = p.cached;
         let (lanes, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
             gates.retain(|_, v| {
@@ -406,6 +428,10 @@ impl Store {
             selected: None,
             stamp: Instant::now(),
             checkpoint: None,
+            // A cached login's folder list may be behind: the first command other than
+            // SELECT/EXAMINE refreshes it, so APPEND or COPY to a folder created since
+            // doesn't answer TRYCREATE.
+            dirty: cached,
             deadline: Instant::now() + Duration::from_secs(5),
         };
         s.install(meta);
@@ -472,6 +498,47 @@ impl Store {
     }
     pub fn refresh(&mut self) -> Result<(), store::Error> {
         self.reload(false)
+    }
+    /// After the internal API committed a change. A failed refresh must not turn the
+    /// committed command into a failure (RFC 3501 6.4.7: a client told NO retries the COPY
+    /// or APPEND that already happened); the snapshot stays as it was and the next command
+    /// refreshes it.
+    fn settle(&mut self) {
+        if self.refresh().is_err() {
+            self.dirty = true
+        }
+    }
+    /// One IMAP command on a logged-in connection. A snapshot marked stale by a change
+    /// hint, or older than 240 s, is refreshed first; SELECT and EXAMINE load their own.
+    pub fn imap(
+        &mut self,
+        core: &mut Imap,
+        bytes: &[u8],
+        identity: &dyn Identity,
+        stale: &mut bool,
+        now: store::Date,
+    ) -> Result<Reply, store::Error> {
+        let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
+            w.eq_ignore_ascii_case(b"SELECT") || w.eq_ignore_ascii_case(b"EXAMINE")
+        });
+        if !selects && (*stale || self.dirty || self.stamp.elapsed() > Duration::from_secs(240)) {
+            self.refresh()?;
+            *stale = false
+        }
+        if selects {
+            *stale = false;
+        }
+        let reply = core.step(bytes, identity, self, now);
+        // A parse, folder or access refusal can bypass Store::change.
+        // No uploaded literal ever belongs to the next command.
+        self.finish_command();
+        Ok(reply)
+    }
+    /// A change hint while idling: reload (possibly from the wake cache) and push the update.
+    pub fn wake(&mut self, core: &mut Imap, stale: &mut bool) -> Result<Reply, store::Error> {
+        self.reload(true)?;
+        *stale = false;
+        Ok(core.update(self))
     }
     pub fn reload(&mut self, wake: bool) -> Result<(), store::Error> {
         let checkpoint = self.checkpoint;
@@ -622,6 +689,7 @@ impl Store {
             }
         }
         self.stamp = Instant::now();
+        self.dirty = false;
         Ok(())
     }
 }
@@ -702,7 +770,11 @@ impl MailStore for Store {
         // RFC SELECT deselects the old mailbox even if the new selection fails.
         self.clear_selection();
         self.selected = Some(path.into());
-        let result = self.refresh().and_then(|()| self.folder(path).map(|_| ()));
+        let refreshed = self.refresh();
+        // The folder list stays whatever the last snapshot said; don't trust it for the
+        // next command (APPEND to a folder created since would answer TRYCREATE).
+        self.dirty |= refreshed.is_err();
+        let result = refreshed.and_then(|()| self.folder(path).map(|_| ()));
         if result.is_err() {
             self.clear_selection();
         }
@@ -781,16 +853,14 @@ impl MailStore for Store {
             FolderOp::Subscribe(b) => ("subscribe", None, Some(b)),
         };
         self.api.json::<Value>(json!({"op":"edit","kid":self.principal.kid,"folder":self.keys.get(p).map_or("",String::as_str),"action":action,"path":path,"sub":sub}))?;
-        self.refresh()
+        self.settle();
+        Ok(())
     }
     fn change(&mut self, p: &str, c: Change<'_>) -> Result<Applied, store::Error> {
         let folder = self.keys.get(p).ok_or(store::Error::Missing)?;
         let mut arg = json!({"op":"mutate","kid":self.principal.kid,"folder":folder,"flags":[],"mode":"add","to":null,"uids":null});
         match c {
             Change::Flags(uids, mode, flags) => {
-                if uids.len() > 1000 {
-                    return Err(store::Error::Limit);
-                }
                 arg["action"] = json!("flags");
                 arg["flags"] = json!(flags);
                 arg["uids"] = json!(uids);
@@ -802,12 +872,21 @@ impl MailStore for Store {
             }
             Change::Expunge(uids) => {
                 arg["action"] = json!("expunge");
-                arg["uids"] = json!(uids)
+                // A plain EXPUNGE (or CLOSE) names every UID this snapshot holds; the API
+                // keeps only the \Deleted ones. Batches then bound each statement, where a
+                // NULL list would expunge a whole folder in one.
+                arg["uids"] = match uids {
+                    Some(u) => json!(u),
+                    None => json!(
+                        self.folder(p)?
+                            .entries
+                            .iter()
+                            .map(|e| e.uid)
+                            .collect::<Vec<_>>()
+                    ),
+                }
             }
             Change::Transfer(uids, to, moving) => {
-                if !moving && uids.len() > 1000 {
-                    return Err(store::Error::Limit);
-                }
                 arg["action"] = json!(if moving { "move" } else { "copy" });
                 arg["uids"] = json!(uids);
                 arg["to"] = json!(self.keys.get(to).ok_or(store::Error::Missing)?);
@@ -886,7 +965,7 @@ impl MailStore for Store {
                     })?;
                     let a: AppliedWire =
                         serde_json::from_value(a).map_err(|_| store::Error::Unavailable)?;
-                    self.refresh()?;
+                    self.settle();
                     return Ok(Applied {
                         pairs: a.pairs,
                         validity: a.validity,
@@ -910,24 +989,54 @@ impl MailStore for Store {
             if all.is_empty() {
                 out.validity = self.folder(p)?.validity;
             }
-            for batch in all.chunks(1000) {
-                self.budget()?;
+            // Large sets go in batches of BATCH UIDs inside this one command: each batch is
+            // one atomic API call with its own statement, its own 5 s budget and its own COPY
+            // replay ticket (derived from the command's, so a retry replays the batches that
+            // committed). Other connections get a turn between batches.
+            let ticket = arg.get("ticket").cloned();
+            for (i, batch) in all.chunks(BATCH).enumerate() {
+                if i > 0 {
+                    std::thread::yield_now();
+                }
+                self.deadline = Instant::now() + Duration::from_secs(5);
                 arg["uids"] = Value::Array(batch.to_vec());
-                let a: AppliedWire = self.api.json(arg.clone())?;
-                out.validity = a.validity;
-                out.pairs.extend(a.pairs)
+                if let Some(t) = &ticket {
+                    arg["ticket"] = batch_ticket(t, i);
+                }
+                match self.api.json::<AppliedWire>(arg.clone()) {
+                    Ok(a) => {
+                        out.validity = a.validity;
+                        out.pairs.extend(a.pairs)
+                    }
+                    // Nothing committed yet (that we know of): the plain error.
+                    Err(e) if i == 0 => return Err(e),
+                    // Earlier batches committed: show them, then fail the rest.
+                    Err(_) => {
+                        self.settle();
+                        return Err(store::Error::Partial);
+                    }
+                }
             }
         } else {
             let a: AppliedWire = self.api.json(arg)?;
             out.validity = a.validity;
             out.pairs = a.pairs
         }
-        self.refresh()?;
+        self.settle();
         if arg_is_copy {
             self.pending_copy = None;
         }
         Ok(out)
     }
+}
+/// UIDs per internal mutation call (the API's per-statement bound for COPY receipts too).
+const BATCH: usize = 1000;
+/// The replay ticket of batch `i`: the command's issue time and a nonce derived from the
+/// command's nonce, so each batch has its own receipt and a retry finds the same ones.
+fn batch_ticket(t: &Value, i: usize) -> Value {
+    let nonce = t["nonce"].as_str().unwrap_or_default();
+    let derived = Sha256::digest(format!("{nonce}:{i}").as_bytes());
+    json!({"nonce": hex::encode(&derived[..16]), "issued": t["issued"]})
 }
 impl Submitter for Store {
     fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
@@ -981,14 +1090,7 @@ pub async fn listen(
         while let Some(msg) = futures_util::future::poll_fn(|cx| connection.poll_message(cx)).await
         {
             if let tokio_postgres::AsyncMessage::Notification(n) = msg? {
-                if let Ok(mut m) = api.wakes.lock() {
-                    m.clear()
-                }
-                let auth = n.channel() == "bane_protocol_auth";
-                if auth {
-                    api.invalidate(Some(n.payload()))
-                }
-                events.publish(Some(n.payload()), auth);
+                api.notified(events, n.channel(), n.payload())
             }
         }
         Err::<(), _>(anyhow!("listener ended"))
@@ -1014,6 +1116,7 @@ mod auth_tests {
                     addresses: vec![],
                     folders: vec![],
                     started: None,
+                    cached: false,
                 },
             )
             .unwrap()
@@ -1079,5 +1182,368 @@ mod auth_tests {
         assert!(r.current("two", t, after));
         r.record(None, after);
         assert!(!r.current("two", t, after));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mailgw_core::store::{Change, MailStore};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    type Mutation = (String, Vec<u64>, Option<String>);
+    /// A scripted internal API: INBOX holds UID 1; snapshots fail while `down` is set.
+    struct Script {
+        down: AtomicBool,
+        snapshots: AtomicUsize,
+        /// Every mutate call: (action, UIDs, ticket nonce).
+        mutations: Mutex<Vec<Mutation>>,
+        /// Fail the mutate call with this 1-based index (before committing).
+        fail_call: AtomicUsize,
+    }
+    fn reply(script: &Script, body: &[u8]) -> (u16, String) {
+        let p: Value = serde_json::from_slice(body).unwrap_or_default();
+        let meta = |next: u32, highest: u64| {
+            json!([{"key":"inbox","path":"INBOX","validity":1,"next":next,"highest":highest,"subscribed":true,"total":1,"unseen":1},
+                   {"key":"archive","path":"Archive","validity":4,"next":2,"highest":3,"subscribed":true,"total":1,"unseen":1}])
+        };
+        match p["op"].as_str() {
+            // The login's folder list predates Archive; snapshots list it.
+            Some("login") => (
+                200,
+                json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","addresses":[],
+                       "folders":[meta(2, 2)[0].clone()]})
+                .to_string(),
+            ),
+            Some("snapshot") => {
+                script.snapshots.fetch_add(1, Ordering::SeqCst);
+                if script.down.load(Ordering::SeqCst) {
+                    return (503, "{}".into());
+                }
+                let entries = if p["path"] == "INBOX" && p["since"] == 0 {
+                    json!([{"uid":1,"modseq":2,"date":"2026-01-01T00:00:00+00:00","size":5,"flags":[],"handle":"h"}])
+                } else {
+                    json!([])
+                };
+                let body = json!({"folders": meta(2, 2), "entries": entries, "gone": [], "floor": 0, "more": null});
+                (200, body.to_string())
+            }
+            Some("mutate") => {
+                let uids: Vec<u64> = p["uids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_u64).collect())
+                    .unwrap_or_default();
+                let mut log = script.mutations.lock().unwrap();
+                log.push((
+                    p["action"].as_str().unwrap_or_default().to_owned(),
+                    uids.clone(),
+                    p["ticket"]["nonce"].as_str().map(str::to_owned),
+                ));
+                if log.len() == script.fail_call.load(Ordering::SeqCst) {
+                    return (503, "{}".into());
+                }
+                let pairs: Vec<[u64; 2]> = if p["action"] == "copy" {
+                    uids.iter().map(|u| [*u, *u]).collect()
+                } else {
+                    vec![]
+                };
+                (200, json!({"pairs": pairs, "validity": 4}).to_string())
+            }
+            _ => (422, "{}".into()),
+        }
+    }
+    async fn serve(l: tokio::net::TcpListener, script: Arc<Script>) {
+        while let Ok((mut s, _)) = l.accept().await {
+            let script = script.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![];
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let Ok(n) = s.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() < end + 4 + len {
+                        continue;
+                    }
+                    let body: Vec<u8> = buf.drain(..end + 4 + len).skip(end + 4).collect();
+                    let (status, text) = reply(&script, &body);
+                    let out = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{text}",
+                        text.len()
+                    );
+                    if s.write_all(out.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    }
+    fn principal() -> Principal {
+        serde_json::from_value(json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","addresses":["x@example.invalid"],
+            "folders":[{"key":"inbox","path":"INBOX","validity":1,"next":2,"highest":2,"subscribed":true,"total":1,"unseen":1},
+                       {"key":"archive","path":"Archive","validity":4,"next":1,"highest":1,"subscribed":true,"total":0,"unseen":0}]}))
+        .unwrap()
+    }
+
+    /// Found by gateway/tear (witness: deliver, hint, A noop, fail-snapshot, A copy 1 Archive):
+    /// the API committed the COPY, the refresh after it failed, and the client was told NO.
+    #[test]
+    fn a_committed_change_survives_a_failed_refresh() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
+        });
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        store.select("INBOX").unwrap();
+        assert_eq!(store.folder("INBOX").unwrap().entries.len(), 1);
+
+        script.down.store(true, Ordering::SeqCst);
+        let applied = store
+            .change("INBOX", Change::Transfer(&[1], "Archive", false))
+            .expect("a committed COPY must not report failure");
+        assert_eq!(applied.pairs, vec![(1, 1)]);
+        assert_eq!(applied.validity, 4);
+
+        // The next command refreshes the snapshot it could not refresh before.
+        script.down.store(false, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let mut stale = false;
+        let r = store
+            .imap(
+                &mut core,
+                b"a NOOP\r\n",
+                &account,
+                &mut stale,
+                store::Date::default(),
+            )
+            .unwrap();
+        assert!(r.bytes.ends_with(b"a OK Completed\r\n"));
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
+        assert_eq!(store.folder("Archive").unwrap().next, 2);
+    }
+
+    /// Found by gateway/tear (witness: B idle, fail-snapshot, hint, B wake, A create Work,
+    /// fail-snapshot, B reconnect, B append Work). A login served from the 5 s cache carries
+    /// the folder list of an earlier login, and a failed SELECT keeps whatever list the
+    /// store had: an APPEND to a folder created since answered NO [TRYCREATE]. Now the next
+    /// command other than SELECT refreshes first.
+    #[test]
+    fn a_cached_login_or_failed_select_refreshes_before_the_next_command() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
+        });
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        api.online.store(true, Ordering::Release);
+        let proto = mailgw_core::session::Protocol::Imap;
+        assert!(!api.login("u@example.invalid", "pw", proto).unwrap().cached);
+        let p = api.login("u@example.invalid", "pw", proto).unwrap();
+        assert!(p.cached);
+        let mut store = Store::new(api, p).unwrap();
+        assert!(store.folder("Archive").is_err());
+
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let mut stale = false;
+        let mut run = |store: &mut Store, line: &[u8]| {
+            let r = store
+                .imap(
+                    &mut core,
+                    line,
+                    &account,
+                    &mut stale,
+                    store::Date::default(),
+                )
+                .unwrap();
+            String::from_utf8_lossy(&r.bytes).into_owned()
+        };
+        let text = run(&mut store, b"a STATUS Archive (MESSAGES)\r\n");
+        assert!(text.contains("* STATUS \"Archive\" (MESSAGES 1)"), "{text}");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), 1);
+        assert_eq!(run(&mut store, b"b NOOP\r\n"), "b OK Completed\r\n");
+        assert_eq!(
+            script.snapshots.load(Ordering::SeqCst),
+            1,
+            "fresh: no refresh"
+        );
+
+        // A failed SELECT: the next command refreshes first.
+        script.down.store(true, Ordering::SeqCst);
+        assert!(run(&mut store, b"c SELECT INBOX\r\n").starts_with("c NO"));
+        script.down.store(false, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        assert_eq!(run(&mut store, b"d NOOP\r\n"), "d OK Completed\r\n");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
+    }
+
+    /// Large STORE/COPY/EXPUNGE sets run in 1,000-UID batches inside one command, each its own
+    /// call (a refused "STORE 1:*" broke "mark all read" in real clients). A batch failing
+    /// after others committed answers Partial; a COPY retry sends the same per-batch tickets,
+    /// so the API replays the batches it already committed.
+    #[test]
+    fn large_sets_run_in_batches_and_a_copy_retry_replays_them() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
+        });
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        store.select("INBOX").unwrap();
+        let uids: Vec<u32> = (1..=2500).collect();
+        let sizes = |from: usize| -> Vec<usize> {
+            script.mutations.lock().unwrap()[from..]
+                .iter()
+                .map(|m| m.1.len())
+                .collect()
+        };
+
+        let flags = mailgw_core::store::Flags::from(["\\Seen".to_owned()]);
+        store
+            .change(
+                "INBOX",
+                Change::Flags(&uids, mailgw_core::store::Mode::Add, flags.clone()),
+            )
+            .unwrap();
+        assert_eq!(sizes(0), [1000, 1000, 500]);
+
+        // The second batch fails: the first stays committed, the snapshot is refreshed.
+        script.fail_call.store(5, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        let r = store.change(
+            "INBOX",
+            Change::Flags(&uids, mailgw_core::store::Mode::Add, flags),
+        );
+        assert!(matches!(r, Err(store::Error::Partial)));
+        assert_eq!(sizes(3), [1000, 1000]);
+        assert!(script.snapshots.load(Ordering::SeqCst) > before);
+
+        // COPY: batch two fails; the retry carries the same three batch tickets.
+        script.mutations.lock().unwrap().clear();
+        script.fail_call.store(2, Ordering::SeqCst);
+        let r = store.change("INBOX", Change::Transfer(&uids, "Archive", false));
+        assert!(matches!(r, Err(store::Error::Partial)));
+        script.fail_call.store(0, Ordering::SeqCst);
+        let a = store
+            .change("INBOX", Change::Transfer(&uids, "Archive", false))
+            .unwrap();
+        assert_eq!(a.pairs.len(), 2500);
+        let log = script.mutations.lock().unwrap().clone();
+        let nonces: Vec<_> = log.iter().map(|m| m.2.clone().unwrap()).collect();
+        assert_eq!(
+            log.iter().map(|m| m.1.len()).collect::<Vec<_>>(),
+            [1000, 1000, 1000, 1000, 500]
+        );
+        assert_eq!(
+            nonces[..2],
+            nonces[2..4],
+            "a retry must reuse the batch tickets"
+        );
+        assert_ne!(nonces[2], nonces[3], "each batch has its own receipt");
+        // A new COPY after success gets a new ticket.
+        store
+            .change("INBOX", Change::Transfer(&uids[..1], "Archive", false))
+            .unwrap();
+        assert_ne!(
+            script.mutations.lock().unwrap().last().unwrap().2.as_ref(),
+            Some(&nonces[0])
+        );
+
+        // A plain EXPUNGE names the snapshot's UIDs instead of a NULL (whole folder) list.
+        script.mutations.lock().unwrap().clear();
+        store.change("INBOX", Change::Expunge(None)).unwrap();
+        assert_eq!(script.mutations.lock().unwrap()[0].1, [1]);
+    }
+
+    /// Found by gateway/tear (witness with one credential: B append Work, A append Work,
+    /// A append INBOX), and fixed upstream in 20222d4 (finish_command): a refused APPEND kept
+    /// its spool and upload reservation, so the credential's next APPEND could not get one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_append_releases_its_upload() {
+        let api = Arc::new(Api::new("http://127.0.0.1:9".into(), "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        let global = Arc::new(tokio::sync::Semaphore::new(8));
+        let lanes = store.lanes.pools(|s| &s.uploads);
+        let free = lanes.each_ref().map(|l| l.available_permits());
+        let reservation =
+            crate::admission::Reservation::take(global.clone(), Some(lanes.clone()), 1)
+                .await
+                .unwrap();
+        store.upload = Some(crate::upload::Upload::new(5, reservation).unwrap());
+        assert_eq!(lanes[0].available_permits(), free[0] - 1);
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let r = tokio::task::block_in_place(|| {
+            store.imap(
+                &mut core,
+                b"a APPEND Nowhere {0+}\r\n\r\n",
+                &account,
+                &mut false,
+                store::Date::default(),
+            )
+        })
+        .unwrap();
+        assert!(r.bytes.starts_with(b"a NO [TRYCREATE]"));
+        assert!(store.upload.is_none());
+        assert_eq!(lanes.each_ref().map(|l| l.available_permits()), free);
+        assert_eq!(global.available_permits(), 8);
     }
 }
