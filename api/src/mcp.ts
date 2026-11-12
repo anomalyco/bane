@@ -87,7 +87,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Ac
   // the operation's REST permission (not its HTTP method) and dashboard-only administration.
   const authorized = (op: McpOperation) => 'domains' in principal && !op.dashboardOnly && (!op.mailbox || actorMailAccess(principal) !== null)
     && (!op.receivingConsent || !principal.grantId || !!principal.receivingConsent) && !(op.ownerOnly && principal.role === 'member')
-    && (principal.permissions.includes('manage') || principal.permissions.includes(op.permission));
+    && (op.permission === 'any' || principal.permissions.includes('manage') || principal.permissions.includes(op.permission));
   const operations = new Map([...catalog].filter(([, op]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : authorized(op)));
   const params = new URL(request.url).searchParams;
   const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());

@@ -49,6 +49,14 @@ const WITNESSES: &[&[&str]] = &[
     // Receiving consent without manage listed mailbox administration REST refuses (recheck of #51).
     &["mint grant3", "receiving grant3", "probe grant3 code", "probe grant3 plain"],
     &["promote member", "mint grant2", "receiving grant2", "probe grant2 code", "probe grant2 plain"],
+    // Every other grant shape (recheck 2 of #51: a send-only grant lost getCurrentIdentity):
+    // listings in both catalogs, a call, receiving consent, and the REST audit.
+    &["mint g-s", "probe g-s code", "probe g-s plain", "probe g-s call", "receiving g-s", "probe g-s code", "probe g-s audit"],
+    &["mint g-m", "probe g-m code", "probe g-m plain", "probe g-m call", "receiving g-m", "probe g-m code", "probe g-m audit"],
+    &["mint g-rm", "probe g-rm code", "probe g-rm plain", "probe g-rm call", "receiving g-rm", "probe g-rm code", "probe g-rm audit"],
+    &["mint g-sm", "probe g-sm code", "probe g-sm plain", "probe g-sm call", "receiving g-sm", "probe g-sm code", "probe g-sm audit"],
+    &["mint m-r", "probe m-r code", "probe m-r plain", "probe m-r call", "receiving m-r", "probe m-r code", "probe m-r audit"],
+    &["mint m-s", "probe m-s code", "probe m-s plain", "probe m-s call", "promote member", "mint g-s", "probe m-s code", "probe m-s audit"],
     // The REST table checked against real REST, for every GET, once per actor type.
     &["mint grant", "probe grant audit", "receiving grant", "probe grant audit"],
     &["mint grant3", "probe grant3 audit", "receiving grant3", "probe grant3 audit"],

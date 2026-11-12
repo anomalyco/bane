@@ -2652,6 +2652,20 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // tear witness (recheck 2 of #51): mint g-s; probe g-s code|plain -> getCurrentIdentity missing; probe g-s call -> TOOL_UNAVAILABLE.
+  test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
+      const {token}=await oauthGrant(t,db,'bane:send offline_access',request);
+      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
+      const code=new Set((ok(await rpc(true,'tools/list')).result.tools as Json[]).map(x=>x.name as string));
+      const plain=new Set((ok(await rpc(false,'tools/list')).result.tools as Json[]).flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`))));
+      for(const ops of [code,plain]){assert.ok(ops.has('getCurrentIdentity'));assert.ok(ops.has('sendEmail'));assert.ok(!ops.has('listContacts'),'read-level reads need read');}
+      const me=ok(await rpc(true,'tools/call',{name:'getCurrentIdentity',arguments:{}})).result;
+      assert.equal(me.isError,false,redact(me));assert.equal(me._meta.status,200);assert.deepEqual(me.structuredContent.permissions,['send']);
+    });
+  });
+
   // tear witness (7 steps): mint grant; A begin apikey grant k1; A step; A step; revoke grant; A step; A step -> 500 INTERNAL_ERROR.
   test('a grant-derived key create racing the approval revoke is refused as unauthorized, not a 500',async t=>{
     await simulatedSesFixture(t,async({db,request})=>{

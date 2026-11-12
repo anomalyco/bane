@@ -22,8 +22,9 @@ export interface McpOperation {
   readonly inbox?: 'read' | 'create' | 'modify' | 'send';
   readonly untrustedContent?: boolean;
   readonly toolset: Toolset;
-  /** The permission REST requires of a workspace credential (manage implies every permission). */
-  readonly permission: 'read' | 'send' | 'manage';
+  /** The permission REST requires of a workspace credential (manage implies every permission;
+   *  any: no permission check, every authenticated actor). */
+  readonly permission: 'any' | 'read' | 'send' | 'manage';
   /** REST refuses workspace members (owner/admin areas and receiving administration). */
   readonly ownerOnly: boolean;
   /** Under mailboxAuth: a workspace credential needs actorMailAccess (manage). */
@@ -51,6 +52,8 @@ const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
 const READ_LEVEL_WRITES = new Set(['createAgentToken']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'revealWebhookSecret']);
+// No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
+const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
 const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
@@ -307,7 +310,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       freeze(tool);
       // The path guards are REST's own predicates (core.ts); mailbox paths need manage of a workspace credential.
       const mailbox = mailboxRoute(path);
-      const permission = mailbox || MANAGE_LEVEL_READS.has(name) ? 'manage' : SEND_LEVEL.has(name) ? 'send' : READ_LEVEL_WRITES.has(name) ? 'read' : write ? 'manage' : 'read';
+      const permission = ANY_AUTHENTICATED.has(name) ? 'any' : mailbox || MANAGE_LEVEL_READS.has(name) ? 'manage' : SEND_LEVEL.has(name) ? 'send' : READ_LEVEL_WRITES.has(name) ? 'read' : write ? 'manage' : 'read';
       const ownerOnly = receiving || ownerRoute(method, path);
       operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox, receivingConsent: receivingConsentRoute(path), dashboardOnly: DASHBOARD_ONLY.has(name), validate: validator(input), validateOutput }));
     }
