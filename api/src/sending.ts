@@ -951,6 +951,7 @@ async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInpu
   try { return await idempotent(c,a,{...input,size:bytes.length,checksum},async db=>AttachmentInfo.parse(await upload.finish(db)),undefined,upload.put); }
   finally { await upload.refund(); }
 }
+const UPLOAD_PUT_MS=10*60_000;
 function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:ReturnType<typeof validateAttachment>,bytes:Uint8Array,checksum:string,uploadedBy?:string){
   const attachmentId=id('attachment'),storageKey=`${a.workspaceId}/attachments/${attachmentId}`;
   let reserved=false,published=false;
@@ -964,7 +965,8 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
         await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
       });
       reserved=true;
-      await runtime.storage.put(storageKey,bytes,input.contentType);
+      // Bounded far inside the reservation's hour (and the tombstone's day, 158): a put cannot land after both.
+      await runtime.storage.put(storageKey,bytes,input.contentType,AbortSignal.timeout(UPLOAD_PUT_MS));
     },
     async finish(db:DbExecutor){
       if(!(await take(db)).rowCount) throw new ApiError(503,'UPLOAD_EXPIRED','Upload reservation expired; retry the upload.',undefined,true);
@@ -977,7 +979,8 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
       // Never delete a published object: once finish took the reservation, the attachment row
       // may have committed even if its response was lost. Any other ending deletes the object,
       // also when the sweeper already took an expired reservation: its deletion can run before
-      // a slow put lands. The sweeper recovers crashes and DB outages.
+      // a slow put lands. If this never runs (a crash, a DB outage), the reservation's tombstone
+      // (158) queues the deletion a day later.
       await runtime.db.transaction(async db=>{if((await take(db)).rowCount || !published) await enqueue(db,{workspaceId:a.workspaceId,type:'maintenance.deleteAttachment',payload:{key:storageKey}});}).catch(()=>log('warn',{code:'UPLOAD_RESERVATION_CLEANUP_DEFERRED'}));
     },
   };

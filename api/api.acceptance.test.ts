@@ -9168,6 +9168,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query('SELECT FROM sending_attachments WHERE workspace_id=$1',[wid])).rowCount,0);
     });
   });
+  // Review of #57, P2 (tear witness, 8 steps: U1 upload, expire, sweep, purge, U1 crash, day, sweep, purge -> a late
+  // put whose Worker died after the sweeper's deletion ran left its object with no durable record).
+  test('attachment upload: an unpublished object keeps a durable cleanup obligation even if its Worker dies',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js'),{cleanup}=await import('./src/maintenance.js');
+      const wid=runtime.config.workspaceId,puts:{key:string;signal:unknown}[]=[];let landed=false;
+      // The first put hangs (its Worker dies before finish and refund); later ones succeed.
+      t.mock.method(runtime.storage,'put',(key:string,_b:Uint8Array,_c:string,signal:unknown)=>{puts.push({key,signal});return puts.length===1?new Promise<void>(()=>{landed=true;}):Promise.resolve();});
+      void storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'late.txt',contentType:'text/plain'},Buffer.from('late')).catch(()=>{});
+      for(let i=0;i<400&&!landed;i++)await new Promise(r=>setTimeout(r,5));
+      assert.ok(landed);const [late]=puts;
+      assert.ok(late!.signal instanceof AbortSignal && !late!.signal.aborted,'the put is bounded by an abort signal');
+      // The hourly sweeper takes the expired reservation and its deletion runs before the put lands.
+      await db.query("UPDATE sending_upload_reservations SET expires_at=now()-interval '1 second' WHERE storage_key=$1",[late!.key]);
+      await cleanup(runtime);
+      await db.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND payload->>'key'=$2",[wid,late!.key]);
+      const tomb=async(key:string)=>(await db.query("SELECT delete_after>now()+interval '23 hours' AS later FROM sending_upload_tombstones WHERE storage_key=$1",[key])).rows;
+      assert.deepEqual(await tomb(late!.key),[{later:true}],'the reservation left a tombstone due a day later');
+      // A published upload leaves none, and a stale tombstone for it never deletes its object.
+      const published=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
+      assert.deepEqual(await tomb(puts[1]!.key),[]);
+      await db.query("INSERT INTO sending_upload_tombstones VALUES($1,$2,$3,now()-interval '1 second')",[published.id,wid,puts[1]!.key]);
+      await db.query("UPDATE sending_upload_tombstones SET delete_after=now()-interval '1 second' WHERE storage_key=$1",[late!.key]);
+      await cleanup(runtime);
+      const deletions=async(key:string)=>(await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='maintenance.deleteAttachment' AND status='pending' AND payload->>'key'=$2",[wid,key])).rowCount;
+      assert.equal(await deletions(late!.key),1,'the late object is queued for deletion again');
+      assert.equal(await deletions(puts[1]!.key),0,'a published object is never deleted');
+      assert.equal((await db.query('SELECT FROM sending_upload_tombstones WHERE workspace_id=$1',[wid])).rowCount,0);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');

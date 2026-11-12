@@ -24,7 +24,7 @@ export function s3Storage(env: Record<string, string | undefined>): Storage {
     client: new s3.S3Client({ region: env.S3_REGION ?? 'us-east-1', endpoint: env.S3_ENDPOINT, forcePathStyle: Boolean(env.S3_ENDPOINT), credentials: { accessKeyId, secretAccessKey }, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }), maxAttempts: 2 }),
   })).catch(error => { clientPromise = undefined; throw error; });
   return {
-    async put(key, body, contentType) { const { client, s3 } = await getClient(); await client.send(new s3.PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType })); },
+    async put(key, body, contentType, signal) { const { client, s3 } = await getClient(); await client.send(new s3.PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }), { abortSignal: signal }); },
     async get(key) {
       try {
         const { client, s3 } = await getClient();

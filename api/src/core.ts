@@ -24,7 +24,8 @@ export interface Actor {
 export interface Storage {
   // Identity for reusable immutable bytes only, never pending request-bound I/O.
   readonly cacheScope?: object;
-  put(key: string, body: Uint8Array, contentType: string): Promise<void>;
+  /** `signal` bounds the put where the backend supports it (S3); a Worker invocation bounds an R2 binding put. */
+  put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
   delete(key: string): Promise<void>;
 }
