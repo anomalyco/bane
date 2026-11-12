@@ -8447,16 +8447,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         SELECT $1||n,$1,$2,'key','a@example.org','["b@example.org"]','[]','[]','fixture','{}',false,'delivered',now()-(n%24)*interval '1 hour' FROM generate_series($3::int,$4::int)n`,[wid,REGION,start,Math.min(start+19999,total)]);
       const allowance=hostedAllowance(runtime.config,wid,1);
       assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total);
-      // Production plans read the (workspace_id,hour) key. On a tiny analyzed table the planner may
-      // seq-scan instead and count other suites' committed rows, so pin the plan to the index path.
+      // Production plans read the (workspace_id,hour) key. On a tiny analyzed table the planner may seq-scan, or
+      // hash-join a whole-index scan bounded only by hour (CI, 3f5137c), and count other suites' committed rows.
+      // Another workspace's busy day in the same hours makes such a plan both costly and visible: whatever the plan
+      // text (s.id, a constant, ANY, $n, another index), the scans may read only this workspace's 24 rows.
+      await db.query(`INSERT INTO hosted_usage_hourly(workspace_id,hour,recipients) SELECT $1||'-other-'||w,date_trunc('hour',now(),'UTC')-h*interval '1 hour',1
+        FROM generate_series(1,1000)w,generate_series(0,23)h`,[wid]);
       await db.query('SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off');
       const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM hosted_allowance_read(${wid},1,0,100,1000,10000,10)`)).rows[0]['QUERY PLAN'] as Json[];
       await db.query('RESET enable_seqscan; RESET enable_bitmapscan');
       const nodes=(p:Json):Json[]=>[p,...(p.Plans??[]).flatMap(nodes)]; const all=nodes(plan[0].Plan);
       assert.ok(!all.some(n=>['sending_emails','sending_email_events'].includes(n['Relation Name'])));
-      const usage=all.filter(n=>n['Relation Name']==='hosted_usage_hourly');
-      assert.equal(usage.length,1); assert.match(usage[0]['Index Cond']??'',/workspace_id = /);
-      assert.equal(usage[0]['Actual Rows']*usage[0]['Actual Loops'],24);
+      const usage=all.filter(n=>n['Relation Name']==='hosted_usage_hourly'), shape=JSON.stringify(usage.map(n=>[n['Node Type'],n['Index Name'],n['Index Cond'],n['Filter']]));
+      assert.ok(usage.length && usage.every(n=>/^Index (Only )?Scan$/.test(n['Node Type'])),shape);
+      const read=usage.reduce((sum,n)=>sum+(n['Actual Rows']+(n['Rows Removed by Filter']??0)+(n['Rows Removed by Index Recheck']??0))*n['Actual Loops'],0);
+      assert.equal(read,24,`Read ${read} hourly rows: ${shape}`);
       assert.ok(plan[0]['Execution Time']<100,`Allowance took ${plan[0]['Execution Time']}ms for ${total} messages.`);
       t.diagnostic(`Allowance on ${total} envelopes: 24 hourly rows, ${plan[0]['Execution Time']} ms.`);
       await db.query(`UPDATE sending_emails SET status='rejected' WHERE id=$1`,[wid+'1']);
@@ -9848,6 +9853,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(readd,w,'The re-add is idempotent and returns the existing domain.');
     const route=await send!.then(r=>r,(e:Json)=>String(e?.cause?.code??e?.code??e));
     assert.deepEqual(route,{region,binding:{domain:w,connection:w,generation:1,account:'111122223333',topic:null}});
+  });
+  // Dev E2E, Nov 12 14:38 (req_a86da923…, 40P01 in reserve_placed_claim): the same cycle through a mailbox send
+  // (thread, reply, forward, SMTP submission). sendFromMailbox checked its From through regional_sender, which
+  // locked the claim, and reached admission's settings lock only afterwards, behind a re-add holding that row.
+  test('mailbox send: the sender check waits on the settings row before it locks the claim a domain re-add needs',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
+    const g=await fixtureDatabase(t),w=unique('mdead'),host=w+'.invalid',region='us-fixture-'+w.slice(-8),account=String(Date.now()).slice(-12).padStart(12,'7');
+    cleanup(t,async()=>{
+      await g.query('DELETE FROM provider_pool_regions WHERE region=$1',[region]);
+      for (const table of ['mailbox_addresses','mailboxes','mailbox_domains','operation_domains','ses_installation_settings','job_schedule']) await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,inbound_bucket) VALUES($1,$2,'ready','fixture-mail')",[region,account]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')",[w,region,account]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    await g.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,receiving_host,region,status,enabled_at) VALUES($1,$1,$1,$2,$2,$3,'active',now())",[w,host,region]);
+    const mailbox=await createMailbox(runtime.db,{workspaceId:w},{domainId:w,domainName:host,address:`reply@${host}`,origin:'api'});
+    const actor={workspaceId:w,permissions:['send'],domains:[],keyId:'fixture-key'} as import('./src/core.js').Actor;
+    // Keep nothing the send writes: the runner must never dispatch this fixture's mail.
+    const rollback=new Error('Roll back the fixture send');
+    await g.query('BEGIN');
+    let send:Promise<unknown>|undefined,readd:string|undefined,queued:string|undefined;
+    try {
+      await g.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR NO KEY UPDATE',[w]);
+      send=runtime.db.transaction(async tx=>{queued=(await sendFromMailbox(runtime,tx,{mailbox,actor,scope:{workspaceId:w},from:mailbox.address,
+        to:['reader@example.net'],cc:[],bcc:[],replyTo:[],subject:'Lock order',text:'Synthetic.',attachments:[],inReplyTo:null,references:[],headers:[]})).message.status;throw rollback;});
+      send.catch(()=>{});
+      for(let i=0;i<400&&!(await g.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;i++)await new Promise(r=>setTimeout(r,5));
+      // Before the fix the waiting send already held the claim FOR SHARE: this re-add then hit 40P01 after deadlock_timeout.
+      const started=Date.now();
+      readd=(await g.query('SELECT id,error_code FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')])).rows[0].id;
+      assert.ok(Date.now()-started<500,'The re-add never waits on the send.');
+      await g.query('COMMIT');
+    } finally { await g.query('ROLLBACK'); }
+    assert.equal(readd,w,'The re-add is idempotent and returns the existing domain.');
+    const outcome=await send!.then(()=>'committed',(e:Json)=>e===rollback ? queued : String(e?.cause?.code??e?.code??e));
+    assert.equal(outcome,'queued','The send continues once the re-add commits.');
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
