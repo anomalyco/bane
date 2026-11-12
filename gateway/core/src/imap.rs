@@ -104,6 +104,8 @@ pub struct Imap {
     selected: Option<Selected>,
     idle: Option<String>,
     sasl: Option<String>,
+    /// A BYE found while a command ran; sent after that command's tagged response.
+    bye: Option<Vec<u8>>,
 }
 impl Imap {
     pub fn new(tls: bool) -> Self {
@@ -113,6 +115,7 @@ impl Imap {
             selected: None,
             idle: None,
             sasl: None,
+            bye: None,
         }
     }
     pub fn idling(&self) -> bool {
@@ -139,6 +142,18 @@ impl Imap {
         });
         r.action = if ok { Action::Login } else { Action::Failure };
         r
+    }
+    /// Add an update to a command's reply. If it ends the session (the selected folder
+    /// vanished while the command ran, which a refreshed Remote snapshot can reveal), the
+    /// command still completes and the BYE follows its tagged response, then the connection
+    /// closes: no tagged response after BYE, no open connection after it (RFC 3501 7.1.5).
+    fn merge(&mut self, store: &dyn MailStore, r: &mut Reply) {
+        let u = self.update(store);
+        if u.action == Action::Close {
+            self.bye = Some(u.bytes)
+        } else {
+            r.bytes.extend(u.bytes)
+        }
     }
     pub fn update(&mut self, store: &dyn MailStore) -> Reply {
         let mut r = Reply::default();
@@ -307,6 +322,10 @@ impl Imap {
                     )),
                     Err(e) => r.line(format!("{t} NO {e}")),
                 }
+                if let Some(bye) = self.bye.take() {
+                    r.bytes.extend(bye);
+                    r.action = Action::Close;
+                }
             }
         }
         r
@@ -454,7 +473,7 @@ impl Imap {
                     },
                 )?;
                 code = format!("[APPENDUID {} {}]", a.validity, a.pairs[0].1);
-                r.bytes.extend(self.update(s).bytes)
+                self.merge(s, r)
             }
             _ => {
                 let sel = self.selected.as_mut().ok_or(Error::Denied)?;
@@ -469,7 +488,7 @@ impl Imap {
                         }
                         self.selected = None
                     }
-                    C::Check => r.bytes.extend(self.update(s).bytes),
+                    C::Check => self.merge(s, r),
                     C::Fetch {
                         sequence_set,
                         macro_or_item_names,
@@ -815,7 +834,7 @@ impl Imap {
                                 code.clear()
                             }
                         }
-                        r.bytes.extend(self.update(s).bytes)
+                        self.merge(s, r)
                     }
                     C::Expunge | C::ExpungeUid { .. } => {
                         write()?;
@@ -825,7 +844,7 @@ impl Imap {
                             None
                         };
                         s.change(&p, Change::Expunge(uids.as_deref()))?;
-                        r.bytes.extend(self.update(s).bytes)
+                        self.merge(s, r)
                     }
                     _ => return Err(Error::Denied),
                 }
@@ -883,4 +902,65 @@ fn wildcard(pat: &[u8], name: &[u8]) -> bool {
         prev = next
     }
     prev[name.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Account;
+    use crate::store::{Applied, Memory};
+
+    /// A store whose snapshot loses the selected folder during a change, the way a Remote
+    /// refresh reveals that another session deleted it.
+    struct Vanishing(Memory, bool);
+    impl MailStore for Vanishing {
+        fn folders(&self) -> Vec<String> {
+            self.0.folders()
+        }
+        fn folder(&self, path: &str) -> Result<&Folder, Error> {
+            if self.1 && path == "Work" {
+                return Err(Error::Missing);
+            }
+            self.0.folder(path)
+        }
+        fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error> {
+            self.0.edit_folder(path, op)
+        }
+        fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
+            let r = self.0.change(path, change);
+            self.1 = true;
+            r
+        }
+    }
+
+    /// Found by gateway/tear on the Remote store (witness: B create Work, A select Work,
+    /// B delete Work, A copy 1 Archive): the COPY's update said BYE, then the command sent a
+    /// tagged OK and the connection stayed open.
+    #[test]
+    fn bye_found_during_a_command_follows_its_completion_and_closes() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Vanishing(Memory::default(), false);
+        store.0.edit_folder("Work", FolderOp::Create).unwrap();
+        let now = Date::default();
+        for cmd in ["COPY 1 INBOX", "MOVE 1 INBOX", "EXPUNGE", "UID EXPUNGE 1:*"] {
+            store.1 = false;
+            let mut imap = Imap::new(true);
+            imap.authenticated = true;
+            assert!(
+                imap.step(b"a SELECT Work\r\n", &account, &mut store, now)
+                    .bytes
+                    .ends_with(b"a OK [READ-WRITE] Completed\r\n")
+            );
+            let r = imap.step(format!("b {cmd}\r\n").as_bytes(), &account, &mut store, now);
+            let text = String::from_utf8_lossy(&r.bytes);
+            let ok = text.find("b OK").unwrap_or(usize::MAX);
+            let bye = text.find("* BYE").unwrap_or(0);
+            assert!(ok < bye, "{cmd}: {text}");
+            assert!(
+                text.ends_with("Selected mailbox no longer exists\r\n"),
+                "{cmd}: {text}"
+            );
+            assert!(r.action == Action::Close, "{cmd}");
+        }
+    }
 }
