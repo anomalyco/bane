@@ -87,7 +87,7 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared' };
+export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared'; mac?: string };
 export interface Runtime {
   mailR2?: { bucket: R2Bucket; name: string; write: boolean };
   db: Database; storage: Storage; config: Config;
@@ -118,7 +118,7 @@ export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: strin
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
-export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
+export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */
   leaseFence?: string;
@@ -159,6 +159,20 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/** A (created_at, id) page cursor, bound to its resource and filters; microseconds survive the round trip. */
+export function readCursor(value: string | undefined, binding: string): { at: string; id: string } | null {
+  if (!value) return null;
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+    // ISO 8601 allows offsets up to ±23:59; Postgres refuses past ±15:59 (22009), so an edited cursor would be a 500.
+    const tuple = z.tuple([z.string().datetime({ offset: true }).regex(/(?:Z|[+-](?:0\d|1[0-5]):[0-5]\d)$/), z.string().min(1).max(120), z.literal(binding)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
+    return { at: tuple[0], id: tuple[1] };
+  } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
+}
+export function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
+  const last = rows[limit - 1];
+  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
+}
 /**
  * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts
  * with a workspace ID or a mail class, and no workspace may be named `uploads` (migration 158).
@@ -284,7 +298,8 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
 // node-postgres throws plain errors when a socket drops. Drizzle wraps all of them, so read the cause chain.
 const TRANSIENT_SQLSTATES = new Set(['58000', '53300', '57P01', '57P02', '57P03']);
 const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE']);
-const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|Server connection attempt failed: .+)$/;
+// node-postgres's pool checkout timeout is the same condition as Hyperdrive's "Failed to acquire a connection".
+const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|timeout exceeded when trying to connect|Server connection attempt failed: .+)$/;
 const errorChain = (error: unknown) => { const chain: Error[] = []; for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); return chain; };
 /** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs. */
 export const databaseCodeOf = (error: unknown) => errorChain(error).map(e => (e as { code?: unknown }).code).find((code): code is string => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code));
@@ -295,6 +310,9 @@ export function transientDatabaseError(error: unknown) {
     return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || TRANSIENT_DRIVER_MESSAGE.test(e.message);
   });
 }
+/** A transaction Postgres rolled back to break a deadlock (40P01) or a serialization conflict (40001): nothing it wrote
+ * was kept, so the same request or job can safely run again. */
+export const databaseConflict = (error: unknown) => !(error instanceof ApiError) && ['40P01', '40001'].includes(databaseCodeOf(error) ?? '');
 /** What callers see when the database is briefly unreachable: retry, nothing was committed by this request. */
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
@@ -344,6 +362,15 @@ export function admissionPeer(address: string): string {
     return [...a, ...Array(8-a.length-b.length).fill('0'), ...b].slice(0,4).join(':') + '::';
   } catch { return 'unknown'; }
 }
+// Cloudflare gives every cross-zone Worker subrequest the same client address and names the calling
+// zone in CF-Worker, so callers on Workers (OpenCode Console among them) would otherwise share one
+// admission bucket and one failure budget with every other Worker on the Internet. Only that egress
+// address may choose a bucket this way; any other client keeps its own address.
+const WORKER_EGRESS = admissionPeer('2a06:98c0:3600::103');
+export function admissionKey(address: string, worker: string | null) {
+  const zone = worker?.trim().toLowerCase();
+  return address === WORKER_EGRESS && zone && /^[a-z0-9.-]{1,253}$/.test(zone) ? `worker:${zone}` : address;
+}
 
 // Identity entry has a request budget; authenticated API routes have a failure
 // budget. Check completed failures before dispatch, never charge concurrency.
@@ -375,15 +402,22 @@ export async function guardPublicRequest(path: string, headers: Headers, peer: s
   }
   return response;
 }
-// All credentials and image-producing routes share one atomic workspace counter.
-export async function chargeRenderBudget(c: Ctx, workspaceId: string) {
-  const limit = 30;
-  const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-    VALUES (${workspaceId}, 'render:images', date_trunc('minute', now()), 1)
+/**
+ * One atomic per-minute counter in api_request_budgets, named by `key` within a workspace: true while this minute's
+ * charges, this one included, stay within `limit`. A window stored in the future (an operator's or a test's hold) stays.
+ */
+export async function chargeBudget(runtime: Pick<Runtime, 'db'>, workspaceId: string, key: string, limit: number) {
+  const { rows: [row] } = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+    VALUES (${workspaceId}, ${key}, date_trunc('minute', now()), 1)
     ON CONFLICT (workspace_id, key_id) DO UPDATE SET
       used = CASE WHEN excluded.window_start > api_request_budgets.window_start THEN 1 ELSE least(api_request_budgets.used + 1, ${limit + 1}) END,
       window_start = greatest(api_request_budgets.window_start, excluded.window_start) RETURNING used`);
-  if (budget.rows[0]!.used > limit) {
+  return row!.used <= limit;
+}
+// All credentials and image-producing routes share one atomic workspace counter.
+export async function chargeRenderBudget(c: Ctx, workspaceId: string) {
+  const limit = 30;
+  if (!await chargeBudget(c.env, workspaceId, 'render:images', limit)) {
     c.header('Retry-After', '60');
     throw new ApiError(429, 'RENDER_RATE_LIMITED', `This workspace allows ${limit} image previews and imports per minute. Retry after the window resets.`, undefined, true);
   }

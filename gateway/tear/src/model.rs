@@ -881,7 +881,6 @@ impl Model {
         if self.sessions[s].stale || self.sessions[s].aged {
             self.event("fill-after-refresh");
             if self.reload(s).is_err() {
-                self.drop_session(s);
                 return false;
             }
             self.sessions[s].stale = false;
@@ -1117,7 +1116,7 @@ impl Model {
             return Err(());
         }
         let x = &self.sessions[s];
-        if !selects && (x.stale || x.aged) {
+        if !x.idle && !selects && (x.stale || x.aged) {
             let e = if x.aged {
                 "aged-refresh"
             } else {
@@ -1145,7 +1144,10 @@ impl Model {
         self.event("hint-consumed");
         self.sessions[s].stale = true;
         if self.sessions[s].idle {
-            self.wake_reload(cfg, s)?;
+            if self.wake_reload(cfg, s).is_err() {
+                self.drop_session(s);
+                return Err(());
+            }
             self.sessions[s].stale = false;
             self.update(cfg, s);
         }
@@ -1227,8 +1229,8 @@ impl Model {
             && !matches!(act, Reconnect(_))
         {
             // The shell consumes a pending hint first (biased select), then refreshes a
-            // stale or aged snapshot before any non-SELECT line, DONE included. A failed
-            // refresh there drops the connection (fail closed).
+            // stale or aged snapshot before mailbox commands. DONE is local; a failed
+            // pre-command refresh refuses the command, not the session.
             let selects = matches!(act, Select { .. });
             // An APPEND literal is reserved and spooled before the core runs: only the
             // pending hint is consumed first; the stale refresh and BYE come at completion.
@@ -1244,9 +1246,11 @@ impl Model {
                 self.event(if self.revoked {
                     "revoked-bye"
                 } else {
-                    "drop-before-command"
+                    "refused-before-command"
                 });
-                self.drop_session(s);
+                if matches!(act, AppendEnd(_)) {
+                    self.sessions[s].uploading = None;
+                }
                 out.ok = false;
                 return self.finish(cfg, out, &before, &gens);
             }
@@ -1658,7 +1662,6 @@ impl Model {
                         return self.finish(cfg, out, &before, &gens);
                     }
                     if self.before(cfg, s, false).is_err() || !self.sessions[s].up {
-                        self.drop_session(s);
                         out.ok = false;
                         return self.finish(cfg, out, &before, &gens);
                     }

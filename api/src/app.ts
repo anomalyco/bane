@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -22,7 +22,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
   if (pathname === '/v1/events/ses') return 'ops-events';
   if (pathname === '/v1/domains' || pathname.startsWith('/v1/domains/')) return 'ops-domains';
-  if (/^\/v1\/(?:settings|webhooks|metrics|sender-score)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
+  if (/^\/v1\/(?:settings|webhooks|metrics|sender-score|usage)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
   if (pathname === '/v1/emails' || pathname.startsWith('/v1/emails/')) return 'sending-emails';
   if (/^\/v1\/(?:attachments|campaigns|campaign-content-guide)(?:\/|$)/.test(pathname)) return 'sending-other';
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
@@ -92,7 +92,7 @@ function invalidFields(issues: readonly Issue[]) {
   return { message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
 }
 
-function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
+function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null; createTagMarkdownDocs: (doc: Record<string, any>, slug: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
     if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field); }
   } });
@@ -113,7 +113,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
     // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set; everything else is no-store.
-    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
     c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
@@ -200,13 +200,22 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
+    const conflict = !known && !invalidJson && databaseConflict(error);
     // An MCP approval revoked while its request ran: the object it would own has no grant left.
     const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
+    // Values Postgres cannot store come from the request: U+0000 in any text (22021, or 22P05 inside JSON) and a
+    // date outside its range, such as year 0000 or a +16:00 offset, which ISO 8601 validation accepts (22007/22008/22009). A client error, not a 500.
+    const refused = known || invalidJson ? undefined : databaseCodeOf(error);
+    const nul = refused === '22021' || refused === '22P05', badDate = refused === '22007' || refused === '22008' || refused === '22009';
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
       : transient ? databaseUnavailable()
+      : nul ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).')
+      : badDate ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: a date is out of range. Use a year from 0001 to 9999 and an offset within ±15:59.')
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
+      : conflict ? new ApiError(503, 'DATABASE_CONFLICT', 'The request conflicted with a concurrent change and was rolled back. Retry it.', undefined, true)
       : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
@@ -221,23 +230,25 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       errorType: unexpected ? error.name : undefined, databaseCode: databaseCodeOf(error),
       stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
-    else if (transient) c.header('Retry-After', '1');
+    else if (transient || conflict) c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
-  app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));
+  // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
+  app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
   app.get('/llms.txt', async c => { const { doc, createLlmsText } = await loadDocs(); return markdown(c, createLlmsText(doc)); });
   app.get('/docs.md', async c => { const { doc, createMarkdownDocs } = await loadDocs(); return markdown(c, createMarkdownDocs(doc)!); });
   app.get('/docs/operations/*', async c => { const { doc, createMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/operations/'.length); const operation = /^[A-Za-z][A-Za-z0-9_]{0,63}\.md$/.test(file) ? file.slice(0, -3) : ''; const value = operation ? createMarkdownDocs(doc, operation) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented operation not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.get('/docs/tags/*', async c => { const { doc, createTagMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/tags/'.length); const value = /^[a-z0-9-]{1,64}\.md$/.test(file) ? createTagMarkdownDocs(doc, file.slice(0, -3)) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented tag not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   return app;
 }
 
 export async function createOpenApiApp(): Promise<App> {
-  const full = createShell(lazyModule(() => import('./openapi-docs.js').then(({ createOpenApiDocument, createLlmsText, createMarkdownDocs }) => ({
-    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
+  const full = createShell(lazyModule(() => import('./openapi-docs.js').then(({ createOpenApiDocument, createLlmsText, createMarkdownDocs, createTagMarkdownDocs }) => ({
+    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   }))), true);
   const [
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
@@ -258,8 +269,8 @@ export type HttpApp = Pick<App, 'fetch'>;
 
 export function createApp(options: { fallback?: MiddlewareHandler<AppEnv> } = {}): HttpApp {
   const getFullApp = lazyModule(() => createOpenApiApp());
-  const loadDocs = lazyModule(() => Promise.all([getFullApp(), import('./openapi-docs.js')]).then(([full, { createOpenApiDocument, createLlmsText, createMarkdownDocs }]) => ({
-    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
+  const loadDocs = lazyModule(() => Promise.all([getFullApp(), import('./openapi-docs.js')]).then(([full, { createOpenApiDocument, createLlmsText, createMarkdownDocs, createTagMarkdownDocs }]) => ({
+    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   })));
   let base: App | undefined;
   const getBase = () => {
