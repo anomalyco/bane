@@ -6,9 +6,7 @@ import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { WorkspaceSwitcher } from '../../components/WorkspaceSwitcher'
-import { useApi, useApiDef, useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
-import { queries } from '../../data/queries'
-import { number } from '../../lib/format'
+import { useApi, useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { agentStep, finishedStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
@@ -235,11 +233,7 @@ function connectionError(error: unknown) {
 }
 
 function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) => void; error: unknown }) {
-  // The limit a new hosted sender starts with and where it grows to, from this installation's own steps (GET /v1/usage).
-  const usage = useApiDef(queries.usage())
-  const steps = usage.data?.steps
-  const start = steps?.length ? `${number(steps[0]!.cap)} emails a day to start` : 'A daily limit to start'
-  const grows = steps && steps.length > 1 ? ` The limit grows to ${number(steps[steps.length - 1]!.cap)} a day as your mail proves healthy.` : ' The limit grows as your mail proves healthy.'
+  // Fixed copy, so the choice never re-wraps when a request lands; the exact steps are in Settings → Plan & usage.
   return <div className="onboarding onboarding--choice">
     <div className="onboarding-intro onboarding-intro--center onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Where should your email send from?</h1>
@@ -249,8 +243,8 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through Bane’s account on Amazon SES, Amazon’s email-sending service. No AWS account needed; you add a few DNS records.{grows}</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price" title={start}>{start}</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-body">Send through Bane’s account on Amazon SES, Amazon’s email-sending service. No AWS account needed; you add a few DNS records. It starts with a small daily limit that rises on its own as your mail proves healthy.</span>
+        <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit to start</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>

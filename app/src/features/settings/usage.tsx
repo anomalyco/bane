@@ -22,12 +22,12 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
   return <>
     <SectionHeader title="Plan & usage" />
     <p className="muted usage-note">Billing isn’t on yet, so nothing is charged. These are the published prices, what you’ve used this month and your sending limit today. Simulator sends count like any other send.</p>
-    <div className="settings-rows">
+    <div className="settings-rows usage-rows">
       <Row title="Price" hint="Sent or received">{value(u => `${money(u.pricing.perThousand)} per 1,000 emails`, 160)}</Row>
       <Row title="Free every month" hint="Resets on the 1st, UTC">{value(u => `${number(u.pricing.freeSent)} sent · ${number(u.pricing.freeReceived)} received`, 180)}</Row>
-      <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}` : 'This calendar month'}>{value(u => `${number(u.month.sent)} sent · ${number(u.month.received)} received`, 160)}</Row>
-      <Row title="Estimated cost" hint="If billing were on today">{value(u => <span>{money(estimate)}{estimate === 0 && <span className="muted"> · within the free allowance</span>}{u.simulated && <span className="muted"> · this server only simulates sending</span>}</span>, 80)}</Row>
-      <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? 'A custom limit, set by the Bane team' : 'Recipients in the last 24 hours'}>{value(u => !u.daily ? <span className="muted">Connect sending first</span> : u.daily.cap === null ? 'No daily limit' : <DailyMeter used={u.daily.used} cap={u.daily.cap} resetAt={u.daily.resetAt} />, 160)}</Row>
+      <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(u => `${number(u.month.sent)} sent · ${number(u.month.received)} received`, 160)}</Row>
+      <Row title="Estimated cost" hint={usage && estimate === 0 ? 'Within the free allowance' : 'If billing were on today'}>{value(() => money(estimate), 80)}</Row>
+      <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? 'Custom, set by the Bane team' : 'Recipients, last 24 hours'}>{value(u => !u.daily ? <span className="muted">Connect sending first</span> : u.daily.cap === null ? 'No daily limit' : <DailyMeter used={u.daily.used} cap={u.daily.cap} resetAt={u.daily.resetAt} />, 160)}</Row>
     </div>
     <section className="usage-steps-section" aria-labelledby="usage-steps-title">
       <SectionHeader title={<span id="usage-steps-title">How the daily limit grows</span>} />

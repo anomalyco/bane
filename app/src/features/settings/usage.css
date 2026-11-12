@@ -15,3 +15,10 @@
 .usage-steps__body b { font-variant-numeric: tabular-nums; }
 .usage-steps__body .muted { font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
 .usage-steps__badge { margin-left: var(--space-8); padding: 1px 6px; border-radius: 999px; background: var(--color-layer-2); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* Phone: rows stack label and value in two columns; the value column keeps one width so values arriving never move it. */
+@media (max-width: 640px) {
+  .usage-rows .settings-row { grid-template-columns: minmax(0, 1fr) 192px; }
+  .usage-rows .settings-row__control { justify-self: stretch; }
+  .usage-meter__track { width: 56px; }
+}

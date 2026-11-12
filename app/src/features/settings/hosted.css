@@ -8,7 +8,7 @@
 .settings-rail a { display: flex; align-items: center; height: 28px; padding-inline: var(--space-8); border-radius: 4px; color: var(--color-muted); text-decoration: none; transition: background-color var(--motion-duration), color var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { .settings-rail a:hover { color: var(--color-text); background: var(--color-hover); } }
 .settings-rail a[aria-current='page'] { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
-.settings-rail a[data-locked] { justify-content: space-between; }
+.settings-rail a[data-locked] { justify-content: space-between; gap: var(--space-4); }
 .settings-rail a[data-locked] svg { color: var(--color-faint); }
 .hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; padding-top: 52px; animation: section-enter 120ms ease-out both; }
 .hosted-settings__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-12)); }
