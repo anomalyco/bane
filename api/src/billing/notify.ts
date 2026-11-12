@@ -65,6 +65,14 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
         text: body(`${n.workspace} has owed ${debt} since ${n.unpaidSince ? day(n.unpaidSince) : 'its balance went below $0'}.`,
           `Sending is paused. Received mail is still accepted and delivered${holdAt ? ` until ${day(holdAt)}` : ''}. From then on Bane holds new received mail: it's stored safely but not delivered to inboxes, webhooks or IMAP. Nothing is deleted.`,
           [`Add credit in Settings → Billing to settle the ${debt}. Sending resumes and nothing is held.`]) };
+    case 'credit_expiring': {
+      const left = formatUsd(microCents(typeof n.data.remainingUc === 'string' ? n.data.remainingUc : '0'));
+      const at = typeof n.data.expiresAt === 'string' ? new Date(n.data.expiresAt) : null;
+      return { subject: `Bane: ${left} of credit for ${n.workspace} expires on ${at ? day(at) : 'its anniversary'}`,
+        text: body(`${left} of a top-up to ${n.workspace} is still unused. Prepaid credit expires 12 months after purchase${at ? `, so it expires on ${day(at)}` : ''}.`,
+          'Nothing yet. Usage always spends the oldest credit first, so this credit goes before newer top-ups. Whatever is left on that day leaves the balance; it is not refundable.',
+          ['Nothing to do if you expect to use it. Otherwise there is no action that keeps it: expired credit is not refunded.']) };
+    }
     case 'receive_held':
       return { subject: `Bane is holding received mail for ${n.workspace}`,
         text: body(`${n.workspace} has owed ${debt} since ${n.unpaidSince ? day(n.unpaidSince) : 'its balance went below $0'}, for more than 7 days.`,

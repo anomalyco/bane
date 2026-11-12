@@ -4066,7 +4066,7 @@ export type BillingUsagePoint = {
 export type BillingLedgerEntry = {
     id: string;
     at: string;
-    kind: 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment';
+    kind: 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment' | 'expire';
     amount: MicroCents & unknown;
     paid: MicroCents;
     promo: MicroCents;
@@ -4077,6 +4077,10 @@ export type BillingLedgerEntry = {
     };
     paymentId: string | null;
     invoiceUrl: string | null;
+    /**
+     * For a top-up: when its remaining credit expires, 12 months after purchase. Unused credit is not refundable.
+     */
+    expiresAt: string | null;
 };
 
 export type BillingPayment = {

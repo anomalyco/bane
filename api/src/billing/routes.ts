@@ -42,9 +42,10 @@ export const BillingSummarySchema = z.object({
     .describe('Set when Anomaly made this workspace free (mode exempt): nothing is charged and sending never pauses for the balance. Usage is still measured, and monthToDate shows what it would cost.'),
 }).openapi('BillingSummary');
 const LedgerEntry = z.object({
-  id: z.string(), at: z.string(), kind: z.enum(['topup', 'usage', 'grant', 'refund_hold', 'refund_release', 'dispute', 'dispute_reversal', 'write_off', 'adjustment']),
+  id: z.string(), at: z.string(), kind: z.enum(['topup', 'usage', 'grant', 'refund_hold', 'refund_release', 'dispute', 'dispute_reversal', 'write_off', 'adjustment', 'expire']),
   amount: MicroCents.describe('paid + promo; negative takes from the balance.'), paid: MicroCents, promo: MicroCents, balanceAfter: MicroCents.describe('Paid and promotional balance after this entry.'),
   description: z.string(), detail: z.record(z.string(), z.unknown()), paymentId: z.string().nullable(), invoiceUrl: z.string().nullable(),
+  expiresAt: z.string().nullable().describe('For a top-up: when its remaining credit expires, 12 months after purchase. Unused credit is not refundable.'),
 }).openapi('BillingLedgerEntry');
 const Payment = z.object({
   id: z.string(), at: z.string(), kind: z.enum(['checkout', 'saved_card', 'recharge', 'setup']), status: z.enum(['created', 'pending', 'requires_action', 'succeeded', 'failed', 'canceled', 'expired']),
@@ -108,19 +109,22 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
     case 'dispute': return 'Card payment disputed';
     case 'dispute_reversal': return 'Dispute closed in your favor: credit restored';
     case 'write_off': return 'Unpaid balance written off';
+    case 'expire': return 'Credit expired, 12 months after purchase';
   }
 }
 const INTERNAL = new Set(['reason', 'ticketRef', 'operator', 'operatorId', 'note']);
 const publicDetail = (detail: Record<string, unknown>) => Object.fromEntries(Object.entries(detail ?? {}).filter(([key]) => !INTERNAL.has(key)));
 
-type LedgerRow = { id: string; at: string; kind: LedgerKind; payment_id: string | null; invoice_url: string | null; paid_uc: string; promo_uc: string; balance_after_uc: string; promo_after_uc: string; detail: Record<string, unknown> };
+type LedgerRow = { id: string; at: string; kind: LedgerKind; payment_id: string | null; invoice_url: string | null; expires_at: string | null; paid_uc: string; promo_uc: string; balance_after_uc: string; promo_after_uc: string; detail: Record<string, unknown> };
 /** One page of the ledger, newest first, with each top-up's or refund's payment and its invoice link (one statement). */
 async function ledgerPage(db: DbExecutor, workspaceId: string, cursor: string | undefined, limit: number) {
   const { rows } = await db.execute<LedgerRow>(sql`SELECT l.id::text,to_char(l.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,l.kind,x.payment_id,p.invoice_url,
-      l.paid_uc::text,l.promo_uc::text,l.balance_after_uc::text,l.promo_after_uc::text,l.detail
+      l.paid_uc::text,l.promo_uc::text,l.balance_after_uc::text,l.promo_after_uc::text,l.detail,
+      to_char(c.expires_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS expires_at
     FROM (SELECT * FROM billing_ledger WHERE workspace_id=${workspaceId} ${cursor ? sql`AND id<${cursor}::bigint` : sql``} ORDER BY id DESC LIMIT ${limit + 1}) l
     CROSS JOIN LATERAL (SELECT CASE WHEN l.source_id LIKE 'attempt:%' THEN substr(l.source_id,9) ELSE l.detail->>'attemptId' END AS payment_id) x
     LEFT JOIN billing_payment_attempts p ON p.workspace_id=l.workspace_id AND p.id=x.payment_id
+    LEFT JOIN billing_credit_lots c ON l.kind='topup' AND c.workspace_id=l.workspace_id AND c.source_id=l.source_id
     ORDER BY l.id DESC`);
   const page = rows.slice(0, limit);
   return { rows: page, nextCursor: rows.length > limit ? page.at(-1)!.id : null };
@@ -164,7 +168,7 @@ export function registerBilling(app: App) {
     return c.json({ data: page.rows.map(row => {
       const paid = BigInt(row.paid_uc), promo = BigInt(row.promo_uc);
       return { id: row.id, at: row.at, kind: row.kind, amount: (paid + promo).toString(), paid: row.paid_uc, promo: row.promo_uc, balanceAfter: (BigInt(row.balance_after_uc) + BigInt(row.promo_after_uc)).toString(),
-        description: describe(row.kind, row.detail ?? {}), detail: publicDetail(row.detail), paymentId: row.payment_id, invoiceUrl: row.invoice_url };
+        description: describe(row.kind, row.detail ?? {}), detail: publicDetail(row.detail), paymentId: row.payment_id, invoiceUrl: row.invoice_url, expiresAt: row.expires_at };
     }), nextCursor: page.nextCursor }, 200);
   });
 
@@ -244,6 +248,7 @@ export function registerBilling(app: App) {
 // reason, before and after, in the same transaction as the money (billing_post). Refunds call Stripe, which never
 // runs inside a transaction: package B holds the amount first, and the audit row commits right after.
 const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit log (at least 10 characters).');
+const RefundBasis = z.enum(['billing_error', 'legal']);
 const WorkspaceParam = z.object({ wid: z.string().min(1).max(100) });
 const Mutation = z.object({ 'Idempotency-Key': z.string().min(1).max(200).optional() });
 type Account = { mode: string; paid_mode: string; balance_uc: string; promo_uc: string; unpaid_since: string | null; free_via: string | null; free_until: string | null; free_reason: string | null };
@@ -388,7 +393,8 @@ function registerOperatorBilling(app: App) {
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/refunds', operationId: 'operatorRefundTopUp',
-    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ attemptId: z.string().min(1).max(100), amountCents: z.number().int().min(1).max(1_000_000).optional(), reason: Reason,
+    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ attemptId: z.string().min(1).max(100), amountCents: z.number().int().min(1).max(1_000_000).optional(),
+      basis: RefundBasis.describe('Why this charge is refunded. Unused credit is not refundable otherwise; an account Anomaly closes is refunded with close-refund.'), reason: Reason,
       ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(z.object({ refundId: z.string(), status: z.string() })), ...errors } }), async c => {
     const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json'), key = c.req.header('Idempotency-Key'), hash = operatorRequestHash(c, body);
     await existingWorkspace(c.env.db, wid);
@@ -398,7 +404,7 @@ function registerOperatorBilling(app: App) {
     }
     // Stripe is called outside any transaction (package B holds the amount first). The audit row, and the key that makes
     // a retry return this refund, commit in the transaction that writes the refund_hold ledger row: all or nothing.
-    const refund = await refundTopUp(c.env, { workspaceId: wid, attemptId: body.attemptId, amountCents: body.amountCents, reason: body.reason, operator: `operator:${operator.userId}`,
+    const refund = await refundTopUp(c.env, { workspaceId: wid, attemptId: body.attemptId, amountCents: body.amountCents, basis: body.basis, reason: body.reason, operator: `operator:${operator.userId}`,
       onHeld: async (tx, held) => {
         const after = await accountOf(tx, wid), before = { ...after, balance_uc: (BigInt(after.balance_uc) + held.amountUc).toString() };
         await writeOperatorAudit(tx, c, operator, wid, { action: 'billing-refund', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
@@ -407,6 +413,30 @@ function registerOperatorBilling(app: App) {
       } });
     if (key) await c.env.db.execute(sql`UPDATE operator_idempotency SET response=${JSON.stringify(refund)}::jsonb WHERE operator_id=${operator.userId} AND key=${key}`);
     return c.json(refund, 200);
+  });
+
+  // Anomaly closing an account without cause refunds what is left of every top-up (each against its own card charge,
+  // newest first). Repeating it refunds nothing more: each refund holds its amount first, and only unspent, unexpired
+  // paid credit is refundable. Promotional credit never is.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/close-refund', operationId: 'operatorRefundOnClosure',
+    request: { params: WorkspaceParam, body: json(z.object({ reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) },
+    responses: { 200: response(z.object({ refunds: z.array(z.object({ refundId: z.string(), attemptId: z.string(), amountCents: z.number().int(), status: z.string() })) })), ...errors } }), async c => {
+    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json');
+    await existingWorkspace(c.env.db, wid);
+    const { rows: lots } = await c.env.db.execute<{ attempt_id: string; cents: number }>(sql`SELECT substr(source_id,9) AS attempt_id, (remaining_uc/1000000)::int AS cents FROM billing_credit_lots
+      WHERE workspace_id=${wid} AND kind='topup' AND source_id LIKE 'attempt:%' AND expired_at IS NULL AND remaining_uc >= 1000000 ORDER BY expires_at DESC, created_at DESC`);
+    const refunds = [];
+    for (const lot of lots) {
+      try {
+        const r = await refundTopUp(c.env, { workspaceId: wid, attemptId: lot.attempt_id, basis: 'account_closure', reason: body.reason, operator: `operator:${operator.userId}`,
+          onHeld: async (tx, held) => {
+            const after = await accountOf(tx, wid), before = { ...after, balance_uc: (BigInt(after.balance_uc) + held.amountUc).toString() };
+            await writeOperatorAudit(tx, c, operator, wid, { action: 'billing-refund-closure', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
+          } });
+        refunds.push({ refundId: r.refundId, attemptId: lot.attempt_id, amountCents: lot.cents, status: r.status });
+      } catch (error) { if (!(error instanceof ApiError && error.code === 'REFUND_EXCEEDS_BALANCE')) throw error; }   // spent meanwhile: nothing left of it
+    }
+    return c.json({ refunds }, 200);
   });
 }
 

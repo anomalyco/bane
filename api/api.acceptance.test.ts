@@ -6419,7 +6419,7 @@ describe('Billing: Stripe', () => {
     const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
     await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
     await post('usage', `usage:${wid}:spent`, -2000n * UC);
-    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, reason: 'Synthetic refund', operator: 'operator:fixture' });
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
     await assert.rejects(refund(3001), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
     let heldWhenCalled: string[] = [];
     fake.onRequest = async (method, path) => { if (method === 'POST' && path === '/v1/credit_notes') heldWhenCalled = (await ledger()).map(r => r.kind); };
@@ -6444,7 +6444,7 @@ describe('Billing: Stripe', () => {
     const second = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2500, actor: 'user:fixture', billingEmail: null });
     await deliver('checkout.session.completed', fake.payCheckout((await attempt(second.attemptId)).stripe_checkout_session));
     fake.refundStatus = 'pending';
-    const slow = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: second.attemptId, amountCents: 500, reason: 'Synthetic refund', operator: 'operator:fixture' });
+    const slow = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: second.attemptId, amountCents: 500, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
     assert.equal(slow.status, 'pending');
     assert.equal((await account()).balance, String(2000n * UC));
     const stripeRefund = (await db.query('SELECT stripe_refund FROM billing_refunds WHERE id = $1', [slow.refundId])).rows[0].stripe_refund;
@@ -6559,7 +6559,7 @@ describe('Billing: Stripe', () => {
     await db.query('UPDATE billing_accounts SET free_emails_used = 3000 WHERE workspace_id = $1', [wid]);
     await db.query(`INSERT INTO billing_usage_hourly (workspace_id, hour, meter, quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 240000)`, [wid]);
     assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.availableUc, String(200n * UC));
-    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, reason: 'Unused credit', operator: 'operator:fixture' });
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Unused credit', operator: 'operator:fixture' });
     await assert.rejects(refund(201), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
     const done = await refund();
     assert.equal(done.status, 'succeeded');
@@ -6820,13 +6820,14 @@ describe('Billing: API, MCP and notices', () => {
         assert.deepEqual([funded.balance.paid, funded.paymentMethod.brand, funded.paymentMethod.last4], ['5000000000', 'visa', '4242']);
         const [topup] = page(await local('GET', '/v1/billing/ledger'));
         assert.deepEqual([topup.kind, topup.description, topup.paymentId, typeof topup.invoiceUrl], ['topup', 'Credit added', first.attemptId, 'string']);
+        assert.equal(topup.expiresAt.slice(0, 10), new Date(new Date(topup.at).setUTCFullYear(new Date(topup.at).getUTCFullYear() + 1)).toISOString().slice(0, 10), 'A top-up expires 12 months after purchase.');
         const [paid] = page(await local('GET', '/v1/billing/payments'));
         assert.deepEqual([paid.id, paid.status, paid.card.last4, typeof paid.invoiceUrl, typeof paid.receiptUrl], [first.attemptId, 'succeeded', '4242', 'string', 'string']);
         // An operator refund: the audit row and the Idempotency-Key commit in the transaction that holds the refund
         // (same xmin as the refund_hold ledger row); a retry returns the refund, another body is refused, and a refusal
         // leaves no audit row.
         await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
-        const refundPath = `/v1/operator/billing/${wid}/refunds`, refundBody = { attemptId: first.attemptId, amountCents: 1000, reason: 'Customer asked for part of a top-up back' };
+        const refundPath = `/v1/operator/billing/${wid}/refunds`, refundBody = { attemptId: first.attemptId, amountCents: 1000, basis: 'billing_error', reason: 'Customer was charged for a top-up twice' };
         const refund = ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' }));
         assert.match(refund.refundId, /^brf_/);
         assert.deepEqual(ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' })), refund);
@@ -6836,6 +6837,14 @@ describe('Billing: API, MCP and notices', () => {
         assert.deepEqual([hold.paid, await audits()], ['-1000000000', [{ x: hold.x, reason: refundBody.reason, before: '5000000000', after: '4000000000' }]]);
         error(await local('POST', refundPath, { ...refundBody, amountCents: 900_000 }), 409, 'REFUND_EXCEEDS_BALANCE');
         assert.equal((await audits()).length, 1, 'A refused refund leaves no audit row.');
+        // Unused credit is refundable only for a billing error, a legal requirement or an account Anomaly closes.
+        error(await local('POST', refundPath, { attemptId: first.attemptId, reason: 'Customer no longer needs the credit' }), 422);
+        error(await local('POST', refundPath, { ...refundBody, basis: 'unused_credit' }), 422);
+        // Anomaly closes the account without cause: what is left of every top-up goes back to its card.
+        const closed = ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds;
+        assert.deepEqual(closed.map((r: Json) => [r.attemptId, r.amountCents]), [[first.attemptId, 4000]]);
+        assert.deepEqual(ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds, [], 'Nothing is left to refund twice.');
+        assert.deepEqual((await db.query(`SELECT detail->>'basis' AS basis FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold' ORDER BY id`, [wid])).rows.map(r => r.basis), ['billing_error', 'account_closure']);
         // The owner sets auto-recharge (the summary comes back), then removes the card, which turns it off.
         const on = ok(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1500, amountCents: 3000, monthlyCapCents: 30000 }));
         assert.deepEqual([on.state.autoRecharge, on.autoRecharge.enabled, on.autoRecharge.thresholdCents, on.autoRecharge.monthlyCapCents], ['on', true, 1500, 30000]);

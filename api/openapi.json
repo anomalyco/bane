@@ -14043,7 +14043,8 @@
               "dispute",
               "dispute_reversal",
               "write_off",
-              "adjustment"
+              "adjustment",
+              "expire"
             ]
           },
           "amount": {
@@ -14090,6 +14091,13 @@
               "string",
               "null"
             ]
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a top-up: when its remaining credit expires, 12 months after purchase. Unused credit is not refundable."
           }
         },
         "required": [
@@ -14103,7 +14111,8 @@
           "description",
           "detail",
           "paymentId",
-          "invoiceUrl"
+          "invoiceUrl",
+          "expiresAt"
         ]
       },
       "BillingPayment": {

@@ -158,7 +158,7 @@ function RechargeForm({ settings, hasCard, capped, Row }: { settings: NonNullabl
 
 // History: the balance's ledger and the card payments, a page at a time. Both are cursor lists with card slots on phones.
 const ledgerColumns: Column<LedgerEntry>[] = [
-  { key: 'description', label: 'Description', render: e => <span className="billing-desc" title={e.description}>{e.description}</span>, card: 'title' },
+  { key: 'description', label: 'Description', render: e => <span className="billing-desc" title={e.description}>{e.description}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>, card: 'title' },
   { key: 'at', label: 'Date', width: 132, render: e => date(e.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
   { key: 'amount', label: 'Amount', width: 112, align: 'right', render: e => <span className="billing-amount" data-sign={BigInt(e.amount) < 0n ? 'out' : 'in'}>{usd(e.amount, { sign: true })}</span>, card: 'aside' },
   { key: 'after', label: 'Balance after', width: 128, align: 'right', render: e => usd(e.balanceAfter), cardRender: e => <>{usd(e.balanceAfter)}{e.invoiceUrl && <> · <InvoiceLink href={e.invoiceUrl} label="Invoice" /></>}</>, card: 'field' },

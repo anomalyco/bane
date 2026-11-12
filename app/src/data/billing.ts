@@ -20,8 +20,8 @@ export interface BillingSummary {
   /** Anomaly made this workspace free: nothing is charged; usage is still measured (monthToDate is what it would cost). */
   freePlan: { until: string | null } | null
 }
-export type LedgerKind = 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment'
-export interface LedgerEntry { id: string; at: string; kind: LedgerKind; amount: string; paid: string; promo: string; balanceAfter: string; description: string; detail: Record<string, unknown>; paymentId: string | null; invoiceUrl: string | null }
+export type LedgerKind = 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment' | 'expire'
+export interface LedgerEntry { id: string; at: string; kind: LedgerKind; amount: string; paid: string; promo: string; balanceAfter: string; description: string; detail: Record<string, unknown>; paymentId: string | null; invoiceUrl: string | null; expiresAt: string | null }
 export type PaymentStatus = 'created' | 'pending' | 'requires_action' | 'succeeded' | 'failed' | 'canceled' | 'expired'
 export interface Payment { id: string; at: string; kind: 'checkout' | 'saved_card' | 'recharge' | 'setup'; status: PaymentStatus; amountCents: number; taxCents: number | null; totalCents: number | null; card: { brand: string; last4: string } | null; invoiceUrl: string | null; invoicePdf: string | null; receiptUrl: string | null; failure: { code: string; message: string } | null }
 export interface UsagePoint { start: string; meter: 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive'; quantity: string }
