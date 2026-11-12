@@ -80,7 +80,7 @@ export function ApiKeysPage() {
         </div>
         {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id} columns={[
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
-            ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
+            ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.status === 'active' && row.item.workspaceId === null ? 'Choose a workspace in Settings' : row.item.clientId} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
             cardRender: row => row.kind === 'mcp' ? row.item.name || 'MCP client' : row.item.purpose },
           { key: 'access', label: 'Access', width: '30%', card: 'line', render: row => row.kind === 'mcp'

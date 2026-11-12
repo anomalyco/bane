@@ -80,7 +80,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },
   connections: { label: 'MCP connections', actions: {
-    list: 'listMcpConnections', revoke: 'revokeMcpConnection', createInbox: 'createInboxConnection',
+    list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection',
   } },
   regions: { label: 'SES regions', actions: {
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',

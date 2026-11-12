@@ -602,7 +602,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     assert.equal(grants.rowCount,1,'Two tokens from the same client must resolve to one approval');
     const {createApp}=await import('./src/app.js');const app=createApp();
     const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
-    const call=(path:string,method='GET')=>app.fetch(new Request('https://bane.example.org'+path,{method,headers:{cookie:manager!.cookie.replace(/^bane\./,'__Host-bane.'),origin:'https://bane.example.org'}}),dashboard);
+    const call=(path:string,method='GET',body?:object,cookie=manager!.cookie,env=dashboard)=>app.fetch(new Request('https://bane.example.org'+path,{method,body:body&&JSON.stringify(body),headers:{cookie:cookie.replace(/^bane\./,'__Host-bane.'),origin:'https://bane.example.org',...(body?{'content-type':'application/json'}:{})}}),env);
     const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
     assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
     assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
@@ -611,6 +611,48 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     // MCP clients and the live dev E2E (mcpChallenge) read a JSON-RPC error body.
     const deniedBody=await denied.json() as {jsonrpc:string;id:null;error:{code:number;message:string}};
     assert.equal(deniedBody.jsonrpc,'2.0');assert.equal(deniedBody.error.code,-32000);assert.match(deniedBody.error.message,/Reconnect/);
+    const bind=(id:string,body:object,cookie?:string,env?:typeof dashboard)=>call(`/v1/mcp-connections/${id}/workspace`,'POST',body,cookie,env);
+    assert.equal((await bind(grants.rows[0].id,{workspaceId:'default',receiving:false})).status,409,'A revoked approval cannot be rebound');
+    // With several workspaces, a new client's approval waits unbound until the user chooses one in Bane.
+    const suffix=randomUUID().slice(0,8);
+    for(const [workspace,role] of [['mcp-admin','admin'],['mcp-member','member']]) {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$2)',[workspace+suffix,workspace+suffix]);
+      await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)',[randomUUID(),manager.userId,workspace+suffix,role]);
+    }
+    let tick=2;const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++});
+    const actor=async()=>authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({workspaceId:a.workspaceId,receivingConsent:a.receivingConsent}));
+    const pending=await run(multi());
+    assert.equal(pending.status,403);assert.match(pending.headers.get('www-authenticate')!,/^Bearer error="insufficient_scope"/);
+    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:'Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/account'},id:null});
+    const unbound=await db.query('SELECT id,workspace_id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi']);
+    assert.deepEqual(unbound.rows.map(r=>r.workspace_id),[null]);
+    const multiId=unbound.rows[0].id as string;
+    const listed=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
+    assert.deepEqual([listed?.workspaceId,listed?.receiving],[null,false]);
+    assert.equal((await bind(multiId,{workspaceId:'mcp-member'+suffix,receiving:true})).status,403,'Receiving needs an owner or admin');
+    assert.equal((await bind(multiId,{workspaceId:'missing'+suffix,receiving:false})).status,403);
+    assert.equal((await bind(multiId,{workspaceId:'default',receiving:false,extra:true})).status,422);
+    const otherUser=unique('acceptance-user'),otherToken=createHash('sha256').update(randomUUID()).digest('base64url'),dashboardIssuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
+    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)',[otherUser,`${otherUser}@example.org`]);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
+    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
+    const otherDashboard={...dashboard,config:{...dashboard.config,allowedEmails:[...dashboard.config.allowedEmails,`${otherUser}@example.org`]}};
+    assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
+    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can bind it');
+    assert.equal((await run(multi())).status,403);
+    const chosen=await bind(multiId,{workspaceId:'mcp-admin'+suffix,receiving:false});
+    assert.equal(chosen.status,200);assert.deepEqual(await chosen.json(),{id:multiId,workspaceId:'mcp-admin'+suffix,receiving:false});
+    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
+    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true})).status,200);
+    assert.deepEqual(await (await actor()).json(),{workspaceId:'default',receivingConsent:true});
+    const after=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
+    assert.deepEqual([after?.workspaceId,after?.receiving],['default',true]);
+    // Once a single membership remains, an unbound approval (here: its workspace was deleted) binds by itself,
+    // without the receiving consent given for the old workspace.
+    await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id<>$2',[manager.userId,'mcp-admin'+suffix]);
+    await db.query("UPDATE bane_resource_grants SET workspace_id=NULL WHERE id=$1",[multiId]);
+    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
   } finally { await db.query('ROLLBACK'); }
 });
 

@@ -25,6 +25,9 @@
 .settings-name { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); width: 100%; }
 .settings-name-input.ui-input { width: min(320px, 100%); }
 .settings-name .ui-button[data-hidden] { visibility: hidden; }
+.settings-mcp { position: relative; display: flex; align-items: center; gap: var(--space-8); }
+.settings-mcp .ui-button[data-hidden] { visibility: hidden; }
+.settings-mcp__workspace { width: 200px; }
 .settings-name-error { position: absolute; top: calc(100% + 6px); right: 0; z-index: 2; width: min(360px, 100%); text-align: left; white-space: normal; }
 .settings-score { display: inline-flex; align-items: baseline; gap: var(--space-8); color: var(--color-text); text-decoration: none; }
 .settings-score b { font-weight: var(--font-weight-bold); }
@@ -57,4 +60,13 @@
   .settings-inline > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .settings-name { justify-content: flex-start; }
   .settings-name-input.ui-input { flex: 1; width: auto; }
+}
+/* An approval's four controls need more room than one row offers on tablets and phones: stack them under the name. */
+@media (max-width: 900px) {
+  .settings-row:has(.settings-mcp) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); height: auto; min-height: 53px; padding-block: var(--space-12); }
+  .settings-row:has(.settings-mcp) .settings-row__control { justify-content: flex-start; }
+  .settings-mcp { flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .settings-mcp__workspace { flex: 1 0 100%; width: auto; }
 }

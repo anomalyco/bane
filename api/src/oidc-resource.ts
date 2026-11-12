@@ -43,11 +43,12 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const resource = audience(runtime);
   const metadata = new URL('/.well-known/oauth-protected-resource/mcp', resource).href;
   // MCP clients expect a JSON-RPC envelope; the challenge itself lives in WWW-Authenticate (RFC 6750, RFC 9470).
-  function denied(status: 401 | 403, error = status === 401 ? 'invalid_token' : 'insufficient_scope', extra = '') {
+  // `detail` replaces only the JSON-RPC message; the challenge header keeps its fixed description.
+  function denied(status: 401 | 403, error = status === 401 ? 'invalid_token' : 'insufficient_scope', extra = '', detail?: string) {
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
     const message = error === 'insufficient_user_authentication' ? 'Bane requires Google sign-in. Reconnect this MCP client and choose Google at Anomaly account.'
       : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : 'This client has no active Bane approval for the requested access.';
-    return Response.json({jsonrpc:'2.0', error:{code:-32000, message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="bane:read"${extra}` }});
+    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="bane:read"${extra}` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -82,22 +83,31 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const userId=identity.rows[0]?.user_id;
   if (!userId) return denied(403);
   const keyId = 'mcp_at_' + await digest(JSON.stringify([userId,claims.client_id]));
-  // Pin the first approval to one workspace; later tokens may reuse that
-  // binding, even if the user has since joined additional workspaces.
-  await runtime.db.execute(sql`WITH memberships AS (
+  // The first approval binds to the user's only workspace. With several, it waits unbound (workspace_id NULL)
+  // until the user chooses one in Bane; an unbound approval (or one whose workspace was deleted) binds by
+  // itself once one membership remains, without receiving: that consent named the old workspace. A bound approval
+  // keeps its workspace when the user joins others.
+  await runtime.db.execute(sql`WITH existing AS (SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId}), memberships AS (
     SELECT m.workspace_id, m.role FROM workspace_members m WHERE m.user_id=${userId} AND m.role IN ('owner','admin','member')
-      AND (NOT EXISTS(SELECT FROM bane_resource_grants WHERE id=${keyId}) OR m.workspace_id=(SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId})) LIMIT 2
+      AND (NOT EXISTS(SELECT FROM existing WHERE workspace_id IS NOT NULL) OR m.workspace_id=(SELECT workspace_id FROM existing)) LIMIT 2
+  ), target AS (
+    SELECT workspace_id, role FROM memberships WHERE (SELECT count(*) FROM memberships)=1
+    UNION ALL SELECT NULL, NULL WHERE (SELECT count(*) FROM memberships)=2
   ) INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at)
     SELECT ${keyId},${claims.iss},${claims.sub},${userId},${claims.client_id},workspace_id,
       CASE WHEN role='member' THEN array_remove(${sql.param(allowed)}::text[],'manage') ELSE ${sql.param(allowed)}::text[] END,
-      to_timestamp(${claims.exp}),${claims.iat} FROM memberships WHERE (SELECT count(*) FROM memberships)=1
+      to_timestamp(${claims.exp}),${claims.iat} FROM target
     ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,
-      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject
-    WHERE NOT bane_resource_grants.revoked AND bane_resource_grants.workspace_id=excluded.workspace_id
+      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,workspace_id=excluded.workspace_id,
+      receiving=bane_resource_grants.receiving AND bane_resource_grants.workspace_id IS NOT NULL
+    WHERE NOT bane_resource_grants.revoked AND (bane_resource_grants.workspace_id IS NULL OR bane_resource_grants.workspace_id=excluded.workspace_id)
       AND (excluded.issued_at>bane_resource_grants.issued_at OR (excluded.issued_at=bane_resource_grants.issued_at AND
         excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))`);
   const actor = await externalMcpGrant(runtime, keyId);
-  if (!actor) return denied(403);
+  if (!actor) {
+    const { rows: [pending] } = await runtime.db.execute(sql`SELECT FROM bane_resource_grants WHERE id=${keyId} AND workspace_id IS NULL AND NOT revoked`);
+    return pending ? denied(403, undefined, '', `Choose a workspace for this MCP client in Bane: ${new URL('/settings/account', runtime.config.publicUrl).href}`) : denied(403);
+  }
   const granted=actor.permissions.filter(permission=>allowed.includes(permission));
   return granted.length ? handler({...actor,permissions:granted}) : denied(403);
 }

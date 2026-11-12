@@ -4,7 +4,8 @@ import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type 
 import {protectedResourceMetadata} from './oidc-resource.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
 
-const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired'])}).openapi('McpConnection');
+const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),workspaceId:z.string().nullable(),receiving:z.boolean()}).openapi('McpConnection');
+const Binding=z.object({workspaceId:z.string().min(1).max(200),receiving:z.boolean()}).strict().openapi('McpConnectionBinding');
 function owner(c:Ctx) {
   const principal=c.get('actor');
   if(principal.credential!=='dashboard') throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use your dashboard session.');
@@ -17,13 +18,28 @@ export function registerMcpAuth(app:App) {
   });
   app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
     const user=owner(c),{limit,cursor}=c.req.valid('query');
-    const {rows}=await c.env.db.execute<{id:string;client_id:string;name:string|null;email:string;scopes:string[];created_at:string;updated_at:string;status:'active'|'revoked'|'expired'}>(sql`
+    const {rows}=await c.env.db.execute<{id:string;client_id:string;name:string|null;email:string;scopes:string[];created_at:string;updated_at:string;status:'active'|'revoked'|'expired';workspace_id:string|null;receiving:boolean}>(sql`
       WITH approvals AS (SELECT g.id,g.user_id,g.client_id,g.client_id AS name,ARRAY(SELECT 'bane:'||p FROM unnest(g.permissions)p) scopes,g.created_at,g.updated_at,
-        CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status
+        CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status,g.workspace_id,g.receiving
         FROM bane_resource_grants g WHERE g.user_id=${user}
-        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired' FROM bane_expired_approvals WHERE user_id=${user})
+        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false FROM bane_expired_approvals WHERE user_id=${user})
       SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${cursor?sql`WHERE a.id>${cursor}`:sql``} ORDER BY a.id LIMIT ${limit+1}`);
-    return c.json({data:rows.slice(0,limit).map(r=>({id:r.id,clientId:r.client_id,name:r.name,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status})),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
+    return c.json({data:rows.slice(0,limit).map(r=>({id:r.id,clientId:r.client_id,name:r.name,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving})),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
+  });
+  // Chooses (or changes) the workspace an approval acts in. Credentials it created elsewhere stop at their next
+  // use: agent tokens, mailbox keys and protocol passwords all check the approval's current workspace.
+  app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/workspace',operationId:'bindMcpConnection',tags:['Auth'],security,request:{params:IdParams,body:{required:true,content:{'application/json':{schema:Binding}}}},responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),receiving:z.boolean()})),...errors}}),async c=>{
+    const user=owner(c),{id}=c.req.valid('param'),{workspaceId,receiving}=c.req.valid('json');
+    const {rows:[result]}=await c.env.db.execute<{revoked:boolean|null;role:string|null;bound:boolean}>(sql`WITH approval AS (SELECT revoked FROM bane_resource_grants WHERE id=${id} AND user_id=${user}),
+      membership AS (SELECT role FROM workspace_members WHERE workspace_id=${workspaceId} AND user_id=${user} AND role IN ('owner','admin','member')),
+      bound AS (UPDATE bane_resource_grants SET workspace_id=${workspaceId},receiving=${receiving},updated_at=now() WHERE id=${id} AND user_id=${user} AND NOT revoked
+        AND EXISTS(SELECT FROM membership WHERE NOT ${receiving} OR role IN ('owner','admin')) RETURNING id)
+      SELECT (SELECT revoked FROM approval) revoked,(SELECT role FROM membership) role,EXISTS(SELECT FROM bound) bound`);
+    if(result?.revoked==null) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
+    if(result.revoked) throw new ApiError(409,'MCP_CONNECTION_REVOKED','This MCP connection is revoked. Reconnect the client to approve it again.');
+    if(!result.role) throw new ApiError(403,'PERMISSION_DENIED','You are not a member of that workspace.');
+    if(!result.bound) throw new ApiError(403,'ADMIN_REQUIRED','Receiving tools need an owner or admin of that workspace.');
+    return c.json({id,workspaceId,receiving},200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
     const user=owner(c),{id}=c.req.valid('param');

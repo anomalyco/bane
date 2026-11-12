@@ -54,7 +54,7 @@ const READ_LEVEL_WRITES = new Set(['createAgentToken']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'revealWebhookSecret']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
-const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection']);
+const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection', 'bindMcpConnection']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
