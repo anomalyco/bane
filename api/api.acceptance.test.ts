@@ -180,13 +180,6 @@ test('S3 fixture: object round trips and reserved part headers keep the service 
   for(const Key of [key,'copy.txt'])await client.send(new DeleteObjectCommand({Bucket:'fixture',Key}));
   assert.equal((await client.send(new ListObjectsV2Command({Bucket:'fixture'}))).KeyCount,0);
 });
-test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
-  const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
-  const host = 'inbox.example.com';
-  assert.equal(receivingIssueTitle('proof_stale', host), `Recheck ownership of ${host}`);
-  assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
-  for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
-});
 // PR #144 review: a contact property is free text. Every run of non-space characters with an @ in it is masked whole,
 // with any quoted string or comment it touches (app/src/lib/private-address.ts addressParts, components/AddressText.tsx).
 test('dashboard addresses in free text: every run holding an @ is masked whole, with the quoted string or comment it touches', async () => {
@@ -225,6 +218,13 @@ test('dashboard addresses in free text: every run holding an @ is masked whole, 
   const started = performance.now();
   addressParts('x@'.repeat(100_000) + ' ' + '"('.repeat(50_000) + '@'); addressParts('a "b" (c) d@e '.repeat(5_000));
   assert.ok(performance.now() - started < 1000, 'long text is split quickly');
+});
+test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
+  const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
+  const host = 'inbox.example.com';
+  assert.equal(receivingIssueTitle('proof_stale', host), `Recheck ownership of ${host}`);
+  assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
+  for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
 });
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
