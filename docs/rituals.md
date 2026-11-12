@@ -43,7 +43,7 @@ flowchart TD
   deliver --> slack["Slack"] & discord["Discord"] & hook["Webhook"] & fwd["Forward"]
 ```
 
-- A ritual error stops evaluation for that recipient. Bane discards pending ritual actions, marks the message as junk with `ritual-error`, and uses the existing junk delivery rules. Ritual text and regex operations inspect at most the first 65,536 characters.
+- A ritual error stops evaluation for that recipient. Bane discards pending ritual actions, marks the message as junk with `ritual-error`, and uses the existing junk delivery rules. Ritual text and regex operations inspect at most the first 65,536 characters. A regex test also spends one step for every 64 bytes of matcher state it builds; a pattern that needs more than 512 KiB of state for a text (many wildcards in a row, for example) is a ritual error for that message, so prefer `includes`, anchors and specific words over long runs of `.`.
 - Local decisions commit with the message, so nobody sees mail before its final disposition. External calls are queued only after that commit.
 - A dry run (`testRituals`) runs the same pipeline on a stored message or pasted MIME inside a rolled-back transaction. It never delivers, never calls Jev and never saves; pass `scores` (or set answers in the dashboard) to see what an omen answer would do.
 
@@ -200,7 +200,7 @@ Lists live in the config: `"senderLists": { "vip": ["ceo@example.com", "@partner
 | Actions | 32 per run; three calls per endpoint per recipient |
 | Output | 64 KiB per action, 256 KiB per message |
 | Omens | 10 per ritual, 10 distinct questions per message |
-| Regex | 256 characters, 512 RE2 instructions, 64 Ki characters of input |
+| Regex | 256 characters, 512 RE2 instructions, 64 Ki characters of input, 512 KiB of matcher state per test |
 
 Measured cost on a warm plan is 4–6 µs of CPU per message for typical rituals (`BANE_BENCH=1` runs the benchmark).
 
