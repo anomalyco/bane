@@ -1136,6 +1136,44 @@ pub async fn listen(
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    /// A credential keeps its rate state for a minute after its last session. When the
+    /// table is full that state gives way to the next login; a credential with an open
+    /// session keeps its place and its lanes.
+    #[test]
+    fn a_full_credential_table_admits_the_next_login_and_keeps_open_sessions() {
+        let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
+        let login = |n: usize| {
+            Store::new(
+                api.clone(),
+                Principal {
+                    workspace: "w".into(),
+                    account: "owner".into(),
+                    inbox: "inbox".into(),
+                    kid: format!("app{n}"),
+                    addresses: vec![],
+                    folders: vec![],
+                    started: None,
+                    cached: false,
+                },
+            )
+        };
+        let tracked = || api.gates.lock().unwrap().len();
+        let open: Vec<_> = (0..3).map(|n| login(n).unwrap()).collect();
+        for n in 3..GATES {
+            drop(login(n).unwrap());
+        }
+        assert_eq!(tracked(), GATES);
+        let returning = login(GATES - 1).unwrap();
+        assert_eq!(tracked(), GATES);
+        let next = login(GATES).unwrap();
+        assert_eq!(tracked(), 5);
+        let gates = api.gates.lock().unwrap();
+        for session in open.iter().chain([&returning, &next]) {
+            let gate = &gates[&session.principal.kid];
+            assert!(Arc::ptr_eq(&gate.lanes.0[0], &session.lanes.0[0]));
+            assert!(Arc::ptr_eq(&gate.lanes.0[2], &open[0].lanes.0[2]));
+        }
+    }
     #[tokio::test]
     async fn account_and_workspace_capacity_is_shared_and_waiters_are_fifo() {
         use crate::admission::{Reservation, Shares};
@@ -1209,44 +1247,6 @@ mod auth_tests {
                 drop(head);
                 assert!(second.await.is_some());
             }
-        }
-    }
-    /// A credential keeps its rate state for a minute after its last session. When the
-    /// table is full that state gives way to the next login; a credential with an open
-    /// session keeps its place and its lanes.
-    #[test]
-    fn a_full_credential_table_admits_the_next_login_and_keeps_open_sessions() {
-        let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
-        let login = |n: usize| {
-            Store::new(
-                api.clone(),
-                Principal {
-                    workspace: "w".into(),
-                    account: "owner".into(),
-                    inbox: "inbox".into(),
-                    kid: format!("app{n}"),
-                    addresses: vec![],
-                    folders: vec![],
-                    started: None,
-                    cached: false,
-                },
-            )
-        };
-        let tracked = || api.gates.lock().unwrap().len();
-        let open: Vec<_> = (0..3).map(|n| login(n).unwrap()).collect();
-        for n in 3..GATES {
-            drop(login(n).unwrap());
-        }
-        assert_eq!(tracked(), GATES);
-        let returning = login(GATES - 1).unwrap();
-        assert_eq!(tracked(), GATES);
-        let next = login(GATES).unwrap();
-        assert_eq!(tracked(), 5);
-        let gates = api.gates.lock().unwrap();
-        for session in open.iter().chain([&returning, &next]) {
-            let gate = &gates[&session.principal.kid];
-            assert!(Arc::ptr_eq(&gate.lanes.0[0], &session.lanes.0[0]));
-            assert!(Arc::ptr_eq(&gate.lanes.0[2], &open[0].lanes.0[2]));
         }
     }
     #[test]
