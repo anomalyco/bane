@@ -57,8 +57,8 @@ function readCursor(cursor?: string) {
   return { at, key: cursor.slice(split + 1) };
 }
 type Audit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string };
-/** Idempotency, If-Match and the audit row around one mutation, all in one transaction. */
-async function mutate<T>(c: Ctx, operator: OperatorIdentity, workspaceId: string, body: unknown, work: (tx: DbExecutor, expectVersion: number | undefined) => Promise<{ result: T; audit: Audit }>): Promise<T> {
+/** Idempotency, If-Match and the audit row around one mutation, all in one transaction. Billing's operator tools use it too. */
+export async function mutate<T>(c: Ctx, operator: OperatorIdentity, workspaceId: string, body: unknown, work: (tx: DbExecutor, expectVersion: number | undefined) => Promise<{ result: T; audit: Audit }>): Promise<T> {
   const key = c.req.header('Idempotency-Key'), match = c.req.header('If-Match'), expectVersion = match ? Number(match.replaceAll('"', '')) : undefined;
   const hash = createHash('sha256').update(JSON.stringify([c.req.method, c.req.path, body])).digest('hex');
   return c.env.db.transaction(async tx => {
