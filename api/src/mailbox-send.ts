@@ -35,7 +35,7 @@ const mailboxSender = (runtime:Runtime,from:string,wid:SQL=sql`d.workspace_id`) 
   : verifiedClaim(wid,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`);
 
 /** Resolve to immutable sending uploads before admission, never inside a message transaction. */
-export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, items:AttachmentInput[],from:string):Promise<ResolvedAttachment[]> {
+export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRow,'id'|'workspaceId'|'domainId'>, items:AttachmentInput[],from:string):Promise<ResolvedAttachment[]> {
   const scope={workspaceId:mailbox.workspaceId}, out:ResolvedAttachment[]=[];
   if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${mailboxSender(runtime,from)}`)).rowCount)throw unverifiedSender();
   for(const item of items){

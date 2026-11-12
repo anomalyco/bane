@@ -4,6 +4,7 @@ import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, ModuleLoadError,
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
+import { principal } from './mail-gateway.js';
 import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
 import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
@@ -41,7 +42,7 @@ export type Mail = typeof emails.$inferSelect;
 type Review = { version:number; draft: CampaignDraft; rendered: { html?: string; text?: string }; assets:AttachmentRow[]; contentHash: string | null; recipient: ReviewedRecipient };
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
-type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
+type Leased = { mail: Mail; contentBytes: number; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: Partial<EmailSnapshot> };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
@@ -81,7 +82,13 @@ export interface DispatcherOptions {
 export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number; quotaRetryAt?: number; paceRetryAt?: number }
 
 // Timestamps are cast to text so raw rows match Drizzle's string-mode timestamp columns.
-const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) => sql`leased.${sql.identifier(column.name)}${column.columnType.startsWith('PgTimestamp') ? sql`::text` : sql``} AS ${sql.identifier(key)}`);
+// The lease carries routing/claim metadata, not a batch of multi-MiB bodies. Use the
+// logical size: pg_column_size can report the much smaller compressed TOAST value.
+const INLINE_SNAPSHOT_BYTES = 64 * 1024;
+const contentFields = sql`ARRAY['text','html','raw','template']`;
+const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) => key === 'snapshot'
+  ? sql`CASE WHEN measured.bytes > ${INLINE_SNAPSHOT_BYTES} THEN leased.snapshot - ${contentFields} ELSE leased.snapshot END AS snapshot`
+  : sql`leased.${sql.identifier(column.name)}${column.columnType.startsWith('PgTimestamp') ? sql`::text` : sql``} AS ${sql.identifier(key)}`);
 let rankJsonCache: string | undefined;
 const rankJson = () => rankJsonCache ??= JSON.stringify(rank);
 
@@ -323,12 +330,13 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     ) ${simple ? sql`, ${claimCtes(runtime,region,simple)}, slow AS (
       UPDATE sending_emails e SET lease_until=clock_timestamp()+interval '2 minutes' FROM due WHERE e.workspace_id=due.workspace_id AND e.id=due.id AND NOT EXISTS(SELECT 1 FROM input WHERE id=e.id)
     )` : sql``}
-    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND used>=greatest(50,cap/2)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
+    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND used>=greatest(50,cap/2)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, measured.bytes AS snapshot_bytes, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,${simple?sql`(SELECT count(*)::int FROM webhook_jobs)`:sql`0`} AS webhooks,
       ${simple ? sql`CASE WHEN EXISTS(SELECT 1 FROM input WHERE id=leased.id) THEN coalesce((SELECT status FROM claimed WHERE id=leased.id),'lost') END` : sql`NULL`} AS claim_status,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
       r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered,r.assets AS review_assets, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM selected leased
+    CROSS JOIN LATERAL (SELECT octet_length(leased.snapshot::text) AS bytes OFFSET 0) measured
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
     LEFT JOIN reviews r ON r.carrier = leased.id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
@@ -374,7 +382,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
     if(mail.snapshot.deferredCampaign) mail.snapshot={...mail.snapshot,from:mail.from,to:mail.to,cc:mail.cc,bcc:mail.bcc,region:mail.region,subject:mail.subject,attachments:shared?shared.draft.attachments:mail.snapshot.attachments??[],binding:shared?shared.draft.binding:mail.snapshot.binding};
-    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), quota: quota_sample as LeaseQuota | undefined, claimStatus: claim_status as Leased['claimStatus'], review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
+    return { mail, contentBytes: Number(row.snapshot_bytes) > INLINE_SNAPSHOT_BYTES ? Number(row.snapshot_bytes) : 0, owner: ready ? owner! : null, rateRetries: Number(rate_retries), quota: quota_sample as LeaseQuota | undefined, claimStatus: claim_status as Leased['claimStatus'], review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
 }
 
@@ -542,6 +550,9 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
             WHERE f.email_id=x.id AND f.workspace_id=x.workspace_id AND x.actor_key_id='forward:'||f.endpoint AND starts_with(d.ref,'forward:')
             AND d.verified AND d.declined_at IS NULL AND NOT h.paused AND NOT EXISTS(SELECT FROM jsonb_array_elements_text(f.grants) gid WHERE NOT mail_receiving_grant(f.workspace_id,gid,${receivingPolicy(runtime.config)}::jsonb)) FOR SHARE)
           WHEN starts_with(x.actor_key_id, 'user_') THEN EXISTS (${approvedOriginUser(runtime, sql`x.workspace_id`, sql`substr(x.actor_key_id, 6)`, sql`x.campaign_id IS NULL`)})
+          WHEN starts_with(x.actor_key_id, 'app_') THEN EXISTS (
+            SELECT FROM (${principal(runtime, 'smtp', sql`p.id=x.actor_key_id AND b.workspace_id=x.workspace_id`)} FOR SHARE OF p,b) a
+            JOIN mailbox_addresses addr ON addr.workspace_id=a.w AND addr.mailbox_id=a.b AND addr.address=x.sender FOR SHARE OF addr)
           WHEN starts_with(x.actor_key_id, 'mbk_') THEN EXISTS (
             SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.address = x.sender
             WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id AND k.revoked_at IS NULL AND k.permissions ? 'send'
@@ -937,7 +948,20 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   const loadAttachments = batchAttachments(base, ready);
   const screenDeferred:Mail[]=[];
   const prepare = async (item: typeof ready[number]) => {
-    try { return await prepareMail(item, loadAttachments,gate); }
+    try {
+      if (item.contentBytes) {
+        // Read only after reserving the page. Do not attach the body to the lease:
+        // that array outlives this send, even when its byte reservation is released.
+        const m=item.mail;
+        const {rows:[body]}=await base.db.execute<{text:string|null;html:string|null;raw:string|null;template:EmailSnapshot['template']|null}>(sql`
+          SELECT snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'raw' AS raw,snapshot->'template' AS template
+          FROM sending_emails WHERE workspace_id=${m.workspaceId} AND id=${m.id} AND dispatch_version=${m.dispatchVersion} AND status='queued'`);
+        if (!body) { counters.skipped++;return; }
+        const snapshot={...m.snapshot,text:body.text??undefined,html:body.html??undefined,raw:body.raw??undefined,template:body.template??undefined};
+        return await prepareMail({...item,mail:{...m,snapshot}}, loadAttachments,gate);
+      }
+      return await prepareMail(item, loadAttachments,gate);
+    }
     catch (error) {
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
       if (error instanceof ApiError && error.code==='CONTENT_SCREEN_UNAVAILABLE') {
@@ -967,7 +991,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       }
     } finally {for(const r of await workers) if(r.status==='rejected') throw r.reason;}
   };
-  if(ready.some(item=>item.mail.snapshot.attachments.length)) {
+  if(ready.some(item=>item.contentBytes || item.mail.snapshot.attachments.length)) {
     // Reserve bytes, not a whole lane. Small pages overlap and share the result
     // writer; disjoint large bodies still cannot accumulate across sibling lanes.
     const limit=8*1024*1024;let page:typeof ready=[],bytes=0;
@@ -991,7 +1015,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     };
     for(const item of ready){
       // Invalid oversize metadata is rejected in prepare before reading the object.
-      const n=Math.min(limit,(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,0));
+      const n=Math.min(limit,(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,item.contentBytes));
       if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;
     }
     if(page.length)await flush();

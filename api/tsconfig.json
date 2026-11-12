@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "api.acceptance.test.ts", "worker-configuration.d.ts", "scripts/check-premerge.ts"]
+  "include": ["src/**/*.ts", "api.acceptance.test.ts", "worker-configuration.d.ts", "scripts/check-premerge.ts", "scripts/preview-smoke.ts"]
 }

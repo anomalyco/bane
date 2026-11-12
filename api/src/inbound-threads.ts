@@ -61,8 +61,9 @@ function visibleLinks(value: MailboxAccess, filter: Filter) {
 }
 
 // Delivery details (SMTP envelope, region, spam verdict, headers, raw message) go to owner and admin dashboard sessions and
-// unrestricted manage API keys only; MCP grants and agent tokens read mail without them. Shared with logs.ts.
-export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && v.admin);
+// unrestricted manage API keys only; MCP grants, agent tokens and the API keys a grant created read mail without them.
+// Shared with logs.ts.
+export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && !actor.grantId && v.admin);
 // Which stored messages a reader can see, and the receiving addresses each was delivered to. Shared with the unified
 // logs (logs.ts), so both lists apply the same rule.
 export const accessibleMessages = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
