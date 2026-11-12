@@ -69,6 +69,9 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   useEffect(() => () => window.clearTimeout(typing.current), [])
   const type = (value: string) => { setDraft(value); window.clearTimeout(typing.current); typing.current = window.setTimeout(() => { written.current = value; update({ q: value }) }, 250) }
   const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
+  // A new page size (the window resized) starts from the first page; the size settling on mount keeps the URL's page.
+  const fitted = useRef<number | null>(null)
+  useEffect(() => { if (!measured) return; if (fitted.current !== null && fitted.current !== pageSize) update({ page: null }); fitted.current = pageSize }, [pageSize, measured]) // eslint-disable-line react-hooks/exhaustive-deps
   // Status and stream follow the direction: a sent status leaves Received, received and spam leave Sent, and streams are sent mail only.
   const setDirection = (value: LogDirection) => update({ view: value, status: value === 'received' && sentStatuses.includes(status) || value === 'sent' && receivedStatuses.includes(status) ? null : status, stream: value === 'received' ? null : stream })
   const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
@@ -83,7 +86,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" value={draft} onChange={event => type(event.target.value)} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => update({ status: value, ...receivedStatuses.includes(value) ? { stream: null } : {} })} options={['all', ...[...allowed].sort((a, b) => [...receivedStatuses, ...sentStatuses].indexOf(a) - [...receivedStatuses, ...sentStatuses].indexOf(b))].map(option)} />
       <Select aria-label="Email stream filter" value={stream} disabled={receivedOnly} onValueChange={value => update({ stream: value })} options={streams} /></div>
-      <Button disabled={!query.data?.items.length} title="Download the rows on this page as a CSV file" onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} />Export CSV</Button>
+      <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export CSV</span></Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logColumns}

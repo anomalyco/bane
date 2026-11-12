@@ -77,7 +77,6 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
 }
 
 export function AgentInboxesPage() {
-  const navigate = useNavigate()
   const { canAdminister } = useWorkspaceAccess()
   const [search, setSearch] = useState('')
   const [creating, setCreating] = useState(false)
@@ -90,15 +89,17 @@ export function AgentInboxesPage() {
       {canAdminister && <Button variant="primary" onClick={() => setCreating(true)}>New inbox</Button>}
     </>} />
     {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
-      <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`${route}/${row.id}`)}
+      <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}
         empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an inbox key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
         columns={[
-          { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link className="receiving-clip" to={`${route}/${row.id}`}><PrivateAddress value={row.address} /></Link>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div> },
-          { key: 'status', label: 'Status', width: '14%', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
-          { key: 'expires', label: 'Expires', width: '16%', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : date(row.expiresAt) },
-          { key: 'messages', label: 'Messages', align: 'right', render: row => number(row.usage.messages) },
-          { key: 'unread', label: 'Unread', align: 'right', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span> },
-          { key: 'held', label: 'Held', align: 'right', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
+          // An inbox's card: its address and status, its name or type, then expiry and mail counts.
+          { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div>, cardRender: row => <PrivateAddress value={row.address} /> },
+          { key: 'name', label: 'Name', table: false, card: 'line', render: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
+          { key: 'status', label: 'Status', width: '14%', card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
+          { key: 'expires', label: 'Expires', width: '16%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : date(row.expiresAt), cardRender: row => row.status === 'deleting' ? 'Deleting now' : `Expires ${date(row.expiresAt)}` },
+          { key: 'messages', label: 'Messages', align: 'right', card: 'inline', render: row => number(row.usage.messages), cardRender: row => `${number(row.usage.messages)} ${row.usage.messages === 1 ? 'message' : 'messages'}` },
+          { key: 'unread', label: 'Unread', align: 'right', card: 'inline', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span>, cardRender: row => `${number(row.usage.unread)} unread` },
+          { key: 'held', label: 'Held', align: 'right', card: 'hide', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
         ]} />
       {inboxes.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={inboxes.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, inboxes.data?.nextCursor)} />}
     </>}
@@ -183,10 +184,11 @@ function InboxDetail({ id }: { id: string }) {
         <DataTable loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
           empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? 'Mail sent to this inbox shows up here within seconds.' : undefined} />}
           columns={[
-            { key: 'from', label: 'From', width: '24%', render: row => <span className="receiving-clip"><Sender value={row.from} /></span> },
-            { key: 'subject', label: 'Subject', width: '40%', render: row => <div className="settings-cell-stack"><span className="receiving-clip">{row.subject || '(no subject)'}</span>{row.snippet && <span className="muted receiving-clip">{row.snippet}</span>}</div> },
-            { key: 'code', label: 'Code', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span> },
-            { key: 'state', label: 'Status', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
+            // A message's card: its subject and status, then the sender and any code it carries.
+            { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="receiving-clip"><Sender value={row.from} /></span> },
+            { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <div className="settings-cell-stack"><span className="receiving-clip">{row.subject || '(no subject)'}</span>{row.snippet && <span className="muted receiving-clip">{row.snippet}</span>}</div>, cardRender: row => row.subject || '(no subject)' },
+            { key: 'code', label: 'Code', card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span> },
+            { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
             { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
           ]} />
         {!settled ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}

@@ -9,13 +9,16 @@ import { date, label } from '../../lib/format'
 import { receivedTo } from '../../lib/private-address'
 
 // One log row, shared by Logs and Overview's latest emails: the same columns, masking and click-through in both.
+// On a phone each row is a card: the subject (the link) and the time, then direction, status and the other party.
 export const logColumnDefs: SkeletonColumn[] = [
-  { key: 'time', label: 'Time · UTC', width: 140 }, { key: 'direction', label: <span className="sr-only">Direction</span>, width: 48 },
-  { key: 'status', label: 'Status', width: 104 }, { key: 'from', label: 'From', width: '14%' }, { key: 'to', label: 'To', width: '14%' },
-  { key: 'subject', label: 'Subject' }, { key: 'stream', label: 'Stream', width: 116 }, { key: 'open', label: '', width: 28 },
+  { key: 'time', label: 'Time · UTC', width: 140, card: 'aside' }, { key: 'direction', label: <span className="sr-only">Direction</span>, width: 48, card: 'line' },
+  { key: 'status', label: 'Status', width: 104, card: 'inline' }, { key: 'from', label: 'From', width: '14%', card: 'inline' }, { key: 'to', label: 'To', width: '14%', card: 'hide' },
+  { key: 'subject', label: 'Subject', card: 'title' }, { key: 'stream', label: 'Stream', width: 116, card: 'hide' }, { key: 'open', label: '', width: 28, card: 'hide' },
 ]
 
 export const logTimestamp = (value: string) => date(value, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' })
+// A card's time: the hour today, the date before that (UTC, like the table).
+const cardTime = (value: string) => date(value, value.slice(0, 10) === new Date().toISOString().slice(0, 10) ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' })
 // Sent and received mail open at /logs/:id; received message IDs start with msg_.
 export const logHref = (row: Pick<LogEntry, 'id'>) => `/logs/${encodeURIComponent(row.id)}`
 export const isReceivedId = (id: string) => id.startsWith('msg_')
@@ -37,10 +40,10 @@ function SentTo({ to }: { to: string[] }) {
 }
 
 export const logColumns: Column<LogEntry>[] = [
-  { ...logColumnDefs[0]!, render: row => <span className="muted" title={row.at}>{logTimestamp(row.at)}</span> },
+  { ...logColumnDefs[0]!, render: row => <span className="muted" title={row.at}>{logTimestamp(row.at)}</span>, cardRender: row => <time dateTime={row.at} title={`${logTimestamp(row.at)} UTC`}>{cardTime(row.at)}</time> },
   { ...logColumnDefs[1]!, render: row => <span className="log-direction" data-direction={row.direction} title={row.direction === 'sent' ? 'Sent' : 'Received'}>{row.direction === 'sent' ? 'Out' : 'In'}</span> },
   { ...logColumnDefs[2]!, render: row => row.direction === 'sent' ? <StatusBadge status={row.status} /> : row.status === 'spam' ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
-  { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} /> },
+  { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} />, cardRender: row => row.direction === 'sent' ? <>To <SentTo to={row.to} /></> : <>From <PrivateAddress value={row.from.address} /></> },
   { ...logColumnDefs[4]!, render: row => row.direction === 'sent' ? <SentTo to={row.to} /> : <ReceivedTo row={row} /> },
   { ...logColumnDefs[5]!, render: row => <span className="log-subject" title={row.subject}>{(row.attachmentCount ?? 0) > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}<span className={row.subject ? undefined : 'muted'}>{row.subject || '(no subject)'}</span></span> },
   { ...logColumnDefs[6]!, render: row => <span className="muted">{row.stream ? label(row.stream) : '—'}</span> },

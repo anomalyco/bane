@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
@@ -19,6 +19,8 @@ const eventHints: Partial<Record<WebhookEvent, string>> = { 'email.sent': 'SES a
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...defaultEvents] }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
 const eventLabel = (event: string) => label(event.replace(/^email\./, '').replace('.', '_'))
+// The events a webhook gets, named rather than counted: "All events", or the first and how many more.
+const eventSummary = (list: WebhookEvent[]) => list.length === events.length ? 'All events' : `${eventLabel(list[0] ?? '')}${list.length > 1 ? ` +${number(list.length - 1)}` : ''}`
 function scopeText(scope: Webhook['regionIds']) { return scope === 'all' ? 'All regions' : scope.join(', ') }
 function validate(input: WebhookInput) {
   const errors: Record<string, string> = {}
@@ -61,10 +63,11 @@ export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
     <p className="muted settings-section-note">Bane calls your URL when something happens to email you send: delivered, bounced, marked as spam and more. Each call is signed so you can <Link to="/docs#webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhooks" />} columns={[
-      { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
+    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
+      { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
+      { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },
       ...multiTenant ? [] : [{ ...column(columns, 'scope'), render: (webhook: Webhook) => scopeText(webhook.regionIds) }],
-      { ...column(columns, 'events'), render: (webhook: Webhook) => <span className="settings-webhook-events" title={webhook.events.map(eventLabel).join(', ')}>{webhook.events.length === events.length ? 'All events' : <>{eventLabel(webhook.events[0]!)}{webhook.events.length > 1 && <span className="muted"> +{number(webhook.events.length - 1)}</span>}</>}</span> },
+      { ...column(columns, 'events'), render: (webhook: Webhook) => <span className="settings-webhook-events" title={webhook.events.map(eventLabel).join(', ')}>{eventSummary(webhook.events)}</span>, cardRender: (webhook: Webhook) => eventSummary(webhook.events) },
       { ...column(columns, 'headers'), render: (webhook: Webhook) => <HeaderNames headers={webhook.headers} /> },
       { ...column(columns, 'status'), render: (webhook: Webhook) => <StatusBadge status={label(webhook.status)} /> },
     ]} />}
@@ -99,7 +102,7 @@ function NewWebhook() {
     {!multiTenant && regions.isPending ? <WebhookBodySkeleton isNew /> : !multiTenant && regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
       <EndpointFields input={input} onChange={setInput} regions={regions.data?.data ?? []} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
-      <div className="cluster"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
+      <div className="cluster form-actions"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
     </form>}
     <SecretDialog secret={created?.secret ?? null} title="Webhook created · Signing secret" onClose={() => { const id = created?.id; setCreated(null); if (id) navigate(`/settings/webhooks/${id}`, { replace: true }) }}><SigningNote /></SecretDialog>
   </div>
@@ -121,6 +124,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   // Hosted users can't change the region scope, so their updates leave it out and keep the saved one.
   const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: '', ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events })
   const deliveryColumnSet = deliveryColumns(multiTenant)
+  async function retryDelivery(delivery: WebhookDelivery) { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }
   const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [action, setAction] = useState<'pause' | 'resume' | 'rotate' | 'delete' | null>(null)
@@ -173,12 +177,16 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><SigningNote /><MutationError error={test.error ?? reveal.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
-        { ...column(deliveryColumnSet, 'time'), render: (delivery: WebhookDelivery) => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div> },
+        { ...column(deliveryColumnSet, 'time'), render: (delivery: WebhookDelivery) => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div>, cardRender: (delivery: WebhookDelivery) => `${date(delivery.at, { month: 'short', day: 'numeric', timeZone: 'UTC' })} · ${time(delivery.at)}` },
         ...multiTenant ? [] : [{ ...column(deliveryColumnSet, 'region'), render: (delivery: WebhookDelivery) => delivery.regionId }],
-        { ...column(deliveryColumnSet, 'event'), render: (delivery: WebhookDelivery) => delivery.test ? <span className="settings-cell-stack"><span>Test</span><span className="muted">{eventLabel(delivery.event)}</span></span> : eventLabel(delivery.event) },
-        { ...column(deliveryColumnSet, 'status'), render: (delivery: WebhookDelivery) => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
-        { ...column(deliveryColumnSet, 'attempts'), render: (delivery: WebhookDelivery) => number(delivery.attempts) },
-        { ...column(deliveryColumnSet, 'actions'), render: (delivery: WebhookDelivery) => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
+        { ...column(deliveryColumnSet, 'event'), render: (delivery: WebhookDelivery) => delivery.test ? <span className="settings-cell-stack"><span>Test</span><span className="muted">{eventLabel(delivery.event)}</span></span> : eventLabel(delivery.event), cardRender: (delivery: WebhookDelivery) => `${delivery.test ? 'Test · ' : ''}${eventLabel(delivery.event)} · ${delivery.response || 'No response'}` },
+        { ...column(deliveryColumnSet, 'status'), render: (delivery: WebhookDelivery) => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div>, cardRender: (delivery: WebhookDelivery) => <StatusBadge status={label(delivery.status)} /> },
+        { ...column(deliveryColumnSet, 'attempts'), render: (delivery: WebhookDelivery) => number(delivery.attempts), cardRender: (delivery: WebhookDelivery) => `${number(delivery.attempts)} ${delivery.attempts === 1 ? 'attempt' : 'attempts'}` },
+        { ...column(deliveryColumnSet, 'actions'), render: (delivery: WebhookDelivery) => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={() => void retryDelivery(delivery)}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div>,
+          cardRender: (delivery: WebhookDelivery) => <DropdownMenu label={`Actions for the ${eventLabel(delivery.event)} delivery`} title={eventLabel(delivery.event)} items={[
+            ...['retry_pending', 'failed'].includes(delivery.status) ? [{ label: 'Retry now', disabled: pending || webhook.status === 'paused', onSelect: () => void retryDelivery(delivery) }] : [],
+            { label: 'Inspect', onSelect: () => setInspected(delivery) },
+          ]} /> },
       ]} />
       <MutationError error={historyError} />{api.webhookDeliveries && (historyBusy ? <PaginationSkeleton /> : <Pagination page={historyPagination.page} pageSize={20} nextCursor={currentHistoryCursor} onPageChange={next => void changeHistoryPage(next)} />)}
     </section>

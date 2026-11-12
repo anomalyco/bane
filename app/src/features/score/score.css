@@ -118,6 +118,13 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
   .next-steps a:hover > :first-child { text-decoration: underline; text-underline-offset: 4px; }
   .next-steps a:hover svg { transform: translate(2px, -2px); }
 }
+/* Phone: a compact breakdown, the six factors in two columns of label and value (no bars). 122px in every state. */
+@media (max-width: 640px) {
+  .score-breakdown, .score-breakdown--loading { height: 122px; }
+  .score-factors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-24); }
+  .score-factors > li > button { grid-template-columns: minmax(0, 1fr) auto; }
+  .score-factors > li > button > .score-bar { display: none; }
+}
 
 /* The explainer: the status, what counts, how it is graded and the six parts. */
 .score-about { width: min(600px, calc(100vw - 32px)); }
