@@ -473,12 +473,12 @@ async function autoAct(words: string[]): Promise<unknown> {
     });
     case 'fail': case 'lose': return autoTxn(async () => {
       // The oldest running job stops. fail: its final attempt failed permanently; the handler's
-      // terminal write (mailbox-ingest.ts) fails a still-pending receipt. lose: the job ended
+      // terminal write (mailbox-ingest.ts) fails the receipt as claimed. lose: the job ended
       // without touching its receipt (a dropped or crashed attempt).
       const w = wsOf(a), mid = sesId(b);
       const job = (await auto.client.query(`SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='running' ORDER BY created_at,id LIMIT 1`, [w, mid])).rows[0];
       if (!job) return 'e:no-running-job';
-      const failed = verb === 'fail' ? (await auto.client.query("UPDATE mail_receipts SET status='failed',error='MAILBOX_INGEST_FAILED',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending'", [w, mid])).rowCount : 0;
+      const failed = verb === 'fail' ? (await auto.client.query("UPDATE mail_receipts SET status='failed',error='MAILBOX_INGEST_FAILED',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending' AND recipients=$3::jsonb", [w, mid, claims.get(job.id)])).rowCount : 0;
       await auto.client.query(`UPDATE jobs SET status=$2 WHERE id=$1`, [job.id, verb === 'fail' ? 'failed' : 'completed']);
       return failed;
     });

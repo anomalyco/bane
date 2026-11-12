@@ -606,8 +606,8 @@ impl Recv {
         !p.txns["A"].blocked
     }
 
-    /// The oldest running job of X:m stops (done, fail or lose); a done job settles the receipt
-    /// behind the store's fence, a failed one fails a still-pending receipt.
+    /// The oldest running job of X:m stops (done, fail or lose). A done job settles the receipt, a
+    /// failed one fails it, both only as claimed: still pending with the recipients it read.
     fn end_job(&mut self, x: usize, m: &str, how: &str) -> Value {
         let claimed = self.ws[x].jobs.get_mut(m).unwrap().running.remove(0);
         if self.ws[x].jobs[m].pending == 0 && self.ws[x].jobs[m].running.is_empty() {
@@ -618,7 +618,7 @@ impl Recv {
                 r.status = "processed".into();
                 json!(1)
             }
-            ("fail", Some(r)) if r.status == "pending" => {
+            ("fail", Some(r)) if r.status == "pending" && r.set() == claimed => {
                 r.status = "failed".into();
                 r.error = Some("MAILBOX_INGEST_FAILED".into());
                 json!(1)

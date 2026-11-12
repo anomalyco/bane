@@ -398,11 +398,16 @@ export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
   catch { return null; }
 }
 
-const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void) => {
+// A terminal write settles the receipt only as this attempt claimed it: still pending, with the same
+// recipients. A reopen while the job ran holds the receipt until the job ends (155), and a stale or
+// lapsed attempt must not retire the newer recipients.
+const claimedBy=(recipients:string[])=>sql`${mailReceipts.status}='pending' AND ${mailReceipts.recipients}=${JSON.stringify(recipients)}::jsonb`;
+const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job:Parameters<JobHandler>[2],reserveMime:(size:number)=>void,claim:{recipients?:string[]}) => {
   const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
   const receipt=job.ingest!==undefined?job.ingest:(await runtime.db.execute<{input:IngestInput|null}>(sql`SELECT ${ingestInput(runtime.config,scope.workspaceId,sesMessageId)} AS input`)).rows[0]?.input;
   if(!receipt)return;
+  claim.recipients=receipt.recipients;
   if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
@@ -416,7 +421,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       const {CopyObjectCommand}=await loadIngestS3();
       await s3.send(new CopyObjectCommand({Bucket:receipt.bucket,Key:'quarantine/'+sesMessageId,CopySource:`${receipt.bucket}/${sourceKey}`,CopySourceIfMatch:receipt.notification.stagingEtag as string|undefined,TaggingDirective:'REPLACE'}));
       log('warn',{code:quarantine,workspaceId:scope.workspaceId,virus:verdicts.virus??'missing',spam:verdicts.spam??'missing'});
-      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),eq(mailReceipts.status,'pending')));
+      await runtime.db.update(mailReceipts).set({status:'failed',error:quarantine,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,scope.workspaceId),eq(mailReceipts.sesMessageId,sesMessageId),claimedBy(receipt.recipients)));
       return;
     } finally {s3.destroy();}
   }
@@ -591,14 +596,14 @@ const deleteMailObjects:JobHandler=async(runtime,payload,job)=>{
 };
 export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId)),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
-  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]);
+  const key=JSON.stringify([job.workspaceId,payload.sesMessageId]),claim:{recipients?:string[]}={recipients:job.ingest?.recipients};
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());
   inProgress.add(key);
   try { await ingestJob(runtime,payload,job,size=>{
     const bytes=Math.min(PARSE_LIMIT,Math.max(256*1024,size));
     if(mimeBytes+bytes>PARSE_LIMIT)throw new JobDeferred(new Date(Date.now()+2000).toISOString());
     mimeBytes+=bytes;reserved=bytes;
-  }); }
+  },claim); }
   catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
     if (job.attempts<MAX_ATTEMPTS) {
@@ -608,7 +613,7 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'m
       if (error.status>=500 || error.status===429) throw new ApiError(503,error.code,'Mailbox ingestion temporarily unavailable.',undefined,true);
     }
     const code=error instanceof ApiError ? (error.code==='MAILBOX_ATTACHMENT_UPLOAD_FAILED'?'ATTACHMENT_UPLOAD_FAILED':error.code) : 'MAILBOX_INGEST_FAILED';
-    await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),eq(mailReceipts.status,'pending')));
+    await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString()}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),claim.recipients?claimedBy(claim.recipients):eq(mailReceipts.status,'pending')));
     log('error',{code,workspaceId:job.workspaceId,jobId:job.id});
   } finally { mimeBytes-=reserved;inProgress.delete(key); }
 } };
