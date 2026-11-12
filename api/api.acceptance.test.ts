@@ -1043,7 +1043,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const part = (v: object) => Buffer.from(JSON.stringify(v)).toString('base64url');
               const jwt = part({ alg:'ES256', kid:'op' })+'.'+part({ iss:issuer, aud:'fixture', sub:subject, nonce:invalidNonce?'wrong':nonce, iat:now, exp:now+60, email:ownerEmail, email_verified:true, hd:'example.com' });
               const signature = sign('sha256', Buffer.from(jwt), {key:op.privateKey,dsaEncoding:'ieee-p1363'});
-              return Response.json({ token_type:'Bearer', access_token:'fixture', id_token:jwt+'.'+signature.toString('base64url') });
+              return Response.json({ token_type:'Bearer', access_token:'fixture', id_token:jwt+'.'+Buffer.from(signature).toString('base64url') });
             }
             default: throw Error('Unexpected OIDC endpoint');
           }
