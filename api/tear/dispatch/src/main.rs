@@ -37,15 +37,22 @@ fn model(v: &Value) -> R<Model> {
 /// transactional mail, leaving 1-3 campaign credits, below the shard count at 2) under two
 /// dispatcher shards and a four-recipient campaign; they are checked as invariants.
 fn configs() -> Vec<Cfg> {
-    let exact = |seed, pace, campaign| Cfg { seed, pace, campaign, recipients: 2, quota: None, owners: 1, drain_batch: 24 };
-    let quota = |q| Cfg { seed: 0, pace: None, campaign: P::Ok, recipients: 4, quota: Some(q), owners: 1, drain_batch: 24 };
+    let exact = |seed, pace, campaign| Cfg { seed, pace, campaign, recipients: 2, quota: None, owners: 1, drain_batch: 24, exact_quota: None };
+    let quota = |q| Cfg { seed: 0, pace: None, campaign: P::Ok, recipients: 4, quota: Some(q), owners: 1, drain_batch: 24, exact_quota: None };
     let owners = Cfg { owners: 2, drain_batch: 2, ..exact(0, None, P::Ok) };
-    vec![exact(0, None, P::Ok), exact(0, Some(1), P::Ok), exact(0, None, P::Thr), exact(9_998, None, P::Unk), quota(2), quota(3), quota(4), owners]
+    // A 24-hour quota of 2 keeps 1 for transactional mail: one marketing recipient fits, so a
+    // two-recipient marketing envelope never does. One owner with 24-row leases, or two owners
+    // with two-row leases (each lease holds every owner's head).
+    let allowance = Cfg { exact_quota: Some(2), ..exact(0, None, P::Ok) };
+    let allowance2 = Cfg { exact_quota: Some(2), ..owners.clone() };
+    vec![exact(0, None, P::Ok), exact(0, Some(1), P::Ok), exact(0, None, P::Thr), exact(9_998, None, P::Unk), quota(2), quota(3), quota(4), owners, allowance, allowance2]
 }
 fn cfgs_for(profile: &str) -> Vec<usize> {
     match profile {
         "quota" => vec![4, 5, 6],
         "owners" => vec![7],
+        "allowance" => vec![8],
+        "allowance2" => vec![9],
         "admission" => vec![3],
         "dispatch" => vec![0],
         "campaign" => vec![0, 1, 2],
@@ -149,7 +156,7 @@ impl Host for Check {
                 let c = &self.cfg;
                 let recipients: Vec<&str> = (0..c.recipients).map(|_| c.campaign.name()).collect();
                 self.fixture.act(&json!({"reset": {"seed": c.seed, "pace": c.pace, "recipients": recipients,
-                    "quota": c.quota.map_or(-1, i64::from), "shards": c.quota.is_some(), "invariants": c.quota.is_some(),
+                    "quota": c.quota.or(c.exact_quota).map_or(-1, i64::from), "shards": c.quota.is_some(), "invariants": c.quota.is_some(),
                     "owners": c.owners, "drainBatch": c.drain_batch}}))?;
                 Value::Null
             }
@@ -278,6 +285,16 @@ const SCENARIOS: &[(usize, &[&str], &str)] = &[
     // The original owner-cursor bug through the ordinary runner: two owners fill a two-row lease.
     (7, &["send ok", "send2 ok", "send ok", "drain"], "a run with a lease's worth of owners leases past the last owner"),
     (7, &["send2 ok", "send ok", "send2 ok", "send ok", "send2 ok", "drain", "send ok", "drain"], "a run with a lease's worth of owners leases past the last owner"),
+    // Recheck of #52 (P1): one owner's full page of envelopes the allowance cannot afford.
+    (8, &["mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2",
+        "mkt2", "mkt2", "mkt2", "mkt2", "drain"], "the lease skips an envelope the allowance cannot afford"),
+    (8, &["mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2", "mkt2",
+        "mkt2", "mkt2", "mkt2", "mkt2", "mkt1", "drain"], "affordable mail behind an oversized head sends"),
+    // Recheck of #52 (P2): every owner's head is too large; their affordable followers still send.
+    (9, &["mkt2", "mkt2b", "mkt1", "mkt1b", "drain"], "affordable mail behind an oversized head sends"),
+    (9, &["mkt2", "mkt2b", "mkt1", "mkt1b", "drain", "wait 1d", "wait 1m", "drain"], "affordable mail behind an oversized head sends"),
+    // The reserve: transactional mail spends the room marketing would have used, never the reverse.
+    (9, &["mkt1", "send ok", "mkt1b", "drain", "wait 1m", "wait 1s", "drain", "wait 1d", "wait 1m", "drain"], "the allowance delays an envelope in its page"),
     // Review of #52 (P2): one drain is a whole run, not one 24-row page.
     (0, &["send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok",
         "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "send ok", "drain"], "drain leases a second page"),
@@ -523,10 +540,11 @@ fn main() -> R<()> {
             let random = campaign(&mut check, "ci random 100x24", walks("all", 100, 24), Some(Instant::now() + Duration::from_secs(22)))?;
             let quota = campaign(&mut check, "ci quota 30x24", walks("quota", 30, 24), Some(Instant::now() + Duration::from_secs(8)))?;
             let owners = campaign(&mut check, "ci owners 30x12", walks("owners", 30, 12), Some(Instant::now() + Duration::from_secs(5)))?;
+            let allowance = campaign(&mut check, "ci allowance 40x16", [walks("allowance", 20, 16), walks("allowance2", 20, 16)].concat(), Some(Instant::now() + Duration::from_secs(8)))?;
             let (info, traces) = edges(3, 20_000, alphabet("dispatch"), &cfgs[0])?;
             let mut edge = campaign(&mut check, "ci edges dispatch depth 3", traces.into_iter().map(|t| (0, t)).collect(), Some(Instant::now() + Duration::from_secs(18)))?;
             edge["model"] = info;
-            json!([scenarios, random, quota, owners, edge])
+            json!([scenarios, random, quota, owners, allowance, edge])
         }
         _ => {
             let (n, len) = (nums.first().copied().unwrap_or(500), nums.get(1).copied().unwrap_or(30));

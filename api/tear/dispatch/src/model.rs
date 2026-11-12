@@ -54,6 +54,11 @@
 //! - [x] Pending cap: 10,000 queued direct rows admitted, the 10,001st refused (seeded to 9,998).
 //! - [x] Campaign daily cap 1 of 2 recipients: one release per window, the next at +24 h +1 s;
 //!       temporal: a full window holds the next release until it ends, never over the cap.
+//! - [x] An exact SES quota of 2 (one marketing recipient after the reserve) predicted for the
+//!       runner: a full page of envelopes the allowance cannot afford (one owner, 24 two-recipient
+//!       envelopes) ends the run idle in a bounded number of leases; affordable followers behind
+//!       every owner's oversized head still send; transactional mail spends the room before
+//!       marketing does (configurations 8 and 9, the `allowance` profiles).
 //! - [x] SES 24-hour quota 2, 3 and 4 with two shards (1-3 campaign credits, fewer than the shard
 //!       count at 2: the tail claim): campaign mail never spends the transactional reserve, and
 //!       every row settles within a simulated week (quota profile, invariants).
@@ -103,6 +108,8 @@ pub const PRE_SEND: u32 = 5; // a claimed send that cannot start within 5 s is d
 pub const DAY: u32 = 86_400;
 pub const SCHEDULE: u32 = 60; // `schedule` launches for now + 60 s
 pub const PENDING_CAP: u32 = 10_000; // direct mail queued or attempting per workspace (floor)
+pub const QUOTA_REFRESH: u32 = 60; // a dispatcher's quota snapshot is fresh this long
+pub const HEADROOM: i64 = 10; // percent of the 24-hour quota kept for transactional mail
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -192,6 +199,14 @@ pub struct Mail {
     /// Sent by the second owner.
     #[serde(default)]
     pub second: bool,
+    /// Marketing (campaign or direct) rather than transactional, and its recipient count.
+    #[serde(default)]
+    pub marketing: bool,
+    #[serde(default = "one")]
+    pub cost: u8,
+}
+fn one() -> u8 {
+    1
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +290,11 @@ pub struct Cfg {
     /// is not modeled: only that one run sends every due row.
     pub owners: u8,
     pub drain_batch: u8,
+    /// An SES 24-hour quota predicted exactly for the runner alone (configurations 8 and 9): its
+    /// snapshot, the transactional reserve and the marketing allowance, with envelopes larger
+    /// than the allowance (`mkt2`) ahead of ones that fit (`mkt1`).
+    #[serde(default)]
+    pub exact_quota: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +310,14 @@ pub struct Model {
     pub runner_brake_until: u32,
     pub d: [Inst; 2],
     pub directs: u8,
+    /// Under an exact quota: the provider's accepted recipients (time, count), and the runner's
+    /// snapshot (recipients sent in the last 24 h, taken at) with its sends since.
+    #[serde(default)]
+    pub ledger: Vec<(u32, u8)>,
+    #[serde(default)]
+    pub snapshot: Option<(u32, u32)>,
+    #[serde(default)]
+    pub sent_since: u32,
     /// Coverage tags of the last action (not part of the state).
     #[serde(skip)]
     pub cov: Vec<&'static str>,
@@ -327,6 +355,9 @@ impl Model {
             runner_brake_until: 0,
             d: [off(), off()],
             directs: 0,
+            ledger: vec![],
+            snapshot: None,
+            sent_since: 0,
             cov: vec![],
         }
     }
@@ -341,6 +372,8 @@ impl Model {
                 || (m.st == St::Attempting && m.attempt.map(|a| a + RECOVER) == Some(t))
         }) || (self.camp.job_racy && self.camp.job == Some(t))
             || (self.runner_brake_until > 0 && self.runner_brake_until == t)
+            || self.snapshot.is_some_and(|(_, at)| at + QUOTA_REFRESH == t)
+            || self.ledger.iter().any(|(at, _)| at + DAY == t)
             || self.camp.sched == Some(t)
             || self.camp.window.map(|w| w + DAY) == Some(t)
             || self
@@ -355,7 +388,7 @@ impl Model {
     /// Lease order: transactional before campaign mail, then creation order.
     fn due_order(&self) -> Vec<usize> {
         let mut due: Vec<usize> = (0..self.mails.len()).filter(|&i| self.is_due(&self.mails[i])).collect();
-        due.sort_by_key(|&i| (self.mails[i].campaign, i));
+        due.sort_by_key(|&i| (self.mails[i].marketing, i));
         due
     }
 
@@ -398,6 +431,10 @@ impl Model {
         };
         if m.campaign && canceled {
             self.cov.push("in-flight send after cancel");
+        }
+        let cost = m.cost;
+        if self.cfg.exact_quota.is_some() && matches!(out, Out::Accepted | Out::Unknown) {
+            self.ledger.push((self.t, cost));
         }
         self.cov.push(match out {
             Out::Accepted if m.throttles > 0 => "retry after a throttle accepted",
@@ -512,6 +549,9 @@ impl Model {
     /// no time budget): lease a page, claim and send it six at a time, record each group, and
     /// lease again while pages come back full. A short page ends the run.
     fn drain(&mut self) {
+        if let Some(q) = self.cfg.exact_quota {
+            return self.drain_quota(i64::from(q));
+        }
         if self.d.iter().any(|i| i.ph != Ph::Off) {
             self.cov.push("runner drain interleaved with a stepped process");
         }
@@ -560,7 +600,7 @@ impl Model {
                 for (idx, (i, ver)) in claimed.into_iter().enumerate() {
                     // The first send of a turn starts at its slot; a transactional second one may
                     // take the next slot at once (unless braked), in flight before the first's response.
-                    let early = idx == 1 && !self.mails[i].campaign && first_start.is_some_and(|s| self.runner_brake_until <= s);
+                    let early = idx == 1 && !self.mails[i].marketing && first_start.is_some_and(|s| self.runner_brake_until <= s);
                     let start = if early { first_start.unwrap() } else { self.t.max(self.runner_next_send) };
                     if idx == 0 {
                         first_start = Some(start);
@@ -585,6 +625,130 @@ impl Model {
                 }
             }
             if rows.len() < batch {
+                break;
+            }
+        }
+        if finishing {
+            self.finish_campaign();
+        }
+    }
+
+    /// The fair lease (one owner's next row each turn before any owner's second), over rows that
+    /// fit the allowance when it is known: a marketing envelope needs `marketing` recipients
+    /// left, a transactional one `transactional`; `priority` leases transactional mail only.
+    fn fair_page(&mut self, batch: usize, marketing: Option<i64>, transactional: Option<i64>, priority: bool) -> Vec<usize> {
+        let mut skipped = false;
+        let mut turns: Vec<(usize, bool, usize)> = vec![];
+        for second in [false, true] {
+            let mut turn = 0;
+            for i in self.due_order() {
+                let m = &self.mails[i];
+                if m.second != second {
+                    continue;
+                }
+                let cap = if m.marketing { marketing } else { transactional };
+                if (m.marketing && priority) || cap.is_some_and(|c| i64::from(m.cost) > c) {
+                    skipped |= m.marketing && !priority;
+                    continue;
+                }
+                turns.push((turn, m.marketing, i));
+                turn += 1;
+            }
+        }
+        if skipped {
+            self.cov.push("the lease skips an envelope the allowance cannot afford");
+        }
+        turns.sort();
+        let mut page: Vec<usize> = turns.into_iter().take(batch).map(|(_, _, i)| i).collect();
+        page.sort_by_key(|&i| (self.mails[i].marketing, i));
+        page
+    }
+
+    /// The runner's run under an exact SES quota. The snapshot is taken (GetAccount) when the run
+    /// leases rows and the last one is 60 s old or missing; until then the lease cannot know
+    /// the allowance. Per envelope in a claim group, it is claimed if its recipients fit what is
+    /// left (transactional: quota - snapshot - sent since; marketing: the same less the reserve),
+    /// counting envelopes already held in the group; otherwise a marketing envelope is released
+    /// and a transactional one held until the quota can change. A page that claims nothing ends
+    /// the run, unless it was leased before the allowance was known.
+    fn drain_quota(&mut self, q: i64) {
+        if self.d.iter().any(|i| i.ph != Ph::Off) {
+            self.cov.push("runner drain interleaved with a stepped process");
+        }
+        let reserve = (q * HEADROOM + 99) / 100;
+        let batch = self.cfg.drain_batch as usize;
+        let mut fresh = self.snapshot.is_some_and(|(_, at)| self.t < at + QUOTA_REFRESH);
+        let left = |m: &Model, marketing: bool| {
+            let (sent, _) = m.snapshot.unwrap_or((0, 0));
+            let room = q - i64::from(sent) - i64::from(m.sent_since);
+            if marketing { (q - i64::from(sent) - reserve).max(0) - i64::from(m.sent_since) } else { room }
+        };
+        let mut finishing = false;
+        loop {
+            let mut priority = false;
+            if fresh && left(self, true) <= 0 {
+                if left(self, false) <= 0 {
+                    self.cov.push("the quota is spent: no lease");
+                    break;
+                }
+                priority = true;
+            }
+            let (marketing, transactional) = if fresh { (Some(left(self, true).max(0)), Some(left(self, false).max(0))) } else { (None, None) };
+            let rows = self.fair_page(batch, marketing, transactional, priority);
+            if rows.is_empty() {
+                break;
+            }
+            for &i in &rows {
+                self.mails[i].lease = Some(self.t + LEASE);
+            }
+            if !fresh {
+                let t = self.t;
+                let sent = self.ledger.iter().filter(|(at, _)| at + DAY > t).map(|(_, n)| u32::from(*n)).sum();
+                self.snapshot = Some((sent, t));
+                self.sent_since = 0;
+                fresh = true;
+            }
+            if left(self, false) <= 0 {
+                for &i in &rows {
+                    self.mails[i].lease = None;
+                }
+                break;
+            }
+            let retry = (self.t + 1).max(self.snapshot.map_or(0, |(_, at)| at + QUOTA_REFRESH));
+            let mut claims = 0;
+            for group in rows.chunks(6) {
+                let mut held = 0i64;
+                let mut claimed = vec![];
+                for &i in group {
+                    let (marketing, cost) = (self.mails[i].marketing, i64::from(self.mails[i].cost));
+                    if cost <= left(self, marketing) - held {
+                        held += cost;
+                        claims += 1;
+                        let ver = self.mails[i].ver;
+                        if self.claim(i, ver) == Some(true) {
+                            claimed.push((i, ver));
+                        }
+                    } else {
+                        self.cov.push("the allowance delays an envelope in its page");
+                        self.mails[i].lease = if marketing { None } else { Some(retry) };
+                    }
+                }
+                for (i, ver) in claimed {
+                    self.sent_since += u32::from(self.mails[i].cost);
+                    if self.mails[i].marketing && self.mails.iter().enumerate().any(|(j, o)| j < i && o.marketing && o.second == self.mails[i].second && o.st == St::Queued && o.cost > self.mails[i].cost) {
+                        self.cov.push("affordable mail behind an oversized head sends");
+                    }
+                    let out = self.provider(i);
+                    let t = self.t;
+                    finishing |= self.record(i, out, ver, t);
+                }
+            }
+            if rows.len() < batch {
+                break;
+            }
+            // A full page that advanced nothing would be leased again unchanged.
+            if claims == 0 && marketing.is_some() {
+                self.cov.push("a page that advances nothing ends the run");
                 break;
             }
         }
@@ -696,6 +860,15 @@ impl Model {
     fn admit(&mut self, p: P) -> Value {
         self.admit_as(p, false)
     }
+    fn admit_marketing(&mut self, cost: u8, second: bool) -> Value {
+        let reply = self.admit_as(P::Ok, second);
+        if reply[0] == 202 {
+            let m = self.mails.last_mut().unwrap();
+            m.marketing = true;
+            m.cost = cost;
+        }
+        reply
+    }
     fn admit_as(&mut self, p: P, second: bool) -> Value {
         if !second && self.pending() + 1 > PENDING_CAP {
             self.cov.push("pending cap +1 refused");
@@ -720,6 +893,8 @@ impl Model {
             throttles: 0,
             interrupted: false,
             second,
+            marketing: false,
+            cost: 1,
         });
         json!([202, name])
     }
@@ -897,6 +1072,8 @@ impl Model {
                             throttles: 0,
                             interrupted: false,
                             second: false,
+                            marketing: true,
+                            cost: 1,
                         });
                     }
                     self.camp.window = window;
@@ -953,6 +1130,7 @@ impl Model {
             "wait" => self.t += parse_wait(words[1]),
             "send" => r = json!([self.admit(P::parse(words[1]).unwrap())]),
             "send2" => r = json!([self.admit_as(P::parse(words[1]).unwrap(), true)]),
+            "mkt1" | "mkt2" | "mkt1b" | "mkt2b" => r = json!([self.admit_marketing(if words[0].starts_with("mkt2") { 2 } else { 1 }, words[0].ends_with('b'))]),
             "sendk" => r = json!([self.admit_key(words[1], P::parse(words[2]).unwrap())]),
             "dupk" => {
                 // Two concurrent requests with one key: one admits, the other replays it.
@@ -968,7 +1146,12 @@ impl Model {
             "resume" => r = self.resume(),
             "cancel" => r = self.cancel(),
             "jobs" => self.jobs(),
-            "drain" => self.drain(),
+            "drain" => {
+                self.drain();
+                if self.cfg.exact_quota.is_some() {
+                    r = json!(true); // idle: an unaffordable pass is a quota hold, not unfinished work
+                }
+            }
             "recover" => self.recover(),
             "D1" | "D2" => {
                 let k = (words[0] == "D2") as usize;
@@ -1040,10 +1223,14 @@ pub fn alphabet(profile: &str) -> Vec<String> {
     let campaign = ["launch", "schedule", "pause", "resume", "cancel", "jobs", "drain", "D1 step", "D1 crash", "recover", "wait 59s", "wait 1d"];
     let admission = ["send ok", "sendk k1 ok", "sendk k1 rej", "dupk k2 ok", "drain"];
     let owners = ["send ok", "send2 ok", "drain", "recover"];
+    let allowance = ["mkt1", "mkt2", "send ok", "drain", "wait 59s", "wait 1m", "wait 1d"];
+    let allowance2 = ["mkt1", "mkt2", "mkt1b", "mkt2b", "send ok", "send2 ok", "drain", "wait 59s", "wait 1m", "wait 1d"];
     let quota = ["send ok", "send unk", "launch", "jobs", "D1 step", "D2 step", "D1 crash", "D2 crash", "recover", "wait 1m", "wait 1d", "settle", "ses pause", "ses resume"];
     let pick: Vec<&str> = match profile {
         "quota" => quota.to_vec(),
         "owners" => owners.to_vec(),
+        "allowance" => allowance.to_vec(),
+        "allowance2" => allowance2.to_vec(),
         "dispatch" => dispatch.to_vec(),
         "campaign" => campaign.to_vec(),
         "admission" => admission.to_vec(),

@@ -120,7 +120,7 @@ async function setClock(epochMs: number) {
 
 // ---- trace state ---------------------------------------------------------------------
 type Persona = 'ok' | 'thr' | 'rej' | 'unk';
-type Mail = { name: string; id: string; persona: Persona; calls: number; accepted: number[] };
+type Mail = { name: string; id: string; persona: Persona; calls: number; accepted: number[]; marketing?: boolean };
 type Pending = { kind: 'lease' | 'claim' | 'ses' | 'record'; ids: string[]; release: () => void };
 type Instance = { gate: GateState; running?: Promise<unknown>; parked: Pending[]; wake?: () => void; done: boolean; error?: string; generation: number; emptyLease?: boolean; shard?: { index: number; count: number } };
 type Config = { quota: number; pace: number | null; seed: number; recipients: Persona[]; shards: boolean; invariants: boolean; owners: number; drainBatch: number };
@@ -172,6 +172,8 @@ async function reset(cfg: Partial<Config>) {
     await db.execute(sql`WITH w AS (INSERT INTO workspaces(id,name,slug) VALUES (${W2},${W2},${W2}) RETURNING id)
       INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT ${W2 + '_key'},id,'tear',${createHash('sha256').update(SECRET2).digest('hex')},${SECRET2.slice(0, 14)},'["read","send","manage"]','[]' FROM w`);
     await ensureRegionSettings(db, { workspaceId: W2, regions: [R] });
+    await db.execute(sql`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+      SELECT x.id||'_b',${W2},x.email,'subscribed' FROM jsonb_to_recordset(${JSON.stringify(contacts)}::jsonb) x(id text,email text)`);
   }
   if (config.seed) await db.execute(sql`INSERT INTO sending_stream_depth(workspace_id,stripe,marketing,n) VALUES (${W},99,false,${config.seed})`);
   const draft = await api('POST', '/v1/campaigns', { name: 'tear', from: 'sender@example.com', region: R, subject: 'Hello', html: '<p>Hello</p>', audience: { listId: W + '_list' } });
@@ -202,7 +204,7 @@ async function api(method: string, path: string, body?: unknown, headers: Record
 
 // ---- fake SES ------------------------------------------------------------------------
 const providerError = (status: number, name: string, message: string) => Object.assign(new Error(message), { name, $metadata: { httpStatusCode: status } });
-const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).length;
+const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).length; // one entry per recipient
 // GetAccount and SendEmail, for this trace's region only. A stepped instance parks before the call.
 (SESv2Client.prototype as any).send = async function (command: any) {
   const name = command.constructor.name, input = command.input;
@@ -225,7 +227,8 @@ const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).lengt
     event('paused'); if (!pauseRefusedAt.has(mail.name)) pauseRefusedAt.set(mail.name, vnow());
     throw providerError(400, 'SendingPausedException', 'Sending is paused for this account.');
   }
-  if (config.quota >= 0 && withinDay() >= config.quota) { event('quota'); throw providerError(400, 'MessageRejected', 'Daily message quota exceeded.'); }
+  const recipients = ['ToAddresses', 'CcAddresses', 'BccAddresses'].reduce((n, k) => n + ((input.Destination?.[k] as string[] | undefined)?.length ?? 0), 0);
+  if (config.quota >= 0 && withinDay() + recipients > config.quota) { event('quota'); throw providerError(400, 'MessageRejected', 'Daily message quota exceeded.'); }
   const outcome = mail.persona === 'thr' && mail.calls === 1 ? 'throttle' : mail.persona === 'thr' ? 'ok' : mail.persona;
   event(outcome === 'throttle' ? 'throttled' : outcome === 'rej' ? 'refused' : outcome === 'unk' ? 'unknown' : 'accepted');
   if (outcome === 'throttle') {
@@ -238,8 +241,7 @@ const withinDay = () => sesAccepted.filter(at => at > vnow() - 86_400_000).lengt
   if (outcome === 'rej') throw providerError(400, 'MessageRejected', 'Email address is not verified.');
   // A 5xx may or may not have been accepted: count it as a possible delivery.
   mail.accepted.push(vnow());
-  sesAccepted.push(vnow());
-  if (campaign) marketingAccepted.push(vnow());
+  for (let n = 0; n < recipients; n++) { sesAccepted.push(vnow()); if (campaign || mail.marketing) marketingAccepted.push(vnow()); }
   if (outcome === 'unk') throw providerError(500, 'InternalFailure', 'Service unavailable.');
   return { MessageId: 'tear-' + randomUUID() };
 };
@@ -381,6 +383,19 @@ async function send(persona: Persona, key?: string, concurrent = false, secret =
     return [reply.status, (mails.get(id) ?? newMail(id, persona, 'e')).name];
   });
 }
+// Direct marketing to a subscribed contact. The API admits marketing with exactly one
+// recipient; `mkt2` then widens the admitted row to two recipients, as an older or
+// imported row can be, so the dispatcher meets envelopes larger than its allowance.
+async function marketing(recipients: number, second = false) {
+  const to = config.recipients.slice(0, recipients).map((p, i) => `${p}-c${i + 1}@example.com`);
+  const reply = await api('POST', '/v1/emails/send', { from: 'sender@example.com', to: to[0], subject: 'Tear', text: 'Synthetic tear message.', kind: 'marketing' }, {}, second ? SECRET2 : SECRET);
+  if (reply.status !== 202) return [[reply.status, reply.body?.error?.code ?? null]];
+  const id = reply.body.id as string;
+  if (recipients > 1) await db.execute(sql`UPDATE sending_emails SET to_addresses=${JSON.stringify(to)}::jsonb, snapshot=jsonb_set(snapshot,'{to}',${JSON.stringify(to)}::jsonb) WHERE id=${id}`);
+  const mail = newMail(id, 'ok', 'e'); mail.marketing = true;
+  return [[202, mail.name]];
+}
+
 async function campaignAction(action: string) {
   const path = `/v1/campaigns/${CAMPAIGN}`;
   let reply;
@@ -405,13 +420,35 @@ async function act(label: string) {
   switch (verb) {
     case 'send': result = await send(args[0] as Persona); break;
     case 'send2': result = await send(args[0] as Persona, undefined, false, SECRET2); break;
+    case 'mkt1': case 'mkt2': case 'mkt1b': case 'mkt2b': result = await marketing(Number(verb[3]), verb.endsWith('b')); break;
     case 'sendk': result = await send(args[1] as Persona, args[0]); break;
     case 'dupk': result = await send(args[1] as Persona, args[0], true); break;
     case 'launch': case 'schedule': case 'pause': case 'resume': case 'cancel': result = await campaignAction(verb); break;
     case 'jobs': await drainJobs(runtime, 20, 1, 15_000, 'work'); break;
     case 'drain': {
       const gate = gates.get('runner') ?? initialGate(); gates.set('runner', gate);
-      await ctx.run({}, () => runDispatcher(runtime, { region: R, lanes: 1, batchSize: config.drainBatch, gate, schedulePartialFlush: () => () => {} }));
+      // Count the run's leases and claimed rows: a run never leases more than once per row it
+      // claimed, plus the lease that finds nothing, a wrap and a quota recheck.
+      const counts = { leases: 0, claimed: 0 }, dialect = (db as any).dialect;
+      const counted = new Proxy(db, { get(target, prop, receiver) {
+        if (prop === 'execute') return (query: any) => {
+          const rendered = dialect.sqlToQuery(query.getSQL ? query.getSQL() : query), kind = classify(rendered.sql);
+          if (kind === 'lease') counts.leases++;
+          if (kind === 'claim') counts.claimed += idsIn(rendered.params).length;
+          return target.execute(query);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } }) as Runtime['db'];
+      // With a finite quota a pass that cannot afford its rows must end; give it a budget so a
+      // regression shows as a non-idle report instead of a hung host.
+      const report = await ctx.run({}, () => runDispatcher({ ...runtime, db: counted }, { region: R, lanes: 1, batchSize: config.drainBatch, gate, schedulePartialFlush: () => () => {}, ...(config.quota >= 0 && !config.invariants ? { until: vnow() + 1000 } : {}) }));
+      if (counts.leases > counts.claimed + 3) safety.push(`spin:${counts.leases} leases for ${counts.claimed} claimed rows`);
+      // Due mail left behind needs a wake: unfinished work (not idle) or a retry deadline.
+      const [due] = await q<{ n: number }>(sql`SELECT count(*)::int AS n FROM sending_emails WHERE ${owned()} AND region=${R} AND status='queued'
+        AND (scheduled_at IS NULL OR scheduled_at <= now()) AND (lease_until IS NULL OR lease_until < now())`);
+      if (due!.n && report.idle && report.quotaRetryAt === undefined && report.paceRetryAt === undefined) safety.push(`asleep-with-mail-due:${due!.n}`);
+      if (config.quota >= 0 && !config.invariants) result = report.idle;
       break;
     }
     case 'recover': await dispatchPartitions(runtime, true); break;
