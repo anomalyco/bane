@@ -2,7 +2,7 @@
 import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check } from 'lucide-react'
-import { Button, DataTable, DropdownMenu, EmptyState, ErrorState, Input, LoadingRegion, PageHeader, Pagination, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { Button, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
@@ -75,7 +75,7 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
         <button key={k} type="button" className="rcv-filter" aria-pressed={filters.kind === k} onClick={() => setFilter({ kind: k })}>{kinds[k].label}<span>{number(kindCount(overview.counts, k))}</span></button>)}</div>
       <div className="rcv-toolbar__end">
         {hosts.length > 1 && <Select className="rcv-domain" aria-label="Domain" value={filters.domain || 'all'} onValueChange={v => setFilter({ domain: v === 'all' ? '' : v })} options={[{ value: 'all', label: 'All domains' }, ...hosts.map(d => ({ value: d.name, label: d.name }))]} />}
-        <Input className="receiving-search" type="search" aria-label="Search routes" placeholder="Search address or name" value={filters.q} onChange={e => setFilter({ q: e.target.value })} />
+        <SearchField className="search-box--list" aria-label="Search routes" placeholder="Search address or name" value={filters.q} onChange={e => setFilter({ q: e.target.value })} />
       </div>
     </div>
     <div className="rcv-kindline">
