@@ -126,8 +126,8 @@ test('Cloudflare static files: only files the deployed build has get a cache lif
     }
     return out;
   };
-  const {headers,uncached}=withFileRules(source,[...built,'index.html',...fonts]);
-  assert.deepEqual(uncached,[]);
+  const {headers,uncached}=withFileRules(source,[...built,'index.html','constructor/index.js','theme.js',...fonts]);
+  assert.deepEqual(uncached,[]);assert.equal(sent(headers,'/constructor/index.js').get('cache-control'),undefined,'Only the directories with a lifetime get rules.');
   for(const file of built)assert.equal(sent(headers,'/'+file).get('cache-control'),'public, max-age=31536000, immutable',file);
   for(const file of fonts)assert.equal(sent(headers,'/'+file).get('cache-control'),FILE_CACHE.fonts,file);
   assert.match(FILE_CACHE.fonts!,/^public, max-age=86400\b/);

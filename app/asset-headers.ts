@@ -24,7 +24,7 @@ const isRule = (line: string) => line.startsWith('/')
  */
 export function withFileRules(source: string, files: string[]): { headers: string; uncached: string[] } {
   const room = Math.max(0, MAX_RULES - source.split('\n').filter(isRule).length)
-  const known = [...new Set(files)].filter(file => file.slice(0, file.indexOf('/')) in FILE_CACHE)
+  const known = [...new Set(files)].filter(file => Object.hasOwn(FILE_CACHE, file.slice(0, Math.max(0, file.indexOf('/')))))
   const ruled = known.filter(file => PLAIN_FILE.test(file)).slice(0, room)
   const rules = ruled.map(file => `/${file}\n  Cache-Control: ${FILE_CACHE[PLAIN_FILE.exec(file)![1]!]}`)
   return { headers: [source.trimEnd(), ...rules].join('\n') + '\n', uncached: known.filter(file => !ruled.includes(file)) }
