@@ -409,8 +409,9 @@ async function audience() {
     const preview = await api('previewContactImport', { body: { csv: `email,name\n${success},${name}\n`, listId: l.id, mapping: { email: 'email', name: 'name' } } });
     const path = { id: preview.id };
     check(preview.status === 'preview' && preview.listId === l.id && preview.rows.length === 1 && preview.rows[0].email === success && !preview.errors.length, 'refusing import of anything but this run’s contact');
-    const committed = await api('commitContactImport', { path });
-    check(committed.status === 'committed' && committed.imported === 1, 'import did not commit exactly one row');
+    // Attested consent marks only contacts with no decision; this run's contact is already subscribed, so nothing changes.
+    const committed = await api('commitContactImport', { path, body: { consent: { status: 'subscribed', evidence: `${prefix} e2e attestation` } } });
+    check(committed.status === 'committed' && committed.imported === 1 && committed.subscribed === 0, 'import did not commit exactly one row without re-recording consent');
     const receipt = await api('getContactImport', { path });
     check(receipt.id === path.id && receipt.listId === l.id && receipt.rows.length === 1 && receipt.rows[0].name === name, 'incorrect stored import');
     // This endpoint exposes summary metadata only and has no server-side listId filter.
@@ -521,6 +522,17 @@ async function scheduledCampaign(audience: Audience) {
   check(paced.delivery?.pacing.perDay === 100 && paced.delivery.pacing.rateShare === 0.25, 'pacing changes missing');
   const resumed = await api('resumeCampaign', { path, body: {} });
   check(resumed.state === 'scheduled' && resumed.scheduledAt && Date.parse(resumed.scheduledAt) === Date.parse(scheduledAt), 'resume lost future schedule');
+  const later = new Date(Date.parse(scheduledAt) + 86_400_000).toISOString();
+  const moved = await api('rescheduleCampaign', { path, body: { scheduledAt: later } });
+  check(moved.state === 'scheduled' && moved.scheduledAt !== null && Date.parse(moved.scheduledAt) === Date.parse(later) && moved.delivery?.expanded === 0, 'reschedule did not move the send time');
+  const unscheduled = await api('unscheduleCampaign', { path, body: {} });
+  check(unscheduled.state === 'draft' && unscheduled.scheduledAt === null && unscheduled.delivery === null && unscheduled.counts.total === 0, 'unschedule did not return an untouched draft');
+  const again = await api('scheduleCampaign', { path, headers: idKey('schedule-again'), body: { revision: unscheduled.revision, scheduledAt } });
+  check(again.queued === 1 && again.scheduledAt === scheduledAt, 'unscheduled draft did not schedule again');
+  await until('campaign scheduled again', () => api('getCampaignState', { path }), row => {
+    check(['preparing', 'scheduled'].includes(row.state), `unexpected pre-schedule state ${row.state}`);
+    return row.state === 'scheduled';
+  }, row => row.state);
   const canceled = await api('cancelCampaign', { path });
   check(canceled.state === 'canceled' && canceled.inFlight === 0 && canceled.canceled === 1, 'cancel did not stop one future recipient');
   const stats = await api('getCampaignStats', { path });

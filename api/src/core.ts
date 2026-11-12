@@ -185,7 +185,7 @@ export const receivingConsentRoute = (path: string) =>
 export const ownerRoute = (method: string, path: string) => {
   const verb = method.toUpperCase();
   return appPasswordRoute(path) || /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/regions\/|^\/v1\/settings\/ses$/.test(path) || (path === '/v1/regions' && verb !== 'GET')
-    || (verb === 'POST' && /^\/v1\/campaigns\/[^/]+\/(?:send|schedule|pause|resume|pacing|cancel)$/.test(path));
+    || (verb === 'POST' && /^\/v1\/campaigns\/[^/]+\/(?:send|schedule|unschedule|reschedule|pause|resume|pacing|cancel)$/.test(path));
 };
 /** notMember (app.ts): whether REST refuses this actor the route because it is a workspace member. */
 export const memberRefused = (actor: Pick<Actor, 'role'> | undefined, method: string, path: string) => actor?.role === 'member' && ownerRoute(method, path);
