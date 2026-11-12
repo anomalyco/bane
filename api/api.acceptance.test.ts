@@ -126,7 +126,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
     assert.ok(branch, `${name}.${action}`); assert.deepEqual(branch.required ?? [], catalog.get(operation)!.tool.inputSchema.required ?? []);
   }
-  for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
+  for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);  // Campaign delivery controls are owner/admin only; MCP listings follow REST, so a member's grant is never offered them.
+  for (const name of ['sendCampaign', 'scheduleCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'cancelCampaign']) assert.equal(catalog.get(name)?.ownerOnly, true, name);
 });
 test('rituals: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
   const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const source=(s:string)=>`export default function route(email,ctx){\n${s}\n}`;
@@ -2179,6 +2180,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       });
       error(await local('PUT', `/v1/regions/${memberRegions.defaultRegion}`, { enabled: true }, guest), 403, 'PERMISSION_DENIED');
       error(await local('POST', '/v1/campaigns/nope/send', { revision: 1 }, guest), 403, 'PERMISSION_DENIED');
+      // PR #86 review: a member could unschedule an owner's approved campaign (back to a draft, its frozen audience
+      // dropped). Unschedule and reschedule are owner/admin delivery controls, like send and cancel, in REST and MCP.
+      const ownerCampaign = ok(await local('POST', '/v1/campaigns', { name: unique('owner-schedule') }, a.cookie), 201), ownerReview = unique('review');
+      await pool.query("INSERT INTO sending_campaign_reviews (id, workspace_id, campaign_id, revision, draft, content_hash) VALUES ($1,$2,$3,$4,$5::jsonb,'synthetic')", [ownerReview, a.org.id, ownerCampaign.id, ownerCampaign.revision, JSON.stringify(ownerCampaign.draft)]);
+      await pool.query("UPDATE sending_campaigns SET state='scheduled', review_id=$3, total=1, prepared=1, scheduled_at=now()+interval '1 day' WHERE workspace_id=$1 AND id=$2", [a.org.id, ownerCampaign.id, ownerReview]);
+      cleanup(t, async () => { await pool.query('DELETE FROM sending_campaigns WHERE workspace_id=$1 AND id=$2', [a.org.id, ownerCampaign.id]); await pool.query('DELETE FROM sending_campaign_reviews WHERE id=$1', [ownerReview]); });
+      error(await local('POST', `/v1/campaigns/${ownerCampaign.id}/unschedule`, {}, guest), 403, 'PERMISSION_DENIED');
+      error(await local('POST', `/v1/campaigns/${ownerCampaign.id}/reschedule`, { scheduledAt: new Date(Date.now() + 7_200_000).toISOString() }, guest), 403, 'PERMISSION_DENIED');
+      const untouched = ok(await local('GET', `/v1/campaigns/${ownerCampaign.id}`, undefined, a.cookie));
+      assert.deepEqual({ state: untouched.state, review: (await pool.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [ownerCampaign.id])).rows[0].review_id }, { state: 'scheduled', review: ownerReview }, 'The owner\'s schedule and frozen audience stay.');
       const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
       error(await local('GET', `/v1/contacts/${contact.id}`, undefined, b.cookie), 404);
       const { originAllowed } = await import('./src/sending.js');
