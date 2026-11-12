@@ -1,32 +1,79 @@
 .audience-page { display: flex; flex-direction: column; min-width: 0; min-height: 100%; }
 .audience-page > * { flex-shrink: 0; }
 .audience-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.data-toolbar .ui-select-trigger:is(.audience-list-filter, .audience-status-filter) { width: 170px; }
+.data-toolbar .ui-select-trigger.audience-status-filter { width: 170px; }
 .audience-summary > .ui-skeleton-line { width: auto; }
-.ui-input.audience-list-search { width: 220px; max-width: 100%; flex-shrink: 0; }
 .audience-page > .data-toolbar > .cluster { flex-wrap: wrap; }
 .ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
 .audience-page > .section { margin-block: var(--space-24) 0; padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
 .audience-page > .ui-alert { margin-top: var(--space-16); }
 .audience-summary { min-height: var(--space-20); gap: var(--space-8) var(--space-24); }
 .section > .audience-summary { margin-bottom: var(--space-12); }
-.audience-page > .audience-summary:has(+ .ui-tabs) { margin-bottom: var(--space-16); }
 .audience-page .section > .ui-section-header:has(+ p.muted) { margin-bottom: var(--space-8); }
 .audience-page .section > p.muted { margin: 0 0 var(--space-12); }
 .audience-properties { gap: var(--space-24) var(--space-32); }
 .audience-properties dl { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: var(--space-12) var(--space-16); margin: 0; }
 .audience-properties dt, .audience-properties dd { margin: 0; overflow-wrap: anywhere; }
 .audience-properties dt { color: var(--color-muted); }
+.audience-dd-note { display: block; margin-top: var(--space-4); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .cluster.audience-links { gap: var(--space-8) var(--space-16); }
 .audience-editor { gap: var(--space-24); }
 .audience-editor > .section { margin: 0; padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+.audience-editor .section > p.muted { margin: 0; }
 .audience-name { max-width: 480px; }
 .audience-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 34px; gap: var(--space-12); align-items: start; }
 .audience-rule-remove { margin-top: var(--space-24); }
+
+/* What each consent state means, under the filters of every table that shows one. */
+.audience-legend { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-16); margin: 0 0 var(--space-12); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.audience-legend__term { color: var(--color-text); }
+
+/* ListPicker: an input that searches lists by name, with the shared popover surface for its options. */
+.audience-list-picker { position: relative; min-width: 0; width: 100%; }
+.audience-list-picker > .ui-input { padding-right: var(--space-32); text-overflow: ellipsis; }
+.audience-list-picker > svg { position: absolute; right: var(--space-12); top: 50%; translate: 0 -50%; color: var(--color-muted); pointer-events: none; }
+.data-toolbar .audience-list-picker.audience-list-filter, .audience-list-picker.audience-count-list { width: 220px; max-width: 100%; flex-shrink: 0; }
+.audience-list-options { position: absolute; inset-inline: 0; top: calc(100% + var(--space-4)); min-width: 220px; max-height: min(280px, 40vh); overflow-y: auto; overscroll-behavior: contain; }
+.audience-list-option { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); width: 100%; min-height: var(--control-height); padding: var(--space-4) var(--space-8); border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.audience-list-option > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audience-list-option[aria-selected='true'] { background: var(--color-hover); }
+.audience-list-option[data-current] { color: var(--color-accent); }
+.audience-list-note { padding: var(--space-6) var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* Import and bulk-consent dialogs. */
+.audience-dialog-copy { margin: 0; }
+.audience-consent { display: flex; flex-direction: column; gap: var(--space-8); padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+.audience-consent > .ui-field__hint { margin: 0; }
+.audience-review-bar { justify-content: space-between; gap: var(--space-8) var(--space-16); }
+/* The count, five sample addresses and "and N more" fit this height, so the dialog keeps its size when the count arrives. */
+.audience-plan { display: flex; flex-direction: column; gap: var(--space-8); min-height: calc(7 * var(--leading-sm) + 6 * var(--space-8)); }
+.audience-plan p { margin: 0; }
+.audience-sample { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.audience-sample li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Segment rule builder: one row per condition (field, operator, value, remove). */
+.audience-conditions { display: flex; flex-direction: column; gap: var(--space-8); }
+.audience-condition { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 34px; gap: var(--space-12); align-items: center; }
+.audience-condition--head { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.audience-condition-days { display: flex; align-items: center; gap: var(--space-8); }
+.audience-condition-days > .ui-input { width: 96px; }
+.audience-condition-group { grid-column: 1 / 4; display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; padding: var(--space-8) var(--space-12); border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); }
+.audience-condition-group > .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ui-textarea.audience-json { font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
 @media (max-width: 800px) {
   .audience-rule { grid-template-columns: minmax(0, 1fr) 34px; }
   .audience-rule > .ui-field { grid-column: 1; }
   .audience-rule-remove { grid-column: 2; grid-row: 1; }
+  /* Field and condition share the first line, the value gets the second. Classes, not nth-child: a Select inside a
+     form also renders a hidden native select. */
+  .audience-condition { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 34px; row-gap: var(--space-8); }
+  .audience-condition > .audience-condition-field { grid-column: 1; grid-row: 1; }
+  .audience-condition > .audience-condition-operator { grid-column: 2; grid-row: 1; }
+  .audience-condition > .audience-condition-value { grid-column: 1 / 3; grid-row: 2; }
+  .audience-condition > .audience-condition-remove { grid-column: 3; grid-row: 1; }
+  .audience-condition-group { grid-column: 1 / 3; }
+  .audience-condition--head { display: none; }
   .audience-properties dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .audience-properties dt { font-size: var(--text-xs); }
   .audience-properties dd { margin-bottom: var(--space-12); }

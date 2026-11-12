@@ -64,7 +64,6 @@ export async function request<T = Json>(path: string, options: { method?: string
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
   return data as T
 }
-const unsupported = (message: string): never => { throw new ApiError(message, 'UNSUPPORTED_OPERATION') }
 const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, consent: { source: '', at: null }, suppressionReason: r.suppressionReason ?? undefined } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
 const mapSegment = (r: Json): Segment => ({ ...r, rule: r.rule, match: r.rule?.operator === 'or' ? 'any' : 'all', rules: [], matched: undefined, eligible: undefined } as unknown as Segment)
@@ -233,15 +232,15 @@ export function createLiveApi(): BaneApi {
         for (const listId of oldLists.filter(x => !input.listIds.includes(x))) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
         return getContact(result.id, signal)
       },
-      import: async () => unsupported('Upload the original CSV and review the server preview before committing.')
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
-    imports: { preview: input => call<any>('/contact-imports', 'POST', input), commit: id => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST') },
+    imports: { preview: input => call<any>('/contact-imports', 'POST', input), commit: (id, input) => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST', input?.consent ? input : undefined) },
+    audienceQuery: { plan: statement => call<any>('/audience-query/plan', 'POST', {statement}), apply: input => call<any>('/audience-query/apply', 'POST', input) },
     lists: { list: (input = {}, signal) => page('/lists', input, mapList, {search: input.search, counts: input.counts === false ? 'false' : undefined}, signal), get: async (id, signal) => mapList(await call(`/lists/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapList(await call('/lists', 'POST', input, signal)), remove: async (id, signal) => { await call(`/lists/${idPath(id)}`, 'DELETE', undefined, signal) } },
     segments: {
       list: (input = {}, signal) => page('/segments', input, mapSegment, {search: input.search}, signal), get: async (id, signal) => mapSegment(await call(`/segments/${idPath(id)}`, 'GET', undefined, signal)),
       save: async (input, signal) => { if (!input.rule) throw new ApiError('Enter a valid public segment rule.', 'RULE_REQUIRED'); return mapSegment(await call(input.id ? `/segments/${idPath(input.id)}` : '/segments', input.id ? 'PATCH' : 'POST', {name: input.name, rule: input.rule}, signal)) },
-      preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', {}, signal), contacts: []} as any }
+      preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', input.listId ? {listId: input.listId} : {}, signal), contacts: []} as any }
     },
     keys: {
       list: async (signal, cursor, includeRevoked = true) => { const result = await call(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
