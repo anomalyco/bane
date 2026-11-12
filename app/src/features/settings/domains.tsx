@@ -1,15 +1,17 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge } from '../../components/ui'
 import { useApi, useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { label } from '../../lib/format'
-import { ApiError, type DnsRecord, type Domain } from '../../data/types'
+import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
+import { request } from '../../data/live'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { catchAllLabel, mxTone, receivingStatus } from '../inbound/status'
+import { catchAllSetting } from '../inbound/concepts'
 import { fieldError, MutationError } from './shared'
-import { DomainDetailSkeleton, domainColumns, settingsColumns } from './skeletons'
+import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
@@ -27,6 +29,36 @@ function setupSummary(domain: Domain) {
   return parts.length ? parts.join(' · ') : 'Waiting for DNS'
 }
 
+// One page per domain for sending and receiving: Receiving doesn't list domains of its own.
+function ReceivingCell({ domain, name }: { domain?: MailboxDomain; name: string }) {
+  if (!domain || domain.status === 'off' || domain.status === 'disabled') return <div className="settings-cell-stack"><StatusBadge status="Off" tone="neutral" /><div className="muted">Add its MX record to receive</div></div>
+  const status = receivingStatus[domain.status]
+  // The receiving host is shown only when it isn't the domain itself (a reply. subdomain, say).
+  return <div className="settings-cell-stack"><StatusBadge status={status.label} tone={status.tone} />{domain.name !== name && <div className="muted receiving-clip">at {domain.name}</div>}</div>
+}
+
+/** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
+function ReceivingSettings({ domainId }: { domainId: string }) {
+  const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal))
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')
+  const update = useApiMutation((_api, catchAll: MailboxDomain['catchAll']) => request<MailboxDomain>(`/v1/inbound/domains/${encodeURIComponent(domainId)}`, { method: 'PATCH', body: { catchAll } }), 'Catch-all saved')
+  const state = update.data ?? receiving.data
+  const on = !!state && !['off', 'disabled'].includes(state.status)
+  return <section className="section stack" aria-labelledby="domain-receiving">
+    <div className="ui-section-header"><div className="domain-group-title"><h2 id="domain-receiving">Receiving</h2><p className="muted">{!state ? <span className="ui-skeleton" /> : on ? <>Mail to addresses at {state.name} follows its <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>routes</Link>.</> : 'Publish the receiving MX record below to get mail at this domain.'}</p></div>
+      {on && state!.status !== 'active' && <div className="cluster"><Button loading={check.isPending} onClick={() => void check.mutateAsync().catch(() => undefined)}>Check MX now</Button></div>}</div>
+    <MutationError error={update.error ?? check.error} />
+    {!state ? <dl className="settings-facts domain-facts domain-receiving-facts" aria-hidden="true">{['Status', 'Receives at', 'Addresses', catchAllSetting.title].map(term => <div key={term}><dt>{term}</dt><dd><span className="ui-skeleton" /></dd></div>)}</dl> : <dl className="settings-facts domain-facts domain-receiving-facts">
+      <div><dt>Status</dt><dd><StatusBadge status={receivingStatus[state.status].label} tone={receivingStatus[state.status].tone} /></dd></div>
+      <div><dt>Receives at</dt><dd>{on ? state.name : '—'}</dd></div>
+      <div><dt>Addresses</dt><dd>{on ? <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>{state.addressCount.toLocaleString('en-US')}</Link> : '—'}</dd></div>
+      <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd>{on ? <Select aria-label={`${catchAllSetting.title}: ${catchAllSetting.line}`} value={state.catchAll} onValueChange={value => void update.mutateAsync(value as MailboxDomain['catchAll']).catch(() => undefined)} disabled={update.isPending}
+        options={[{ value: 'store', label: catchAllSetting.options.store }, { value: 'create_address', label: catchAllSetting.options.create_address }]} /> : catchAllLabel[state.catchAll]}</dd></div>
+    </dl>}
+    {on && <p className="muted domain-receiving-note">{catchAllSetting.line}</p>}
+  </section>
+}
+
 export function DomainsPage() {
   const { regionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
@@ -34,6 +66,8 @@ export function DomainsPage() {
   const [pageState, setPageState] = useState({ regionId, page: 1 })
   const page = pageState.regionId === regionId ? pageState.page : 1
   const domains = useApiDef(queries.domains(regionId, page), { keepPrevious: previous => previous[1] === regionId })
+  const inbound = useApiDef(queries.inboundDomains())
+  const receivingOf = (id: string) => inbound.data?.find(d => d.id === id)
   const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true)
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
@@ -54,9 +88,11 @@ export function DomainsPage() {
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
-        { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { ...domainColumns(multiTenant)[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus) || row.receivingIssue) && <div className={row.receivingIssue ? 'text-warning' : 'muted'}>{setupSummary(row)}</div>}</div> },
+      <DataTable loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} description="Add a domain to send from it and receive mail at it." action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+        { key: 'name', label: 'Domain', width: multiTenant ? '30%' : '26%', render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
+        { key: 'sending', label: 'Sending', width: '24%', render: row => <div className="settings-cell-stack"><StatusBadge status={row.status === 'verified' ? 'Verified' : label(row.status)} tone={row.status === 'issue' ? 'danger' : row.status === 'verified' ? 'success' : 'warning'} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus) || row.receivingIssue) && <div className={row.receivingIssue ? 'text-warning' : 'muted'}>{setupSummary(row)}</div>}</div> },
+        { key: 'receiving', label: 'Receiving', width: '28%', render: row => <ReceivingCell domain={receivingOf(row.id)} name={row.name} /> },
+        { key: 'addresses', label: 'Addresses', align: 'right', render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted">—</span> } },
         ...multiTenant ? [] : [{ ...settingsColumns.domains[2], render: (row: Domain) => row.regionId }],
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
@@ -136,9 +172,10 @@ export function DomainDetailPage() {
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <dl className="settings-facts domain-facts">
-      <div><dt>Status</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
+      <div><dt>Sending</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
       {!multiTenant && <div><dt>Region</dt><dd>{current.regionId}</dd></div>}
     </dl>
+    {hosted && <ReceivingSettings domainId={id} />}
     <div className="domain-sections">
       <DomainRecords domain={current} setup={dns.setup} receivingView={hosted ? { actions: receivingActions } : undefined} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
@@ -185,7 +222,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
   const status = state ? receivingStatus[state.status] : null
   const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2><p className="muted">Receive mail on {domainName}. Manage addresses in <Link to="/receiving">Receiving</Link>.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2><p className="muted">Receive mail on {domainName}. Its addresses and routes are in <Link to={`/receiving?domain=${encodeURIComponent(domainName)}`}>Receiving</Link>.</p></div>
       <div className="cluster">{on ? <>
         <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
         {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
@@ -196,7 +233,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
     {state && status && on && <>
       <dl className="settings-facts domain-facts">
         <div><dt>Status</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
-        <div><dt>Unknown addresses</dt><dd>{catchAllLabel[state.catchAll]}</dd></div>
+        <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd>{catchAllLabel[state.catchAll]}</dd></div>
         <div><dt>Addresses</dt><dd><Link to="/receiving">{state.addressCount}</Link></dd></div>
         {!multiTenant && <div><dt>Region</dt><dd>{state.region}</dd></div>}
       </dl>
