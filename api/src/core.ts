@@ -159,6 +159,11 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/**
+ * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts
+ * with a workspace ID or a mail class, and no workspace may be named `uploads` (migration 158).
+ */
+export const uploadKey = (workspaceId: string, attachmentId: string) => `uploads/${workspaceId}/${attachmentId}`;
 export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Actor {
   const value = c.get('actor');
   // Dashboard roles include content editing. A scoped machine grant is still bounded by its

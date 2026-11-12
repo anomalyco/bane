@@ -9661,7 +9661,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return {objects:keys.slice(0,2).map(key=>({key,uploaded:objects.get(key)!})),cursor:keys.length>2?keys[1]:undefined};
       };
       const kept=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
-      const old=new Date(Date.now()-2*day),orphan=`${wid}/attachments/attachment_orphan`,young=`${wid}/attachments/attachment_young`,asset=`${wid}/templates/assets/tasset_x`;
+      const hex=()=>randomUUID().replaceAll('-','');
+      const old=new Date(Date.now()-2*day),orphan=`uploads/${wid}/attachment_${hex()}`,young=`uploads/${wid}/attachment_${hex()}`,asset=`${wid}/templates/assets/tasset_x`;
       // The orphan's put landed after every record of its upload was gone; the young one may still be published.
       for(const key of [...objects.keys()])objects.set(key,old);
       objects.set(orphan,old);objects.set(young,new Date());objects.set(asset,old);
@@ -9678,6 +9679,43 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const r2=r2Storage({put:async()=>{started++;}} as unknown as R2Bucket);
       await assert.rejects(r2.put('k',new Uint8Array(1),'text/plain',AbortSignal.abort()));
       assert.equal(started,0);
+    });
+  });
+  // Recheck 2 of #57 (tear witness, 3 steps: foreign, day, purge -> reconciliation took a workspace named
+  // `attachments`'s kept mail, k/attachments/msg_*.eml, for an upload of workspace `k` and deleted it).
+  test('attachment upload: reconciliation and deletion never touch another key family or a referenced key',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {storeAttachmentBytes}=await import('./src/sending.js'),{reconcileUploads}=await import('./src/maintenance.js'),dispatch=await import('./src/dispatch.js');
+      const wid=runtime.config.workspaceId,day=86_400_000,old=()=>new Date(Date.now()-2*day),objects=new Map<string,Date>(),hex=()=>randomUUID().replaceAll('-','');
+      t.mock.method(runtime.storage,'put',async(key:string)=>{objects.set(key,new Date());});
+      t.mock.method(runtime.storage,'delete',async(key:string)=>{objects.delete(key);});
+      runtime.storage.list=async(prefix:string,after?:string)=>{
+        const keys=[...objects.keys()].filter(k=>k.startsWith(prefix)&&(!after||k>after)).sort();
+        return {objects:keys.slice(0,1000).map(key=>({key,uploaded:objects.get(key)!})),cursor:keys.length>1000?keys[999]:undefined};
+      };
+      // Kept mail of a workspace named `attachments`, stored by the local mail store and referenced by its message.
+      const kept=`k/attachments/msg_${hex()}.eml`,thread=unique('thr');
+      await db.query("INSERT INTO mail_threads(id,workspace_id) VALUES($1,'attachments')",[thread]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,raw_bucket,raw_key,lifecycle) VALUES($1,'attachments','inbound',$2,'local:',$3,'kept')",[unique('msg'),thread,kept]);
+      // Other families: a mail attachment, a template asset, a published upload, and an upload-shaped key that
+      // only a mail row references. All a day old and, but for the last two, without any sending record.
+      const published=await storeAttachmentBytes(runtime,{workspaceId:wid},{filename:'kept.txt',contentType:'text/plain'},Buffer.from('kept'));
+      const uploadKey=(await db.query('SELECT storage_key FROM sending_attachments WHERE id=$1',[published.id])).rows[0].storage_key;
+      const mailOwned=`uploads/${wid}/attachment_${hex()}`,orphan=`uploads/${wid}/attachment_${hex()}`;
+      await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,raw_bucket,raw_key,lifecycle) VALUES($1,'attachments','inbound',$2,'local:',$3,'kept')",[unique('msg'),thread,mailOwned]);
+      const others=[kept,`a/attachments/msg_${hex()}/b1/att_1`,`${wid}/templates/assets/tasset_${hex()}`,uploadKey,mailOwned];
+      for(const key of [...others,orphan])objects.set(key,old());
+      await reconcileUploads(runtime);
+      const queued=(await db.query("SELECT workspace_id w,payload->>'key' k FROM jobs WHERE type='maintenance.deleteAttachment' AND status='pending' AND payload->>'key'=ANY($1)",[[...others,orphan]])).rows;
+      assert.deepEqual(queued,[{w:wid,k:orphan}],'only the unowned object of the upload family is queued');
+      // The one deletion handler revalidates every key at deletion time. What b283ae6 queued for the kept mail
+      // (workspace k) is refused; a key that a row references is kept; the orphan is deleted.
+      const del=(w:string,key:string)=>dispatch.deleteAttachment(runtime,{key},{id:unique('job'),attempts:1,workspaceId:w});
+      await assert.rejects(del('k',kept),{code:'JOB_PAYLOAD_INVALID'});
+      for(const key of [uploadKey,mailOwned])await del(wid,key);
+      await del(wid,orphan);
+      assert.deepEqual(others.filter(k=>!objects.has(k)),[],'no object of another family or with a reference was deleted');
+      assert.equal(objects.has(orphan),false);
     });
   });
   test('agent inbox contracts and storage budgets',async t=>{

@@ -5,14 +5,26 @@ import { processJobs, wakeWebhooks } from './jobs.js';
 import type { GateState } from './dispatcher.js';
 import { finishCampaigns, terminalColumns, terminalEvents } from './states.js';
 const loadDispatcher = lazyModule(() => import('./dispatcher.js'));
-const deleteAttachment: JobHandler = async (runtime, payload, job) => {
+const escaped = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** The only keys this job deletes: an attachment's or template asset's, by exact grammar, in the job's workspace. */
+const deletable = (wid: string, key: string) => !wid.includes('/') && new RegExp(`^(?:uploads/${escaped(wid)}/attachment_|${escaped(wid)}/(?:live/)?attachments/attachment_|${escaped(wid)}/templates/assets/tasset_)[A-Za-z0-9]+$`).test(key);
+export const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.key !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion job is missing its object key.');
-  if (!payload.key.startsWith(`${job.workspaceId}/attachments/`) && !payload.key.startsWith(`${job.workspaceId}/live/attachments/`) && !payload.key.startsWith(`${job.workspaceId}/templates/assets/`)) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion key is outside the job scope.');
-  try { await runtime.storage.delete(payload.key); }
-  catch (error) {
-    if (error instanceof ModuleLoadError) throw error;
-    throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true);
-  }
+  const key = payload.key;
+  if (!deletable(job.workspaceId, key)) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion key is outside the job scope.');
+  // Recheck when deleting, not when queuing, and never from the key alone: no row may reference this exact
+  // key (storage_key_in_use, 158). A new reference needs the reservation or asset row this check also sees,
+  // so none can appear before the delete below, in the same transaction.
+  const deleted = await runtime.db.transaction(async tx => {
+    if ((await tx.execute<{ used: boolean }>(sql`SELECT storage_key_in_use(${key}) AS used`)).rows[0]!.used) return false;
+    try { await runtime.storage.delete(key); }
+    catch (error) {
+      if (error instanceof ModuleLoadError) throw error;
+      throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true);
+    }
+    return true;
+  });
+  if (!deleted) log('warn', { code: 'ATTACHMENT_DELETE_KEPT', workspaceId: job.workspaceId, message: 'A row references the object; it was not deleted.' });
 };
 function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
   return wrapModuleLoad(async () => {
