@@ -1143,6 +1143,10 @@ export type CampaignPacingUpdate = {
     rateShare?: number;
 };
 
+export type CampaignRescheduleInput = {
+    scheduledAt: string;
+};
+
 export type WorkspaceSettings = {
     name: string;
 };
@@ -9076,6 +9080,134 @@ export type SetCampaignPacingResponses = {
 };
 
 export type SetCampaignPacingResponse = SetCampaignPacingResponses[keyof SetCampaignPacingResponses];
+
+export type UnscheduleCampaignData = {
+    body: {
+        [key: string]: never;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/unschedule';
+};
+
+export type UnscheduleCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UnscheduleCampaignError = UnscheduleCampaignErrors[keyof UnscheduleCampaignErrors];
+
+export type UnscheduleCampaignResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type UnscheduleCampaignResponse = UnscheduleCampaignResponses[keyof UnscheduleCampaignResponses];
+
+export type RescheduleCampaignData = {
+    body: CampaignRescheduleInput;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/reschedule';
+};
+
+export type RescheduleCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RescheduleCampaignError = RescheduleCampaignErrors[keyof RescheduleCampaignErrors];
+
+export type RescheduleCampaignResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type RescheduleCampaignResponse = RescheduleCampaignResponses[keyof RescheduleCampaignResponses];
 
 export type GetWorkspaceSettingsData = {
     body?: never;

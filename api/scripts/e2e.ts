@@ -521,6 +521,17 @@ async function scheduledCampaign(audience: Audience) {
   check(paced.delivery?.pacing.perDay === 100 && paced.delivery.pacing.rateShare === 0.25, 'pacing changes missing');
   const resumed = await api('resumeCampaign', { path, body: {} });
   check(resumed.state === 'scheduled' && resumed.scheduledAt && Date.parse(resumed.scheduledAt) === Date.parse(scheduledAt), 'resume lost future schedule');
+  const later = new Date(Date.parse(scheduledAt) + 86_400_000).toISOString();
+  const moved = await api('rescheduleCampaign', { path, body: { scheduledAt: later } });
+  check(moved.state === 'scheduled' && moved.scheduledAt !== null && Date.parse(moved.scheduledAt) === Date.parse(later) && moved.delivery?.expanded === 0, 'reschedule did not move the send time');
+  const unscheduled = await api('unscheduleCampaign', { path, body: {} });
+  check(unscheduled.state === 'draft' && unscheduled.scheduledAt === null && unscheduled.delivery === null && unscheduled.counts.total === 0, 'unschedule did not return an untouched draft');
+  const again = await api('scheduleCampaign', { path, headers: idKey('schedule-again'), body: { revision: unscheduled.revision, scheduledAt } });
+  check(again.queued === 1 && again.scheduledAt === scheduledAt, 'unscheduled draft did not schedule again');
+  await until('campaign scheduled again', () => api('getCampaignState', { path }), row => {
+    check(['preparing', 'scheduled'].includes(row.state), `unexpected pre-schedule state ${row.state}`);
+    return row.state === 'scheduled';
+  }, row => row.state);
   const canceled = await api('cancelCampaign', { path });
   check(canceled.state === 'canceled' && canceled.inFlight === 0 && canceled.canceled === 1, 'cancel did not stop one future recipient');
   const stats = await api('getCampaignStats', { path });

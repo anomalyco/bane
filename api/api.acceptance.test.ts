@@ -4019,6 +4019,46 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, key.secret, {}), 409, 'CAMPAIGN_NOT_SENDING');
   });
 
+  test('a scheduled campaign moves to another time or back to an editable draft until it starts sending', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('reschedule-list') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Ada' });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    error(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() - 1000).toISOString() }), 422, 'INVALID_SCHEDULE');
+    const later = new Date(Date.now() + 7_200_000).toISOString();
+    const moved = ok(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: later }));
+    assert.equal(moved.state, 'scheduled');
+    assert.equal(Date.parse(moved.scheduledAt), Date.parse(later));
+    assert.equal(moved.delivery.total, 1, 'Rescheduling keeps the frozen audience.');
+    assert.equal(moved.revision, campaign.revision);
+    // Back to a draft: nothing was sent, the snapshot and reservation are released, and the draft is editable again.
+    const draft = ok(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}));
+    assert.equal(draft.state, 'draft');
+    assert.equal(draft.scheduledAt, null);
+    assert.equal(draft.delivery, null);
+    assert.equal(draft.counts.total, 0);
+    assert.equal(draft.revision, campaign.revision);
+    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}/state`, key.secret)).state, 'draft');
+    const edited = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: draft.revision, draft: { ...draft.draft, subject: 'Fixed typo {{firstName}}' } }));
+    assert.equal(edited.state, 'draft');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    // Schedule again, then move it to two seconds from now: the waiting run is woken and sends at the new, earlier time.
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: edited.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 2000).toISOString() }));
+    const sent = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
+    assert.equal(sent.state, 'done');
+    assert.equal(sent.counts.total, 1);
+    error(await http('POST', `/v1/campaigns/${campaign.id}/unschedule`, key.secret, {}), 409, 'CAMPAIGN_NOT_SCHEDULED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_NOT_SCHEDULED');
+  });
+
   test('missing personalization names the placeholder and the fallback that fixes it', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('personalize-list') });
