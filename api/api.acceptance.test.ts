@@ -8118,7 +8118,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const box = await createMailbox(runtime.db,{workspaceId:wid},{domainId:md,domainName:domain,address:from,origin:'api'});
       const simulator = 'success+e2e@simulator.amazonses.com', mail = { from, to: 'real@example.net', subject:'Guardrail', text:'Synthetic.' };
       const send = (extra:Json = {}) => local('POST','/v1/emails/send',{...mail,...extra});
-      const batch = (n:number) => local('POST','/v1/emails/batch',{emails:Array.from({length:n},()=>mail)});
+      // Distinct receipts: identical copies in one request are bulk evidence (hosted-sending.ts bulkFlags).
+      const batch = (n:number) => local('POST','/v1/emails/batch',{emails:Array.from({length:n},(_,i)=>({...mail,subject:`Guardrail ${i}`}))});
       const thread = () => local('POST','/v1/inbound/threads',{addressId:box.id,to:[mail.to],subject:mail.subject,text:mail.text});
       const pause = async () => ok(await local('GET','/v1/me')).connection.sendingPause;
       const keyed = (to:string) => local('POST','/v1/emails/send',{...mail,to},'live',{'Idempotency-Key':'hosted-one-charge'});
@@ -8375,6 +8376,35 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: false, step: 'warn' }));
       await db.query('UPDATE sending_emails SET lease_until=NULL WHERE id=$1', [later]);
       assert.equal((await drain()).sent, 1);
+    });
+  });
+  test('MX review of #115: a marketing hold holds bulk mail labelled transactional, classified from server-side evidence', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { applyChange } = await import('./src/standing.js');
+      const f = await hostedHoldFixture(runtime, db);
+      await gradedSender(db, f.wid, 10000);
+      const hold = (held: boolean) => runtime.db.transaction(tx => applyChange(tx, { workspaceId: f.wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: held, step: held ? 'restrict' : 'warn' }));
+      const one = (extra: Json = {}) => ({ from: f.from, to: 'reader@example.net', subject: 'Spring sale', text: 'Everything is 20% off this week.', ...extra });
+      const send = (extra: Json = {}) => local('POST', '/v1/emails/send', one(extra));
+      const team = Array.from({ length: 12 }, (_, i) => `member-${i}@example.net`);
+      await hold(true);
+      // The caller's label alone used to decide: the same promotion was 409 as marketing and 202 as transactional.
+      error(await send({ kind: 'marketing' }), 409, 'MARKETING_HELD');
+      for (const [why, request] of [
+        ['ten or more real recipients', send({ to: team.slice(0, 10), kind: 'transactional' })],
+        ['list headers', send({ headers: [{ name: 'List-Id', value: '<spring.example.net>' }] })],
+        ['Precedence: bulk', send({ headers: [{ name: 'Precedence', value: 'bulk' }] })],
+        ['ten identical copies in one request', local('POST', '/v1/emails/batch', { emails: team.slice(0, 10).map(to => one({ to })) })],
+      ] as const) assert.equal(error(await request, 409, 'MARKETING_HELD').code, 'MARKETING_HELD', why);
+      // Genuine transactional mail still flows: one recipient, or a batch of distinct messages.
+      ok(await send({ subject: 'Your sign-in code', text: 'Code 123456' }), 202);
+      ok(await local('POST', '/v1/emails/batch', { emails: team.slice(0, 10).map((to, i) => one({ to, subject: `Your receipt #${i}`, text: `Order ${i}` })) }), 202);
+      ok(await send({ to: team.slice(0, 9) }), 202); // Nine recipients is under the line.
+      // Not held: bulk mail is admitted, stamped and attributed to marketing in the reputation evidence.
+      await hold(false);
+      const bulk = ok(await send({ to: team }), 202).id;
+      assert.deepEqual((await db.query(`SELECT e.snapshot->'bulk' AS bulk,e.snapshot->>'kind' AS kind,r.marketing FROM sending_emails e JOIN hosted_real_envelopes r ON r.workspace_id=e.workspace_id AND r.id=e.id WHERE e.id=$1`, [bulk])).rows,
+        [{ bulk: true, kind: 'transactional', marketing: true }]);
     });
   });
   test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking', async t => {

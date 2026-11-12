@@ -82,7 +82,7 @@ ALTER TABLE hosted_health_hourly ADD COLUMN marketing_accepted bigint NOT NULL D
 ALTER TABLE hosted_health_credits ADD COLUMN marketing_accepted int NOT NULL DEFAULT 0, ADD COLUMN marketing_bounces int NOT NULL DEFAULT 0, ADD COLUMN marketing_complaints int NOT NULL DEFAULT 0;
 CREATE OR REPLACE VIEW hosted_real_envelopes AS SELECT e.id,e.workspace_id,e.created_at,e.status,e.provider_id,
   hosted_real_cost(e.to_addresses || e.cc_addresses || e.bcc_addresses) AS cost,
-  coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL,false) AS marketing
+  coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL OR e.snapshot ? 'bulk',false) AS marketing
   FROM sending_emails e LEFT JOIN provider_connections pc USING(workspace_id)
   WHERE NOT e.simulated AND ((e.feedback_topic_arn IS NULL AND pc.kind='shared') OR EXISTS
     (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'));

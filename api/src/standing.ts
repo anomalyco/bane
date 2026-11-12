@@ -110,7 +110,7 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
       SELECT d.workspace_id,(e.created_at AT TIME ZONE 'UTC')::date AS day,${MAIL_ACCEPTED} AS accepted,
         (e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
         (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,e.status='suppressed' AS suppressed,
-        e.campaign_id IS NOT NULL AS first_send,coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL,false) AS marketing,e.event_outcomes & 32 <> 0 AS clicked
+        e.campaign_id IS NOT NULL AS first_send,coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL OR e.snapshot ? 'bulk',false) AS marketing,e.event_outcomes & 32 <> 0 AS clicked
       -- Only real Hosted mail is evidence: never simulated runs, mail only to the SES mailbox simulator, or mail the
       -- workspace sent through its own (BYO) account before (the unit is one email, in numerator and denominator alike).
       FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0

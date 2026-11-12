@@ -15,6 +15,8 @@ export type EmailSnapshot = {
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
   deferredCampaign?: boolean;
+  /** Server-side bulk evidence on a message its caller labelled transactional (hosted-sending.ts bulkFlags): held like marketing. */
+  bulk?: true;
   /** Present only on mailbox replies; recipients who actually wrote to this mailbox in this thread. */
   replyAuthors?: string[];
   /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */

@@ -36,7 +36,24 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
  * The stream a marketing hold stops, as an expression over a sending_emails row: marketing mail and every campaign
  * row. Admission, campaign release and dispatch (owner selection and the final election) use the same rule.
  */
-export const heldStream = (e: SQL) => sql`(${e}.snapshot->>'kind'<>'transactional' OR ${e}.campaign_id IS NOT NULL)`;
+export const heldStream = (e: SQL) => sql`(${e}.snapshot->>'kind'<>'transactional' OR ${e}.campaign_id IS NOT NULL OR ${e}.snapshot ? 'bulk')`;
+/**
+ * Server-side evidence that a message is bulk, whatever kind its caller chose: at least 10 real recipients, list
+ * headers (List-Id and the other List-* headers, Precedence: bulk/list/junk), or one of at least 10 identical
+ * messages (subject, body and template) in one request. Bulk mail is marketing for holds, the transactional reserve,
+ * the dispatch fence and reputation attribution (snapshot.bulk); it keeps its stream, configuration set and content.
+ */
+export const BULK = { recipients: 10, copies: 10 } as const;
+const LIST_HEADER = /^list-(?:id|unsubscribe|unsubscribe-post|help|subscribe|post|owner|archive)$/i;
+type BulkInput = { kind?: string; to: string | string[]; cc?: string[]; bcc?: string[]; subject?: string; html?: string; text?: string; template?: unknown; headers?: { name: string; value: string }[] };
+export function bulkFlags(mails: BulkInput[]) {
+  const content = (m: BulkInput) => JSON.stringify([m.subject ?? null, m.html ?? null, m.text ?? null, m.template ?? null]), copies = new Map<string, number>();
+  for (const m of mails) copies.set(content(m), (copies.get(content(m)) ?? 0) + 1);
+  return mails.map(m => m.kind !== 'marketing' && (
+    [...(Array.isArray(m.to) ? m.to : [m.to]), ...(m.cc ?? []), ...(m.bcc ?? [])].filter(realDestination).length >= BULK.recipients
+    || !!m.headers?.some(h => LIST_HEADER.test(h.name) || (h.name.toLowerCase() === 'precedence' && /^(?:bulk|list|junk)$/i.test(h.value.trim())))
+    || copies.get(content(m))! >= BULK.copies));
+}
 /**
  * Restrict, an operator's hold, or a marketing hold placed before the standing took over (bounces only): marketing is
  * refused while transactional mail keeps flowing. `reason` is that older hold's own message.

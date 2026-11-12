@@ -20,7 +20,7 @@ import { dmarcView } from './dmarc.js';
 import type { IdentityFacts } from './states.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
-import { assertHostedAllowance, hostedAllowance, hostedCost, marketingHeld, type HostedAllowance } from './hosted-sending.js';
+import { assertHostedAllowance, bulkFlags, hostedAllowance, hostedCost, marketingHeld, type HostedAllowance } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
@@ -804,8 +804,10 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   const data=mails.map(()=>({id:id('email'),status:'queued' as const,simulated:sim})),receipt=batch?{data}:data[0]!;
   const rows:{id:string;snapshot:EmailSnapshot;hash?:string;email?:string}[]=[],wanted=[];
   let prepError:unknown,cost=0,marketing=0,expanded=0;
+  const bulk=bulkFlags(mails);
   for(const [i,m] of mails.entries()){
     const snapshot=structuredSnapshot({...m,region:m.region??''});let token:{hash:string;email:string}|undefined;
+    if(bulk[i])snapshot.bulk=true;
     if(snapshot.html) await validateHtmlUrls(snapshot.html);
     try {
       sesHeaders(snapshot.headers.length+(m.kind==='marketing'?2:0));distinctAttachmentIds(m.attachments);
@@ -821,7 +823,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     }catch(e){if(e instanceof ModuleLoadError)throw e;prepError??=e;}
     rows.push({id:data[i]!.id,snapshot,...token});
     wanted.push({host:m.from.split('@')[1]!.toLowerCase(),region:m.region,kind:m.kind,attachments:m.attachments,bodyBytes:Buffer.byteLength((snapshot.html??'')+(snapshot.text??'')+snapshot.subject)});
-    const n=sim?0:hostedCost(m.to,m.cc,m.bcc);cost+=n;if(m.kind==='marketing')marketing+=n;
+    const n=sim?0:hostedCost(m.to,m.cc,m.bcc);cost+=n;if(m.kind==='marketing'||bulk[i])marketing+=n;
   }
   const assetIds=[...new Set(mails.flatMap(m=>m.attachments))],cfg=c.env.config,caps=cfg.hostedSendCaps;
   const requestedAssets = sql`${JSON.stringify(assetIds)}::jsonb`;
@@ -887,8 +889,9 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
   const regional=regionalSending(c.env), hosts=mails.map(m=>m.from.split('@')[1]!.toLowerCase());
   const bulk=bulkColumns(c.env,a.workspaceId,hosts);
   let cost = 0, marketing = 0;
-  if (mx && !simulated) for (const mail of mails) {
-    const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing') marketing += n;
+  const bulkMail = bulkFlags(mails);
+  if (mx && !simulated) for (const [i, mail] of mails.entries()) {
+    const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing' || bulkMail[i]) marketing += n;
   }
   return idempotent(c, a, input, async db => {
     const attachmentIds = assetIds.filter(id => !id.includes('\0'));
@@ -929,6 +932,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       const link = mail.kind === 'marketing' ? await (await loadOpsUnsub()).createUnsubscribeLink(c.env, a.workspaceId, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
       const route=state.routes?.[hosts[i]!];
       const snapshot = await prepare(runtime, db, a, { ...mail, region }, false, attached, true, true, link?.url, route?.connection ?? state.connection ?? undefined);
+      if (bulkMail[i]) snapshot.bulk = true;
       if (route) snapshot.binding=route.binding;
       if (batch) {
         expandedBytes += Buffer.byteLength(JSON.stringify(snapshot), 'utf8');

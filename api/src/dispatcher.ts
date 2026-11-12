@@ -263,7 +263,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     WHERE (SELECT count(*) FROM due)=1 AND s.ready AND s.installation_id IS NOT NULL AND s.connection->>'paused_at' IS NULL
       AND (e.snapshot ? 'binding' OR s.default_region=${region} OR s.enabled_regions ? ${region})
       AND (${isSimulatedSes(runtime)} OR NOT e.simulated) AND (${isSimulatedSes(runtime)} OR s.connection->>'kind'<>'shared' OR s.connection->>'tenant_state'='ready')
-      AND e.campaign_id IS NULL AND e.review_id IS NULL AND s.stream='transactional' AND NOT starts_with(e.actor_key_id,'mcp_')
+      AND e.campaign_id IS NULL AND e.review_id IS NULL AND s.stream='transactional' AND NOT starts_with(e.actor_key_id,'mcp_') AND NOT e.snapshot ? 'bulk'
       AND NOT (e.snapshot ?| array['raw','deferredCampaign']) AND NOT coalesce((e.snapshot->>'screen')::boolean,false)
       AND (${!runtime.config.hostedScreen || isSimulatedSes(runtime)} OR s.connection->>'kind'<>'shared')
       AND e.snapshot->'attachments'='[]'::jsonb AND e.snapshot->'cc'='[]'::jsonb AND e.snapshot->'bcc'='[]'::jsonb
@@ -523,7 +523,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
     feedback_topic: item.owner.feedbackTopic, binding:item.review?.draft.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
-    hosted:!!item.owner.tenantName,marketing: item.snapshot.kind === 'marketing', held_stream: item.snapshot.kind !== 'transactional' || !!item.mail.campaignId, reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
+    hosted:!!item.owner.tenantName,marketing: item.snapshot.kind === 'marketing', held_stream: item.snapshot.kind !== 'transactional' || !!item.mail.campaignId || !!item.snapshot.bulk, reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
