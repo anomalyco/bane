@@ -125,6 +125,13 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     (1, &["ingest m1 z", "run K m1:V", "reply K timeout", "ingest m2 z", "run K m2:V", "reply K timeout", "ingest m3 z", "run K m3:V", "reply K timeout", "run K m1:V"]),
     // A ritual that failed to junk for box@ made z@'s routed webhook delivery junk: V refused it.
     (1, &["rituals over", "ingest m1 b+z", "run K m1:V"]),
+    // Another SES receipt of the same email, or a reopen after a routing or ritual edit, queued the
+    // earlier recipients' ritual actions and routes again: a second Slack post, a new route's endpoint.
+    (1, &["rituals slack", "ingest m1 b", "ingest d1 b"]),
+    (1, &["ingest m1 a", "route r1 off", "ingest d1 a"]),
+    (1, &["rituals slack", "ingest m1 b", "rituals both", "ingest m1 b+z"]),
+    (1, &["ingest m1 b", "pause W", "ingest d1 a", "unpause W", "ingest d1 a+z"]),
+    (1, &["route r1 drop", "ingest m1 a", "ingest d1 a+z"]),
 ];
 
 fn model(v: &Value) -> R<Model> {

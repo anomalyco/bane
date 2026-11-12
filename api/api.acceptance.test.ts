@@ -9484,6 +9484,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0].status,'delivered');
         }finally{runtime.webhookFetch=prev;await call('PUT','/v1/rituals',{});await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
       });
+      await t.test('delivery: another receipt of one email routes and runs rituals only for recipients not routed before',async()=>{
+        // tear/delivery witnesses: rituals slack, ingest m1 b, ingest d1 b; ingest m1 a, route r1 off, ingest d1 a.
+        await call('POST','/v1/endpoints',{type:'webhook',name:'once-a',url:'https://hooks.example.org/once-a'},201);
+        await call('POST','/v1/endpoints',{type:'webhook',name:'once-b',url:'https://hooks.example.org/once-b'},201);
+        const ids:Record<string,string>=Object.fromEntries((await db.query("SELECT key,id FROM mailbox_webhooks WHERE workspace_id=$1 AND key IN ('once-a','once-b')",[wid])).rows.map(r=>[r.key,r.id]));
+        await route('once@receive.example',['webhook:once-a'],'once-route');
+        await call('PUT','/v1/rituals',{rituals:[{key:'notify',source:'export default function route(email){endpoints["once-a"]({subject:email.subject})}'}],attachments:[{ritual:'notify',target:box.id}]});
+        const email=Buffer.from('From: Agent <a@example.org>\r\nSubject: Once\r\nMessage-ID: <once@example.org>\r\n\r\nHello');
+        const receive=async(mid:string,to:string[])=>{raw.set(mid,email);await submit(mid,to,'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);};
+        const queued=async()=>Object.fromEntries((await db.query('SELECT h.key,count(d.id)::int AS n FROM mailbox_webhooks h LEFT JOIN mailbox_webhook_deliveries d ON d.webhook_id=h.id WHERE h.id=ANY($1) GROUP BY h.key',[Object.values(ids)])).rows.map(r=>[r.key,r.n]));
+        try{
+          await receive('once-1',[box.address,'once@receive.example']);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':0},'the ritual call for the box and the route for once@');
+          // The same email under another SES receipt ID, after the route moved and the ritual was saved again.
+          await call('PATCH','/v1/routing/routes/once-route',{to:['webhook:once-b']});
+          await receive('once-2',[box.address,'once@receive.example']);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':0});
+          assert.deepEqual((await db.query("SELECT envelope_to FROM mail_messages WHERE workspace_id=$1 AND message_id='once@example.org'",[wid])).rows.map(r=>[...r.envelope_to].sort()),[[box.address,'once@receive.example'].sort()]);
+          // A reopen of that receipt with a new recipient routes only the new recipient.
+          await receive('once-2',[box.address,'once@receive.example','once+tag@receive.example']);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
+        }finally{await call('PUT','/v1/rituals',{});for(const id of Object.values(ids))await call('DELETE',`/v1/inbound/webhooks/${id}?detach=true`);}
+      });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const importer=runtime.importPublicImage;let imports=0;
