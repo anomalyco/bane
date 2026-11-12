@@ -8400,8 +8400,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await send({ subject: 'Your sign-in code', text: 'Code 123456' }), 202);
       ok(await local('POST', '/v1/emails/batch', { emails: team.slice(0, 10).map((to, i) => one({ to, subject: `Your receipt #${i}`, text: `Order ${i}` })) }), 202);
       ok(await send({ to: team.slice(0, 9) }), 202); // Nine recipients is under the line.
+      // Review round 3: the mailbox path (threads, replies, forwards, tracked sends, SMTP) applies the same rule.
+      const { createMailbox } = await import('./src/mailbox-store.js'), md = unique('mdom');
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,'held.example',$4,'active')`, [md, f.wid, unique('domain'), REGION]);
+      const box = await createMailbox(runtime.db, { workspaceId: f.wid }, { domainId: md, domainName: 'held.example', address: f.from, origin: 'api' });
+      const thread = (to: string[]) => local('POST', '/v1/inbound/threads', { addressId: box.id, to, subject: 'Spring sale', text: 'Everything is 20% off this week.' });
+      error(await thread(team), 409, 'MARKETING_HELD'); // Twelve recipients through a thread used to be admitted and sent.
+      ok(await thread(['reader@example.net']), 202);
       // Not held: bulk mail is admitted, stamped and attributed to marketing in the reputation evidence.
       await hold(false);
+      ok(await thread(team), 202);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND jsonb_array_length(to_addresses)=12 AND snapshot ? 'bulk'`, [f.wid])).rows[0].n, 1, 'The thread message is stamped bulk.');
       const bulk = ok(await send({ to: team }), 202).id;
       assert.deepEqual((await db.query(`SELECT e.snapshot->'bulk' AS bulk,e.snapshot->>'kind' AS kind,r.marketing FROM sending_emails e JOIN hosted_real_envelopes r ON r.workspace_id=e.workspace_id AND r.id=e.id WHERE e.id=$1`, [bulk])).rows,
         [{ bulk: true, kind: 'transactional', marketing: true }]);
