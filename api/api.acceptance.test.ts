@@ -6975,14 +6975,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { hourlyUpkeep } = await import('./src/maintenance.js'), { PgDialect } = await import('drizzle-orm/pg-core');
       const dialect = new PgDialect(), seen: string[] = [], execute = runtime.db.execute.bind(runtime.db);
       const failing = /^DELETE FROM sending_attachment_links l USING sending_campaign_reviews/;
-      t.mock.method(globalThis, 'fetch', async () => { throw new Error('Offline fixture: DNS refreshes and alerts fail here.'); });
+      // Swapped by hand, not with t.mock: node:test restores every mock again at the end of the test, which would reinstall
+      // the fixture's own fetch mock over the real fetch for the tests after this one.
+      const fixtureFetch = globalThis.fetch;
+      globalThis.fetch = async () => { throw new Error('Offline fixture: DNS refreshes and alerts fail here.'); };
       t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
         const text = dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql; seen.push(text);
         if (failing.test(text)) throw new Error('canceling statement due to statement timeout');
         return execute(query);
       });
       // Only the cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
-      assert.equal((await hourlyUpkeep(runtime))[0], 'MAINTENANCE_CLEANUP_FAILED');
+      try { assert.equal((await hourlyUpkeep(runtime))[0], 'MAINTENANCE_CLEANUP_FAILED'); } finally { globalThis.fetch = fixtureFetch; }
       const failedAt = seen.findIndex(text => failing.test(text));
       assert.ok(failedAt >= 0, 'the retention statement ran and failed');
       assert.ok(seen.slice(failedAt + 1).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery still ran after it');
