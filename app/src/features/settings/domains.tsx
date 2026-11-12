@@ -39,8 +39,8 @@ function ReceivingCell({ domain, name }: { domain?: MailboxDomain; name: string 
 }
 
 /** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
-function ReceivingSettings({ domainId }: { domainId: string }) {
-  const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal))
+/** The page reads the receiving domain before it shows (so this section arrives at its final height) and passes it in. */
+function ReceivingSettings({ domainId, receiving }: { domainId: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown } }) {
   const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')
   const update = useApiMutation((_api, catchAll: MailboxDomain['catchAll']) => request<MailboxDomain>(`/v1/inbound/domains/${encodeURIComponent(domainId)}`, { method: 'PATCH', body: { catchAll } }), 'Catch-all saved')
   const state = update.data ?? receiving.data
@@ -49,7 +49,7 @@ function ReceivingSettings({ domainId }: { domainId: string }) {
     <div className="ui-section-header"><div className="domain-group-title"><h2 id="domain-receiving">Receiving</h2><p className="muted">{!state ? <span className="ui-skeleton" /> : on ? <>Mail to addresses at {state.name} follows its <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>routes</Link>.</> : 'Publish the receiving MX record below to get mail at this domain.'}</p></div>
       {on && state!.status !== 'active' && <div className="cluster"><Button loading={check.isPending} onClick={() => void check.mutateAsync().catch(() => undefined)}>Check MX now</Button></div>}</div>
     <MutationError error={update.error ?? check.error} />
-    {!state ? <dl className="settings-facts domain-facts domain-receiving-facts" aria-hidden="true">{['Status', 'Receives at', 'Addresses', catchAllSetting.title].map(term => <div key={term}><dt>{term}</dt><dd><span className="ui-skeleton" /></dd></div>)}</dl> : <dl className="settings-facts domain-facts domain-receiving-facts">
+    {!state && receiving.error ? <ErrorState error={receiving.error as Error} onRetry={() => void receiving.refetch()} /> : !state ? <dl className="settings-facts domain-facts domain-receiving-facts" aria-hidden="true">{['Status', 'Receives at', 'Addresses', catchAllSetting.title].map(term => <div key={term}><dt>{term}</dt><dd><span className="ui-skeleton" /></dd></div>)}</dl> : <dl className="settings-facts domain-facts domain-receiving-facts">
       <div><dt>Status</dt><dd><StatusBadge status={receivingStatus[state.status].label} tone={receivingStatus[state.status].tone} /></dd></div>
       <div><dt>Receives at</dt><dd>{on ? state.name : '—'}</dd></div>
       <div><dt>Addresses</dt><dd>{on ? <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>{state.addressCount.toLocaleString('en-US')}</Link> : '—'}</dd></div>
@@ -118,6 +118,7 @@ export function DomainDetailPage() {
   const chooseSupported = !!useApi().domains.chooseReceivingHost
   const [recheckUntil, setRecheckUntil] = useState(0)
   const domain = useDomain(id, recheckUntil)
+  const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: hosted })
   const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true)
   const client = useQueryClient()
   // Invalidate only after leaving: refetching this domain would 404 while the dialog closes.
@@ -150,7 +151,7 @@ export function DomainDetailPage() {
     catch (error) { if (host && error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE') { choose.reset(); setMoveMail({ host, message: error.detail.replace(/^Move mail for \S+\? /, '').replace(/ Send confirm: true to choose it anyway\.$/, '') }) } }
   }
   async function checkNow() { try { await verify.mutateAsync(id); if (multiTenant) setRecheckUntil(Date.now() + 30_000) } catch { /* Shown inline. */ } }
-  if (domain.isPending || (!domain.error && dns.pending)) return <DomainDetailSkeleton />
+  if (domain.isPending || (!domain.error && (dns.pending || (hosted && receiving.isPending && !receiving.error)))) return <DomainDetailSkeleton />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
   const mailFromRecords = recordsFor(current, 'mail_from')
@@ -177,7 +178,7 @@ export function DomainDetailPage() {
       <div><dt>Sending</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
       {!multiTenant && <div><dt>Region</dt><dd>{current.regionId}</dd></div>}
     </dl>
-    {hosted && <ReceivingSettings domainId={id} />}
+    {hosted && <ReceivingSettings domainId={id} receiving={receiving} />}
     <div className="domain-sections">
       <DomainRecords domain={current} setup={dns.setup} receivingView={hosted ? { actions: receivingActions } : undefined} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
