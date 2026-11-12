@@ -49,11 +49,14 @@ const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === '
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; accountPauseAt?:number; dailyBlockedUntil?: number; tailExhausted?: boolean; ownerCursor?: string; screenRetryAt?: number }
+export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; accountPauseAt?:number; outageUntil?: number; outageStreak?: number; dailyBlockedUntil?: number; tailExhausted?: boolean; ownerCursor?: string; screenRetryAt?: number }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
 export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/2))) : 24;
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
+// SES gave no usable answer (transport error, timeout, 5xx, or no MessageId): an ambiguous call is never replayed, so stop starting new
+// calls instead of turning every queued email into acceptance_unknown. Doubles while SES stays silent.
+const OUTAGE_MS = 15000, OUTAGE_MAX_MS = 300000;
 // Far below interrupted-attempt recovery (3 min) and the queue lease (2 min). Ordinary groups
 // can share a claim, but an unsent item never waits behind a long envelope or priority flood.
 const MAX_PRE_SEND_MS = 5000;
@@ -810,7 +813,8 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       else earliest = Math.min(earliest, entry.deadline);
     }
     if (earliest === Infinity) return;
-    const wakeAt = active >= (options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, queues.transactional.length ? priorityAt : gate.nextAllowedAt);
+    // After SES stopped answering, probe with one call until it accepts again.
+    const wakeAt = active >= (gate.outageStreak ? 1 : options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, queues.transactional.length ? priorityAt : gate.nextAllowedAt);
     if (wakeAt > now) { timer = setTimeout(pump, Math.ceil(wakeAt - now)); return; }
     (queues.transactional.shift() ?? queues.marketing.shift())!.start();
     pump();
@@ -819,9 +823,9 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
     const queuedAt = Date.now(), s = item.snapshot;
     queues[s.kind].push({ deadline, defer() {
       held.recipients -= cost(item);
-      const accountUntil=(gate.accountPauseAt??0)+300000;
-      const until=accountUntil>Date.now()?accountUntil:gate.dailyBlockedUntil;
-      const code=accountUntil>Date.now()?'SES_ACCOUNT_SENDING_PAUSED':gate.dailyBlockedUntil?'SES_DAILY_QUOTA_EXHAUSTED':undefined;
+      const accountUntil=(gate.accountPauseAt??0)+300000,outage=(gate.outageUntil??0)>Date.now();
+      const until=accountUntil>Date.now()?accountUntil:outage?gate.outageUntil:gate.dailyBlockedUntil;
+      const code=accountUntil>Date.now()?'SES_ACCOUNT_SENDING_PAUSED':outage?'SES_UNAVAILABLE':gate.dailyBlockedUntil?'SES_DAILY_QUOTA_EXHAUSTED':undefined;
       if (!until) counters.idle = false; // Work is still due, possibly on a different shard.
       resolve({ mail: item.mail, type: 'dispatch_deferred', errorCode:code, data:{code:code??'PACING_WAIT',providerCalled:false}, requeueAt:new Date(until??Date.now()).toISOString() });
     }, start() {
@@ -831,6 +835,15 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       reserve(gate, cost(item), options.shard, pacing);
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         if (outcome.type === 'provider_throttled') brake(gate);
+        if (outcome.type === 'accepted') delete gate.outageStreak;
+        // Every ambiguous answer (no response, 5xx, or success without a MessageId) opens it; the specific code stays in the
+        // event data. Calls already in flight when SES went quiet share one window; only a failed probe doubles the next.
+        if (outcome.type === 'acceptance_unknown' && (gate.outageUntil ?? 0) <= Date.now()) {
+          gate.outageUntil = Date.now() + Math.min(OUTAGE_MAX_MS, OUTAGE_MS * 2 ** (gate.outageStreak ?? 0));
+          gate.outageStreak = (gate.outageStreak ?? 0) + 1;
+          gate.brakeUntil = gate.nextAllowedAt = Math.max(gate.nextAllowedAt, gate.outageUntil);
+          counters.paceRetryAt = gate.nextAllowedAt;
+        }
         if (outcome.errorCode==='SES_ACCOUNT_SENDING_PAUSED' || (outcome.errorCode==='SES_ACCOUNT_PAUSE_EXPIRED' && outcome.data.providerCalled)) {
           gate.accountPauseAt=Date.now();gate.brakeUntil=gate.nextAllowedAt=Math.max(gate.nextAllowedAt,gate.accountPauseAt+300000);
           counters.paceRetryAt=gate.nextAllowedAt;
