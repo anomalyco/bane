@@ -15411,6 +15411,27 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             body: '{}',
           }), env);
           assert.ok([400,422].includes(exemptSns.status));
+
+          // 5) Cloudflare gives every cross-zone Worker subrequest the client address 2a06:98c0:3600::103 and names the
+          // calling zone in CF-Worker. One zone's failures or burst must not throttle another zone's Worker (Console).
+          admissionAllowed = true;
+          const limited = [];
+          const zoneEnv = { ...env, ADMISSION: { async limit({ key }) { limited.push(key); return { success: true }; } } };
+          const fromWorker = (zone, ip = '2a06:98c0:3600::103') => worker.fetch(new Request('https://dev.bane.mx/v1/domains', {
+            headers: { 'CF-Connecting-IP': ip, 'CF-Worker': zone, authorization: 'Bearer bane_malformed' },
+          }), zoneEnv);
+          for (let n = 0; n < 40; n++) assert.equal((await fromWorker('noisy.example')).status, 401);
+          const noisy = await fromWorker('noisy.example');
+          assert.equal(noisy.status, 429);
+          assert.equal((await noisy.json()).error?.code, 'PUBLIC_RATE_LIMITED');
+          const other = await fromWorker('console.example');
+          assert.equal(other.status, 401, 'Another zone\\'s Worker keeps its own failure budget.');
+          assert.equal((await other.json()).error?.code, 'AUTH_INVALID');
+          assert.notEqual(limited[0], limited.at(-1), 'Each calling zone has its own admission bucket.');
+          // A client that is not Cloudflare's Worker egress cannot pick a bucket by sending CF-Worker.
+          limited.length = 0;
+          await fromWorker('noisy.example', '198.51.100.7'); await fromWorker('console.example', '198.51.100.7');
+          assert.equal(limited[0], limited[1]);
         } finally {
           await setup.query(\`DROP SCHEMA IF EXISTS \${schema} CASCADE\`);
           await setup.end();
