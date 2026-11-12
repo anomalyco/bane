@@ -2915,6 +2915,159 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('an endpoint held when its approval is removed resumes only with its URL', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { token, consentId } = await oauthGrant(t, db, writableScope, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [consentId]);
+      const toolAs = async (bearer: string, name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); };
+      const tool = (name: string, args: Json) => toolAs(token, name, args);
+      const slack = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/fixturefixturefixture';
+      // A person creates each kind of URL endpoint and a forward to an address on a domain of theirs; the approval
+      // then changes all but one of them.
+      const wid = runtime.config.workspaceId, domain = unique('held').replaceAll('_', '-') + '.example';
+      await db.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$3,$4)', [unique('dom'), domain, wid, REGION]);
+      for (const body of [{ type: 'webhook', name: 'helpdesk', url: 'https://example.com/hooks/helpdesk' }, { type: 'slack', name: 'alerts', url: slack }, { type: 'webhook', name: 'untouched', url: 'https://example.com/hooks/untouched' }, { type: 'forward', name: 'escalate', address: `ops@${domain}`, preverify: true }])
+        ok(await local('POST', '/v1/endpoints', body), 201);
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/events' }), 201);
+      await tool('updateEndpoint', { name: 'helpdesk', body: { url: 'https://example.net/hooks/helpdesk' } });
+      await tool('updateEndpoint', { name: 'alerts', body: { perMinute: 30 } });
+      await tool('updateEndpoint', { name: 'escalate', body: { perMinute: 30 } });
+      await tool('updateInboundWebhook', { webhookId: hook.id, body: { description: 'Events' } });
+      const endpoint = async (name: string) => ok(await local('GET', `/v1/endpoints/${name}`));
+      assert.deepEqual([(await endpoint('helpdesk')).status, (await endpoint('alerts')).status, (await endpoint('escalate')).status], ['ready', 'ready', 'ready']);
+
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke'));
+      const held = await endpoint('helpdesk');
+      assert.equal(held.status, 'paused');
+      assert.match(held.nextStep, /sending its URL again/);
+      assert.equal((await endpoint('untouched')).status, 'ready', 'An endpoint the approval never changed keeps delivering.');
+      // A forward has no URL to send again: it is paused without the mark and resumes as any paused endpoint does.
+      const forward = await endpoint('escalate');
+      assert.equal(forward.status, 'paused'); assert.match(forward.nextStep, /^Deliveries are held\. Resume with updateEndpoint \{ "paused": false \}\./);
+      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND name='forward:escalate'", [wid])).rows, [{ paused: true, reconfirm: false }]);
+      error(await local('PATCH', '/v1/endpoints/escalate', { url: 'https://example.com/hooks/escalate', paused: false }), 422, 'FORWARD_ADDRESS_FIXED');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/escalate', { paused: false })).status, 'ready');
+      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND name='forward:escalate'", [wid])).rows, [{ paused: false, reconfirm: false }]);
+      for (const path of ['/v1/endpoints/helpdesk', '/v1/endpoints/alerts', `/v1/inbound/webhooks/${hook.id}`]) {
+        assert.equal(error(await local('PATCH', path, { paused: false }), 409, 'ENDPOINT_URL_REQUIRED').field, 'url');
+        // Nothing is posted to a held endpoint, a test included.
+        error(await local('POST', `${path}/test`, path.includes('/inbound/') ? {} : undefined), 409, 'ENDPOINT_URL_REQUIRED');
+      }
+      assert.deepEqual((await db.query("SELECT bool_and(paused) AS paused,count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1) AND reconfirm", [hook.id])).rows[0], { paused: true, n: 3 });
+      // Other changes to a held endpoint still work; only resuming waits for the URL.
+      ok(await local('PATCH', '/v1/endpoints/helpdesk', { perMinute: 20, paused: true }));
+
+      // The URL and the resume together, or the URL first and the resume after it.
+      const resumed = ok(await local('PATCH', '/v1/endpoints/helpdesk', { url: 'https://example.com/hooks/helpdesk', paused: false }));
+      assert.equal(resumed.status, 'ready'); assert.match(resumed.nextStep, /^Call it from a ritual/);
+      assert.equal((await db.query("SELECT url FROM mailbox_webhooks WHERE key='helpdesk' AND id<>$1 AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0].url, 'https://example.com/hooks/helpdesk');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/alerts', { url: slack })).status, 'paused');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/alerts', { paused: false })).status, 'ready');
+      assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { url: 'https://example.com/hooks/events', paused: false })).paused, false);
+      // A pause a person sets resumes by itself, as before.
+      ok(await local('PATCH', '/v1/endpoints/helpdesk', { paused: true }));
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/helpdesk', { paused: false })).status, 'ready');
+      ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: true }));
+      assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: false })).paused, false);
+
+      // A resume decides on the endpoint as it is when the update runs. Here a second approval that changed the
+      // endpoint is removed after the resume has read the endpoint and before it writes.
+      const second = await oauthGrant(t, db, writableScope, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [second.consentId]);
+      await toolAs(second.token, 'updateEndpoint', { name: 'untouched', body: { perMinute: 30 } });
+      ok(await local('PATCH', '/v1/endpoints/untouched', { paused: true }));
+      const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>; let removed = false;
+      const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        if (this !== db || removed || !/FROM mail_endpoints d JOIN mailbox_webhooks h/.test(text)) return query.apply(this, args);
+        removed = true;
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]); return rows; });
+      } as typeof pg.Client.prototype.query);
+      try { error(await local('PATCH', '/v1/endpoints/untouched', { paused: false }), 409, 'ENDPOINT_URL_REQUIRED'); } finally { wire.mock.restore(); }
+      assert.equal(removed, true);
+      const marked = async () => (await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE key='untouched' AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0];
+      // The refused request rolled back with everything on its connection, the removal included: the endpoint is still paused.
+      assert.equal((await marked()).paused, true);
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + second.consentId + '/revoke'));
+      assert.deepEqual(await marked(), { paused: true, reconfirm: true });
+      // The database holds the same rule for any writer: a marked endpoint stays paused.
+      await db.query('SAVEPOINT marked_endpoint');
+      await assert.rejects(db.query("UPDATE mailbox_webhooks SET paused=false WHERE key='untouched' AND reconfirm"), /mailbox_webhook_reconfirm_paused/);
+      await db.query('ROLLBACK TO SAVEPOINT marked_endpoint');
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/untouched', { url: 'https://example.com/hooks/untouched', paused: false })).status, 'ready');
+      assert.deepEqual(await marked(), { paused: false, reconfirm: false });
+
+      // A write by a key an approval created reads the approval again inside its transaction, not only when the request
+      // was authenticated. Here the approval is removed between the two reads: the write is refused and nothing changes.
+      const third = await oauthGrant(t, db, writableScope, request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [third.consentId]);
+      const key = ok(await request('POST', '/mcp?codemode=true', third.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'held fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
+      secrets.add(key);
+      ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { description: 'Events, again' }));
+      let reads = 0;
+      const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        // The first read of the approval authenticates the key; the second is the write's own.
+        if (this !== db || !/from "oauth_consent"/.test(text) || ++reads !== 2) return query.apply(this, args);
+        return query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [third.consentId]).then(() => query.apply(this, args));
+      } as typeof pg.Client.prototype.query);
+      try { error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
+      assert.equal(reads, 2);
+      assert.equal(ok(await local('GET', `/v1/inbound/webhooks/${hook.id}`)).url, '\u2022\u2022\u2022\u2022ents');
+      ok(await local('POST', '/v1/mcp-connections/mcp_' + third.consentId + '/revoke'));
+      assert.deepEqual((await db.query('SELECT paused,reconfirm FROM mailbox_webhooks WHERE id=$1', [hook.id])).rows, [{ paused: true, reconfirm: true }]);
+      assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { url: 'https://example.com/hooks/events', paused: false })).paused, false);
+    });
+  });
+
+  test('a removal waits for a receiving write under way, then holds what the write changed', async t => {
+    // Two connections: the write pauses inside its transaction after it has recorded its approval and before it locks
+    // the webhook, and the owner removes the approval meanwhile. The removal waits for the write, then holds the webhook.
+    const db = await fixtureDatabase(t);
+    const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const app = createApp(), runtime = instance.runtime, live = { 'x-bane-environment': 'live' };
+    const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
+    const { token, consentId } = await oauthGrant(t, db, writableScope, request);
+    await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [consentId]);
+    const key = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'race fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
+    secrets.add(key);
+    const hook = ok(await request('POST', '/v1/inbound/webhooks', MANAGER, { url: 'https://example.com/hooks/race-events', eventTypes: ['message.received'] }, live), 201);
+    cleanup(t, async () => { ok(await request('DELETE', `/v1/inbound/webhooks/${hook.id}`, MANAGER, undefined, live)); });
+    ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { description: 'changed by the approval' }, live));
+    const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>;
+    let writer: pg.Client | null = null, release = () => {}, paused = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; }), pausedAt = new Promise<void>(resolve => { paused = resolve; });
+    const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+      const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+      const values = Array.isArray(args[1]) ? args[1] : (args[0] as { values?: unknown[] })?.values ?? [];
+      if (writer === null && /INSERT INTO mail_grant_objects/.test(text) && values.includes(hook.id)) { writer = this; return query.apply(this, args); }
+      if (this !== writer) return query.apply(this, args);
+      writer = null; paused();
+      return gate.then(() => query.apply(this, args));
+    } as typeof pg.Client.prototype.query);
+    try {
+      const write = request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }, live);
+      await pausedAt;
+      let settled = false;
+      const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%oauth_consent%'")).rows[0].n > 0;
+      for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(await waiting(), true, 'The removal waits for the approval the write holds.');
+      assert.equal(settled, false);
+      release();
+      ok(await write);
+      ok(await removal);
+    } finally { wire.mock.restore(); release(); }
+    // The write landed first; the removal then held the webhook, so its URL delivers nothing until the owner states where mail goes.
+    assert.deepEqual((await db.query('SELECT paused,reconfirm FROM mailbox_webhooks WHERE id=$1', [hook.id])).rows, [{ paused: true, reconfirm: true }]);
+    error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, MANAGER, { paused: false }, live), 409, 'ENDPOINT_URL_REQUIRED');
+    const resumed = ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, MANAGER, { url: 'https://example.com/hooks/race-events', paused: false }, live));
+    assert.deepEqual([resumed.paused, resumed.url], [false, '\u2022\u2022\u2022\u2022ents']);
+  });
+
   test('R2: disabled OAuth client cancels queued sends from descendant keys, not independent keys',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,request,run})=>{
       const {originAllowed}=await import('./src/sending.js');
