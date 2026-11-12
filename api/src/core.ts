@@ -59,6 +59,8 @@ export interface Config {
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   hostedScreen?: boolean;
+  /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
+  billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string } };
   placementShadow?: boolean;
   placementDblZone?: string;
   byoTemplateUrl?: string;

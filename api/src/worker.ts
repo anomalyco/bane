@@ -240,6 +240,8 @@ export default {
         // Alerts are best-effort and must not stop the minute recovery work below.
         try { await checkReputationAlerts(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
         await mailboxHourly(await resolveRegionRuntime(runtime));
+        // Billing settles closed hours; best-effort so it can't block the hourly work above.
+        if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/cron.js'))).billingHourly(runtime); } catch (error) { core.log('error', { code: error instanceof core.ApiError ? error.code : 'BILLING_HOURLY_FAILED' }); }
       }
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
@@ -262,6 +264,8 @@ export default {
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
       if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./standing.js'))).standingTick(runtime);
+      // Billing: the auto-recharge sweep and Stripe reconciliation (elected every 5 minutes).
+      if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

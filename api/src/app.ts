@@ -13,7 +13,7 @@ import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview';
+type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/v1/public/stats') return 'public-stats';
@@ -34,6 +34,8 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
   if (pathname === '/v1/connection' || pathname.startsWith('/v1/connection/')) return 'provider-connections';
   if (pathname === '/v1/overview' || pathname.startsWith('/v1/overview/')) return 'overview';
+  // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools.
+  if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (pathname === '/v1/operator' || pathname.startsWith('/v1/operator/')) return 'operator';
   return null;
 }
@@ -73,6 +75,10 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'public-stats': return (await import('./public-stats.js')).registerPublicStats;
       case 'overview': return (await import('./overview-setup.js')).registerOverviewSetup;
       case 'operator': return (await import('./operator.js')).registerOperator;
+      case 'billing': {
+        const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
+        return (target: App) => { registerBilling(target); registerStripeWebhook(target); };
+      }
     }
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
@@ -151,6 +157,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') return next();
+    // Stripe's webhook authenticates with its own signature (billing/stripe-webhook.ts).
+    if (c.req.method === 'POST' && c.req.path === '/v1/billing/stripe') return next();
     return authenticate(c, next);
   });
   app.use('*', async (c, next) => {
@@ -158,7 +166,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // own scoped keys. Unknown routes and public forms are not upload routes.
     if (c.req.path!=='/internal/v1/mail' && c.req.path!=='/mcp' && !/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) && !c.req.path.startsWith('/v1/inbound/')) {
       const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
-      await boundRequestBody(c,c.req.path==='/v1/events/ses'?512*1024:matched && c.get('actor')?undefined:64*1024);
+      await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     await next();
   });
@@ -250,9 +258,11 @@ export async function createOpenApiApp(): Promise<App> {
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
   ]));
+  const [{ registerBilling }, { registerStripeWebhook }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]));
   registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
+  registerBilling(full); registerStripeWebhook(full);
   return full;
 }
 

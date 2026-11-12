@@ -57,12 +57,14 @@ try {
           await reconcileUploads(runtime);
           try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
           await mailboxHourly(runtime);
+          if (runtime.config.multiTenant) try { await (await import('./billing/cron.js')).billingHourly(runtime); } catch (error) { log('error', { code: error instanceof ApiError ? error.code : 'BILLING_HOURLY_FAILED' }); }
         }
         if (Date.now() - lastOutboundSync > 15000) {
           lastOutboundSync = Date.now();
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
+        if (recover && runtime.config.multiTenant) try { await (await import('./billing/stripe-jobs.js')).billingMinute(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
         const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake,'work');
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
