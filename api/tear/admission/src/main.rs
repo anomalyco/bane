@@ -36,10 +36,11 @@
 //!   re-queue a processed receipt without charging; r.reopen-held / r.reopen-failed: a budget hold
 //!   stays held, a failed receipt is not reopened.
 //! - [x] r.coalesce: a reopen while the receipt's ingest job is pending adds no job (the job reads
-//!   the merged recipients when claimed); r.reopen-running: a reopen while the job runs adds one
-//!   if the backlog has room; r.reopen-backlog: otherwise the receipt is held; r.release-backlog:
-//!   a later release admits it without charging the window again; r.stale-claim: the running job
-//!   finds its claim stale and settles nothing, so no recipient is lost.
+//!   the merged recipients when claimed); r.reopen-running: a reopen while the job runs is held
+//!   (MAILBOX_RECEIVE_BACKLOG) until that job ends, since its claim lacks the new recipients;
+//!   r.reopen-backlog: a receipt is held for the backlog; r.release-backlog: a later release admits
+//!   it without charging the window again; r.stale-claim: the running job finds its claim stale and
+//!   settles nothing, so no recipient is lost.
 //! - [x] r.legacy-reopen: the previous Worker's route statement (`legacy-accept`, its reopen bound
 //!   counted duplicates) reopens with the same result during old/new Worker overlap.
 //! - [x] r.limit-exact / r.limit-over: the window reaches exactly `limit`, the next new message is
@@ -361,6 +362,32 @@ const REGRESSIONS: &[(&str, usize, &[&str])] = &[
 
 /// Deterministic traces that reach the rare checklist items exactly at their boundaries.
 const BOUNDARIES: &[(&str, usize, &[&str])] = &[
+    // Lost-receipt recovery re-queues a receipt whose job ended without settling it, and fails it on
+    // the fourth pass.
+    (
+        "recv",
+        0,
+        &["accept m1 a", "claim A m1", "lose A m1", "recover"],
+    ),
+    (
+        "recv",
+        0,
+        &[
+            "accept m1 a",
+            "claim A m1",
+            "lose A m1",
+            "recover",
+            "claim A m1",
+            "lose A m1",
+            "recover",
+            "claim A m1",
+            "lose A m1",
+            "recover",
+            "claim A m1",
+            "lose A m1",
+            "recover",
+        ],
+    ),
     // The next hour's window admits again; a due hold is released at 71 hours and fails at 72.
     (
         "recv",
@@ -936,11 +963,15 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                         {
                             add("r.dup");
                         }
+                        if known
+                            && receipt[0] == "held"
+                            && receipt[4] == "MAILBOX_RECEIVE_BACKLOG"
+                            && wv["jobs"][m][1].as_i64() > Some(0)
+                        {
+                            add("r.reopen-running");
+                        }
                         if known && v["queued"].as_i64() >= Some(1) {
                             add("r.reopen");
-                            if wv["jobs"][m][1].as_i64() > Some(0) {
-                                add("r.reopen-running");
-                            }
                             if verb == "legacy-accept" {
                                 add("r.legacy-reopen");
                             }
@@ -1052,9 +1083,10 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                     {
                         add("r.drain");
                     }
+                    // The receipt was held for a reopen while this job ran (the job end then drains it).
                     if verb == "fail"
                         && v == &json!(0)
-                        && wsv(x)["receipts"][w[2].as_str()][0] == "held"
+                        && prev[["A", "B"][x]]["receipts"][w[2].as_str()][0] == "held"
                     {
                         add("r.stale-fail");
                     }
