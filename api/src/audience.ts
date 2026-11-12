@@ -38,6 +38,8 @@ const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), nam
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), ...Dates }).openapi('AudienceImport');
 const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000;
+const ImportCommit = z.object({ consent: z.object({ status: z.literal('subscribed'), evidence: z.string().trim().min(1).max(2000).describe('How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.'), policyVersion: z.string().trim().min(1).max(120).optional() }).strict().optional().describe('Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.') }).strict().openapi('CommitContactImportInput');
+const CommittedImport = Import.extend({ subscribed: z.number().int().describe('Contacts this commit marked subscribed; 0 without consent or when the import was already committed.') }).openapi('CommittedContactImport');
 const ImportInput = z.object({ csv: z.string().min(1).max(IMPORT_MAX_BYTES), listId: z.string().min(1).max(120).optional(), mapping: z.object({ email: z.string().min(1).max(200), name: z.string().min(1).max(200).optional(), firstName: z.string().min(1).max(200).optional(), plan: z.string().min(1).max(200).optional(), country: z.string().min(1).max(200).optional() }).strict() }).strict();
 
 function scope(table: { workspaceId: AnyPgColumn }, identity: Pick<Actor, 'workspaceId'>) { return eq(table.workspaceId, identity.workspaceId); }
@@ -273,7 +275,7 @@ export function registerAudience(app: App) {
     });
     return c.json({ id: contactId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: 'Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.', request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: 'Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.', request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json');
     const occurredAt = input.occurredAt ?? new Date().toISOString();
     const source = input.source ?? (identity.credential === 'dashboard' ? 'dashboard' : identity.credential === 'mcp' ? 'mcp' : identity.credential === 'agentToken' ? 'agent-token' : 'api');
@@ -344,7 +346,7 @@ export function registerAudience(app: App) {
     const identity = actor(c), segment = await findSegment(c.env.db, identity, c.req.valid('param').id), listId = c.req.valid('json').listId;
     const conditions = [compileRule(segment.rule)]; if (listId) { await findList(c.env.db, identity, listId); conditions.push(inList(identity, listId)); } return c.json(counts(await boundedContacts(c.env.db, identity, conditions, 1000)), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: 'Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.', request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: 'Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.', request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), input = c.req.valid('json'); if (input.listId) await findList(c.env.db, identity, input.listId);
     const preview = previewImport(input); const [row] = await c.env.db.insert(imports).values({ id: id('imp'), ...scopeValues(identity), listId: input.listId, ...preview }).returning(); return c.json(row!, 201);
   });
@@ -354,10 +356,10 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c); const [row] = await c.env.db.select().from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1); return c.json(row ?? notFound('Import'), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
-    const identity = actor(c, 'editContent'), importId = c.req.valid('param').id;
+  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, description: 'Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.', request: { params: IdParams, body: { ...json(ImportCommit), required: false } }, responses: { 200: response(CommittedImport), ...errors } }), async c => {
+    const identity = actor(c, 'editContent'), importId = c.req.valid('param').id, consent = c.req.valid('json').consent;
     const result = await c.env.db.transaction(async tx => {
-      const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return job;
+      const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return { ...job, subscribed: 0 };
       // A share lock keeps the list from being changed or deleted mid-commit without serializing concurrent imports into it.
       if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
       // One statement upserts every row and adds list memberships, however large the import. Rows travel as a
@@ -366,7 +368,7 @@ export function registerAudience(app: App) {
       // lock order. Imported names are never null, so COALESCE keeps the stored name only when the import omits it.
       const payload = JSON.stringify(job.rows.map(row => ({ id: id('con'), email: row.email, name: row.name ?? null, properties: row.properties })));
       const now = new Date().toISOString();
-      const upserted = job.rows.length ? (await tx.execute<{ email: string; properties: Record<string, string | number | boolean | null> }>(sql`
+      const upserted = job.rows.length ? (await tx.execute<{ id: string; email: string; properties: Record<string, string | number | boolean | null> }>(sql`
         WITH incoming AS (
           SELECT * FROM jsonb_to_recordset(${payload}::jsonb) AS r(id text, email text, name text, properties jsonb)
         ), upserted AS (
@@ -379,12 +381,23 @@ export function registerAudience(app: App) {
           SELECT ${identity.workspaceId}, ${job.listId}::text, id FROM upserted WHERE ${job.listId}::text IS NOT NULL
           ON CONFLICT DO NOTHING
         )
-        SELECT email, properties FROM upserted`)).rows : [];
+        SELECT id, email, properties FROM upserted`)).rows : [];
       // The upsert locks every current profile, so concurrent imports cannot bypass the merged limit.
       // Rejecting here rolls back this entire commit, including memberships and restorations.
       const byEmail = new Map(upserted.map(contact => [contact.email, contact]));
       for (const row of job.rows) if (!Properties.safeParse(byEmail.get(row.email)!.properties).success) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${row.row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${row.row}.properties`);
-      const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rows.length, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning(); return updated!;
+      // Attested consent upgrades only contacts with no decision; an opt-out is never overridden by an import.
+      const subscribed = consent && upserted.length ? (await tx.execute<{ id: string; contact_id: string }>(sql`
+        WITH changed AS (
+          UPDATE audience_contacts c SET marketing_consent = 'subscribed', updated_at = ${now}
+          WHERE c.workspace_id = ${identity.workspaceId} AND c.id IN (SELECT jsonb_array_elements_text(${JSON.stringify(upserted.map(contact => contact.id))}::jsonb)) AND c.marketing_consent = 'unknown'
+          RETURNING c.id, c.email
+        )
+        INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, occurred_at)
+        SELECT 'cns_' || replace(gen_random_uuid()::text, '-', ''), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${now} FROM changed
+        RETURNING id, contact_id`)).rows : [];
+      for (let start = 0; start < subscribed.length; start += 100) await enqueue(tx, { type: 'operation.publishBatch', ...scopeValues(identity), payload: { events: subscribed.slice(start, start + 100).map(row => ({ id: row.id, type: 'contact.subscription_changed', createdAt: now, ...scopeValues(identity), region: null, data: { contactId: row.contact_id, status: 'subscribed', source: 'import' } })) } });
+      const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rows.length, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning(); return { ...updated!, subscribed: subscribed.length };
     }); return c.json(result, 200);
   });
 }

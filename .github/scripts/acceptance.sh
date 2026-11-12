@@ -3,14 +3,21 @@ set -euo pipefail
 umask 077
 export HOME="$RUNNER_TEMP/fixture-home"
 mkdir -p "$HOME"
+export PGPORT=${PGPORT:-5432}
 admin() { PGPASSWORD=fixture-admin psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 "$@"; }
 admin <<'SQL'
+-- Deadlock guard (docs/ci.md): find a lock cycle after 50 ms instead of 1 s, log every lock wait longer than that,
+-- and end a statement that waits 15 s for a lock with an error instead of hanging the job.
+ALTER SYSTEM SET deadlock_timeout = '50ms';
+ALTER SYSTEM SET log_lock_waits = on;
+SELECT pg_reload_conf();
 CREATE ROLE fixture LOGIN NOSUPERUSER PASSWORD 'fixture';
 CREATE DATABASE fixture OWNER fixture;
 -- These are small OLTP fixtures: don't spend the job compiling one-off plans.
 ALTER ROLE fixture SET jit = off;
+ALTER ROLE fixture SET lock_timeout = '15s';
 SQL
-export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:5432/fixture
+export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:$PGPORT/fixture
 export HOST=127.0.0.1
 export AUTH_ALLOWED_EMAILS=operator@example.com AUTH_ALLOWED_DOMAINS=example.com GOOGLE_CLIENT_ID=fixture GOOGLE_CLIENT_SECRET=fixture
 BETTER_AUTH_SECRET=$(openssl rand -hex 36); export BETTER_AUTH_SECRET
@@ -32,7 +39,10 @@ shard() (
     if (( rc != 0 )); then tail -n 100 "$HOME"/*.log; fi
   }
   trap cleanup EXIT
-  ../.github/s3-fixture/node_modules/.bin/s3rver -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
+  # The emulator normalizes bucket paths differently from the AWS SDK; like the previous fixture,
+  # it checks object operations here, not SigV4 calculations.
+  # This release packages the CLI module but omits its bin entry point.
+  node -e 'require("../.github/s3-fixture/node_modules/@20minutes/s3rver/lib/cli").parseAsync([process.argv[0], "s3rver", ...process.argv.slice(1)]).catch(error => { console.error(error.message); process.exitCode = 1; })' -- -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --allow-mismatched-signatures --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
   node --import tsx src/server.ts > "$HOME/server.log" 2>&1 & pids+=("$!")
   node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
   # Start as soon as all fixtures are alive and the HTTP server accepts requests.
@@ -60,4 +70,21 @@ shard simulated 8788 _sim 4570 "--test-name-pattern=$pattern" & simulated=$!
 rc=0
 wait "$integration" || rc=$?
 wait "$simulated" || rc=$?
+
+# Deadlock guard: fail on any deadlock Postgres detected during the suite, including one a retry absorbed or a test
+# never asserted on. A backend reports its counters when it exits, so wait for the shards' connections to close.
+for ((i=0; i<50; i++)); do
+  [[ $(admin -Atc "SELECT count(*) FROM pg_stat_activity WHERE datname LIKE 'fixture%'") == 0 ]] && break
+  sleep .1
+done
+sleep 1
+deadlocks=$(admin -Atc "SELECT coalesce(sum(deadlocks), 0) FROM pg_stat_database WHERE datname LIKE 'fixture%'")
+if (( deadlocks > 0 )); then
+  echo "::error title=Deadlock guard::Postgres detected $deadlocks deadlock(s) (40P01) during the acceptance suite. Two code paths lock the same rows in opposite orders; see docs/ci.md."
+  # The service container's log has each cycle: both statements, their locks and the processes that held them.
+  if [[ -n ${PG_CONTAINER:-} ]]; then docker logs "$PG_CONTAINER" 2>&1 | grep -B2 -A12 'deadlock detected' | head -n 200 || :; fi
+  rc=1
+else
+  echo 'Deadlock guard: Postgres detected no deadlocks.'
+fi
 exit "$rc"

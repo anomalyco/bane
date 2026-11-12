@@ -60,6 +60,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       sha: ${{ steps.version.outputs.sha }}
+      artifact: ${{ steps.package.outputs.artifact-id }}
     steps:
       - name: Require an authorized actor
         env:
@@ -130,7 +131,8 @@ jobs:
           npm pack --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/pack.json"
           jq -e 'length == 1 and (.[0].filename | endswith(".tgz"))' "$RUNNER_TEMP/pack.json" > /dev/null
           echo "Packed $(jq -r '.[0].filename' "$RUNNER_TEMP/pack.json")" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - id: package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sdk-package
           path: ${{ runner.temp }}/*.tgz
@@ -145,24 +147,55 @@ jobs:
     permissions:
       contents: write # the tag and the GitHub release
       id-token: write # npm trusted publishing and provenance
+      actions: read # download this build's artifact by its immutable id
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.build.outputs.version }}
       SHA: ${{ needs.build.outputs.sha }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
-      # No checkout, bun or repository files in this job: it only runs the npm
-      # CLI and SHA-pinned actions on the artifact, which it treats as data.
+      # No checkout, bun or repository scripts in this job: the archive reader
+      # copies one package to a fixed file before the npm CLI inspects it.
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: 24.16.0
           package-manager-cache: false
       # Node 24.16.0 bundles npm 11.13.0 (trusted publishing requires >=11.5.1);
       # no unpinned npm install in a job holding publish rights.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: sdk-package
-          path: ${{ runner.temp }}/package
+      - name: Download the package
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact }}
+        run: |
+          [[ $ARTIFACT_ID =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/sdk-artifact.zip"
+          python3 - <<'PY'
+          import os, pathlib, stat, zipfile
+
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive = root / 'sdk-artifact.zip'
+          limit = 16 * 1024 * 1024
+          if archive.stat().st_size > limit:
+              raise SystemExit('Package archive exceeds 16 MiB.')
+          with zipfile.ZipFile(archive) as source:
+              entries = source.infolist()
+              expected = 'banemx-sdk-' + os.environ['VERSION'] + '.tgz'
+              if len(entries) != 1 or entries[0].filename != expected:
+                  raise SystemExit('Expected one versioned SDK tarball.')
+              entry = entries[0]
+              kind = stat.S_IFMT(entry.external_attr >> 16)
+              if kind not in (0, stat.S_IFREG) or entry.flag_bits & 1 or entry.file_size > limit or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                  raise SystemExit('Expected a regular SDK tarball of at most 16 MiB.')
+              target = root / 'package'
+              target.mkdir()
+              # Read the entry as bytes; its name never chooses an output path.
+              with source.open(entry) as content, (target / 'sdk.tgz').open('xb') as output:
+                  written = 0
+                  while chunk := content.read(65536):
+                      written += len(chunk)
+                      if written > limit:
+                          raise SystemExit('SDK tarball exceeds 16 MiB.')
+                      output.write(chunk)
+          PY
       - name: Check the package
         run: |
           tarball=$(find "$RUNNER_TEMP/package" -maxdepth 1 -name '*.tgz' -print -quit)

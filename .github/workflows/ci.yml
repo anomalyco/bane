@@ -42,6 +42,18 @@ jobs:
       - name: Type-check the live SDK CLI probe
         working-directory: api
         run: ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --lib ES2023,DOM,DOM.Iterable --types node scripts/e2e-upload-cli.ts
+      # What broke dev after merge, checked before it: live E2E coverage, Cloudflare routing, migration order and
+      # numbers (against dev and older open PRs), and phone card slots. docs/ci.md explains each failure.
+      - name: Pre-merge invariants
+        working-directory: api
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          # A pull request's checkout is GitHub's merge into the current base: its first parent is that base.
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then BASE=$(git rev-parse HEAD^1); fi
+          node --import tsx scripts/check-premerge.ts --base "$BASE"
       - run: cd app && bun run build
       - name: Build API and bundle both Workers without deploying
         working-directory: api
@@ -155,9 +167,13 @@ jobs:
       - *bun-cache
       # The stdio MCP acceptance test starts ../mcp/src/server.ts, which needs the MCP package's dependencies.
       - run: for pkg in api mcp .github/s3-fixture; do (cd "$pkg" && bun install --frozen-lockfile); done
+      # Also the deadlock guard: Postgres detects lock cycles after 50 ms and logs lock waits, and the job fails on
+      # any deadlock it counted, printing each cycle from the service's log (docs/ci.md).
       - name: Run all acceptance tests with isolated database and object storage
         run: bash ../.github/scripts/acceptance.sh
         working-directory: api
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
 
   # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.

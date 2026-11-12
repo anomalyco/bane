@@ -1,12 +1,14 @@
-import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
+import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, ScrollText, Send, Settings, Users } from 'lucide-react'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
-import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from './ui'
+import { Alert, Button, EmptyState, ErrorState, Select, Sheet, Skeleton, SkeletonText } from './ui'
+import { useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
@@ -18,6 +20,12 @@ const SidebarScore = score.page(module => module.SidebarScore)
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
 const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']] as const
+// Below 900 px the sidebar becomes a top bar (workspace, theme) and a bottom tab bar: the four areas used most, one
+// thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
+// button; the tab bar keeps the main ones visible and says where you are.
+const tabs = ['/', '/logs', '/receiving', '/campaigns']
+const icons: Record<string, ReactNode> = { '/': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings /> }
+const current = (path: string, pathname: string) => path === '/' ? pathname === '/' : pathname === path || pathname.startsWith(`${path}/`)
 export function AppShell() {
   const api = useApi()
   const { regionId, setRegionId } = useRegion()
@@ -82,18 +90,21 @@ export function AppShell() {
   }, [api.mode, regionReady])
   // Scroll: a new page starts at the top (filter and tab changes on the same page keep their place); Back and Forward
   // restore where that entry was left, waiting a moment for its (usually cached) content to be tall enough again.
+  // The page card scrolls on a desktop; on a phone or tablet the document does, so the browser's bars collapse.
+  const compact = useCompactShell()
   const navigationType = useNavigationType()
   const scrolls = useRef(new Map<string, number>())
   const lastPath = useRef(location.pathname)
+  const scroller = () => compact ? document.scrollingElement as HTMLElement | null : content.current
   useEffect(() => {
-    const el = content.current, key = location.key
-    if (!el) return
+    const el = scroller(), key = location.key, target: HTMLElement | Window | null = compact ? window : el
+    if (!el || !target) return
     const save = () => { scrolls.current.set(key, el.scrollTop) }
-    el.addEventListener('scroll', save, { passive: true })
-    return () => el.removeEventListener('scroll', save)
-  }, [location.key])
+    target.addEventListener('scroll', save, { passive: true })
+    return () => target.removeEventListener('scroll', save)
+  }, [location.key, compact])
   useLayoutEffect(() => {
-    const el = content.current, samePage = lastPath.current === location.pathname
+    const el = scroller(), samePage = lastPath.current === location.pathname
     lastPath.current = location.pathname
     if (navigationType === 'POP') {
       const top = scrolls.current.get(location.key) ?? 0
@@ -102,12 +113,12 @@ export function AppShell() {
       const apply = () => { el.scrollTop = top; if (Math.abs(el.scrollTop - top) > 1 && tries++ < 60) frame = requestAnimationFrame(apply) }
       const stop = () => cancelAnimationFrame(frame)
       apply()
-      el.addEventListener('wheel', stop, { once: true, passive: true }); el.addEventListener('touchstart', stop, { once: true, passive: true })
-      return () => { stop(); el.removeEventListener('wheel', stop); el.removeEventListener('touchstart', stop) }
+      window.addEventListener('wheel', stop, { once: true, passive: true }); window.addEventListener('touchstart', stop, { once: true, passive: true })
+      return () => { stop(); window.removeEventListener('wheel', stop); window.removeEventListener('touchstart', stop) }
     }
     if (samePage) return
     window.scrollTo(0, 0)
-    el?.scrollTo(0, 0)
+    content.current?.scrollTo(0, 0)
   }, [location.key])
   useEffect(() => {
     const preferred = regions.data?.defaultRegion
@@ -126,35 +137,73 @@ export function AppShell() {
       }
     }
   }
+  const links = navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path))
+  const context = <>
+    {access.multiTenant && <WorkspaceSwitcher />}
+    {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
+    {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
+    {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
+  </>
+  const footer = <>
+    {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
+    {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
+    <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
+      <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
+      {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
+      <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
+    </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
+  </>
+  const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
+    <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
+      {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
+        : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />
+        : needsRegion && regions.data && !enabled.length ? <EmptyState title="No enabled regions" action={!access.multiTenant && <Link to="/settings">Set up SES</Link>} />
+        : <Outlet />}
+    </Suspense></ChunkFallback.Provider>
+  </main>
+  if (compact) return <div className="app-shell app-shell--compact">
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <header className="mobile-bar">
+      <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
+      <div className="mobile-bar__context">{context}</div>
+      <ThemeToggle />
+    </header>
+    {main}
+    <TabBar links={links} intent={intent} footer={footer} />
+  </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
       <ThemeToggle />
-      <div className="sidebar-context">
-        {access.multiTenant && <WorkspaceSwitcher />}
-        {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
-        {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
-        {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
-      </div>
-      <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
-      <div className="sidebar-footer">
-        {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
-        {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
-      <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
-        <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
-        {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
-        <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
-      </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
-      </div>
+      <div className="sidebar-context">{context}</div>
+      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
+      <div className="sidebar-footer">{footer}</div>
     </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
-      <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
-        {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
-          : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />
-          : needsRegion && regions.data && !enabled.length ? <EmptyState title="No enabled regions" action={!access.multiTenant && <Link to="/settings">Set up SES</Link>} />
-          : <Outlet />}
-      </Suspense></ChunkFallback.Provider>
-    </main>
+    {main}
   </div>
+}
+
+// The tab bar and its More sheet. More opens as a history entry of its own, so Back (or a swipe back) closes it
+// instead of leaving the page; a page picked in it replaces that entry, so Back from there returns to the page below.
+const issued = new Set<string>()
+function TabBar({ links, intent, footer }: { links: (typeof navigation)[number][]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode }) {
+  const location = useLocation(), navigate = useNavigate()
+  // Only an entry opened in this visit counts: a reload on it shows the page, not a stale sheet.
+  const token = (location.state as { more?: string } | null)?.more
+  const open = Boolean(token && issued.has(token))
+  const more = links.filter(([path]) => !tabs.includes(path))
+  const inMore = more.some(([path]) => current(path, location.pathname))
+  const show = () => { const next = `${Date.now()}:${Math.random()}`; issued.add(next); navigate({ pathname: location.pathname, search: location.search, hash: location.hash }, { state: { more: next } }) }
+  const close = () => { if (open) navigate(-1) }
+  return <>
+    <nav className="tab-bar" aria-label="Main navigation">
+      {links.filter(([path]) => tabs.includes(path)).map(([path, title]) => <NavLink key={path} className="tab-bar__item" to={path} end={path === '/'} {...intent(path)}><span className="tab-bar__icon" aria-hidden="true">{icons[path]}</span><span className="tab-bar__label">{title}</span></NavLink>)}
+      <button type="button" className="tab-bar__item" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Ellipsis /></span><span className="tab-bar__label">More</span></button>
+    </nav>
+    <Sheet open={open} onOpenChange={next => { if (!next) close() }} title="More" hideTitle className="more-sheet">
+      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <NavLink key={path} className="more-sheet__link" to={path} replace {...intent(path)}><span className="more-sheet__icon" aria-hidden="true">{icons[path]}</span>{title}</NavLink>)}</nav>
+      <div className="more-sheet__footer">{footer}</div>
+    </Sheet>
+  </>
 }
