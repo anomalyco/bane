@@ -8,7 +8,7 @@ export const realDestination = (address: string) => !address.toLowerCase().endsW
 export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string[] = []) =>
   (Array.isArray(to) ? to.length : 1) + cc.length + bcc.length;
 
-export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null; marketingHeld?: boolean; marketingHoldReason?: string | null; step?: string };
+export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean; nextCap?: number | null; nextCapAt?: string | null; marketingHeld?: boolean; marketingHoldReason?: string | null; step?: string; marketingHourCap?: number | null; marketingHourUsed?: number; marketingHourResetAt?: string | null; marketingDayCap?: number | null };
 // The current UTC hour plus the preceding 23 buckets. The same statement as admission,
 // independent of how many envelopes or destinations were admitted in those hours.
 // `read` is for display (GET /v1/me): the same figures from hosted_allowance_read, which takes no row locks.
@@ -25,6 +25,12 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
   if (marketing > 0 && allowance.marketingHeld) throw marketingHeld(allowance.marketingHoldReason);
   if (allowance.cap === null) return;
   const reserved = marketing > 0 && marketing + allowance.used > allowance.marketingCap;
+  // The marketing-per-hour cap is folded into marketingCap (hosted_allowance_read); say so when it is the one that binds.
+  const hourly = reserved && allowance.marketingHourCap != null && (allowance.marketingHourUsed ?? 0) + marketing > allowance.marketingHourCap;
+  if (hourly && incoming + allowance.used <= allowance.cap) {
+    const resetAt = new Date(allowance.marketingHourResetAt!).toISOString();
+    throw new ApiError(429, 'SEND_LIMIT_REACHED', `Hosted marketing is limited to ${count(allowance.marketingHourCap!)} recipients an hour; ${count(allowance.marketingHourUsed ?? 0)} are used this hour. The next hour starts at ${resetAt}.${marketing > allowance.marketingHourCap! ? ' This submission exceeds the hourly limit.' : ''}`, undefined, marketing <= allowance.marketingHourCap!, resetAt);
+  }
   if (incoming && (incoming + allowance.used > allowance.cap || reserved)) {
     const resetAt = allowance.resetAt ? new Date(allowance.resetAt).toISOString() : undefined;
     const retryable = incoming <= allowance.cap && marketing <= allowance.marketingCap;

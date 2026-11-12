@@ -79,6 +79,9 @@ ALTER TABLE sending_campaigns ADD COLUMN probe_wait_until timestamptz, ADD COLUM
 ALTER TABLE sending_campaigns DROP CONSTRAINT sending_campaigns_waiting_reason_check,
   ADD CHECK (waiting_reason IN ('pacing_window','ses_daily_quota','hosted_daily_quota','list_probe'));
 
+-- Marketing recipients per usage hour, for the marketing-per-hour cap (hosted_allowance_read).
+ALTER TABLE hosted_usage_hourly ADD COLUMN marketing bigint NOT NULL DEFAULT 0;
+
 -- Health evidence split by stream, so a bounce-only problem can hold marketing and keep transactional mail flowing.
 ALTER TABLE hosted_health_hourly ADD COLUMN marketing_accepted bigint NOT NULL DEFAULT 0, ADD COLUMN marketing_bounces bigint NOT NULL DEFAULT 0, ADD COLUMN marketing_complaints bigint NOT NULL DEFAULT 0;
 ALTER TABLE hosted_health_credits ADD COLUMN marketing_accepted int NOT NULL DEFAULT 0, ADD COLUMN marketing_bounces int NOT NULL DEFAULT 0, ADD COLUMN marketing_complaints int NOT NULL DEFAULT 0;
@@ -185,11 +188,12 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
    SELECT wid AS id UNION ALL SELECT w.id FROM workspaces w WHERE w.id<>wid AND w.quota_sponsor=(SELECT sponsor FROM capped)
      AND (w.send_cap_override IS NULL OR w.send_cap_override_expires_at<=now()) AND NOT w.exempt_hosted_quotas
  ), hours AS (
-   SELECT h.hour,sum(h.recipients) AS recipients FROM siblings s JOIN hosted_usage_hourly h ON h.workspace_id=s.id
+   SELECT h.hour,sum(h.recipients) AS recipients,coalesce(sum(h.marketing) FILTER (WHERE h.workspace_id=wid),0) AS marketing FROM siblings s JOIN hosted_usage_hourly h ON h.workspace_id=s.id
    WHERE incoming>0 AND h.hour BETWEEN date_trunc('hour',now(),'UTC')-interval '23 hours' AND date_trunc('hour',now(),'UTC') AND h.recipients>0 GROUP BY h.hour
  ), usage AS (SELECT hour,sum(recipients) OVER(ORDER BY hour DESC) AS running FROM hours)
- SELECT jsonb_build_object('cap',p.cap,'marketingCap',m.cap,'used',u.used,'resetAt',u.reset,
-   'nextChangeAt',least(p.restored_until,coalesce(u.first_expiry,date_trunc('hour',now(),'UTC')+interval '24 hours')),
+ SELECT jsonb_build_object('cap',p.cap,'marketingCap',CASE WHEN hr.binding THEN u.used+greatest(0,hr.cap-hr.used) ELSE m.cap END,'marketingDayCap',m.cap,'used',u.used,'resetAt',u.reset,
+   'nextChangeAt',least(p.restored_until,coalesce(u.first_expiry,date_trunc('hour',now(),'UTC')+interval '24 hours'),CASE WHEN hr.binding THEN hr.reset END),
+   'marketingHourCap',hr.cap,'marketingHourUsed',hr.used,'marketingHourResetAt',CASE WHEN hr.cap IS NOT NULL THEN hr.reset END,
    'pauseReason',coalesce(p.pause_reason,CASE WHEN p.sponsor_hold='pause' THEN 'Hosted sending is paused for another workspace of this account. Bane reviews it before this workspace can send.' END),
    'pendingCapOverride',p.pending_cap_override,'exemptHostedQuotas',p.exempt_hosted_quotas,
    'nextCap',CASE WHEN p.restored_until IS NOT NULL AND p.full_cap>p.cap THEN p.full_cap END,'nextCapAt',CASE WHEN p.restored_until IS NOT NULL AND p.full_cap>p.cap THEN p.restored_until END,
@@ -200,7 +204,38 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
        *coalesce(p.release_percent,100)/100) END AS cap) m CROSS JOIN LATERAL (
    SELECT coalesce(max(running),0) AS used,min(hour)+interval '24 hours' AS first_expiry,
      max(hour) FILTER(WHERE running+least(incoming,p.cap)>p.cap OR (marketing>0 AND running+least(marketing,m.cap)>m.cap))+interval '24 hours' AS reset FROM usage) u
+   -- Marketing per hour, per workspace (parallel campaigns and direct marketing share it): max(25, limit / 4). It is
+   -- folded into marketingCap when it binds, so every check of marketingCap (one-statement admission, the session
+   -- path, campaign release) enforces it, and nextChangeAt says when the next hour starts.
+   CROSS JOIN LATERAL (SELECT c.cap,c.used,date_trunc('hour',now(),'UTC')+interval '1 hour' AS reset,c.cap IS NOT NULL AND u.used+greatest(0,c.cap-c.used)<m.cap AS binding FROM (
+     SELECT CASE WHEN p.cap IS NOT NULL THEN greatest(25,p.cap/4) END AS cap,
+       coalesce((SELECT h.marketing FROM hours h WHERE h.hour=date_trunc('hour',now(),'UTC')),0) AS used) c) hr
 $$;
+
+-- Marketing recipients per hour (the marketing-hour cap): both usage triggers below count them next to all recipients.
+CREATE OR REPLACE FUNCTION hosted_charge_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO hosted_usage_hourly AS u(workspace_id,hour,recipients,marketing)
+    SELECT n.workspace_id,date_trunc('hour',n.created_at,'UTC'),sum(jsonb_array_length(n.to_addresses||n.cc_addresses||n.bcc_addresses)),
+      coalesce(sum(jsonb_array_length(n.to_addresses||n.cc_addresses||n.bcc_addresses)) FILTER (WHERE n.snapshot->>'kind'='marketing' OR n.campaign_id IS NOT NULL OR n.snapshot ? 'bulk'),0)
+    FROM new_mail n LEFT JOIN provider_connections pc USING (workspace_id) WHERE NOT n.simulated AND hosted_charged(n.status,n.provider_id)
+    AND ((n.feedback_topic_arn IS NULL AND pc.kind='shared') OR n.feedback_topic_arn IN (SELECT feedback_topic_arn FROM provider_pool_regions))
+    GROUP BY 1,2 ORDER BY 1,2 ON CONFLICT (workspace_id,hour) DO UPDATE SET recipients=u.recipients+excluded.recipients,marketing=u.marketing+excluded.marketing;
+  RETURN NULL;
+END $$;
+CREATE OR REPLACE FUNCTION hosted_adjust_usage() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE n integer; mk integer;
+BEGIN
+  SELECT CASE WHEN NEW.charge_simulator THEN jsonb_array_length(NEW.to_addresses||NEW.cc_addresses||NEW.bcc_addresses) ELSE e.cost END,e.marketing::int INTO n,mk
+    FROM hosted_real_envelopes e WHERE e.workspace_id=NEW.workspace_id AND e.id=NEW.id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  INSERT INTO hosted_usage_hourly AS u(workspace_id,hour,recipients,marketing) SELECT NEW.workspace_id,h,sum(delta),sum(delta)*mk FROM (VALUES
+    (date_trunc('hour',OLD.created_at,'UTC'),-n*hosted_charged(OLD.status,OLD.provider_id,OLD.error_code)::int),
+    (date_trunc('hour',NEW.created_at,'UTC'), n*hosted_charged(NEW.status,NEW.provider_id,NEW.error_code)::int)) d(h,delta)
+    WHERE h >= date_trunc('hour',now(),'UTC')-interval '23 hours' GROUP BY h HAVING sum(delta)<>0 ORDER BY h
+    ON CONFLICT (workspace_id,hour) DO UPDATE SET recipients=u.recipients+excluded.recipients,marketing=u.marketing+excluded.marketing;
+  RETURN NULL;
+END $$;
 
 -- The one hold test admission (above), campaign launch and dispatch share (230 defined it for the connection's own
 -- hold): the standing's restrict or pause unless an owner released it, an operator's hold, or a hold from before the

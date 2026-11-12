@@ -8005,7 +8005,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
       assert.equal((await apply()).rows[0].details.new,500);assert.equal((await apply()).rowCount,0);
       await run('campaign.run');assert.equal((await delivery()).expanded,1);
-      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
+      assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingDayCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a),workspaces w WHERE w.id=$1`,[wid])).rows,
         [{used:'92',marketing:'450',burst:50,pending_cap_override:null,exempt_hosted_quotas:false}]);
     });
   });
@@ -9173,14 +9173,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       };
       await db.query("INSERT INTO hosted_usage_hourly VALUES($1,date_trunc('hour',now()),89)",[sibling]);
       // A workspace the standing job has not seen yet is calibrating: 100 a day, all of it the transactional reserve.
-      assert.deepEqual([(await limit()).used,(await limit()).cap,(await limit()).marketingCap,(await limit()).step],[89,100,0,'ok']);
+      assert.deepEqual([(await limit()).used,(await limit()).cap,(await limit()).marketingDayCap,(await limit()).step],[89,100,0,'ok']);
       // Age and history no longer raise it; the stored score limit does.
       await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '2 days',1000,0,0)",[wid]);
       assert.equal((await limit()).cap,100);
       await gradedSender(db,wid,2000);
-      assert.deepEqual([(await limit()).cap,(await limit()).marketingCap],[2000,1800]);
+      assert.deepEqual([(await limit()).cap,(await limit()).marketingDayCap],[2000,1800]);
       await db.query('UPDATE sender_standing SET daily_limit=200 WHERE workspace_id=$1',[wid]);
-      assert.deepEqual([(await limit()).cap,(await limit()).marketingCap],[200,100],'A small sender always keeps 100 a day for receipts and resets.');
+      assert.deepEqual([(await limit()).cap,(await limit()).marketingDayCap],[200,100],'A small sender always keeps 100 a day for receipts and resets.');
       assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,50);
       await db.query('UPDATE sender_standing SET daily_limit=10000 WHERE workspace_id=$1',[wid]);
       assert.equal((await db.query('SELECT hosted_minute_cap($1) AS cap',[wid])).rows[0].cap,500);
@@ -9188,7 +9188,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("UPDATE sender_standing SET step='restrict' WHERE workspace_id=$1",[wid]);
       assert.equal((await limit()).marketingHeld,true);
       await db.query("UPDATE sender_standing SET release_until=now()+interval '1 hour',release_percent=50 WHERE workspace_id=$1",[wid]);
-      assert.deepEqual([(await limit()).marketingHeld,(await limit()).marketingCap],[false,4500]);
+      assert.deepEqual([(await limit()).marketingHeld,(await limit()).marketingDayCap],[false,4500]);
       // An operator override applies until it expires, then the score limit is back (and siblings share again).
       await db.query("UPDATE workspaces SET send_cap_override=25000,send_cap_override_expires_at=now()+interval '1 day' WHERE id=$1",[wid]);
       assert.deepEqual([(await limit()).cap,(await limit()).used],[25000,0]);
@@ -9332,6 +9332,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('marketing per hour: campaigns and direct marketing share max(25, limit / 4) an hour, enforced at release and admission', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'hourly.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      await gradedSender(db, wid, 1000);
+      assert.equal(ok(await local('GET', '/v1/sender-score')).limit.marketingPerHour, 250);
+      const list = ok(await local('POST', '/v1/lists', { name: unique('hourly') }), 201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'hourly-'||n||'@example.net','subscribed' FROM generate_series(1,300)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: 'Hourly newsletter', from, subject: 'Hourly', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201), path = `/v1/campaigns/${c.id}`;
+      ok(await local('POST', `${path}/send`, { revision: c.revision }), 202);
+      await db.query('UPDATE sending_campaigns SET probe_cleared_at=now() WHERE id=$1', [c.id]); // A clean list; the probe is tested elsewhere.
+      for (let i = 0; i < 6; i++) { await db.query(`UPDATE sending_emails SET status='delivered',provider_id='hourly-'||id WHERE campaign_id=$1 AND status='queued'`, [c.id]); await run('campaign.run'); }
+      const held = ok(await local('GET', path)).delivery;
+      // Review of #115: the 1,000/day sender's advertised 250 an hour was display-only; all 300 went out in the hour.
+      assert.deepEqual([held.expanded, held.waiting?.reason, Date.parse(held.waiting?.until) - Date.parse(new Date(Math.floor(Date.now() / 3600_000 + 1) * 3600_000).toISOString())], [250, 'hosted_daily_quota', 0]);
+      const direct = error(await local('POST', '/v1/emails/send', { from, to: 'hourly-1@example.net', subject: 'Flash sale', text: 'Fixture', kind: 'marketing' }), 429, 'SEND_LIMIT_REACHED');
+      assert.match(direct.message, /limited to 250 recipients an hour; 250 are used this hour/);
+      ok(await local('POST', '/v1/emails/send', { from, to: 'hourly-1@example.net', subject: 'Your receipt', text: 'Fixture' }), 202);
+    });
+  });
   test('campaign list probe: the first recipients go out, release waits for their feedback, and a bad probe quarantines the campaign', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'probe.example', from = `news@${domain}`;
