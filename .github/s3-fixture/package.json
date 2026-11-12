@@ -1,5 +1,5 @@
 {
   "name": "s3-fixture",
   "private": true,
-  "dependencies": { "s3rver": "3.7.1" }
+  "dependencies": { "@20minutes/s3rver": "5.0.0" }
 }
