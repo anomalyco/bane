@@ -26,6 +26,10 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   const named = (suffix: string) => ({ ...tags, Name: `${name}-${suffix}` });
   const desired = config.getNumber("mailGatewayDesired") ?? 0;
   if (!Number.isSafeInteger(desired) || desired < 0) throw new Error("bane:mailGatewayDesired must be a nonnegative integer");
+  // The deploy reads the same committed flag: true binds the Worker's MAILGW_API_TOKEN (and fails
+  // without it), false removes it. Tasks only run against a Worker that can authenticate them.
+  const enabled = config.getBoolean("mailGatewayEnabled") ?? false;
+  if (desired > 0 && !enabled) throw new Error("Set bane:mailGatewayEnabled to true before scaling bane:mailGatewayDesired above 0");
   const image = config.get("mailGatewayImage");
   const repoUrl = `${account}.dkr.ecr.us-east-2.amazonaws.com/${name}`;
   if ((desired > 0 && !image) || (image !== undefined &&

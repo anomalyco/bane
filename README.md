@@ -57,10 +57,15 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `dev` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`, `E2E_API_KEY`; optional `MAILGW_API_TOKEN` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
-| `production` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`; optional `MAILGW_API_TOKEN` | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
+| `dev` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`, `E2E_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
+| `production` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
 
-`MAILGW_API_TOKEN` is the IMAP/SMTP gateway's shared key and must equal the stage's `mail-gateway/api-token` ([dev turn-on runbook](gateway/PHASE2.md#dev-turn-on-runbook)). Until it exists the deploy logs a notice and sends no override, so the Worker keeps refusing gateway calls with 403 `PROTOCOL_DENIED`.
+`MAILGW_API_TOKEN` is the IMAP/SMTP gateway's shared key and must equal the stage's `mail-gateway/api-token`. The committed `bane:mailGatewayEnabled` in `infra/pulumi/Pulumi.<stage>.yaml` decides how the Worker deploy treats it:
+
+- **True:** the deploy reads the key inside its Worker step and binds it, and stops if the key is missing or invalid.
+- **False (the default):** the deploy removes the Worker's binding, so gateway calls get 403 `PROTOCOL_DENIED`.
+
+See the [dev turn-on runbook](gateway/PHASE2.md#dev-turn-on-runbook).
 
 **Both stages use the same key names.** The stage comes from the GitHub environment,
 which selects that environment's variables, and from the `bane/<stage>/` folder, which

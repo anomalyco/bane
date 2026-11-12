@@ -24,7 +24,14 @@ Build with `docker buildx build --platform linux/arm64 --load -t bane-mailgw:loc
 
 ## Dev turn-on runbook
 
-Dev only: AWS `905840579680`, Worker `bane-dev`, `dev.bane.mx`. Production keeps `bane:mailGatewayDesired` at its default of 0 and has no `MAILGW_API_TOKEN`. DNS stays on Spectrum: leave `bane:mailGatewayDns` off and test through the stack output `mailGatewayEndpoint` with the stage hostnames as SNI.
+Dev only: AWS `905840579680`, Worker `bane-dev`, `dev.bane.mx`. Production leaves `bane:mailGatewayEnabled` and `bane:mailGatewayDesired` at their defaults (false and 0). DNS stays on Spectrum: leave `bane:mailGatewayDns` off and test through the stack output `mailGatewayEndpoint` with the stage hostnames as SNI.
+
+**The switch is `bane:mailGatewayEnabled` in `infra/pulumi/Pulumi.<stage>.yaml`.** Pulumi and the Worker deploy (`.github/scripts/deploy-worker.sh`) both read the committed value, so there is no third state:
+
+- **True:** the deploy reads `bane/<stage>/MAILGW_API_TOKEN` inside its "Deploy the Worker" step and binds it to the Worker. If the token is missing, pending deletion, unreadable or malformed, the deploy stops.
+- **False (default):** the deploy removes the Worker's `MAILGW_API_TOKEN` binding if one exists, before deploying, and checks that it's gone. `/internal/v1/mail` then answers 403 `PROTOCOL_DENIED`.
+
+Every deploy ends by checking that the Worker's binding matches the flag. Pulumi refuses a positive `bane:mailGatewayDesired` while the flag is false.
 
 **Before starting:** the dev stack has applied the gateway at zero tasks (needs [Dax's one-time IAM](../infra/pulumi/README.md#dax-one-time-iam-for-the-gateway); already true on 2026-11-12, when the dev deploy's Pulumi step printed `mailGatewayEndpoint`), migrations `170–183` are applied on dev, and the dev Worker is deployed from a commit that contains this runbook.
 
@@ -38,7 +45,7 @@ Set every value out of band: never in stack config, argv, the image or logs. Pul
 | `bane/dev/mail-gateway/tls-cert` | `MAILGW_CERT_PEM` | PEM full chain, leaf first, from a public CA, with SANs `imap.dev.bane.mx` and `smtp.dev.bane.mx`. |
 | `bane/dev/mail-gateway/tls-key` | `MAILGW_KEY_PEM` | The matching private key, PEM (PKCS#8, SEC1 or PKCS#1). |
 | `bane/dev/mail-gateway/api-token` | gateway `MAILGW_API_TOKEN` | One random token, at least 32 characters from `[A-Za-z0-9._~+/=-]`. `openssl rand -hex 32` gives 64. |
-| `bane/dev/MAILGW_API_TOKEN` (secrets account) | Worker `MAILGW_API_TOKEN` | **The same token, byte for byte.** The deploy's "Fetch the optional mail-gateway token" step reads it and `deploy-worker.sh` sets it on `bane-dev`. While it's absent the step logs a notice and the Worker keeps answering `/internal/v1/mail` with 403 `PROTOCOL_DENIED`. |
+| `bane/dev/MAILGW_API_TOKEN` (secrets account) | Worker `MAILGW_API_TOKEN` | **The same token, byte for byte.** Read only while `bane:mailGatewayEnabled` is true, and only inside "Deploy the Worker". It is never written to `$GITHUB_ENV`. |
 
 Create the listener role as the database owner in `psql`. `\password` keeps the password out of history:
 
@@ -63,11 +70,17 @@ unset token
 
 Before uploading the certificate, check that the key matches: `openssl x509 -noout -pubkey -in fullchain.pem | openssl sha256` must equal `openssl pkey -pubout -in privkey.pem | openssl sha256`. Then upload `tls-cert`, `tls-key` and `db-url` the same way, with `--secret-string file://fullchain.pem`, `file://privkey.pem` and `file:///dev/stdin`.
 
-### 2. Give the Worker the token
+### 2. Enable dev and give the Worker the token
 
-Run the dev deploy: merge to `dev`, or dispatch **Deploy** on `dev`. Do this before any task starts; without the Worker's token every gateway login is refused. Check:
+Once both copies of the token exist, open a PR to `dev` that adds one line to `infra/pulumi/Pulumi.dev.yaml` and nowhere else:
 
-- The "Fetch the optional mail-gateway token" step logs `bane/dev/MAILGW_API_TOKEN is set`.
+```yaml
+  bane:mailGatewayEnabled: "true"
+```
+
+Merge it before any task starts; without the Worker's token every gateway login is refused. If the CI copy is missing or malformed, the deploy stops in "Deploy the Worker" and the Worker stays closed: fix the secret and re-run the job. Check:
+
+- "Deploy the Worker" ends with `Mail gateway: bane:mailGatewayEnabled=true; Worker MAILGW_API_TOKEN bound=true.`
 - From `api/`, `bunx wrangler secret list --config wrangler.dev.jsonc` lists `MAILGW_API_TOKEN`.
 - An unsigned `curl -sX POST https://dev.bane.mx/internal/v1/mail` still returns 403 `PROTOCOL_DENIED`. Only signed calls pass.
 
@@ -91,7 +104,7 @@ In a PR to `dev`, add these two lines to `infra/pulumi/Pulumi.dev.yaml` and nowh
   bane:mailGatewayDesired: "1"
 ```
 
-Leave `Pulumi.production.yaml` unchanged, and don't set `bane:mailGatewayDns`. Merging runs Pulumi for the dev stack, which waits up to 30 minutes for a steady service. If the task never becomes healthy, the ECS circuit breaker rolls it back, and that deploy fails before it reaches the Worker. One task is enough for dev: the NLB is cross-zone, and every task holds its own LISTEN connection.
+Leave `Pulumi.production.yaml` unchanged, and don't set `bane:mailGatewayDns`. Pulumi refuses this change unless step 2's `bane:mailGatewayEnabled: "true"` is already in the file. Merging runs Pulumi for the dev stack, which waits up to 30 minutes for a steady service. If the task never becomes healthy, the ECS circuit breaker rolls it back, and that deploy fails before it reaches the Worker. One task is enough for dev: the NLB is cross-zone, and every task holds its own LISTEN connection.
 
 ### 5. Verify
 
@@ -122,7 +135,11 @@ Record the numbers in this file next to the SQL budgets, then revoke the test ap
 
 ### Rollback
 
-1. **Stop the gateway.** Set `bane:mailGatewayDesired: "0"` in `Pulumi.dev.yaml` (keep the image line) and merge. If a failing service blocks the dev pipeline, or the stop is urgent, first run `aws ecs update-service --region us-east-2 --cluster bane-mail-gateway --service bane-mail-gateway --desired-count 0` as a dev administrator. The config change keeps the next Pulumi run from scaling it back up. The NLB, secrets and image stay, and nothing else on dev changes.
-2. **Close the API side.** Delete `bane/dev/MAILGW_API_TOKEN` in the secrets account first. A pending deletion counts as absent, so later deploys send no token. Then, from `api/`, run `bunx wrangler secret delete MAILGW_API_TOKEN --config wrangler.dev.jsonc`. The Worker is back to 403 `PROTOCOL_DENIED`. Deleting only the CI copy isn't enough, because deploys keep the Worker's last value.
+1. **Disable in one PR.** In `Pulumi.dev.yaml`, set `bane:mailGatewayEnabled: "false"` and `bane:mailGatewayDesired: "0"` (keep the image line), then merge. Pulumi scales the service to zero. "Deploy the Worker" then deletes the Worker's `MAILGW_API_TOKEN`, checks that it's gone and ends with `bane:mailGatewayEnabled=false; Worker MAILGW_API_TOKEN bound=false`. The Worker is back to 403 `PROTOCOL_DENIED`, and later deploys keep it that way. The NLB, the secrets, the image and the rest of dev stay unchanged. The CI copy of the token can stay, because it isn't read while the flag is false.
+2. **If it can't wait for the pipeline** (urgent, or a failing service blocks the dev deploy), act directly as a dev administrator and still land step 1 right after:
+   - Run `aws ecs update-service --region us-east-2 --cluster bane-mail-gateway --service bane-mail-gateway --desired-count 0`.
+   - From `api/`, run `bunx wrangler secret delete MAILGW_API_TOKEN --config wrangler.dev.jsonc`.
+
+   Until step 1 merges, a deploy with the flag still true binds the CI copy again. If you deleted the CI copy, that deploy stops instead.
 3. **Close the database role.** Run `ALTER ROLE bane_mailgw_listen NOLOGIN;`, then `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'bane_mailgw_listen';`.
 4. **Revoke test app passwords** with `DELETE /v1/inboxes/{id}/app-passwords/{passwordId}`. DNS never changed, so there's nothing to restore.
