@@ -1,5 +1,6 @@
 import { ApiError, digest, type Runtime } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
+import { VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
 
 // Opt-in content screen for live transactional mail (`screen: true`): asks Jev, TypeSafe AI's decision
@@ -29,7 +30,9 @@ export type ScreenResult = { spam: number; model: string };
 const cache = new Map<string, { expires: number; result: ScreenResult }>();
 const flights=new WeakMap<Runtime['storage'],Map<string,Promise<ScreenResult>>>();
 
-const normalize = (s: string) => s.normalize('NFKC').replace(/[\p{Cf}\p{Mn}]/gu, '');
+// The text as a reader sees it: compatibility forms folded, and the characters that draw nothing (format controls,
+// combining marks, Hangul fillers and other default-ignorable code points) removed.
+const normalize = (s: string) => s.normalize('NFKC').replace(/[\p{Cf}\p{Mn}\p{Default_Ignorable_Code_Point}]/gu, '');
 function copy(s = '') {
   const sentences = normalize(s).split(/\n+|(?<=[.!?])\s+/).map(p => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
   return [...new Set(sentences)].join(' ');
@@ -56,6 +59,7 @@ function completeBodies(content: string, links: string) {
 function host(value: string) {
   try { return new URL(value.startsWith('//') ? 'https:'+value : value).hostname.toLowerCase(); } catch { return ''; }
 }
+const INLINE=new Set(['a','abbr','b','bdi','bdo','big','cite','code','data','del','dfn','em','font','i','ins','kbd','label','mark','q','s','samp','small','span','strike','strong','sub','sup','time','tt','u','var','wbr','img','input','button','select','textarea','output','meter','progress','picture','source','svg','text','tspan','math','mi','mo','mn','ruby','rt','rp','nobr']);
 async function body(snapshot: EmailSnapshot) {
   // Preserve order and repetitions in mandatory input; deduplicating sentences
   // could change the meaning or make an over-limit message appear to fit.
@@ -67,34 +71,51 @@ async function body(snapshot: EmailSnapshot) {
     if (snapshot.html.length>512*1024) throw tooLarge();
     const fragment=boundedHtmlFragment(snapshot.html);
     if (!fragment) throw tooLarge();
-    const nodes = fragment.childNodes.slice().reverse().map(node=>({node,anchor:''})), text:string[]=[];
-    while (nodes.length) {
-      const item=nodes.pop()!, {node}=item; let anchor=item.anchor;
-      if ('tagName' in node && ['style','script','template','head'].includes(node.tagName)) continue;
+    // Text as a client lays it out: inline runs stay one word, block elements end the line, and text a client shows
+    // beside the flow (alt, title) follows on its own lines, as does a table row whose cells hold short pieces read
+    // glued, the way a recipient reads a word laid out across adjacent cells.
+    const lines:string[]=[], aside:string[]=[], rows:string[][]=[]; let line='';
+    const flush=()=>{ if(line.trim()) lines.push(line); line=''; };
+    const walk=(node:typeof fragment.childNodes[number], anchor:string)=>{
       if ('value' in node) {
-        text.push(node.value);
+        line+=node.value;
         if(anchor) for(const word of normalize(node.value).split(/\s+/)) {
           if(!word.includes('.') || word.length>2048)continue;
           const label=host(word.includes('://')?word:'https://'+word);
           if(label && label!==anchor) mismatches.add(`${label} → ${anchor}`);
         }
-      }
-      if ('attrs' in node) for (const a of node.attrs) {
-        if (['href','src','srcset','background','action','style'].includes(a.name)) {
-          for(const m of normalize(a.value).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
-          if(node.tagName==='a' && a.name==='href') anchor=host(normalize(a.value));
-        }
-        if (['alt','title'].includes(a.name)) text.push(a.value);
+        return;
       }
       const children='childNodes' in node ? node.childNodes : [];
-      for (let i=children.length-1;i>=0;i--) nodes.push({node:children[i]!,anchor});
-    }
-    rendered=project(text.join('\n'));
+      if (!('tagName' in node)) { for (const child of children) walk(child,anchor); return; }
+      const tag=node.tagName;
+      if (['style','script','template','head','title','xml'].includes(tag)) return;
+      let display='';
+      for (const a of node.attrs) {
+        if (['href','src','srcset','background','action','style'].includes(a.name)) {
+          for(const m of normalize(a.value).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
+          if(tag==='a' && a.name==='href') anchor=host(normalize(a.value));
+        }
+        if (a.name==='style') display=/(?:^|;)\s*display\s*:\s*([a-z-]+)/i.exec(a.value)?.[1]?.toLowerCase() ?? '';
+        if (['alt','title'].includes(a.name) && a.value.trim()) aside.push(a.value);
+      }
+      const inline=display ? display.startsWith('inline') : INLINE.has(tag);
+      if (!inline) flush();
+      const start=lines.length;
+      if (tag==='tr') rows.push([]);
+      for (const child of children) walk(child,anchor);
+      if (!inline) flush();
+      if (tag==='td' || tag==='th') rows[rows.length-1]?.push(lines.slice(start).join(' '));
+      if (tag==='tr') { const cells=rows.pop()!; if (cells.length>1 && cells.some(cell=>cell.trim() && cell.trim().length<=4)) aside.push(cells.join('')); }
+    };
+    for (const child of fragment.childNodes) walk(child,'');
+    flush();
+    rendered=project([...lines,...aside].join('\n'));
   }
   const signals=[...mismatches,...hosts];
   if(signals.length>60) throw tooLarge();
   const links=signals.join('\n');
-  const words=(v:string)=>new Set(v.toLowerCase().match(/[\p{L}\p{N}]+/gu));
+  const words=(v:string)=>new Set(v.toLowerCase().match(VISIBLE_WORDS));
   function overlap(text:string, html:string) {
     const a=words(text), b=words(html), common=[...a].filter(w=>b.has(w)).length;
     return a.size && b.size ? common/(a.size+b.size-common) : undefined;
