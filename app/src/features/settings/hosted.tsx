@@ -59,7 +59,7 @@ export function HostedSettings() {
   </div>
 }
 
-function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; children: ReactNode }) {
+export function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return <div className="settings-row"><div className="settings-row__label"><span>{title}</span>{hint && <span className="muted">{hint}</span>}</div><div className="settings-row__control">{children}</div></div>
 }
 
@@ -135,23 +135,26 @@ function AccountRows() {
     <Row title="Name" hint="From your Google account">{session.identity.name || '—'}</Row>
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
-    <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
-    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={app.name||app.clientId} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
+    <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
+    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
       :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
     {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
     <MutationError error={revoke.error}/>
     {['bane.mx','dev.bane.mx'].includes(window.location.hostname) && <Row title="Issuer grants"><a href={window.location.hostname==='dev.bane.mx'?'https://account.dev.anoma.ly/apps':'https://account.anoma.ly/apps'}>Manage connected apps at Anomaly account</a></Row>}
   </div>
 }
+// A client's name and the label of its entry (`?profile=` on its MCP URL), so a personal and a work entry of one client
+// are easy to tell apart. The label is display only.
+export const connectionTitle = (app: Pick<McpConnection, 'name' | 'clientId' | 'profile'>) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
 // Each approval acts in one workspace. A new one waits for this choice when you belong to several; receiving tools
 // need an owner or admin there. Save keeps its place whether or not it is shown, so choosing never moves the row.
-function McpApproval({ app, workspaces, onRevoke }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void }) {
+export function McpApproval({ app, workspaces, onRevoke }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void }) {
   const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
   const [receiving, setReceiving] = useState(app.receiving ?? false)
   const bind = useApiMutation((api, input: { workspaceId: string; receiving: boolean }) => api.credentials.bindMcpConnection(app.id, input), 'Saved')
   const admin = (id: string) => ['owner', 'admin'].includes(workspaces.find(workspace => workspace.id === id)?.role ?? '')
   const changed = workspaceId !== '' && (workspaceId !== app.workspaceId || receiving !== (app.receiving ?? false))
-  const name = app.name || app.clientId
+  const name = connectionTitle(app)
   return <Row title={name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
     <span className="settings-mcp">
       <Select aria-label={`Workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Choose a workspace" disabled={bind.isPending}

@@ -18,7 +18,7 @@ const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subd
 const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const safeModeSkips: Partial<Record<Op, string>> = {
-  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard,
+  listMcpConnections: dashboard, getMcpConnection: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
   listWorkspaces: dashboard, createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
@@ -278,6 +278,7 @@ async function devBoundaries() {
   await denied('acceptWorkspaceInvitation',{path:fake,headers:{Origin:base.origin}});
   await denied('updateWorkspaceMember',{path:fake,body:{role:'member'}});
   await denied('removeWorkspaceMember',{path:fake});
+  await denied('getMcpConnection',{path:fake});
   await denied('revokeMcpConnection',{path:fake});
   await denied('bindMcpConnection',{path:fake,body:{workspaceId:prefix,receiving:false}});
   await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');

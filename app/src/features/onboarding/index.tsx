@@ -5,7 +5,7 @@ import { Alert, Button, ErrorState, ErrorText, Field, Input, SectionHeader, Tabs
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
-import { WorkspaceSwitcher } from '../../components/WorkspaceSwitcher'
+import { AccountSwitcher } from '../../components/AccountSwitcher'
 import { useApi, useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { agentStep, finishedStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
@@ -57,7 +57,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
     <header className="onboarding-header">
       <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />bane</span>
       <div className="onboarding-header-actions">
-        <div className="onboarding-workspace"><WorkspaceSwitcher /></div>
+        <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />
         <Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button>
       </div>

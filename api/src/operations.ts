@@ -974,12 +974,15 @@ export function registerOperations(app: App) {
     const {id,token}=c.req.valid('param'), {state,error}=c.req.valid('query');
     // An expired or foreign token changes nothing but still lands on the domain page: the provider has
     // already applied the records by now, and the page's own polling picks up verification.
-    const back=()=>c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}`,303);
     const claim=verifyReturn(c.env.config.authSecret,token);
+    // The page reopens as the account that started the setup (a browser can hold several), in its workspace.
+    const back=()=>c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}${claim?`?account=${encodeURIComponent(claim.userId)}`:''}`,303);
     if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) return back();
     // A session that ended while the user was at the provider also goes back; the dashboard asks them to sign in.
+    // The return is a navigation without the tab's X-Bane-Account: act as the initiating account's own session.
     const { verifiedDashboardUser } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
-    const user=await verifiedDashboardUser(c.env,c.req.raw.headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
+    const headers=new Headers(c.req.raw.headers); headers.set('x-bane-account',claim.userId);
+    const user=await verifiedDashboardUser(c.env,headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
     if(!user || claim.userId!==user.userId) return back();
     const {userId}=user;
     const wid=claim.workspaceId;
