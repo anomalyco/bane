@@ -106,35 +106,18 @@
       ]
     },
     {
-      "Sid": "GatewayRolesWithBoundary",
-      "Effect": "Allow",
+      "Sid": "GatewayRolesAreOperatorOwned",
+      "Effect": "Deny",
       "Action": [
         "iam:CreateRole",
-        "iam:PutRolePermissionsBoundary"
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
       ],
       "Resource": [
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
         "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
-      ],
-      "Condition": {
-        "StringEquals": {
-          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
-        }
-      }
-    },
-    {
-      "Sid": "GatewayExecutionPolicyWithinBoundary",
-      "Effect": "Allow",
-      "Action": [
-        "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy"
-      ],
-      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution",
-      "Condition": {
-        "StringEquals": {
-          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
-        }
-      }
+      ]
     },
     {
       "Sid": "PassToEcs",
@@ -149,6 +132,25 @@
           "iam:PassedToService": "ecs-tasks.amazonaws.com"
         }
       }
+    },
+    {
+      "Sid": "GatewayCodeIsOperatorOwned",
+      "Effect": "Deny",
+      "Action": ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition", "ecs:DeleteTaskDefinitions", "ecs:RunTask", "ecs:StartTask", "ecs:ExecuteCommand"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MailControlsAreOperatorOwned",
+      "Effect": "Deny",
+      "Action": [
+        "ses:PutIdentityPolicy", "ses:DeleteIdentityPolicy", "ses:CreateEmailIdentityPolicy", "ses:UpdateEmailIdentityPolicy", "ses:DeleteEmailIdentityPolicy",
+        "ses:CreateReceiptRule", "ses:UpdateReceiptRule", "ses:DeleteReceiptRule", "ses:CreateReceiptRuleSet", "ses:DeleteReceiptRuleSet", "ses:SetActiveReceiptRuleSet", "ses:SetReceiptRulePosition", "ses:ReorderReceiptRuleSet",
+        "ses:CreateConfigurationSetEventDestination", "ses:UpdateConfigurationSetEventDestination", "ses:DeleteConfigurationSetEventDestination",
+        "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketAcl", "s3:PutBucketPublicAccessBlock", "s3:PutLifecycleConfiguration",
+        "sns:CreateTopic", "sns:SetTopicAttributes", "sns:SetSubscriptionAttributes", "sns:AddPermission", "sns:RemovePermission",
+        "sqs:CreateQueue", "sqs:SetQueueAttributes", "sqs:AddPermission", "sqs:RemovePermission"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "ProtectDeployRole",

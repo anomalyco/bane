@@ -27,7 +27,6 @@
         "ecs:UpdateService",
         "ecs:ListServiceDeployments",
         "ecs:DescribeServiceDeployments",
-        "ecs:RegisterTaskDefinition",
         "ecs:ListTagsForResource",
         "ecs:TagResource",
         "ecs:UntagResource"
@@ -35,9 +34,13 @@
       "Resource": [
         "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:cluster/bane-mail-gateway",
         "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:service/bane-mail-gateway/bane-mail-gateway",
-        "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:service-deployment/bane-mail-gateway/bane-mail-gateway/*",
-        "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:task-definition/bane-mail-gateway:*"
-      ]
+        "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:service-deployment/bane-mail-gateway/bane-mail-gateway/*"
+      ],
+      "Condition": {
+        "ArnEqualsIfExists": {
+          "ecs:task-definition": "YOUR_GATEWAY_TASK_DEFINITION_ARN"
+        }
+      }
     },
     {
       "Effect": "Allow",

@@ -1,14 +1,139 @@
 {
   "Version": "2012-10-17",
   "Statement": [
-    {"Effect":"Allow","Action":["sqs:CreateQueue","sqs:GetQueueUrl","sqs:GetQueueAttributes","sqs:SetQueueAttributes","sqs:TagQueue","sqs:UntagQueue","sqs:ListQueueTags"],"Resource":["arn:aws:sqs:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound-dead-letters","arn:aws:sqs:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback-dead-letters","arn:aws:sqs:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback-dead-letters"]},
-    {"Effect":"Allow","Action":["ses:DescribeActiveReceiptRuleSet","ses:DescribeReceiptRule","ses:CreateReceiptRule","ses:UpdateReceiptRule"],"Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2"}}},
-    {"Effect":"Allow","Action":"s3:CreateBucket","Resource":"arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2","s3:LocationConstraint":"us-east-2"}}},
-    {"Effect":"Allow","Action":["s3:PutBucketTagging","s3:PutBucketPolicy","s3:PutBucketPublicAccessBlock","s3:PutLifecycleConfiguration","s3:ListBucket","s3:GetBucketTagging","s3:GetBucketPolicy","s3:GetBucketPublicAccessBlock","s3:GetLifecycleConfiguration","s3:GetBucketAcl","s3:GetBucketCORS","s3:GetBucketWebsite","s3:GetBucketVersioning","s3:GetAccelerateConfiguration","s3:GetBucketRequestPayment","s3:GetBucketLogging","s3:GetReplicationConfiguration","s3:GetEncryptionConfiguration","s3:GetBucketObjectLockConfiguration","s3:GetBucketLocation"],"Resource":"arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2","s3:ResourceAccount":"YOUR_AWS_ACCOUNT_ID"}}},
-    {"Effect":"Allow","Action":["sns:CreateTopic","sns:TagResource","sns:ListTagsForResource","sns:GetTopicAttributes","sns:SetTopicAttributes"],"Resource":["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound","arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback","arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"]},
-    {"Effect":"Allow","Action":["sns:GetSubscriptionAttributes","sns:SetSubscriptionAttributes"],"Resource":["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound","arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback","arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"]},
-    {"Effect":"Allow","Action":"sns:Subscribe","Resource":["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound","arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback"],"Condition":{"StringEquals":{"sns:Protocol":"https","sns:Endpoint":"YOUR_STAGE_ORIGIN/v1/events/ses"}}},
-    {"Effect":"Allow","Action":["ses:GetConfigurationSet","ses:GetConfigurationSetEventDestinations","ses:CreateConfigurationSetEventDestination","ses:UpdateConfigurationSetEventDestination","ses:DeleteConfigurationSetEventDestination"],"Resource":["arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-transactional","arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-marketing","arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional","arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing"]},
-    {"Effect":"Allow","Action":["cloudwatch:PutMetricAlarm","cloudwatch:DescribeAlarms","cloudwatch:ListTagsForResource","cloudwatch:TagResource","cloudwatch:UntagResource"],"Resource":["arn:aws:cloudwatch:us-east-2:YOUR_AWS_ACCOUNT_ID:alarm:bane-inbound-dead-letters","arn:aws:cloudwatch:us-east-2:YOUR_AWS_ACCOUNT_ID:alarm:bane-feedback-dead-letters","arn:aws:cloudwatch:us-east-1:YOUR_AWS_ACCOUNT_ID:alarm:bane-trusted-feedback-dead-letters"]}
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:GetQueueUrl",
+        "sqs:GetQueueAttributes",
+        "sqs:TagQueue",
+        "sqs:UntagQueue",
+        "sqs:ListQueueTags"
+      ],
+      "Resource": [
+        "arn:aws:sqs:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound-dead-letters",
+        "arn:aws:sqs:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback-dead-letters",
+        "arn:aws:sqs:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback-dead-letters"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ses:DescribeActiveReceiptRuleSet",
+        "ses:DescribeReceiptRule"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-2"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:CreateBucket",
+      "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-2",
+          "s3:LocationConstraint": "us-east-2"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutBucketTagging",
+        "s3:ListBucket",
+        "s3:GetBucketTagging",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetBucketAcl",
+        "s3:GetBucketCORS",
+        "s3:GetBucketWebsite",
+        "s3:GetBucketVersioning",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketLogging",
+        "s3:GetReplicationConfiguration",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::bane-YOUR_AWS_ACCOUNT_ID-mail-us-east-2",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-2",
+          "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:TagResource",
+        "sns:ListTagsForResource",
+        "sns:GetTopicAttributes"
+      ],
+      "Resource": [
+        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound",
+        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback",
+        "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sns:GetSubscriptionAttributes",
+      "Resource": [
+        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound",
+        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback",
+        "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:bane-trusted-feedback"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sns:Subscribe",
+      "Resource": [
+        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-inbound",
+        "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:bane-feedback"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "sns:Protocol": "https",
+          "sns:Endpoint": "YOUR_STAGE_ORIGIN/v1/events/ses"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ses:GetConfigurationSet",
+        "ses:GetConfigurationSetEventDestinations"
+      ],
+      "Resource": [
+        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-transactional",
+        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-marketing",
+        "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-transactional",
+        "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/bane-trusted-marketing"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:ListTagsForResource",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:cloudwatch:us-east-2:YOUR_AWS_ACCOUNT_ID:alarm:bane-inbound-dead-letters",
+        "arn:aws:cloudwatch:us-east-2:YOUR_AWS_ACCOUNT_ID:alarm:bane-feedback-dead-letters",
+        "arn:aws:cloudwatch:us-east-1:YOUR_AWS_ACCOUNT_ID:alarm:bane-trusted-feedback-dead-letters"
+      ]
+    }
   ]
 }

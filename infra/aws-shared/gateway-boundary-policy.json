@@ -25,10 +25,10 @@
       "Effect": "Allow",
       "Action": "secretsmanager:GetSecretValue",
       "Resource": [
-        "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/db-url-??????",
-        "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/tls-cert-??????",
-        "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/tls-key-??????",
-        "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/api-token-??????"
+        "YOUR_GATEWAY_DB_URL_ARN",
+        "YOUR_GATEWAY_TLS_CERT_ARN",
+        "YOUR_GATEWAY_TLS_KEY_ARN",
+        "YOUR_GATEWAY_API_TOKEN_ARN"
       ]
     }
   ]

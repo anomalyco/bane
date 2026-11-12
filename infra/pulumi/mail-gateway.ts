@@ -19,10 +19,11 @@ function apiOrigin(stage: "dev" | "production", origin: string) {
 }
 
 export function mailGateway(stage: "dev" | "production", { account, cloudflareAccountId, origin }: Stage,
-  config: pulumi.Config, ohio: aws.Provider, iam: aws.Provider, cloudflare: cf.Provider, tags: Record<string, string>) {
+  config: pulumi.Config, ohio: aws.Provider, iam: aws.Provider, cloudflare: cf.Provider, tags: Record<string, string>,
+  operatorOnly: (options: pulumi.CustomResourceOptions) => pulumi.CustomResourceOptions) {
   const api = apiOrigin(stage, origin);
   const opts = { provider: ohio, protect: true };
-  const iamOpts = { provider: iam, protect: true };
+  const iamOpts = operatorOnly({ provider: iam, protect: true });
   const named = (suffix: string) => ({ ...tags, Name: `${name}-${suffix}` });
   const desired = config.getNumber("mailGatewayDesired") ?? 0;
   if (!Number.isSafeInteger(desired) || desired < 0) throw new Error("bane:mailGatewayDesired must be a nonnegative integer");
@@ -81,8 +82,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   const assumeRolePolicy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole",
     Principal: { Service: "ecs-tasks.amazonaws.com" }, Condition: { StringEquals: { "aws:SourceAccount": account },
       ArnLike: { "aws:SourceArn": `arn:aws:ecs:us-east-2:${account}:*` } } }] });
-  // Operator-owned ceiling for both roles (infra/aws-shared/gateway-boundary-policy.json): the deploy
-  // role may create them and write the execution role's inline policy only with this boundary attached.
+  // Both roles, their trust/inline policy, and their exact-secret boundary are operator-owned.
   const permissionsBoundary = `arn:aws:iam::${account}:policy/bane-gateway-boundary`;
   const task = new aws.iam.Role(`${name}-task`, { name: `${name}-task`, assumeRolePolicy, permissionsBoundary, tags }, iamOpts);
   const execution = new aws.iam.Role(`${name}-execution`, { name: `${name}-execution`, assumeRolePolicy, permissionsBoundary, tags }, iamOpts);
@@ -97,7 +97,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   }, iamOpts);
 
   const cluster = new aws.ecs.Cluster(name, { name, tags }, opts);
-  // A new image must be able to replace the task definition revision without unprotecting the service.
+  // Only an operator publishes a reviewed revision. Normal CI retains the last approved state.
   const definition = new aws.ecs.TaskDefinition(name, { family: name, requiresCompatibilities: ["FARGATE"], networkMode: "awsvpc",
     runtimePlatform: { operatingSystemFamily: "LINUX", cpuArchitecture: "ARM64" }, cpu: "512", memory: "1024",
     // ECS can't scope DeregisterTaskDefinition by family. Leave old revisions for operator cleanup.
@@ -110,7 +110,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
       systemControls: [{ namespace: "net.ipv4.ip_unprivileged_port_start", value: `${Math.min(...ports)}` }],
       logConfiguration: { logDriver: "awslogs", options: { "awslogs-group": log.name, "awslogs-region": "us-east-2", "awslogs-stream-prefix": "gateway" } },
     }]),
-  }, { provider: ohio });
+  }, operatorOnly({ provider: ohio }));
   const service = new aws.ecs.Service(name, { name, cluster: cluster.arn, launchType: "FARGATE", platformVersion: "1.4.0",
     taskDefinition: definition.arn, desiredCount: desired, deploymentMinimumHealthyPercent: 100, deploymentMaximumPercent: 200,
     deploymentCircuitBreaker: { enable: true, rollback: true }, waitForSteadyState: true,
