@@ -2,7 +2,7 @@
 
 Lives in `api/tear/delivery/`. The access checker owns `api/tear/`; dispatch, inbox and gateway have their own subdirectories. Every tear host shares one disposable-database rule, `api/tear/disposable.ts`, which this host imports.
 
-A [tear](https://github.com/anomalyco/tear) model of what happens to received mail after it is stored: the routing plan (exact routes, local-part patterns, the `*@` catch-all, drop, disabled routes), rituals (endpoint calls, the three-calls-per-endpoint cap, the 32-intent budget and fail-to-junk), and endpoints (webhook, replay-safe webhook, Slack, forward) through the one delivery path, `ritualDelivery`: retries, backoff, Retry-After, per-endpoint rate limits, Idempotency-Keys, the attempt fence, pause, delete, forward decline and loop suppression.
+A [tear](https://github.com/anomalyco/tear) model of what happens to received mail after it is stored: the routing plan (exact routes, local-part patterns, the `*@` catch-all, drop, disabled routes), rituals (endpoint calls, the three-calls-per-endpoint cap, the 32-intent budget and fail-to-junk), and endpoints (webhook, replay-safe webhook, Slack, forward, and a plain event subscription) through the one delivery path, `ritualDelivery`: retries, backoff, Retry-After, per-endpoint rate limits, Idempotency-Keys, the gate and attempt fence, pause (held mail), delete, forward decline, loop suppression and the 30-day delivery retention.
 
 - `src/model.rs` is the reference model, written from the documented contract.
 - `src/main.rs` holds the edge-case checklist and its coverage, the properties, the bug witnesses and the run modes.
@@ -13,6 +13,7 @@ The host owns time: every pending job is parked, `run K d` makes only `d` due, `
 ## Properties
 
 - Conformance: each step's result, the requests the endpoints received, and the committed view (every delivery's status, attempt count, error, fence state, job status and attempts, scheduled delay; endpoint state; box labels; forwards) equal the model's.
+- The model property `delivery.kept`, on every state: every (email, endpoint) that routing or a ritual chose has a delivery unless the endpoint was deleted or retention pruned a settled one.
 - tear's temporal monitor, on the observations alone: `delivery.once` (no repeat after a success, an unknown outcome or an overlapping request, except to a replay-safe endpoint with the delivery's own Idempotency-Key), `delivery.attempts` (at most 1 + retryAttempts requests), `endpoint.held` (no request starts to an endpoint paused or deleted before the step) and `delivery.settles` (on drained walks, everything queued is delivered, dead-lettered, parked or deleted).
 
 ## Bugs found
@@ -30,14 +31,29 @@ Each was fixed in its own commit, with an acceptance test that fails before the 
 | Unpausing resumed parked deliveries with a fresh attempt budget, so a delivery could be sent more than 1 + retryAttempts times. Completed by a follow-up counting attempts whose outcome was never recorded. Found by the temporal property `delivery.attempts`. | 8 steps; follow-up 9 steps |
 | A runner whose claim went stale still sent a delivery that had meanwhile settled (refused) or been resumed as a new generation. Found by `delivery.attempts`. | 6 steps: `ingest m1 a`, `claim K m1:W`, `expire m1:W`, `run L m1:W`, `reply L 400`, `go K` |
 
+From the review of #58 (the model now encodes each contract first):
+
+| Bug | Witness |
+|---|---|
+| Mail arriving while an endpoint was paused was dropped, not held; past retention a held delivery was deleted silently. Now queued, parked by its claim, sent on unpause, dead-lettered as `ENDPOINT_PAUSED_EXPIRED` after 30 days. | 3 steps: `pause W`, `ingest m1 a`, `run K m1:W`; retention 5 steps |
+| Plain event subscriptions skipped the fence: a pause after the claim, a stale claim and the breaker deferral (attempts reset) all reached them. | 4 steps: `ingest m1 b`, `claim K m1:U`, `pause U`, `go K` |
+| A claim lost before the fence (nothing sent) used up a `retryAttempts 0` delivery's only attempt. | 5 steps (`--retries 0`): `ingest m1 a`, `claim K m1:W`, `drop K`, `expire m1:W`, `run L m1:W` |
+| With that extra claim, a runner stalled before the fence whose lease expired still sent after the next claim. Found by `delivery.attempts`. | 5 steps (`--retries 0`): `ingest m1 z`, `claim K m1:V`, `expire m1:V`, `run L m1:V`, `go K` |
+| A breaker deferral counted as a fence attempt, so a resumed delivery lost a retry. | 13 steps |
+| Mail stored before forward verdicts existed was refused by a later forward. | 5 steps: `ingest m1 z`, `strip m1`, `rituals forward`, `ingest m1 b+z`, `run K m1:F` |
+
+Not fixed, noted: an old Worker during a deploy keeps the old claim, deferral, fence and resume behaviour for the jobs it touches until it drains (the routing and envelope fixes are database functions and change at once); with `junk: include`, one routed delivery per endpoint carries one recipient's junk flag.
+
 ## Recorded runs (after the fixes)
 
 | Run | Traces | Steps | Mismatches | Temporal violations | Time |
 |---|---:|---:|---:|---:|---:|
-| `edges 3 --alpha core` | 3,040 | 8,822 | 0 | 0 | 95 s |
-| `edges 2 --alpha ritual` | 1,183 | 2,331 | 0 | 0 | 27 s |
-| `random 400 30 --seed 303` with `--retries 1`, `0`, `2` | 1,200 (drained) | 50,630 | 0 | 0 | 3 min |
-| `ci` | 1,644 | about 7,000 | 0 | 0 | 55 s |
+| `edges 3 --alpha core` | 4,179 | 12,165 | 0 | 0 | 93 s |
+| `edges 2 --alpha ritual` | 1,431 | 2,825 | 0 | 0 | 30 s |
+| `random 400 30 --seed 505` with `--retries 1`, `0`, `2`, and seed 606 with `0`, `1` | 2,000 (drained) | 89,374 | 0 | 0 | 5 min |
+| `ci` | about 1,870 | about 6,000 | 0 | 0 | 55 s |
+
+The model property `delivery.kept` (nothing routing chose is lost, a paused endpoint holds its mail) held on every state of these runs.
 
 tear is pinned by git rev in `Cargo.toml`. Cargo fetches it with your git credentials (`.cargo/config.toml`), so you need read access to `anomalyco/tear`. tear is a dev tool only: nothing here ships with the API.
 
@@ -68,8 +84,8 @@ cd api/tear/delivery && cargo run --release -- ci
 
 | Command | Traces | Time (idle laptop) |
 |---|---:|---:|
-| `cargo run --release -- edges 3 --alpha core` | 3,040 (8,822 steps) | about 95 s |
-| `cargo run --release -- edges 3 --alpha ritual` | 22,685 (66,837 steps) | about 8 min |
+| `cargo run --release -- edges 3 --alpha core` | 4,179 (12,165 steps) | about 95 s |
+| `cargo run --release -- edges 3 --alpha ritual` | 36,799 (108,929 steps) | about 12 min |
 | `cargo run --release -- random 2000 30 --seed $(date +%s)` | 2,000 walks plus drains | about 5 min |
 | `… random 2000 30 --retries 0`, `--retries 2` or `--retries 9` | | about 5 min each |
 
