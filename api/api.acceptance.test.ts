@@ -5790,7 +5790,7 @@ describe('Billing: API, MCP and notices', () => {
       await enforcement(db, 'enforce');
       await credit(db, wid, 'topup', 'attempt:bpa_fixture_one', 2_500_000_000n);
       await credit(db, wid, 'grant', 'grant:fixture-promo', 0n, 500_000_000n);
-      await db.query(`SELECT billing_post($1,'usage','usage:fixture',-1240000::bigint*20,0,'{"meters":{"send":{"quantity":1000},"receive":{"quantity":240}},"costUc":"24800000","charged":true}','system')`, [wid]);
+      await db.query(`SELECT billing_post($1,'usage','usage:fixture',-1240000::bigint*20,0,'{"meters":{"send":{"quantity":1000},"receive":{"quantity":240}},"costUc":"24800000","charged":true,"from":"2026-11-12T13:00:00+00:00","to":"2026-11-12T15:00:00+00:00"}','system')`, [wid]);
       await credit(db, wid, 'adjustment', 'adjustment:fixture-internal', 100_000_000n, 0n, { reason: 'Internal note never shown to customers', ticketRef: 'T-1' });
       const key = (permissions: string[], domains: string[] = []) => local('POST', '/v1/api-keys', { name: unique('billing'), permissions, domains }).then(r => { const k = ok(r, 201); secrets.add(k.secret); return k.secret as string; });
       const manage = await key(['manage']), reader = await key(['read']), scoped = await key(['manage'], ['billing.example']);
@@ -5800,7 +5800,7 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual([owner.enforcement, owner.mode, owner.state, owner.balance.paid, owner.balance.promo], ['enforce', 'prepaid', { sending: 'ok', receiving: 'ok', autoRecharge: 'off' }, '2575200000', '500000000']);
       assert.deepEqual([owner.free.emails.limit, owner.prices.emailPerThousand, owner.topUpUrl], [3000, '0.20', `${PUBLIC_ORIGIN}/settings#billing`]);
       const ledger = page(await local('GET', '/v1/billing/ledger?limit=3'));
-      assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Bane'], ['usage', '-24800000', 'Usage: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Bane']]);
+      assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Bane'], ['usage', '-24800000', 'Usage Nov 12, 13:00–15:00 UTC: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Bane']]);
       assert.deepEqual(ledger[0].detail, {}, 'Operator reasons and tickets never reach the customer.');
       const rest = ok(await local('GET', `/v1/billing/ledger?cursor=${ok(await local('GET', '/v1/billing/ledger?limit=3')).nextCursor}`));
       assert.deepEqual([rest.data.map((e: Json) => [e.kind, e.paymentId, e.balanceAfter]), rest.nextCursor], [[['topup', 'bpa_fixture_one', '2500000000']], null]);

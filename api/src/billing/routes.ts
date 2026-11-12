@@ -75,6 +75,13 @@ const summary = (c: Ctx, workspaceId: string, amounts: boolean) => readBilling(c
 // ---------- ledger wording ----------
 const count = (n: unknown) => Number(n ?? 0).toLocaleString('en-US');
 type MeterDetail = { quantity?: number | string };
+const when = (at: Date, day: boolean) => at.toLocaleString('en-US', { ...(day ? { month: 'short', day: 'numeric' } : {}), hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' });
+/** " Nov 12, 13:00–15:00 UTC" for the closed hours a settlement covered (billing_settle's detail.from/to). */
+function period(from: unknown, to: unknown) {
+  const a = typeof from === 'string' ? new Date(from) : null, b = typeof to === 'string' ? new Date(to) : null;
+  if (!a || !b || Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return '';
+  return a.toISOString().slice(0, 10) === new Date(b.getTime() - 1).toISOString().slice(0, 10) ? ` ${when(a, true)}–${when(b, false)} UTC` : ` ${when(a, true)} – ${when(b, true)} UTC`;
+}
 /** A ledger row in plain words. Operator notes (reason, ticket) stay internal. */
 function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
@@ -83,7 +90,7 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
       const q = (m: string) => Number(meters[m]?.quantity ?? 0);
       const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} Omens` : '', q('storage') ? 'stored mail' : '',
         q('byo_send') + q('byo_receive') ? `${count(q('byo_send') + q('byo_receive'))} emails on your AWS` : ''].filter(Boolean);
-      return `Usage: ${parts.join(', ') || 'none'}${detail.charged === false ? ' (not charged)' : ''}`;
+      return `Usage${period(detail.from, detail.to)}: ${parts.join(', ') || 'none'}${detail.charged === false ? ' (not charged)' : ''}`;
     }
     case 'topup': return detail.recharge === true ? 'Auto-recharge' : 'Credit added';
     case 'grant': return 'Promotional credit from Bane';
