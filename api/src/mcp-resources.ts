@@ -92,6 +92,9 @@ const resources: Record<string, { label: string; actions: Record<string, string>
 
 // Unlike full operation descriptions, these summaries never point to a different tool.
 const actionSummaries: Record<string, string> = {
+  getInboxAttachment: 'read an inbox attachment',
+  uploadAttachment: 'upload an outgoing attachment',
+  listContacts: 'list contacts',
   createInboundThread: 'start a conversation with confirmed recipients, content and send time',
   replyToInboundThread: 'reply to a reviewed message with confirmed To/Cc/Bcc, content and send time',
   waitForMessage: 'wait for the next inbox message',

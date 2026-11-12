@@ -16,7 +16,7 @@ const base = '/v1/inboxes/{id}/app-passwords',
 export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAccess) {
   const manager = (c: Ctx) => {
     const v = access(c);
-    if (!v.admin || v.mailboxIds)
+    if (!v.admin || v.mailboxIds || c.get('actor')?.role === 'member')
       throw new ApiError(403, 'ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.');
     return v.workspaceId;
   };
@@ -52,8 +52,6 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
         hash = passwordDigest(c.env.config.authSecret, password),
         protocols = [...new Set(q.protocols)];
       const actor = c.get('actor');
-      if (actor?.grantId && (!actor.receivingConsent || !actor.permissions.includes('manage')))
-        throw new ApiError(403, 'PERMISSION_DENIED', 'Explicit receiving consent required.');
       const grant = actor?.grantId ?? null;
       const { rows } = await c.env.db.execute<{ created: string }>(
         sql`WITH allowed AS (UPDATE inbox_state s SET protocol_passwords=protocol_passwords+1, protocol_daily=coalesce(${q.perDay ?? null}::int,protocol_daily),protocol_monthly=coalesce(${q.perMonth ?? null}::int,protocol_monthly) FROM mailboxes b WHERE b.id=s.inbox_id AND b.workspace_id=${wid} AND b.id=${bid} AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND inbox_lock_visible(b.workspace_id,b.id,true) AND protocol_passwords<20 RETURNING s.inbox_id), issued AS (INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) SELECT ${kid},inbox_id,${q.name},${hash},${sql.param(protocols)}::text[] FROM allowed RETURNING id,created_at), bound AS (INSERT INTO mail_grant_objects SELECT ${grant}::text,${wid},'protocol',id FROM issued WHERE ${grant}::text IS NOT NULL) SELECT created_at::text AS created FROM issued`,

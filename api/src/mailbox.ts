@@ -493,7 +493,7 @@ export function registerMailbox(app: App) {
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
   // mailboxRoute and receivingConsentRoute (core.ts) are the rules the MCP listing applies too.
   app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? mailboxAuth(c, next) : next());
-  app.use('/v1/inbound/*', (c, next) => receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
+  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) && receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inbound/*', mailboxCreates);
