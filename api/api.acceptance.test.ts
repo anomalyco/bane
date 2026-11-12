@@ -2343,6 +2343,32 @@ describe('Hosted MCP OAuth and tools', () => {
     return output;
   }
 
+  test('an MCP client name is shown as one short line of visible characters', async t => {
+    await simulatedSesFixture(t, async ({ db, local, request }) => {
+      // Reordering marks, an invisible character, a line break and a control character inside an over-long name.
+      const registered = `Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`;
+      const client = ok(await registerClient(t, db, { client_name: registered }, request), 201);
+      const redirectUri = 'http://127.0.0.1/callback', verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
+      secrets.add(verifier);
+      const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri, scope: writableScope, state: unique('acceptance-mcp-state'),
+        resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
+      const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
+      const consentUrl = new URL(authorization.url, PUBLIC_ORIGIN), oauthQuery = consentUrl.search.slice(1);
+      secrets.add(oauthQuery);
+      const shown = `Desk helper notes ${'x'.repeat(142)}`;
+      assert.equal(shown.length, 160);
+      const consent = await request('GET', `/mcp/consent?${oauthQuery}`, MANAGER, undefined, { accept: 'text/html' });
+      assert.equal(consent.status, 200);
+      const html = String(consent.body);
+      assert.ok(html.includes(`<h1>Allow ${shown} to access Bane?</h1>`), 'The heading names the client on one line.');
+      assert.ok(html.includes(`has not verified "${shown}".`));
+      assert.doesNotMatch(html, /[\u0007\u200B\u202A-\u202E\u2066-\u2069]|x{143}/u);
+      ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
+      const listed = ok(await local('GET', '/v1/mcp-connections')).data.find((row: Json) => row.clientId === client.client_id);
+      assert.equal(listed.name, shown, 'Connections list the same name the approval page showed.');
+    });
+  });
+
   test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
     await simulatedSesFixture(t, async ({ db, request }) => {
       const {token, consentId}=await oauthGrant(t,db,'opensend:read offline_access',request);

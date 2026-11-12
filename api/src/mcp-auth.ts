@@ -331,6 +331,10 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
 }
 
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+// A client registers its own name. Show it as one short line of visible characters: invisible characters and the
+// marks that reorder text are dropped, and line breaks and control characters become one space, so the name reads
+// the same wherever it is shown.
+const clientLabel = (name: string | null | undefined) => [...(name ?? '').replace(/[\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069]/g, '').replace(/[\s\p{Cc}]+/gu, ' ').trim()].slice(0, 160).join('').trim();
 function page(title: string, content: string) {
   const nonce = crypto.randomUUID();
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Bane</title><style nonce="${nonce}">@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}*{box-sizing:border-box;letter-spacing:-0.01em}body{margin:0;background:#fafafa;color:#202020;font:16px/1.5 Inter,Arial,sans-serif;letter-spacing:-0.01em}main{max-width:520px;margin:12vh auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0 0 24px;font-weight:600}p{margin:16px 0}ul{padding-left:22px;margin:20px 0}li{margin:8px 0}.identity{color:#555;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}button{font:inherit;letter-spacing:inherit;padding:10px 18px;border:1px solid #bbb;border-radius:6px;background:transparent;color:inherit;cursor:pointer}button[value=approve],button[value=signin]{background:#202020;color:white;border-color:#202020}button:focus-visible{outline:2px solid #345ad4;outline-offset:3px}small{font-size:14px}.warn{border:1px solid #bbb;border-radius:6px;padding:12px 14px;overflow-wrap:anywhere}a{color:inherit}strong{font-weight:600}</style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`, {
@@ -423,7 +427,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     const [client] = await runtime.db.select({ name: oauthClient.name, disabled: oauthClient.disabled, redirectUris: oauthClient.redirectUris }).from(oauthClient).where(eq(oauthClient.clientId, clientId)).limit(1);
     if (!client || client.disabled) return page('Client unavailable', '<p>This client can no longer connect to Bane.</p>');
     const [workspace] = member ? await runtime.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, member.workspaceId)) : [];
-    const name = client.name?.slice(0, 160) || 'This MCP client';
+    const name = clientLabel(client.name) || 'This MCP client';
     const redirectUri = params.get('redirect_uri') ?? client.redirectUris[0] ?? '';
     let host = redirectUri; try { host = new URL(redirectUri).host || redirectUri; } catch { /* Show the raw value when it is not a URL. */ }
     const hostname = host.replace(/:\d+$/, '');
@@ -452,7 +456,7 @@ export function registerMcpAuth(app: App): void {
     const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
       .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
       .where(and(like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
-    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, scopes: row.scopes.map(canonicalScope).filter(scope => scope !== 'bane:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, name: row.name === null ? null : clientLabel(row.name), scopes: row.scopes.map(canonicalScope).filter(scope => scope !== 'bane:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';
