@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
-import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, ScrollText, Send, Settings, Users } from 'lucide-react'
+import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
@@ -12,6 +12,7 @@ import { useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { StandingBanner } from './StandingBanner'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
@@ -19,12 +20,15 @@ const SidebarScore = score.page(module => module.SidebarScore)
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
-const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']] as const
+type NavItem = readonly [path: string, title: string]
+const navigation: readonly NavItem[] = [['/', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
+// Bane staff (a platform operator role in GET /v1/me) also get the operator console, last.
+const operatorLink: NavItem = ['/operator', 'Operator']
 // Below 900 px the sidebar becomes a top bar (workspace, theme) and a bottom tab bar: the four areas used most, one
 // thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
 // button; the tab bar keeps the main ones visible and says where you are.
 const tabs = ['/', '/logs', '/receiving', '/campaigns']
-const icons: Record<string, ReactNode> = { '/': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings /> }
+const icons: Record<string, ReactNode> = { '/': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings />, '/operator': <ShieldCheck /> }
 const current = (path: string, pathname: string) => path === '/' ? pathname === '/' : pathname === path || pathname.startsWith(`${path}/`)
 export function AppShell() {
   const api = useApi()
@@ -124,7 +128,7 @@ export function AppShell() {
     const preferred = regions.data?.defaultRegion
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
-  useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
+  useEffect(() => { document.title = `${[...navigation, operatorLink].find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
@@ -137,7 +141,7 @@ export function AppShell() {
       }
     }
   }
-  const links = navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path))
+  const links = [...navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)), ...session?.identity?.operator ? [operatorLink] : []]
   const context = <>
     {access.multiTenant && <WorkspaceSwitcher />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
@@ -154,6 +158,7 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
   </>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
+    <StandingBanner />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
       {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
         : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />
@@ -187,7 +192,7 @@ export function AppShell() {
 // The tab bar and its More sheet. More opens as a history entry of its own, so Back (or a swipe back) closes it
 // instead of leaving the page; a page picked in it replaces that entry, so Back from there returns to the page below.
 const issued = new Set<string>()
-function TabBar({ links, intent, footer }: { links: (typeof navigation)[number][]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode }) {
+function TabBar({ links, intent, footer }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode }) {
   const location = useLocation(), navigate = useNavigate()
   // Only an entry opened in this visit counts: a reload on it shows the page, not a stale sheet.
   const token = (location.state as { more?: string } | null)?.more

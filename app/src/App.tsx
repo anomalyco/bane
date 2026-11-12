@@ -17,6 +17,7 @@ const audience = chunk(() => import('./features/audience'))
 const settings = chunk(() => import('./features/settings'))
 const docs = chunk(() => import('./features/docs'))
 const inbound = chunk(() => import('./features/inbound'))
+const operator = chunk(() => import('./features/operator'))
 const loadOnboarding = onboarding.preload
 const loadOverview = overview.preload
 const loadLogs = logs.preload
@@ -25,7 +26,8 @@ const loadAudience = audience.preload
 const loadSettings = settings.preload
 const loadDocs = docs.preload
 const loadInbound = inbound.preload
-Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs })
+const loadOperator = operator.preload
+Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator })
 const LogsPage = logs.page(m => m.LogsPage)
 const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
@@ -59,6 +61,8 @@ const LegacyMailboxRedirect = inbound.page(m => m.LegacyMailboxRedirect)
 const LegacyMailboxWebhooksRedirect = inbound.page(m => m.LegacyMailboxWebhooksRedirect)
 const LegacyMailboxWebhookRedirect = inbound.page(m => m.LegacyMailboxWebhookRedirect)
 const OverviewPage = overview.page(m => m.OverviewPage)
+const OperatorPage = operator.page(m => m.OperatorPage)
+const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
 const OnboardingPage = onboarding.page(m => m.OnboardingPage)
 
 // Preload the first screen's code alongside /v1/me. A workspace that may need onboarding waits instead.
@@ -77,6 +81,7 @@ else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialP
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
 else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
 else if (['/receiving', '/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
+else if (initialPath.startsWith('/operator')) loadOperator().catch(noop)
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
@@ -127,6 +132,7 @@ export function App() {
     <Route path="segments" element={<Moved to={() => '/audience/segments'} />} /><Route path="segments/:id" element={<Moved to={params => `/audience/segments/${id(params)}`} />} />
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} />
     <Route path="developer" element={<Moved to={() => '/docs'} />} />
+    <Route path="operator" element={<OperatorPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>
 }

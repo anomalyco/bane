@@ -140,7 +140,7 @@ export function createLiveApi(): BaneApi {
       updateAutoValidation: (region, stream, mode, signal) => call(`/regions/${idPath(region)}/auto-validation`, 'PUT', { stream, mode, confirm: true }, signal),
     },
     workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
-    senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal) },
+    senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal), release: (input, signal) => call<SenderScore>('/sender-score/release', 'POST', input, signal) },
     overview: { get: async (input, signal) => {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
       const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
