@@ -3061,6 +3061,8 @@ describe('Hosted MCP OAuth and tools', () => {
       await deliver(hidden,[b.id],'billing-private-needle',new Date(Date.now()+2000).toISOString());
       assert.equal((await success('listInboundThreads',{q:'invoice'})).data.length,1);
       const support=ok(await get(path,h));assert.deepEqual(support.messages.map((m:Json)=>m.id),[first.id,shared]);assert.equal(support.snippet,'Shared invoice');assert.deepEqual(support.addressIds,[a.id]);assert.ok(!JSON.stringify(support).includes(hidden));
+      // A conversation names who wrote its newest visible message, in the list and the thread alike.
+      assert.deepEqual(support.from,{name:null,address:'sender@example.net'});assert.deepEqual(ok(await get('/threads',h)).data.find((t:Json)=>t.id===threadId).from,{name:null,address:'sender@example.net'});
       assert.deepEqual(ok(await get('/threads?q=billing-private-needle',h)).data,[]);error(await get(`/messages/${hidden}`,h),404);error(await post(`${path}/reply`,{replyToMessageId:hidden,text:'hidden'},h),404);
       assert.equal((await success('getInboundMessage',{messageId:shared})).text,'Shared invoice');
       assert.deepEqual(ok(await get('/messages?q=billing-private-needle',h)).data,[]);

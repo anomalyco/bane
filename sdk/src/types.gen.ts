@@ -2707,6 +2707,13 @@ export type InboundThread = {
     subject: string;
     snippet: string;
     lastMessageAt: string;
+    /**
+     * Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address.
+     */
+    from: {
+        name: string | null;
+        address: string;
+    };
     addressIds: Array<string>;
     /**
      * Distinct messages visible within the requested address scope.

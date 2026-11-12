@@ -131,7 +131,8 @@ export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
 export interface InboundAddressPatch { displayName?: string | null; aliases?: string[] }
 export type InboundThreadView = MailboxThreadView
-export interface InboundThread { id: string; subject: string; snippet: string; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
+/** from: the newest visible message's sender (absent on older API responses). */
+export interface InboundThread { id: string; subject: string; snippet: string; from?: MailAddress; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
 export interface InboundMessage {
   id: string; threadId: string; addressIds: string[]; direction: 'inbound' | 'outbound'; status: string
   from: MailAddress; to: MailAddress[]; cc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string

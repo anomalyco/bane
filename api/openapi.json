@@ -9623,6 +9623,25 @@
           "lastMessageAt": {
             "type": "string"
           },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ],
+            "description": "Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address."
+          },
           "addressIds": {
             "type": "array",
             "items": {
@@ -9639,6 +9658,7 @@
           "subject",
           "snippet",
           "lastMessageAt",
+          "from",
           "addressIds",
           "messageCount"
         ]
