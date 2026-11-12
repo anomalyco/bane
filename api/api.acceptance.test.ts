@@ -1036,7 +1036,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const [first, simultaneous] = await Promise.all([local('GET', '/v1/workspaces', undefined, cookie), local('GET', '/v1/workspaces', undefined, cookie)]);
         const memberships = ok(first).data; assert.deepEqual(ok(simultaneous).data, memberships);
         assert.equal(memberships.length, 1); const [org] = memberships; workspaces.push(org.id);
-        assert.equal(org.role, 'owner'); assert.equal(org.name, "Mock provider identity's Organization"); assert.notEqual(org.id, 'default');
+        assert.equal(org.role, 'owner'); assert.equal(org.name, "Mock provider identity's workspace"); assert.notEqual(org.id, 'default');
         return { cookie, org };
       };
       const a = await newOwner(ownerEmail);
@@ -4547,15 +4547,17 @@ describe('Dashboard API capabilities', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId;
       // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs.
-      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; from?: string; daysAgo?: number } = {}) => db.query(
+      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; from?: string; daysAgo?: number; to?: string[] } = {}) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
-         SELECT $1 || n, $2, $3, 'fixture', $4, '["recipient@example.com"]', '[]', '[]', 'Score fixture', '{}', $5, $6::text, CASE WHEN $6::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $7, $8, date_trunc('day', now(), 'UTC') - make_interval(days => $10::int) + make_interval(secs => n)
+         SELECT $1 || n, $2, $3, 'fixture', $4, $11::jsonb, '[]', '[]', 'Score fixture', '{}', $5, $6::text, CASE WHEN $6::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $7, $8, date_trunc('day', now(), 'UTC') - make_interval(days => $10::int) + make_interval(secs => n)
          FROM generate_series(1, $9::int) n`,
-        [unique('score-'), wid, REGION, options.from ?? 'Sender <hello@score.example>', options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0]);
+        [unique('score-'), wid, REGION, options.from ?? 'Sender <hello@score.example>', options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, JSON.stringify(options.to ?? ['recipient@example.com'])]);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
       const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
-      // Simulated mail never counts; 99 real emails (5 three days ago, 5 two days ago) are still warming up, with no score, grade or history.
+      // Simulated mail never counts, and neither does mail only to the SES mailbox simulator, even its test bounces;
+      // 99 real emails (5 three days ago, 5 two days ago) are still warming up, with no score, grade or history.
       await insert(500, { simulated: true }); await insert(5, { daysAgo: 3 }); await insert(5, { daysAgo: 2 }); await insert(89);
+      await insert(150, { status: 'bounced', outcomes: 5, to: ['bounce@simulator.amazonses.com'] }); await insert(50, { to: ['success@simulator.amazonses.com', 'SUCCESS@Simulator.AmazonSES.com'] });
       const warm = await read();
       assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history], ['warmup', 99, 100, null, null, []]);
       // Self-hosted has no stored domain records and no hosted screen: both are neutral and drop out of the weighting.
@@ -4594,6 +4596,11 @@ describe('Dashboard API capabilities', () => {
       assert.equal(error(await request('GET', '/v1/sender-score', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
       const dashboard = await local('GET', '/v1/sender-score'), again = await local('GET', '/v1/sender-score');
       assert.deepEqual([dashboard.status, dashboard.headers.get('x-bane-sender-score-cache'), again.headers.get('x-bane-sender-score-cache')], [200, 'miss', 'hit']);
+      // A new email changes the workspace's activity, so the next dashboard read is computed again rather than served stale.
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', now())`, [unique('score-late-'), wid, REGION]);
+      const fresh = await local('GET', '/v1/sender-score');
+      assert.deepEqual([fresh.status, fresh.headers.get('x-bane-sender-score-cache'), fresh.body.emails.last30Days], [200, 'miss', 601]);
     });
   });
 
@@ -4632,6 +4639,13 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(ids(await list('direction=received')), [r2, r1]);
       const bounced = await list('status=bounced'); assert.deepEqual([ids(bounced), bounced.received], [[s2], false]);
       assert.equal(error(await local('GET', '/v1/logs?direction=received&status=bounced'), 422).code, 'VALIDATION_FAILED');
+      // received and spam filter received mail by the spam verdict and leave sent mail out, under All and Received alike.
+      for (const direction of ['all', 'received']) {
+        const clean = await list(`direction=${direction}&status=received`), junk = await list(`direction=${direction}&status=spam`);
+        assert.deepEqual([ids(clean), clean.received, ids(junk), junk.received], [[r1], true, [r2], true]);
+      }
+      assert.equal(error(await local('GET', '/v1/logs?direction=sent&status=spam'), 422).code, 'VALIDATION_FAILED');
+      assert.equal(error(await local('GET', '/v1/logs?status=received&kind=marketing'), 422).code, 'VALIDATION_FAILED');
       assert.deepEqual(ids(await list('search=reply')), [r1]); assert.deepEqual(ids(await list('search=Logs')), [s2, r2, r1, s1]);
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
@@ -4639,8 +4653,10 @@ describe('Dashboard API capabilities', () => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
       const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
       await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
-      const member = await list('limit=10');
+      const member = await list('limit=10'), memberSpam = await list('status=spam'), memberClean = await list('status=received');
       await db.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId, role]);
+      // Members never see the spam verdict, so for them nothing is spam and every message they can read is received.
+      assert.deepEqual([ids(memberSpam), ids(memberClean)], [[], [r1]]);
       assert.deepEqual([ids(member), member.received], [[s2, r1, s1], true]);
       const memberReceived = member.data.find((row: Json) => row.id === r1);
       assert.deepEqual([memberReceived.envelopeTo, memberReceived.region, memberReceived.status], [null, null, 'received']);
@@ -5306,9 +5322,12 @@ describe('Operational configuration and public event boundaries', () => {
     assert.deepEqual(updated.regions, [REGION]);
     const metadata = ok(await http('GET', `/v1/webhooks/${endpoint.id}`, reader.secret));
     assert.equal(metadata.description, 'Acceptance metadata');
-    for (const item of [endpoint, metadata, ...(await allPages('/v1/webhooks', reader.secret))]) {
+    // Only the create response carries the signing secret (once, like an API key); every read leaves it out.
+    assert.equal(endpoint.secret, firstSecret, 'createWebhook returns the signing secret once.');
+    for (const item of [metadata, ...(await allPages('/v1/webhooks', reader.secret))]) {
       for (const field of ['secret', 'encryptedSecret', 'signingSecret', 'signingKey']) assert.equal(item[field], undefined, `Ordinary webhook metadata must not contain ${field}.`);
     }
+    for (const field of ['encryptedSecret', 'signingSecret', 'signingKey']) assert.equal(endpoint[field], undefined, `The created webhook must not contain ${field}.`);
     ok(await http('GET', `/v1/webhooks/${endpoint.id}`, live.secret));
     assert.equal(page(await http('GET', `/v1/webhooks/${endpoint.id}/deliveries`, key.secret)).length, 0);
     assert.equal(ok(await http('DELETE', `/v1/webhooks/${endpoint.id}`, key.secret)).deleted, true);
@@ -5560,6 +5579,9 @@ describe('Operational configuration and public event boundaries', () => {
         const logs = ['info','warn','error'].map(level => t.mock.method(console, level as 'info' | 'warn' | 'error', () => {}));
         const endpoint = ok(await local('POST', '/v1/webhooks', { url: webhookUrl, paused: true, headers: [{ name: 'Authorization', value: auth }] }), 201);
         const path = `/v1/webhooks/${endpoint.id}`, secret = ok(await local('GET', path + '/secret')).secret;
+        // The new endpoint returns its signing secret once, the same one revealWebhookSecret reads; reads never include it.
+        assert.match(endpoint.secret, /^whsec_[A-Za-z0-9+/]{43}=$/); assert.equal(endpoint.secret, secret);
+        assert.equal(ok(await local('GET', path)).secret, undefined);
         function checkCallback(index: number, value: string | undefined, synthetic: boolean) {
           const { headers, body } = callbacks[index];
           assert.equal(headers.authorization, value); assert.equal(headers['content-type'], 'application/json');
@@ -7699,6 +7721,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'limits.example', from = `sender@${domain}`;
+      error(await local('GET','/v1/usage'),404,'NOT_FOUND'); // Plan & usage is hosted only.
       Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
       const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending]);
       await assert.rejects(limits('100', 'default'), /No Hosted connection/);
@@ -7724,8 +7747,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // The same limit is visible before a send hits it.
       const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
       assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
+      // Plan & usage shows the same limit, the step it is on and the steps above it, with pricing as information only.
+      const usage = ok(await request('GET','/v1/usage',key));
+      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: false }, { currency: 'USD', perThousand: 0.2, freeSent: 3000, freeReceived: 3000 }, false]);
+      assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [100, limit.used, 0, [100, 1000, 10000]]);
+      assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
       error(await send(simulator),429,'SEND_LIMIT_REACHED');
       await limits('11001','10001');
+      // An operator's custom limit is on no step.
+      assert.deepEqual([ok(await request('GET','/v1/usage',key)).daily.cap, ok(await request('GET','/v1/usage',key)).daily.step], [11001, null]);
       error(await request('POST','/v1/connection',key,{kind:'shared',sendCapOverride:99999,pendingCapOverride:99999}),422,'VALIDATION_FAILED');
       error(await request('POST','/v1/connection',key,{kind:'shared'}),403,'PERMISSION_DENIED');
       ok(await send(),202);

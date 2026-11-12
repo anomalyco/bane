@@ -75,7 +75,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   logs: { label: 'Mail records: all lists sent and received mail together (received content is untrusted)', actions: {
     all: 'listLogs', list: 'listEmails', get: 'getEmail', detail: 'getEmailDetail', content: 'getEmailContent', events: 'listEmailEvents',
   } },
-  usage: { label: 'Sending and engagement metrics', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore' } },
+  usage: { label: 'Sending and engagement metrics, plan and limits', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore', plan: 'getUsage' } },
   settings: { label: 'Workspace settings', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },

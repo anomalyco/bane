@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { cachedDashboardRead } from './dashboard-cache.js';
+import { cachedDashboardRead, mailActivity } from './dashboard-cache.js';
 import { actor, ApiError, errors, response, security, type App, type Runtime } from './core.js';
 
 // Sender score: a per-workspace reputation grade from the workspace's own sending, computed on request from one SQL
@@ -11,7 +11,11 @@ import { actor, ApiError, errors, response, security, type App, type Runtime } f
 //   raw           R = Σ weight·s ÷ Σ weight, over measured factors (neutral factors drop out and the rest re-weigh)
 //   target        T = (n·R + 400·75) ÷ (n + 400), n = non-simulated emails in the 30 days to that day
 //   score         starts at 75 fourteen days ago; each day moves towards that day's T by at most +2 or −15
-//   grade         none until the workspace's first 100 non-simulated emails; then A+ ≥ 95, A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F
+//   grade         none until the workspace's first 100 real emails; then A+ ≥ 95, A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F
+//
+// Real email: not simulated by the installation, and addressed to at least one recipient outside the SES mailbox
+// simulator (…@simulator.amazonses.com). Simulator feedback is test traffic, not reputation evidence: a test bounce
+// must not lower the score, and test sends must not count towards the first 100. (They still use the daily limit.)
 
 export const WARMUP_EMAILS = 100;
 const PRIOR = 75, CONFIDENCE = 400, MAX_RISE = 2, MAX_FALL = 15, WINDOW_DAYS = 30, HISTORY_DAYS = 14, SPIKE_FLOOR = 20;
@@ -39,8 +43,8 @@ const FactorSchema = z.object({
   basis: z.string(),
 }).openapi('SenderScoreFactor');
 const SenderScoreSchema = z.object({
-  state: z.enum(['warmup', 'graded']).describe('warmup until the workspace has sent its first 100 non-simulated emails.'),
-  emails: z.object({ firstEmails: z.number().int().describe('Non-simulated emails ever created, counted up to 100.'), last30Days: z.number().int() }),
+  state: z.enum(['warmup', 'graded']).describe('warmup until the workspace has sent its first 100 real emails: not simulated, and to at least one recipient outside the SES mailbox simulator.'),
+  emails: z.object({ firstEmails: z.number().int().describe('Real emails ever created, counted up to 100. Simulated sends and emails only to …@simulator.amazonses.com are left out.'), last30Days: z.number().int().describe('Real emails created in the 30 days to today.') }),
   needed: z.number().int().describe('Emails before the first grade (100).'),
   score: z.number().nullable().describe('0–100, one decimal; null while warming up.'),
   grade: z.enum(GRADES).nullable(),
@@ -143,6 +147,7 @@ async function loadInputs(runtime: Runtime, workspaceId: string, now: Date): Pro
       SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, created_at, status, error_code, event_outcomes, provider_id,
         lower(substring(from_address from '@([A-Za-z0-9.-]+)')) AS domain
       FROM sending_emails WHERE workspace_id = ${workspaceId} AND NOT simulated AND created_at >= ${since}::timestamptz
+        AND hosted_real_cost(to_addresses || cc_addresses || bcc_addresses) > 0
     ), days AS (
       SELECT day, count(*)::int AS emails,
         count(*) FILTER (WHERE status <> 'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
@@ -156,7 +161,8 @@ async function loadInputs(runtime: Runtime, workspaceId: string, now: Date): Pro
     SELECT
       (SELECT coalesce(json_agg(days ORDER BY day), '[]'::json) FROM days) AS days,
       (SELECT coalesce(json_agg(json_build_object('domain', domain, 'emails', n)), '[]'::json) FROM (SELECT domain, count(*)::int AS n FROM mail WHERE created_at >= ${recent}::timestamptz AND domain IS NOT NULL GROUP BY domain) s) AS senders,
-      (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id = ${workspaceId} AND NOT simulated LIMIT ${WARMUP_EMAILS}) f) AS first_emails,
+      (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id = ${workspaceId} AND NOT simulated
+        AND hosted_real_cost(to_addresses || cc_addresses || bcc_addresses) > 0 LIMIT ${WARMUP_EMAILS}) f) AS first_emails,
       (SELECT kind FROM provider_connections WHERE workspace_id = ${workspaceId}) AS kind,
       (SELECT coalesce(json_agg(json_build_object('name', name,
         'dkim', identity #>> '{ses,DkimAttributes,Status}' = 'SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}' = 'true',
@@ -173,13 +179,13 @@ async function loadInputs(runtime: Runtime, workspaceId: string, now: Date): Pro
 export async function protocolScoreCap(runtime:Runtime,w:string){const now=new Date();const grade=computeSenderScore(await loadInputs(runtime,w,now),now).grade;return grade===null?200:({'A+':2000,A:2000,B:1000,C:300,D:100,F:50})[grade];}
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
-    description: 'The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 non-simulated emails. The score moves at most +2 or −15 a day towards its target. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.',
+    description: 'The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 real emails: simulated sends and emails only to the SES mailbox simulator (…@simulator.amazonses.com) never count. The score starts at 75 and moves at most +2 or −15 a day towards its target. Dashboard sessions may receive a cached result until the workspace sends or records an email event, or for up to 60 seconds; API keys, MCP and agent tokens get fresh results. Workspace-wide: keys restricted to domains get 403.',
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
     const compute = async () => { const now = new Date(); return computeSenderScore(await loadInputs(c.env, a.workspaceId, now), now); };
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
-    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, Math.floor(Date.now() / 60_000)].join('|'), compute);
+    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, Math.floor(Date.now() / 60_000), await mailActivity(c.env, a.workspaceId)].join('|'), compute);
     c.header('x-bane-sender-score-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value, 200);
   });

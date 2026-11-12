@@ -1,6 +1,16 @@
-import { digest } from './core.js';
+import { sql } from 'drizzle-orm';
+import { digest, type Runtime } from './core.js';
 
 const TTL_SECONDS = 60;
+// The newest email and the newest email event in a workspace, as one cache-key part: a dashboard read cached before
+// the latest send or delivery is never served after it, so Overview's figures agree with Logs on the next read. Two
+// index probes (sending_emails_created_page, operation_events_metrics); quiet workspaces keep hitting the cache.
+export async function mailActivity(runtime: Pick<Runtime, 'db'>, workspaceId: string): Promise<string> {
+  const { rows: [row] } = await runtime.db.execute<{ emails: string | null; events: string | null }>(sql`SELECT
+    (SELECT max(created_at) FROM sending_emails WHERE workspace_id = ${workspaceId})::text AS emails,
+    (SELECT max(created_at) FROM operation_events WHERE workspace_id = ${workspaceId})::text AS events`);
+  return `${row?.emails ?? ''}/${row?.events ?? ''}`;
+}
 const memoryCache = new Map<string, { expires: number; value: unknown }>();
 const inflight = new Map<string, Promise<unknown>>();
 // Per-isolate memory first, then the colo-wide Workers Cache API when present (absent on Node).

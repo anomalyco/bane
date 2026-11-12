@@ -120,6 +120,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `unsubscribeOneClick` | Recipient one-click unsubscribe; never an agent call. |
 | `getMetrics` | `usage` · `metrics` · sending |
 | `getSenderScore` | `usage` · `senderScore` · sending |
+| `getUsage` | `usage` · `plan` · sending |
 | `listRegions` | `regions` · `list` · admin |
 | `configureRegion` | `regions` · `configure` · admin |
 | `discoverRegion` | `regions` · `discover` · admin |
