@@ -807,6 +807,21 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
             "A store +seen loud 1",
         ],
     ),
+    // A reconnect whose SELECT failed kept LOGIN's folder list (from the 5 s login cache, older
+    // than Work): APPEND to Work answered NO [TRYCREATE]. Now the next command refreshes first.
+    (
+        "remote",
+        &[
+            "B idle",
+            "fail-snapshot",
+            "hint",
+            "B wake",
+            "A create Work",
+            "fail-snapshot",
+            "B reconnect",
+            "B append Work",
+        ],
+    ),
     // Model: a slot left unfetchable in INBOX is not blind in the next selection (EXAMINE
     // Archive, whose UID 1 is another message).
     (

@@ -33,6 +33,10 @@ pub struct FolderMeta {
 pub struct Principal {
     #[serde(skip)]
     started: Option<Instant>,
+    /// Served from the 5 s login cache: its folder list can predate a folder another
+    /// connection created since.
+    #[serde(skip)]
+    cached: bool,
     pub kid: String,
     pub inbox: String,
     workspace: String,
@@ -266,6 +270,7 @@ impl Api {
         {
             let mut cached = v.clone();
             cached.started = started;
+            cached.cached = true;
             return Ok(cached);
         }
         let mut principal: Principal = serde_json::from_slice(
@@ -354,7 +359,8 @@ pub struct Store {
     selected: Option<String>,
     pub stamp: Instant,
     checkpoint: Option<(u32, u64)>,
-    /// A committed change whose refresh failed: the next command refreshes first.
+    /// The snapshot may be behind the API (a committed change whose refresh failed, a
+    /// failed SELECT, a cached login): the next command refreshes first.
     dirty: bool,
     pub deadline: Instant,
 }
@@ -366,6 +372,7 @@ impl Store {
     }
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
+        let cached = p.cached;
         let (lanes, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
             gates.retain(|_, v| {
@@ -421,7 +428,10 @@ impl Store {
             selected: None,
             stamp: Instant::now(),
             checkpoint: None,
-            dirty: false,
+            // A cached login's folder list may be behind: the first command other than
+            // SELECT/EXAMINE refreshes it, so APPEND or COPY to a folder created since
+            // doesn't answer TRYCREATE.
+            dirty: cached,
             deadline: Instant::now() + Duration::from_secs(5),
         };
         s.install(meta);
@@ -760,7 +770,11 @@ impl MailStore for Store {
         // RFC SELECT deselects the old mailbox even if the new selection fails.
         self.clear_selection();
         self.selected = Some(path.into());
-        let result = self.refresh().and_then(|()| self.folder(path).map(|_| ()));
+        let refreshed = self.refresh();
+        // The folder list stays whatever the last snapshot said; don't trust it for the
+        // next command (APPEND to a folder created since would answer TRYCREATE).
+        self.dirty |= refreshed.is_err();
+        let result = refreshed.and_then(|()| self.folder(path).map(|_| ()));
         if result.is_err() {
             self.clear_selection();
         }
@@ -1102,6 +1116,7 @@ mod auth_tests {
                     addresses: vec![],
                     folders: vec![],
                     started: None,
+                    cached: false,
                 },
             )
             .unwrap()
@@ -1194,6 +1209,13 @@ mod tests {
                    {"key":"archive","path":"Archive","validity":4,"next":2,"highest":3,"subscribed":true,"total":1,"unseen":1}])
         };
         match p["op"].as_str() {
+            // The login's folder list predates Archive; snapshots list it.
+            Some("login") => (
+                200,
+                json!({"kid":"kid_test","inbox":"box_test","workspace":"ws_test","addresses":[],
+                       "folders":[meta(2, 2)[0].clone()]})
+                .to_string(),
+            ),
             Some("snapshot") => {
                 script.snapshots.fetch_add(1, Ordering::SeqCst);
                 if script.down.load(Ordering::SeqCst) {
@@ -1329,6 +1351,74 @@ mod tests {
         assert!(r.bytes.ends_with(b"a OK Completed\r\n"));
         assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
         assert_eq!(store.folder("Archive").unwrap().next, 2);
+    }
+
+    /// Found by gateway/tear (witness: B idle, fail-snapshot, hint, B wake, A create Work,
+    /// fail-snapshot, B reconnect, B append Work). A login served from the 5 s cache carries
+    /// the folder list of an earlier login, and a failed SELECT keeps whatever list the
+    /// store had: an APPEND to a folder created since answered NO [TRYCREATE]. Now the next
+    /// command other than SELECT refreshes first.
+    #[test]
+    fn a_cached_login_or_failed_select_refreshes_before_the_next_command() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
+        });
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        api.online.store(true, Ordering::Release);
+        let proto = mailgw_core::session::Protocol::Imap;
+        assert!(!api.login("u@example.invalid", "pw", proto).unwrap().cached);
+        let p = api.login("u@example.invalid", "pw", proto).unwrap();
+        assert!(p.cached);
+        let mut store = Store::new(api, p).unwrap();
+        assert!(store.folder("Archive").is_err());
+
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let mut stale = false;
+        let mut run = |store: &mut Store, line: &[u8]| {
+            let r = store
+                .imap(
+                    &mut core,
+                    line,
+                    &account,
+                    &mut stale,
+                    store::Date::default(),
+                )
+                .unwrap();
+            String::from_utf8_lossy(&r.bytes).into_owned()
+        };
+        let text = run(&mut store, b"a STATUS Archive (MESSAGES)\r\n");
+        assert!(text.contains("* STATUS \"Archive\" (MESSAGES 1)"), "{text}");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), 1);
+        assert_eq!(run(&mut store, b"b NOOP\r\n"), "b OK Completed\r\n");
+        assert_eq!(
+            script.snapshots.load(Ordering::SeqCst),
+            1,
+            "fresh: no refresh"
+        );
+
+        // A failed SELECT: the next command refreshes first.
+        script.down.store(true, Ordering::SeqCst);
+        assert!(run(&mut store, b"c SELECT INBOX\r\n").starts_with("c NO"));
+        script.down.store(false, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        assert_eq!(run(&mut store, b"d NOOP\r\n"), "d OK Completed\r\n");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
     }
 
     /// Large STORE/COPY/EXPUNGE sets run in 1,000-UID batches inside one command, each its own

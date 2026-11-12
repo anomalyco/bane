@@ -72,6 +72,7 @@ transcript (synthetic or redacted, never real mail) replays with `transcript FIL
 | A refused APPEND (TRYCREATE) kept its spool and upload reservation; the credential's next APPEND could not get one | 3 steps | Release APPEND spool when command handling refuses its destination (upstream, concurrently); Test that a refused APPEND releases its upload reservation |
 | A command whose update found the selected folder deleted sent `* BYE`, then a tagged OK, and kept the connection open | 4 steps | Close the session after a command whose update finds the folder gone |
 | SMTP: a clock stepping back across midnight reopened the Memory sink's day and month caps | 13 steps | Keep SMTP cap windows from moving backwards on a clock step |
+| A login served from the 5 s cache, or a failed SELECT, kept a folder list older than another connection's CREATE: APPEND to the new folder answered `NO [TRYCREATE]` | 8 steps | Refresh before the next command after a cached login or a failed SELECT |
 | `STORE 1:*`/`COPY 1:*` over 1,000 UIDs answered `NO [LIMIT]` ("mark all read", "select all → delete", "empty Trash"), and a plain EXPUNGE expunged a whole folder in one statement | 5 steps (`--bulk`) | Run large protocol mutations in 1,000-UID batches inside one command; Refresh each thread once per protocol mutation batch |
 
 ## Documented differences and limits

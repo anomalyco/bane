@@ -1281,6 +1281,9 @@ impl Model {
                         k.since = 0;
                     }
                     if self.reload(s).is_err() {
+                        // The folder list stays as the last snapshot left it; the next
+                        // command refreshes first.
+                        self.sessions[s].stale = true;
                         out.ok = false;
                         return self.finish(cfg, out, &before, &gens);
                     }
@@ -1740,7 +1743,11 @@ impl Model {
                         folder: Some(0),
                     });
                     if self.reload(s).is_err() {
+                        // LOGIN succeeded, SELECT INBOX did not: the gateway's folder list
+                        // is whatever LOGIN (possibly its cache) said; the next command
+                        // refreshes first.
                         self.sessions[s].sel = None;
+                        self.sessions[s].stale = true;
                         out.ok = false;
                         return self.finish(cfg, out, &before, &gens);
                     }
