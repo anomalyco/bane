@@ -234,7 +234,7 @@ async function workspaceReads() {
 }
 async function devBoundaries() {
   // Gateway operations are private, not SDK operations. A public runner must never have its signer.
-  for (const op of ['subject','snapshot','body','append']) {
+  for (const op of ['subject','snapshot','body','append','projections']) {
     const response=await fetch(new URL('/internal/v1/mail',base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(12000),body:JSON.stringify({op})});
     check(response.status===403,`unsigned protocol ${op} must be denied`);
   }

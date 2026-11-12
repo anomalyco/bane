@@ -736,7 +736,10 @@ def large_folder(tmp):
         INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle,size_bytes,raw_bucket,raw_key) SELECT 'bench-'||i,workspace_id,thread_id,'inbound','kept',size_bytes,raw_bucket,'k/default/bench-'||i||'.eml' FROM sample,generate_series(2,50001)i;
         INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,modseq) SELECT inbox_id,'bench-'||i,workspace_id,thread_id,'inbound',true,internal_date,modseq FROM sample,generate_series(2,50001)i;
         INSERT INTO inbox_entries SELECT inbox_id,role,i,'bench-'||i,modseq,false,internal_date FROM sample,generate_series(2,50001)i;
+        INSERT INTO mailgw_previews SELECT m.id,m.raw_key,v.prefix,v.complete FROM sample JOIN mailgw_previews v ON v.mid=sample.message_id CROSS JOIN mail_messages m WHERE m.id LIKE 'bench-%';
         UPDATE inbox_folders SET total=50001,uid_next=50002 WHERE custom_path='Capacity';COMMIT;""",'fixture_observer')
+        sql('ANALYZE inbox_entries; ANALYZE mailbox_messages; ANALYZE mail_messages; ANALYZE mailgw_previews','fixture_observer')
+        c.sock.settimeout(25)
         rss=lambda:int(run(['ps','-p',str(pid),'-o','rss=']).strip())
         base=rss();start=time.perf_counter();assert ok(c.select('Capacity'))==[b'50001'];cold=time.perf_counter()-start;delta=rss()-base
         samples=[]
@@ -744,6 +747,13 @@ def large_folder(tmp):
             start=time.perf_counter();assert ok(c.uid('SEARCH',None,'UNSEEN'))==[b'1'];ok(c.uid('FETCH','50001','(UID FLAGS RFC822.SIZE)'));samples.append((time.perf_counter()-start)*1000)
         p95=sorted(samples)[18];print(f'CAPACITY 50001 entries, SELECT {cold:.3f}s, selected RSS delta {delta/1024:.1f} MiB, p95 SEARCH+FETCH {p95:.1f}ms',flush=True)
         assert cold<5 and delta<96*1024 and p95<250, 'capacity budget exceeded'
+        for name,op,count in [
+            ('header sync',lambda:sum(isinstance(v,tuple) and b'From: alias@example.invalid' in v[1] for v in ok(c.uid('FETCH','1:*','(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])'))),50001),
+            ('compound',lambda:len(ok(c.uid('SEARCH',None,'OR','FROM','alias','SUBJECT','none'))[0].split()),50001),
+            ('filtered',lambda:len(ok(c.uid('SEARCH',None,'UNSEEN','SUBJECT','caf'))[0].split()),1),
+            ('text',lambda:len(ok(c.uid('SEARCH',None,'TEXT','dot'))[0].split()),50001),
+        ]:
+            start=time.perf_counter();assert op()==count,name;elapsed=time.perf_counter()-start;print(f'50k {name}: {elapsed:.2f}s',flush=True);assert elapsed<12
         # Two other active inboxes select ordinary large folders and read metadata
         # concurrently. Assert both the measured footprint and the victim's latency.
         with contextlib.ExitStack() as clients,ThreadPoolExecutor(max_workers=2) as pool:

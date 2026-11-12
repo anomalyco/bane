@@ -63,7 +63,13 @@ const submit = z.object({
   to: z.array(z.email()).min(1).max(50),
   content: z.string().max(22369624),
 });
-const rpc = z.discriminatedUnion('op', [login, read, edit, mutate, body, subjectSearch, submit]);
+const projections = z.object({
+  op: z.literal('projections'),
+  kid: token,
+  folder: name,
+  uids: z.array(z.number().int().positive()).min(1).max(256),
+});
+const rpc = z.discriminatedUnion('op', [login, read, edit, mutate, body, subjectSearch, submit, projections]);
 const mac = (key: string, value: string) => createHmac('sha256', key).update(value).digest('hex');
 function equal(a: string, b: string) {
   return /^[a-f0-9]{64}$/.test(a) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -133,11 +139,12 @@ export function registerMailGateway(app: App) {
       );
       if (!stream) throw new ApiError(404, 'MISSING_BODY', 'Body unavailable.');
       if (p.headers && v.header === null) {
-        const bytes=Buffer.from(await readMailBytes(stream,length,65536));
-        const end=bytes.indexOf('\r\n\r\n');
-        if (end<0 && v.size>length && !bytes.subarray(0,2).equals(Buffer.from('\r\n'))) throw new ApiError(413,'HEADER_LIMIT','Header too large.');
-        const n=bytes.subarray(0,2).equals(Buffer.from('\r\n'))?2:end<0?length:end+4;
-        return new Response(bytes.subarray(0,n),{headers:{'content-type':'application/octet-stream'}});
+        const bytes = Buffer.from(await readMailBytes(stream, length, 65536));
+        const end = bytes.indexOf('\r\n\r\n');
+        if (end < 0 && v.size > length && !bytes.subarray(0, 2).equals(Buffer.from('\r\n')))
+          throw new ApiError(413, 'HEADER_LIMIT', 'Header too large.');
+        const n = bytes.subarray(0, 2).equals(Buffer.from('\r\n')) ? 2 : end < 0 ? length : end + 4;
+        return new Response(bytes.subarray(0, n), { headers: { 'content-type': 'application/octet-stream' } });
       }
       return new Response(stream, { headers: { 'content-type': 'application/octet-stream' } });
     }
@@ -146,6 +153,16 @@ export function registerMailGateway(app: App) {
       return c.json(await contentWrite(c, p));
     }
     const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
+    if (p.op === 'projections') {
+      const { previewPage } = await import('./protocol-preview.js');
+      const row = (
+        await runtime.db.execute<{ w: string; items: Parameters<typeof previewPage>[2] }>(
+          sql`WITH a AS (${auth}) SELECT a.w,ARRAY(SELECT jsonb_build_object('uid',e.uid,'mid',m.id,'key',m.raw_key,'bucket',m.raw_bucket,'region',m.region,'size',m.size_bytes,'header',m.mime->'headerLength','raw',v.prefix,'complete',v.complete) FROM inbox_entries e JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w LEFT JOIN mailgw_previews v ON v.mid=m.id AND v.object_key=m.raw_key WHERE l.held_reason IS NULL AND e.inbox_id=a.b AND e.role=${p.folder} AND e.uid=ANY(${sql.param(p.uids)}::bigint[])) AS items FROM a`,
+        )
+      ).rows[0];
+      if (!row) throw bad();
+      return c.json(await previewPage(runtime, row.w, row.items));
+    }
     if (p.op === 'subject') {
       const row = (
         await runtime.db.execute<{ uids: number[] }>(

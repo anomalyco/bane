@@ -7,6 +7,7 @@ import { boundMailBucket, mailKey, withMailObjects } from './mail-objects.js';
 import { mimeIndex } from './mailbox-mime-index.js';
 import { sendFromMailbox, resolveAttachments } from './mailbox-send.js';
 import { protocolScoreCap } from './sender-score.js';
+import {savePreview} from './protocol-preview.js';
 
 type Content = { kid: string; content: string; op: 'submit'; from: string; to: string[] };
 /** Preserve raw octets, including the body. Strip folded Bcc header fields only. */
@@ -149,6 +150,7 @@ export async function contentWrite(c: Ctx, p: Content) {
       sql`INSERT INTO inbox_protocol_sends VALUES(${who.b},(now() AT TIME ZONE 'UTC')::date,${p.to.length}) ON CONFLICT(inbox_id,day) DO UPDATE SET accepted=inbox_protocol_sends.accepted+excluded.accepted`,
     );
     await persist();
+    await savePreview(tx,mid,key,raw,raw.length);
     return { id: message.sendingEmailId };
   });
 }

@@ -5,6 +5,7 @@ import { ApiError, id, type Ctx } from './core.js';
 import { principal } from './mail-gateway.js';
 import { boundMailBucket, mailKey, withMailObjects, readMailBytes } from './mail-objects.js';
 import { parseInboundMime } from './mailbox-ingest.js';
+import {savePreview} from './protocol-preview.js';
 
 const MAX = 8 * 1024 * 1024;
 const metadata = z
@@ -73,6 +74,7 @@ export async function streamedAppend(c: Ctx, encoded: string, digest: string) {
     ).rows[0]!.r;
     if (row.error || row.pairs[0]?.[0] === 1) await withMailObjects(rt, who.w, '', bucket, (o) => o.delete([key]));
     if (row.error) throw new ApiError(409, 'APPEND_REFUSED', 'Append refused.');
+    if(row.pairs[0]?.[0]===0)await savePreview(tx,mid,key,prefix,p.size);
     return row;
   });
 }

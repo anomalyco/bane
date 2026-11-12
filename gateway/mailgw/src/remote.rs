@@ -323,7 +323,10 @@ impl Identity for Login {
         true
     }
 }
+type PreviewPage = BTreeMap<u32, (Arc<[u8]>, bool)>;
 pub struct Store {
+    page_wait: std::cell::Cell<Duration>,
+    page: std::cell::RefCell<PreviewPage>,
     headers: std::cell::RefCell<BTreeMap<u32, Arc<[u8]>>>,
     bytes: std::cell::RefCell<Option<crate::admission::Reservation>>,
     pub credential_share: Arc<crate::admission::Shares>,
@@ -341,6 +344,11 @@ pub struct Store {
     pub deadline: Instant,
 }
 impl Store {
+    pub fn finish_command(&mut self) {
+        self.page_wait.set(Duration::ZERO);
+        self.page.get_mut().clear();
+        drop(self.upload.take());
+    }
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
         let (credential_share, inbox_share, upload_rate) = {
@@ -384,6 +392,8 @@ impl Store {
             )
         };
         let mut s = Self {
+            page_wait: Default::default(),
+            page: Default::default(),
             api,
             bytes: Default::default(),
             upload: None,
@@ -611,6 +621,34 @@ impl Store {
     }
 }
 impl MailStore for Store {
+    fn prefetch(&self, p: &str, uids: &[u32]) -> Result<(), store::Error> {
+        #[derive(Deserialize)]
+        struct Row {
+            uid: u32,
+            raw: String,
+            complete: bool,
+        }
+        self.budget()?;
+        let start = Instant::now();
+        let rows:Vec<Row>=self.api.json(json!({"op":"projections","kid":self.principal.kid,"folder":self.keys.get(p).ok_or(store::Error::Missing)?,"uids":uids}))?;
+        self.page_wait
+            .set((self.page_wait.get() + start.elapsed()).min(Duration::from_secs(15)));
+        let mut page = self.page.borrow_mut();
+        page.clear();
+        for r in rows {
+            page.insert(
+                r.uid,
+                (
+                    STANDARD
+                        .decode(r.raw)
+                        .map_err(|_| store::Error::Unavailable)?
+                        .into(),
+                    r.complete,
+                ),
+            );
+        }
+        Ok(())
+    }
     fn subject(&self, p: &str, term: &str) -> Result<Option<Vec<u32>>, store::Error> {
         if term.len() > 1024 {
             return Err(store::Error::Limit);
@@ -641,7 +679,7 @@ impl MailStore for Store {
         self.refresh()
     }
     fn budget(&self) -> Result<(), store::Error> {
-        if Instant::now() > self.deadline {
+        if Instant::now() > self.deadline + self.page_wait.get() {
             Err(store::Error::Limit)
         } else {
             Ok(())
@@ -649,6 +687,11 @@ impl MailStore for Store {
     }
     fn header(&self, _: &str, e: &Entry) -> Result<Entry, store::Error> {
         self.budget()?;
+        if let Some((raw, _)) = self.page.borrow().get(&e.uid) {
+            let mut e = e.clone();
+            e.raw = raw.clone();
+            return Ok(e);
+        }
         if let Some(raw) = self.headers.borrow().get(&e.uid) {
             let mut entry = e.clone();
             entry.raw = raw.clone();
@@ -671,6 +714,11 @@ impl MailStore for Store {
         Ok(entry)
     }
     fn materialize(&self, _: &str, e: &Entry) -> Result<Entry, store::Error> {
+        if let Some((raw, true)) = self.page.borrow().get(&e.uid) {
+            let mut e = e.clone();
+            e.raw = raw.clone();
+            return Ok(e);
+        }
         let h = self.handles.get(&e.uid).ok_or(store::Error::Missing)?;
         let raw = self
             .api

@@ -283,6 +283,14 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('mail gateway: exact wire projections distinguish complete objects from header-only data',async(t)=>{
+  const {previewPage}=await import('./src/protocol-preview.js');
+  const runtime=fixtureWorker?.runtime;if(!runtime)return t.skip('requires disposable loopback object storage');
+  const raw=Buffer.from('Subject: One\r\n\tfold\r\n\r\n','ascii').toString('base64');
+  const row={uid:1,mid:'fixture',key:'fixture',bucket:'local:',region:'',size:5000,header:22,raw,complete:false};
+  assert.deepEqual(await previewPage(runtime,'default',[row,{...row,uid:2,complete:true}]),[{uid:1,raw,complete:false},{uid:2,raw,complete:true}]);
+});
+
 async function resource(t: TestContext, key: string, path: string, body: Json): Promise<Json> {
   const created = ok(await http('POST', path, key, body), 201);
   assert.equal(typeof created.id, 'string');

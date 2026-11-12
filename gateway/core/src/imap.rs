@@ -519,7 +519,16 @@ impl Imap {
                             }
                         }
                         let f = s.folder(&p)?;
-                        for u in &uids {
+                        let meta_only = items.iter().all(|x| {
+                            matches!(
+                                x,
+                                Item::Flags | Item::Uid | Item::InternalDate | Item::Rfc822Size
+                            )
+                        });
+                        for (at, u) in uids.iter().enumerate() {
+                            if !meta_only && uids.len() > 8 && at % 256 == 0 {
+                                s.prefetch(&p, &uids[at..uids.len().min(at + 256)])?;
+                            }
                             if let Ok(i) = sel.view.binary_search_by_key(u, |v| v.0)
                                 && let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
                             {
@@ -639,6 +648,56 @@ impl Imap {
                             r.line(line);
                             return Ok(Some(String::new()));
                         }
+                        let mut terms = std::collections::BTreeSet::new();
+                        if criteria.as_ref().len() > 1
+                            || criteria.as_ref().iter().any(|k| {
+                                matches!(
+                                    k,
+                                    imap_codec::imap_types::search::SearchKey::And(_)
+                                        | imap_codec::imap_types::search::SearchKey::Or(..)
+                                        | imap_codec::imap_types::search::SearchKey::Not(_)
+                                )
+                            })
+                        {
+                            let mut hits = BTreeMap::new();
+                            if criteria
+                                .as_ref()
+                                .iter()
+                                .all(|k| search::subject_plan(k, &mut terms))
+                                && !terms.is_empty()
+                            {
+                                for &term in &terms {
+                                    if let Some(uids) = s.subject(&p, term)? {
+                                        hits.insert(term, uids);
+                                    }
+                                }
+                                if hits.len() == terms.len() {
+                                    let mut line = String::from("* SEARCH");
+                                    let max = sel.view.last().map_or(0, |v| v.0);
+                                    for (i, (u, _)) in sel.view.iter().enumerate() {
+                                        if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
+                                            && criteria.as_ref().iter().all(|k| {
+                                                search::planned(
+                                                    k,
+                                                    &f.entries[j],
+                                                    i as u32 + 1,
+                                                    sel.view.len() as u32,
+                                                    max,
+                                                    &hits,
+                                                )
+                                            })
+                                        {
+                                            line.push_str(&format!(
+                                                " {}",
+                                                if *uid { *u } else { i as u32 + 1 }
+                                            ));
+                                        }
+                                    }
+                                    r.line(line);
+                                    return Ok(Some(String::new()));
+                                }
+                            }
+                        }
                         let need = criteria
                             .as_ref()
                             .iter()
@@ -653,10 +712,33 @@ impl Imap {
                             .sum::<usize>();
                         let mut bytes_left = 64usize << 20;
                         for (i, (u, _)) in sel.view.iter().enumerate() {
+                            if need != search::Need::Meta && sel.view.len() > 8 && i % 256 == 0 {
+                                let page: Vec<_> = sel.view[i..sel.view.len().min(i + 256)]
+                                    .iter()
+                                    .map(|x| x.0)
+                                    .collect();
+                                s.prefetch(&p, &page)?;
+                            }
                             if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid) {
                                 s.budget()?;
                                 let mem;
                                 let entry = &f.entries[j];
+                                if !criteria
+                                    .as_ref()
+                                    .iter()
+                                    .filter(|k| search::need(k) == search::Need::Meta)
+                                    .all(|k| {
+                                        search::matches(
+                                            k,
+                                            entry,
+                                            i as u32 + 1,
+                                            sel.view.len() as u32,
+                                            sel.view.last().map_or(0, |v| v.0),
+                                        )
+                                    })
+                                {
+                                    continue;
+                                }
                                 if need == search::Need::Body
                                     && entry.size.saturating_mul(scans) > bytes_left
                                 {

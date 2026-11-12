@@ -162,9 +162,14 @@ impl Gateway {
         let mut heartbeat = Instant::now() + KEEPALIVE;
         loop {
             let idling = matches!(&core,Core::Imap(i) if i.idling());
+            let read_deadline = if spool.is_some() {
+                deadline.min(Instant::now() + IO)
+            } else {
+                deadline
+            };
             let read = tokio::select! {
                 biased;
-                _=tokio::time::sleep_until(deadline)=>break,
+                _=tokio::time::sleep_until(read_deadline)=>break,
                 _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
                 event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{let generation=event?;if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;if idling&&let Some(store)=backend.as_mut()&&let Core::Imap(i)=&mut core{tokio::task::block_in_place(||store.reload(true))?;stale=false;let r=i.update(store);write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
                 n=stream.read(&mut buf)=>n?,
@@ -337,7 +342,7 @@ impl Gateway {
                             };
                             // A parse, folder or access refusal can bypass Store::change.
                             // No uploaded literal ever belongs to the next command.
-                            drop(store.upload.take());
+                            store.finish_command();
                             Ok(reply)
                         } else {
                             Ok(match &mut core {

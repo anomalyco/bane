@@ -146,3 +146,44 @@ pub fn scan_count(k: &K<'_>) -> usize {
         _ => usize::from(need(k) != Need::Meta),
     }
 }
+
+/// Lift SUBJECT predicates to the store even when nested under Boolean operators.
+/// Date/flag/UID predicates already have an authoritative local snapshot.
+pub fn subject_plan<'a>(k: &'a K<'_>, terms: &mut std::collections::BTreeSet<&'a str>) -> bool {
+    match k {
+        K::Subject(q) => str::from_utf8(q.as_ref()).ok().is_some_and(|t| {
+            if t.is_empty() {
+                false
+            } else {
+                terms.insert(t);
+                terms.len() <= 8
+            }
+        }),
+        K::And(v) => v.as_ref().iter().all(|k| subject_plan(k, terms)),
+        K::Or(a, b) => subject_plan(a, terms) && subject_plan(b, terms),
+        K::Not(q) => subject_plan(q, terms),
+        _ => need(k) == Need::Meta,
+    }
+}
+pub fn planned(
+    k: &K<'_>,
+    e: &Entry,
+    seq: u32,
+    last: u32,
+    max: u32,
+    hits: &std::collections::BTreeMap<&str, Vec<u32>>,
+) -> bool {
+    match k {
+        K::Subject(q) => str::from_utf8(q.as_ref())
+            .ok()
+            .and_then(|t| hits.get(t))
+            .is_some_and(|uids| uids.binary_search(&e.uid).is_ok()),
+        K::And(v) => v
+            .as_ref()
+            .iter()
+            .all(|k| planned(k, e, seq, last, max, hits)),
+        K::Or(a, b) => planned(a, e, seq, last, max, hits) || planned(b, e, seq, last, max, hits),
+        K::Not(q) => !planned(q, e, seq, last, max, hits),
+        _ => matches(k, e, seq, last, max),
+    }
+}
