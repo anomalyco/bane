@@ -1449,8 +1449,10 @@ async function recipientChunk(db: DbExecutor, reviewId: string, cursor: number, 
 }
 function backgroundFailure(error: unknown) {
   const code = error instanceof ApiError ? error.code : 'CAMPAIGN_DEPENDENCY_FAILED';
-  // Content problems name the contact and the fix (no recipient data beyond its id); anything else stays generic.
-  if (error instanceof ApiError && RECIPIENT_CONTENT_ERRORS.has(code)) return { code, message: `${error.message} Correct it and send again.` };
+  // A missing placeholder value says what fixes it. Never name the contact: campaign errors are shown to everyone who can
+  // see the campaign, so other content errors stay the sanitized summary.
+  const placeholder = error instanceof ApiError && code === 'MISSING_TEMPLATE_VARIABLE' ? /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/.exec(error.message)?.[1] : undefined;
+  if (placeholder) return { code, message: `A recipient has no value for {{${placeholder}}} (${code}). Add a fallback value for ${placeholder} and send again.` };
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
 }
 // Send and schedule: freeze the audience and content now, reserve the recipients, and hand the one run job the rest.

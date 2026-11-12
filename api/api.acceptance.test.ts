@@ -3969,6 +3969,7 @@ describe('Private attachment assets and campaign revisions', () => {
     const failed = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
     assert.equal(failed.state, 'failed');
     assert.equal(failed.delivery.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    assert.equal(failed.delivery.error.message, 'A recipient has no value for {{missing}} (MISSING_TEMPLATE_VARIABLE). Add a fallback value for missing and send again.', 'The failure names the fix, never the contact.');
     assert.equal(failed.delivery.prepared, 0);
     assert.equal(failed.counts.total, 0);
     assert.equal(failed.url, invalid.url, 'A failed campaign opens in the editor again.');
