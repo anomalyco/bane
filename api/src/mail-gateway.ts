@@ -39,6 +39,7 @@ const mutate = z.object({
   op: z.literal('mutate'),
   kid: token,
   action: z.enum(['copy', 'move', 'expunge', 'flags']),
+  ticket: z.object({nonce:z.string().regex(/^[0-9a-f]{32}$/),issued:z.number().int().positive()}).optional(),
   folder: name,
   to: name.nullable(),
   uids: z.array(z.number().int().positive()).max(5000).nullable(),
@@ -255,9 +256,14 @@ export function registerMailGateway(app: App) {
     );
     if (labels.some((x) => !/^[$\w-]{1,64}$/.test(x) || ['unverified', 'spam', 'guard-allowed'].includes(x)))
       throw new ApiError(422, 'INVALID_FLAG', 'Invalid keyword.');
+    if ((p.action==='flags'||p.action==='copy') && (!p.uids || p.uids.length>1000))throw new ApiError(413,'MUTATION_LIMIT','Request at most 1000 UIDs.');
+    if(p.action==='copy'&&(!p.ticket||!p.to))throw new ApiError(422,'MISSING_COPY_TICKET','COPY requires a replay ticket.');
+    const mutation=p.action==='copy'&&p.ticket
+      ?sql`mailgw_copy_once(a.w,a.b,a.k,${p.folder},${p.to},${sql.param(p.uids)}::bigint[],${p.ticket.nonce},${p.ticket.issued},${createHash('sha256').update(JSON.stringify([p.folder,p.to,p.uids])).digest('hex')})`
+      :sql`mailgw_mutate(a.w,a.b,${p.folder},${p.to},${p.action},${sql.param(p.uids)}::bigint[],${p.mode},${JSON.stringify(flags)}::jsonb,${sql.param(labels)}::text[])`;
     const row = (
       await runtime.db.execute<{ r: { pairs: number[][]; validity: number; error?: string } }>(
-        sql`WITH a AS (${auth}) SELECT mailgw_mutate(a.w,a.b,${p.folder},${p.to},${p.action},${sql.param(p.uids)}::bigint[],${p.mode},${JSON.stringify(flags)}::jsonb,${sql.param(labels)}::text[]) r FROM a`,
+        sql`WITH a AS (${auth}) SELECT ${mutation} r FROM a`,
       )
     ).rows[0];
     if (!row) throw bad();

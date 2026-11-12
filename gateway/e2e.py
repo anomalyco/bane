@@ -775,6 +775,18 @@ def large_folder(tmp):
         with connect(p['IMAPS']) as sibling:
             assert ok(sibling.select('Capacity'))==[b'50001']
             assert ok(sibling.uid('FETCH','50001','(UID FLAGS)'))
+        ok(c.create('CopyRetry'))
+        for _ in range(2):
+            assert c.uid('COPY','1:*','CopyRetry')[0]=='NO'
+            assert c.uid('STORE','1:*','+FLAGS.SILENT','(\\Flagged)')[0]=='NO'
+        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='0'
+        assert ok(c.uid('SEARCH',None,'FLAGGED'))==[b'']
+        # Replay the actual ticket from a successful bounded command (as after
+        # a lost private RPC response). No second allocation; same COPYUID.
+        ok(c.uid('COPY','1','CopyRetry'))
+        replay=sql("""SELECT mailgw_copy_once('default','mbx_fixture',r.kid,src.role,dst.role,ARRAY[1]::bigint[],r.nonce,r.issued,r.request_hash)=r.answer
+        FROM mailgw_copy_receipts r,inbox_folders src,inbox_folders dst WHERE r.kid='app_fixture' AND src.custom_path='Capacity' AND dst.custom_path='CopyRetry' AND r.answer->>'validity'=dst.uid_validity::text""",'fixture_observer');assert replay=='t',replay
+        assert sql("SELECT total FROM inbox_folders WHERE custom_path='CopyRetry'",'fixture_observer')=='1'
         for name,op,count in [
             ('header sync',lambda:sum(isinstance(v,tuple) and b'From: alias@example.invalid' in v[1] for v in ok(c.uid('FETCH','1:*','(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])'))),50001),
             ('compound',lambda:len(ok(c.uid('SEARCH',None,'OR','FROM','alias','SUBJECT','none'))[0].split()),50001),

@@ -325,6 +325,7 @@ impl Identity for Login {
 }
 type PreviewPage = BTreeMap<u32, (Arc<[u8]>, bool)>;
 pub struct Store {
+    pending_copy: Option<([u8; 32], Value)>,
     page_wait: std::cell::Cell<Duration>,
     page: std::cell::RefCell<PreviewPage>,
     headers: std::cell::RefCell<BTreeMap<u32, Arc<[u8]>>>,
@@ -389,6 +390,7 @@ impl Store {
             (g.lanes.clone(), g.bytes.clone())
         };
         let mut s = Self {
+            pending_copy: None,
             page_wait: Default::default(),
             page: Default::default(),
             api,
@@ -786,6 +788,9 @@ impl MailStore for Store {
         let mut arg = json!({"op":"mutate","kid":self.principal.kid,"folder":folder,"flags":[],"mode":"add","to":null,"uids":null});
         match c {
             Change::Flags(uids, mode, flags) => {
+                if uids.len() > 1000 {
+                    return Err(store::Error::Limit);
+                }
                 arg["action"] = json!("flags");
                 arg["flags"] = json!(flags);
                 arg["uids"] = json!(uids);
@@ -800,9 +805,41 @@ impl MailStore for Store {
                 arg["uids"] = json!(uids)
             }
             Change::Transfer(uids, to, moving) => {
+                if !moving && uids.len() > 1000 {
+                    return Err(store::Error::Limit);
+                }
                 arg["action"] = json!(if moving { "move" } else { "copy" });
                 arg["uids"] = json!(uids);
-                arg["to"] = json!(self.keys.get(to).ok_or(store::Error::Missing)?)
+                arg["to"] = json!(self.keys.get(to).ok_or(store::Error::Missing)?);
+                if !moving {
+                    let fingerprint: [u8; 32] = Sha256::digest(
+                        serde_json::to_vec(&(
+                            &arg,
+                            self.folder(p)?.validity,
+                            self.folder(to)?.validity,
+                        ))
+                        .map_err(|_| store::Error::Unavailable)?,
+                    )
+                    .into();
+                    if self
+                        .pending_copy
+                        .as_ref()
+                        .is_none_or(|(hash, _)| *hash != fingerprint)
+                    {
+                        let mut nonce = [0u8; 16];
+                        getrandom::fill(&mut nonce).map_err(|_| store::Error::Unavailable)?;
+                        self.pending_copy = Some((
+                            fingerprint,
+                            json!({"nonce":hex::encode(nonce),"issued":chrono::Utc::now().timestamp()}),
+                        ));
+                    }
+                    arg["ticket"] = self
+                        .pending_copy
+                        .as_ref()
+                        .ok_or(store::Error::Unavailable)?
+                        .1
+                        .clone();
+                }
             }
             Change::Append { date, flags, .. } => {
                 if let Some(mut upload) = self.upload.take() {
@@ -867,6 +904,7 @@ impl MailStore for Store {
             validity: 0,
             pairs: vec![],
         };
+        let arg_is_copy = arg["action"] == "copy";
         if let Some(Value::Array(uids)) = arg.get_mut("uids") {
             let all = std::mem::take(uids);
             if all.is_empty() {
@@ -885,6 +923,9 @@ impl MailStore for Store {
             out.pairs = a.pairs
         }
         self.refresh()?;
+        if arg_is_copy {
+            self.pending_copy = None;
+        }
         Ok(out)
     }
 }
