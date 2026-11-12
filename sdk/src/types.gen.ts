@@ -89,6 +89,13 @@ export type ConnectionSummary = {
     };
 } | null;
 
+export type Workspace = {
+    id: string;
+    name: string;
+    slug: string;
+    role: 'owner' | 'admin' | 'member';
+};
+
 export type AgentToken = {
     id: string;
     token: string;
@@ -3472,13 +3479,6 @@ export type InboundWebhookDelivery = {
     updatedAt: string;
 };
 
-export type Workspace = {
-    id: string;
-    name: string;
-    slug: string;
-    role: 'owner' | 'admin' | 'member';
-};
-
 export type WorkspaceMember = {
     id: string;
     userId: string;
@@ -3871,6 +3871,10 @@ export type GetCurrentIdentityResponses = {
         origin: string;
         host: string;
         connection: ConnectionSummary;
+        /**
+         * Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted.
+         */
+        workspaces: Array<Workspace> | null;
     };
 };
 

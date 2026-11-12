@@ -187,6 +187,14 @@ export const ownerRoute = (method: string, path: string) => {
   return appPasswordRoute(path) || /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/regions\/|^\/v1\/settings\/ses$/.test(path) || (path === '/v1/regions' && verb !== 'GET')
     || (verb === 'POST' && /^\/v1\/campaigns\/[^/]+\/(?:send|schedule|pause|resume|pacing|cancel)$/.test(path));
 };
+/** Hosted workspace administration: a signed-in dashboard session, and with `manage` an owner or admin. Not found when self-hosted. */
+export function dashboardSession(c: Ctx, manage = false) {
+  if (!c.env.config.multiTenant) return notFound('Endpoint');
+  const a = c.get('actor');
+  if (a.credential !== 'dashboard') throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.');
+  if (manage && a.role !== 'admin' && a.role !== 'owner') throw new ApiError(403, 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.');
+  return { workspaceId: a.workspaceId, userId: a.keyId.slice(5), email: a.email! };
+}
 // Received mail a Bane credential can read: dashboard members read addressed mail; unrestricted manage credentials read
 // the whole workspace; everything else reads none. Used by mailboxAuth, the unified logs and the MCP listing.
 export function actorMailAccess(actor: Actor): MailboxAccess | null {

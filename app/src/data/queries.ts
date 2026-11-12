@@ -38,7 +38,6 @@ export const queries = {
   mailboxKeys: (showRevoked: boolean) => def(['mailbox-keys', showRevoked], (api, signal) => api.mailboxes.keys(showRevoked, signal)),
   webhooks: (cursor?: string) => def(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor)),
   connection: () => def(['connection'], (_api, signal) => connectionApi.get(signal)),
-  workspaces: () => def(['workspaces'], (_api, signal) => workspaceApi.list(signal)),
   workspaceMembers: () => def(['workspace-members'], (_api, signal) => workspaceApi.members(signal)),
   workspaceInvitations: () => def(['workspace-invitations'], (_api, signal) => workspaceApi.invitations(signal)),
 }

@@ -1,8 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useLocation } from 'react-router'
-import { useApiDef, useApiMutation, useSession } from '../data/context'
-import { queries } from '../data/queries'
-import { workspaceApi } from '../data/workspaces'
+import { useApiMutation, useSession } from '../data/context'
+import { useMembershipCache, workspaceApi } from '../data/workspaces'
 import { fieldError, MutationError } from '../features/settings/shared'
 import { Button, Dialog, Field, Input, Select, useToast } from './ui'
 
@@ -13,7 +12,9 @@ export function WorkspaceSwitcher() {
   const session = useSession()
   const toast = useToast()
   const location = useLocation()
-  const workspaces = useApiDef(queries.workspaces())
+  // The list comes with the session (GET /v1/me), so the trigger shows the current workspace on the first frame.
+  const workspaces = session?.identity?.workspaces ?? null
+  const memberships = useMembershipCache()
   const [switching, setSwitching] = useState(false)
   const [creating, setCreating] = useState(false)
   async function changeWorkspace(id: string, path?: string) {
@@ -22,13 +23,12 @@ export function WorkspaceSwitcher() {
     path ??= (section === 'audience' && ['lists', 'segments'].includes(child)) || (section === 'campaigns' && child === 'templates') ? `/${section}/${child}` : section ? `/${section}` : '/'
     setSwitching(true)
     try { await session?.switchWorkspace(id, path) }
-    catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false); void workspaces.refetch() }
+    catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false); void memberships.refresh() }
   }
-  // Until the list arrives the trigger stays blank (no flash of placeholder text); a failed list says so.
-  const known = workspaces.data?.some(workspace => workspace.id === session?.identity?.workspaceId) ?? false
-  const options = [...(workspaces.data ?? []).map(workspace => ({ value: workspace.id, label: workspace.name })), ...(workspaces.data ? [{ value: createValue, label: 'New workspace…' }] : [])]
+  const known = workspaces?.some(workspace => workspace.id === session?.identity?.workspaceId) ?? false
+  const options = workspaces ? [...workspaces.map(workspace => ({ value: workspace.id, label: workspace.name })), { value: createValue, label: 'New workspace…' }] : []
   return <>
-    <Select id="sidebar-workspace" aria-label="Workspace" value={known ? session?.identity?.workspaceId ?? '' : ''} onValueChange={id => { if (id === createValue) setCreating(true); else void changeWorkspace(id) }} options={options} disabled={switching || !workspaces.data} placeholder={workspaces.isError ? 'Couldn’t load workspaces' : workspaces.isPending ? '' : 'Workspace'} />
+    <Select id="sidebar-workspace" aria-label="Workspace" value={known ? session?.identity?.workspaceId ?? '' : ''} onValueChange={id => { if (id === createValue) setCreating(true); else void changeWorkspace(id) }} options={options} disabled={switching || !workspaces} placeholder="Workspace" />
     {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus()) }} onCreated={id => void changeWorkspace(id, '/')} />}
   </>
 }

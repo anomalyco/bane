@@ -291,7 +291,7 @@ export interface BaneApi {
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number } }) | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number } }) | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }

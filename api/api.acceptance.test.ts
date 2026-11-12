@@ -109,6 +109,7 @@ test('ritual compile limits: maximum-size comments remain valid; identifiers, to
 });
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
+  assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
@@ -1062,6 +1063,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
       const joined = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
       assert.equal(joined.length,2);assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
+      assert.deepEqual(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaces,joined,'GET /v1/me lists the same memberships as the deprecated GET /v1/workspaces.');
       assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id,'Join selects the workspace the recipient confirmed.');
       assert.equal(ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie)).status,'accepted');
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
@@ -1107,6 +1109,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
+      assert.deepEqual(me.workspaces, [{ id: a.org.id, name: a.org.name, slug: a.org.slug, role: 'member' }], 'The joined workspace, and nothing the invitation did not grant.');
       error(await local('POST', '/v1/workspaces', { name: 'Guest workspace' }, guest), 403, 'SIGNUP_NOT_APPROVED');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);

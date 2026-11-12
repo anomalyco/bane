@@ -271,6 +271,34 @@
         ],
         "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
       },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "role"
+        ]
+      },
       "AgentToken": {
         "type": "object",
         "properties": {
@@ -12107,34 +12135,6 @@
           "updatedAt"
         ]
       },
-      "Workspace": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "slug": {
-            "type": "string"
-          },
-          "role": {
-            "type": "string",
-            "enum": [
-              "owner",
-              "admin",
-              "member"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "slug",
-          "role"
-        ]
-      },
       "WorkspaceMember": {
         "type": "object",
         "properties": {
@@ -13348,6 +13348,16 @@
                     },
                     "connection": {
                       "$ref": "#/components/schemas/ConnectionSummary"
+                    },
+                    "workspaces": {
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "$ref": "#/components/schemas/Workspace"
+                      },
+                      "description": "Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted."
                     }
                   },
                   "required": [
@@ -13362,7 +13372,8 @@
                     "domains",
                     "origin",
                     "host",
-                    "connection"
+                    "connection",
+                    "workspaces"
                   ]
                 }
               }
@@ -51676,7 +51687,8 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
+        "deprecated": true,
+        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
         "responses": {
           "200": {
             "description": "Success",
