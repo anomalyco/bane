@@ -2,12 +2,16 @@
 
 Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev E2E passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
 
-## Merging into `dev`: the merge queue
+## Merging into `dev`: the merge queue (one step from on)
 
-`dev` requires the merge queue. When a PR's own checks pass, add it to the queue (`gh pr merge <n>`, or "Merge when ready"). Only the accounts allowed to push `dev` can. The queue merges the PR onto the latest `dev` and every entry ahead of it, runs the required checks (`build`, `acceptance`) on exactly that commit (the `merge_group` event), and merges only if they pass. A PR no longer has to be up to date with `dev` first, so nobody re-runs CI because another PR landed.
+CI and the dev deploy are ready for GitHub's merge queue on `dev`: `ci.yml` runs the required checks (`build`, `acceptance`) on `merge_group`, and the deploy accepts the queue's pushes. The queue is not on yet. `dev` restricts pushes to thdxr and R44VC0RP, and under that classic restriction the queue may push only when the same classic rule requires it. That is the "Require merge queue" checkbox in Settings → Branches → `dev`, which neither the REST nor the GraphQL API exposes. A ruleset-based queue was tried on Nov 12: GitHub refused its merge of #103 with `branch_protection_failure`, so that ruleset (`dev merge queue`) is kept disabled.
+
+**To turn it on** (needs GitHub's sudo confirmation): on the `dev` rule, tick Require merge queue (merge commit, build concurrency 5, merge up to 5, only non-failing, 30-minute timeout) and untick "Require branches to be up to date before merging". From then on, `gh pr merge <n>` adds a green PR to the queue. The queue merges it onto the latest `dev` and the entries ahead of it, runs the required checks on exactly that commit, and merges only if they pass. Only accounts allowed to push `dev` can add PRs.
+
+**Until then:** `gh pr update-branch <n>` and then `gh pr merge <n> --merge --auto` (auto-merge is enabled) merge a PR as soon as its checks pass. Any merge to `dev` in the meantime makes it BEHIND again.
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
-- **Cost:** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between "merge" and the merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Cost (once on):** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between "merge" and the merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
@@ -18,8 +22,10 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | --- | --- | --- | --- |
 | Every PR, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below | ~1–2 min |
 | Every PR, `dev` push | `acceptance` | The API's acceptance suite on Node against an isolated Postgres and S3 fixture, in two shards, plus the **deadlock guard** | ~2–3 min |
+| Every PR, `dev` push | `preview` | The real Worker under `wrangler dev` (workerd) with dev's wrangler config, on a database upgraded from `dev`'s schema; see **Preview stack** | ~2 min |
 | Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift on every dashboard page | ~3 min, in parallel |
 | `dev` push | Deploy dev | Migrate, deploy, health, live dev E2E | ~5 min |
+| Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
 | Push to `production` | Deploy production | Requires the passing dev E2E for the exact SHA | ~4 min |
 
 `build` and `acceptance` are required on `dev`.
@@ -81,3 +87,55 @@ Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two
 **When it fails:** the log excerpt names both statements and the rows they waited for. Find the two code paths and make them take their locks in the same order: the workspace's `ses_installation_settings` row first, then domain claims, then receipts and their windows (`lockedSettings()` in `api/src/sending.ts` is the helper). Add a test that holds the first lock and proves the second path waits for it (see `regional sender: a send waits on the settings row…`), and add the pair to the `lock order:` stress test once it is fixed.
 
 Locally: `PGPORT=<port> PG_CONTAINER=<container> RUNNER_TEMP=$(mktemp -d) bash ../.github/scripts/acceptance.sh` from `api/`, against a disposable Postgres (`docker run -d -e POSTGRES_PASSWORD=fixture-admin -p 127.0.0.1:<port>:5432 postgres:17.11-alpine`).
+
+## Flakes: quarantine and the nightly runs
+
+A flaky check costs every PR a re-run and teaches everyone to ignore red. The policy:
+
+- **Fix it first.** Most flakes are a race with something else in the shared fixture, or a measurement that depends on timing. Two fixed this way: `database connection refusals…` claimed whichever job was due, so under the full suite it could take another test's job (it now shadows the queue with a transaction-scoped `CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`, as the campaign-run tests do); and the CLS gate's `Settings · webhook` phone measurement (below).
+- **Quarantine while you fix it.** Open an issue, then add `[flaky #<issue>]` to the test's name. The required `acceptance` job skips it; the nightly runs it. `check-premerge.ts` fails the build if the tag names no issue or a closed one. Remove the tag when the fix lands, or when the nightly report lists it as passing every run.
+- **The nightly finds new ones.** `.github/workflows/nightly.yml` runs the acceptance suite (`ACCEPTANCE_QUARANTINE=all`, JUnit output) and the CLS gate ten times each, in parallel, on the dev tip, then keeps one issue labeled `nightly-flakes` current: each failing test or CLS measurement with its failure count and first error, run-level failures (a deadlock, a crashed shard), and quarantined tests that passed every run. A clean night closes the issue. Run it by hand from the Actions tab (5, 10 or 20 runs).
+
+`acceptance.sh` modes: `ACCEPTANCE_QUARANTINE` unset skips quarantined tests, `only` runs just them, `all` runs everything; `ACCEPTANCE_JUNIT=<dir>` also writes `integration.xml` and `simulated.xml` there.
+
+### CLS: web fonts load before any text, every run
+
+The CLS gate's `Settings · webhook` phone measurement failed on dev twice on Nov 12 (CLS 0.0334; re-runs passed): the event-type checkboxes grew 7% and "Complaint" wrapped onto the next line when Inter arrived. Inter is 7.2% wider than Arial, and `Inter Fallback` (sized for Arial) named only `Arial` and `Helvetica`, which Linux doesn't have, so CI's first paint used unsized Liberation Sans. Whether text painted before Inter arrived depended on the runner's load.
+
+- `cls.mjs` serves web fonts at once from `app/dist/fonts`, outside the throttled network, so they have loaded before the throttled script that renders any text runs. Font timing no longer varies between runs. `CLS_FONTS=late` delivers every font 1.8 s late instead, to look at the fallback-to-web-font swap itself (it also fails a page if a fallback face has no local font).
+- `tokens.css`: the fallbacks also name their Linux metric twins (Liberation Sans for Arial, DejaVu Sans Mono for Menlo), so readers without Arial get sized fallbacks too.
+- Docs' text measures were in `ch` (the width of the current font's `0`, which changes when the font swaps); they are in `em` now.
+
+With late fonts the fallbacks keep most pages still, but no fallback wraps every string exactly like Inter at a 0.001 limit (on Linux, Onboarding's option cards at phone width wrap one line differently, 0.0071), so the gate measures layout with the real fonts and the late-font mode is for investigation.
+
+**When CLS fails only sometimes**, look for something whose size depends on timing: a font swap (a `ch` width, text measured before the font loaded, a fallback without local metrics), an image without dimensions, or content that arrives after its placeholder with a different size. Make the gate reproduce it every run, then fix the page. Never raise the limit.
+
+## Preview stack (`preview`)
+
+`.github/scripts/preview.sh` runs what dev runs, before merge, with no Cloudflare or AWS account (about 15 s after installing and building the dashboard):
+
+1. **Migrations, fresh and upgraded.** `dev`'s migrations (from the commit the PR lands on) then the PR's, on one database; the PR's alone on another. Both must apply, and `pg_dump --schema-only` of the two must be identical. A migration numbered before one `dev` already applied changes the column order between them, so this fails with "renumber".
+2. **The real Worker.** `wrangler dev` (workerd) with `wrangler.dev.jsonc` as is: `assets` and `run_worker_first`, Durable Objects, queues, rate limits, crons. Only what exists solely on Cloudflare is dropped (custom domain, account, placement, Browser Rendering, observability). Hyperdrive points at the upgraded database, and SES is simulated.
+3. **Every route reaches the Worker.** `api/scripts/preview-smoke.ts` asks each of the ~290 routes anonymously. Each must answer with an `x-request-id` and below 500, so Workers Assets never answers (405 or the dashboard HTML) and no module fails to load in workerd. The dashboard's own paths must still serve its HTML, and the scheduled handler runs once.
+
+**When it fails:** the annotation names the route or the schema difference. For a route, add its prefix to `run_worker_first` in both wrangler configs (the `build` check usually catches it first). For a schema difference, renumber the migration after `dev`'s newest. For a 5xx, find the request ID in the job's wrangler log. Locally, from `api/` with the dashboard built and a disposable Postgres: `BASE=$(git merge-base HEAD origin/dev) PGPORT=<port> PG_CONTAINER=<container> bash ../.github/scripts/preview.sh`.
+
+### Next: the E2E flow itself in preview
+
+`api/scripts/e2e.ts` does not run here yet. It needs a hosted workspace in simulated mode: a seeded workspace, key, ready shared connection and verified domain. It also needs a `preview` profile that expects simulated receipts, and skips by operation ID the steps that need AWS (domain verification, the MX check, the inbound self-loop through SES receiving, Browser Rendering). That would run the E2E's concurrent steps, the source of the dev 40P01s, under workerd before merge. Estimated one to two days, including making it reliable enough to require.
+
+### Why not a Cloudflare preview deployment per PR
+
+A Workers preview version per PR (`wrangler versions upload --preview-alias pr-<n>`) runs on real Cloudflare, but:
+
+- Preview versions don't consume queues or run crons, and they share dev's queues, R2 buckets and Durable Objects. Isolating data needs a database branch per PR (PlanetScale bills branch hours) and a Hyperdrive config per branch.
+- PR workflows would need the Cloudflare token and the AWS role: credentials next to unreviewed PR code.
+- It is real infrastructure to provision, clean up and pay for, and it still wouldn't cover live SES or inbound mail.
+
+The local workerd stack catches the classes that hit dev (routing, module loading, migrations) for free and without credentials. Recommendation: keep it. If live-provider coverage before merge is ever worth paying for, use one shared staging fixture, not one per PR.
+
+## tear (local nightly)
+
+tear, the model checker behind `api/tear/*` (access, admission, delivery, dispatch, inbox, ses), is a private repository, so CI cannot fetch it. `api/tear/nightly.sh` runs every checker's `ci` (with a seed that rotates by date) against a disposable Postgres in Docker, on a machine that can fetch it, in about 20 minutes. Logs and a summary go to `~/.cache/bane-tear/<date>`. With `TEAR_REPORT_REPO=anomalyco/bane`, a failing night opens or comments on the `tear-nightly` issue with each failing checker's minimal witnesses.
+
+Ryan's Mac runs it nightly with cronctl (`bane-tear-nightly`, 02:30) from a detached checkout of `dev` at `~/dev/bane-tear-nightly`. A witness after an API change is often model drift: for example, the first run found `rescheduleCampaign` and `unscheduleCampaign` missing from `api/tear/src/rest.rs`. Add new routes there when you add them to the API.
