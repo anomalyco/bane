@@ -2833,7 +2833,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      assert.equal(fullListing.result.tools.length, 29); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
+      assert.equal(fullListing.result.tools.length, 30); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
