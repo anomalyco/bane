@@ -47,9 +47,11 @@ export async function enqueue(db: DbExecutor, input: { type: string; workspaceId
   return jobId;
 }
 // Thrown by a handler that is polling (not failing): the runner returns the same row to pending at
-// availableAt without consuming an attempt, instead of inserting a new job row per poll.
+// availableAt without consuming an attempt, instead of inserting a new job row per poll. A polling
+// turn starts a fresh attempt count; `keepAttempts` (a delivery waiting for its rate window or a
+// tripped transport) returns only this claim's attempt, so earlier failed attempts still count.
 export class JobDeferred extends Error {
-  constructor(readonly availableAt: string, readonly payload?: Record<string, unknown>) { super('Job deferred.'); }
+  constructor(readonly availableAt: string, readonly payload?: Record<string, unknown>, readonly keepAttempts = false) { super('Job deferred.'); }
 }
 
 export const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtime, payload, job) => {
@@ -144,7 +146,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       if (error instanceof JobDeferred) {
         // A successful polling turn breaks a streak of failures/evictions.
         const nextPayload = error.payload ?? (handlerPayload !== job.payload ? handlerPayload : undefined);
-        await runtime.db.update(jobs).set({ status: 'pending', attempts: 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence);
+        await runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence);
         log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
         return;
       }

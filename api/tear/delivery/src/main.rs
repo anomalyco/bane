@@ -119,6 +119,10 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // retryAttempts 0: after a lost first attempt the lease expiry re-claimed it and sent it again.
     (0, &["ingest m1 z", "run K m1:V", "expire m1:V", "run L m1:V"]),
     (0, &["ingest m1 z", "run K m1:V", "crash K", "expire m1:V", "run L m1:V"]),
+    // A rate-limit or breaker deferral reset the attempt count: a failing endpoint retried forever.
+    (1, &["rate W 1", "ingest m1 a", "run K m1:W", "reply K 503", "run K m1:W"]),
+    (1, &["rate W 1", "ingest m1 a", "run K m1:W", "reply K 503", "run K m1:W", "tick", "run K m1:W", "reply K 503"]),
+    (1, &["ingest m1 z", "run K m1:V", "reply K timeout", "ingest m2 z", "run K m2:V", "reply K timeout", "ingest m3 z", "run K m3:V", "reply K timeout", "run K m1:V"]),
 ];
 
 fn model(v: &Value) -> R<Model> {

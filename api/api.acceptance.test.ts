@@ -10217,6 +10217,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  test('a rate-limited delivery keeps its spent attempts: retries still end at 1 + retryAttempts',async t=>{
+    // tear/delivery witness: rate W 1, ingest m1 a, run K m1:W, reply K 503, run K m1:W.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'paced',url:'https://example.com/paced',retryAttempts:1}),201);
+      ok(await local('PATCH','/v1/endpoints/paced',{perMinute:1}));
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='paced'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_paced',wid,hook,{id:'mev_paced',type:'message.received',messageId:'msg_paced',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_paced','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_paced\"}')",[wid]);
+      const state=async()=>(await db.query("SELECT j.status,j.attempts,d.status AS delivery,d.attempt_count FROM jobs j JOIN mailbox_webhook_deliveries d ON d.id=j.payload->>'deliveryId' WHERE j.id='job_paced'")).rows[0];
+      const due=()=>db.query("UPDATE jobs SET available_at=now() WHERE id='job_paced'");
+      const transport=runtime.webhookFetch;let posts=0;
+      try{
+        runtime.webhookFetch=async()=>{posts++;return {status:503};};
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.deepEqual(await state(),{status:'pending',attempts:1,delivery:'pending',attempt_count:1});
+        // Due again within the same minute: the endpoint's one call per minute is spent.
+        await db.query('UPDATE api_request_budgets SET used=1,window_start=date_trunc($3,now()) WHERE workspace_id=$1 AND key_id=$2',[wid,'ritual:'+hook,'minute']);await due();
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,1);
+        assert.deepEqual(await state(),{status:'pending',attempts:1,delivery:'pending',attempt_count:1});
+        // The next minute: the second (last) attempt fails too, so the delivery is dead-lettered.
+        await db.query("UPDATE api_request_budgets SET window_start=window_start-interval '1 minute' WHERE workspace_id=$1 AND key_id=$2",[wid,'ritual:'+hook]);await due();
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,2);
+        assert.deepEqual(await state(),{status:'failed',attempts:2,delivery:'failed',attempt_count:2});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
     await simulatedSesFixture(t,async({runtime,local,db})=>{
       const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');

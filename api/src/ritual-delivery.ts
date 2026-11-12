@@ -46,7 +46,8 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
     const slot = await tx.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(${w},${'ritual:' + h.webhook_id},date_trunc('minute',now()),1)
       ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN b.used+1 ELSE 1 END,window_start=excluded.window_start
       WHERE b.window_start<>excluded.window_start OR b.used<${policy.perMinute} RETURNING 1`);
-    if (!slot.rowCount) throw new JobDeferred(new Date((Math.floor(Date.now() / 60000) + 1) * 60000).toISOString());
+    // Waiting for the next minute is not an attempt, and does not erase the attempts already made.
+    if (!slot.rowCount) throw new JobDeferred(new Date((Math.floor(Date.now() / 60000) + 1) * 60000).toISOString(), undefined, true);
     if (prior) await tx.execute(sql`UPDATE mail_action_attempts SET state='sending' WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`);
     return { policy, done: false };
   });
@@ -58,7 +59,7 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
     result = await send();
   } catch (e) {
     // Deferred or refused before anything left: the outcome is known, so a retry cannot duplicate.
-    if (e instanceof JobDeferred) { await mark('retry'); throw e; }
+    if (e instanceof JobDeferred) { await mark('retry'); throw new JobDeferred(e.availableAt, e.payload, true); }
     if (e instanceof ApiError) { await mark('retry'); throw e.retryable ? new ActionRetry(e.code) : e; }
     await mark('unknown');
     if (replaySafe(fence.policy)) throw new ActionRetry('ACTION_UNKNOWN');
