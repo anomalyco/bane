@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Button, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SectionHeader, Select } from '../../components/ui'
-import { useApiMutation, useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
 import { roleLabel, workspaceApi } from '../../data/workspaces'

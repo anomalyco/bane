@@ -11,7 +11,7 @@ import { fieldError, MutationError } from '../settings/shared'
 import { nameOf, when, Sender } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const route = '/receiving/inboxes'
 const lifetimes = [{ value: '3600', label: '1 hour' }, { value: '86400', label: '24 hours' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]

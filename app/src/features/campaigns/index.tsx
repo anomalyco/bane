@@ -6,7 +6,7 @@ import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { campaignEditable, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
 import {
-  Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState,
+  Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState,
   Field, Input, PageHeader, SectionHeader, Select, SkeletonText,
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'

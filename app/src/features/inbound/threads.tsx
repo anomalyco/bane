@@ -13,7 +13,7 @@ import { fieldError, MutationError } from '../settings/shared'
 import { addressName, cleanName, full, idempotencyFor, nameOf, when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 
 const views: { value: InboundThreadView; label: string }[] = [{ value: 'inbox', label: 'Inbox' }, { value: 'starred', label: 'Starred' }, { value: 'archive', label: 'Archive' }, { value: 'spam', label: 'Spam' }, { value: 'trash', label: 'Trash' }, { value: 'all', label: 'All' }]
 const statusTone = (status: string) => status === 'delivered' ? 'success' as const : ['bounced', 'complained', 'rejected', 'suppressed', 'rendering_failed', 'canceled'].includes(status) ? 'danger' as const : status === 'delayed' ? 'warning' as const : 'neutral' as const

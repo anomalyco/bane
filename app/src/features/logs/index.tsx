@@ -48,7 +48,6 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
   useEffect(() => setPage(1), [pageSize])
   const setDirection = (value: LogDirection) => { const next = new URLSearchParams(searchParams); if (value === 'all') next.delete('view'); else next.set('view', value); setSearchParams(next, { replace: true }); setPage(1) }
-  const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
   // Status and stream describe sent mail; with Received selected they stay in place, disabled.
   const received = direction === 'received'
@@ -62,7 +61,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
       <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} onRowIntent={rowIntent} columns={logColumns}
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logColumns}
         empty={filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />
           : <EmptyState title={received ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} description="Every email you send or receive appears here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/docs">Send your first email</Link>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}

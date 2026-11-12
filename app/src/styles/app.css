@@ -103,7 +103,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
    Only a filter changes, so blurred and revealed are the same width. */
 .private-address { display: inline-flex; max-width: 100%; white-space: nowrap; }
 .private-address__rest { filter: blur(4px); transition: filter var(--motion-duration); }
-.private-address:hover .private-address__rest, :is(a, button, [tabindex], .ui-table__clickable):focus-visible .private-address__rest { filter: blur(0); }
+.private-address:hover .private-address__rest, :is(a, button, [tabindex], .ui-table__clickable):focus-visible .private-address__rest, .ui-table__linked:has(.ui-row-link:focus-visible) .private-address__rest { filter: blur(0); }
 /* Direction: a quiet mono tag, Out for sent mail and In for received mail. */
 .log-direction { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); }
 .log-direction[data-direction='received'] { color: var(--color-text); }

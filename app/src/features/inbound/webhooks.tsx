@@ -10,7 +10,7 @@ import { fieldError, MutationError, SecretDialog } from '../settings/shared'
 import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
 import './inbound.css'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList } from '../../components/PrivateAddress'
 
 const eventInfo: Partial<Record<MailboxEventType, string>> = {
   'message.junk': 'Received mail whose spam verdict isn’t PASS, when junk delivery is on',

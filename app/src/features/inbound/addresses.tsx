@@ -17,7 +17,7 @@ import { when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
