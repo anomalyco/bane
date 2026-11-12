@@ -12,6 +12,7 @@ export type McpConnection = {
     scopes: Array<string>;
     createdAt: string;
     updatedAt: string;
+    status: 'active' | 'revoked' | 'expired';
 };
 
 export type ApiError = {

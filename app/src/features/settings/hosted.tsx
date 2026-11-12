@@ -112,11 +112,17 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
+  const apps = useApiDef(queries.mcpConnections())
+  const revoke = useApiMutation((api,id:string)=>api.credentials.revokeMcpConnection(id),'MCP connection revoked')
   if (!session?.identity) return null
   return <div className="settings-rows">
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
+    {apps.data?.map(app=><Row key={app.id} title={app.name||app.clientId} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':app.status==='revoked'?'Revoked':<Button variant="danger" onClick={()=>revoke.mutate(app.id)}>Revoke MCP access</Button>}</Row>)}
+    {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
+    <MutationError error={revoke.error}/>
+    {['bane.mx','dev.bane.mx'].includes(window.location.hostname) && <Row title="Issuer grants"><a href={window.location.hostname==='dev.bane.mx'?'https://account.dev.anoma.ly/apps':'https://account.anoma.ly/apps'}>Manage connected apps at Anomaly account</a></Row>}
   </div>
 }
 // Members and invitations appear together once both are known, so the second table never pushes down.

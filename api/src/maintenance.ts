@@ -134,7 +134,6 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
       // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
       await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
   }
-  await drain('bane_resource_grants',batch(sql`bane_resource_grants`, sql`expires_at <= now() AND NOT EXISTS (SELECT FROM mail_grant_objects mg WHERE 'mcp_'||mg.grant_id=bane_resource_grants.id)`));
   await drain('agent_tokens', batch(sql`agent_tokens`, sql`expires_at < ${cutoff}`));
   await drain('audience_operation_plans', batch(sql`audience_operation_plans`, sql`expires_at < now() - interval '1 day'`));
   await drain('sending_email_events', batch(sql`sending_email_events`, sql`created_at < ${cutoff}`));

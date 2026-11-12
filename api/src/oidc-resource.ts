@@ -5,8 +5,10 @@ import { digest, type Actor, type Runtime, type DbExecutor, type Permission } fr
 const permissions: Permission[] = ['read', 'send', 'manage'];
 const audience = (runtime: Runtime) => new URL('/mcp', runtime.config.publicUrl).href;
 export function protectedResourceMetadata(runtime: Runtime) {
-  return { resource: audience(runtime), authorization_servers: [runtime.config.accountIssuer],
-    scopes_supported: [...permissions.map(p => `bane:${p}`),'bane:receiving'], bearer_methods_supported: ['header'] };
+  return { resource: audience(runtime), resource_name:'Bane', authorization_servers: [runtime.config.accountIssuer],
+    scopes_supported: permissions.map(p => `bane:${p}`), bearer_methods_supported: ['header'],
+    // Provisional extension name until the issuer publishes its metadata contract.
+    scope_descriptions:{'bane:read':'Read workspace data.', 'bane:send':'Send email from the workspace.', 'bane:manage':'Manage workspace mail and resources.'} };
 }
 
 // Cache only completed public metadata. Each Worker request owns its fetches.
@@ -26,7 +28,7 @@ async function authority(issuer: string) {
 export async function externalMcpGrant(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
   const { rows: [grant] } = await db.execute<{workspace_id: string; role: string; permissions: Permission[]; receiving:boolean}>(sql`
     SELECT g.workspace_id, m.role, g.permissions,g.receiving FROM bane_resource_grants g
-    JOIN bane_oidc_identities i ON (g.issuer, g.subject) = (i.issuer, i.subject)
+    JOIN bane_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
     JOIN bane_users u ON u.id=i.user_id
     JOIN workspace_members m ON m.workspace_id = g.workspace_id AND m.user_id = i.user_id
     WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked AND g.expires_at > now()
@@ -43,7 +45,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   function denied(status: 401 | 403) {
     const error = status === 401 ? 'invalid_token' : 'insufficient_scope';
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
-    return Response.json({error}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", resource_metadata="${metadata}", scope="bane:read"` }});
+    return Response.json({error,error_description:status===401?'Reconnect and authorize this MCP client at the account service.':'This client has no active Bane approval for the requested access.'}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", resource_metadata="${metadata}", scope="bane:read"` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -65,16 +67,26 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
     const inserted = await runtime.db.execute(sql`INSERT INTO bane_dpop_proofs(id, expires_at) VALUES (${replay}, now()+interval '11 minutes') ON CONFLICT DO NOTHING RETURNING id`);
     if (!inserted.rowCount) return denied(401);
   }
-  const keyId = 'mcp_at_' + await digest(JSON.stringify([claims.iss,claims.client_id,claims.sub,claims.jti]));
-  // Pin a token to one workspace and its role ceiling. Ambiguous membership
-  // needs an explicit workspace grant; never follow a mutable dashboard preference.
+  const identity = await runtime.db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub}`);
+  const userId=identity.rows[0]?.user_id;
+  if (!userId) return denied(403);
+  const keyId = 'mcp_at_' + await digest(JSON.stringify([userId,claims.client_id]));
+  // Pin the first approval to one workspace; later tokens may reuse that
+  // binding, even if the user has since joined additional workspaces.
   await runtime.db.execute(sql`WITH memberships AS (
-    SELECT m.workspace_id, m.role FROM workspace_members m JOIN bane_oidc_identities i ON i.user_id=m.user_id
-    WHERE i.issuer=${claims.iss} AND i.subject=${claims.sub} AND m.role IN ('owner','admin','member') LIMIT 2
-  ) INSERT INTO bane_resource_grants(id,issuer,subject,client_id,workspace_id,permissions,expires_at,receiving)
-    SELECT ${keyId},${claims.iss},${claims.sub},${claims.client_id},workspace_id,
+    SELECT m.workspace_id, m.role FROM workspace_members m WHERE m.user_id=${userId} AND m.role IN ('owner','admin','member')
+      AND (NOT EXISTS(SELECT FROM bane_resource_grants WHERE id=${keyId}) OR m.workspace_id=(SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId})) LIMIT 2
+  ) INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at)
+    SELECT ${keyId},${claims.iss},${claims.sub},${userId},${claims.client_id},workspace_id,
       CASE WHEN role='member' THEN array_remove(${sql.param(allowed)}::text[],'manage') ELSE ${sql.param(allowed)}::text[] END,
-      to_timestamp(${claims.exp}),${scopes.has('bane:receiving')} FROM memberships WHERE (SELECT count(*) FROM memberships)=1 ON CONFLICT DO NOTHING`);
+      to_timestamp(${claims.exp}),${claims.iat} FROM memberships WHERE (SELECT count(*) FROM memberships)=1
+    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,
+      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject
+    WHERE NOT bane_resource_grants.revoked AND bane_resource_grants.workspace_id=excluded.workspace_id
+      AND (excluded.issued_at>bane_resource_grants.issued_at OR (excluded.issued_at=bane_resource_grants.issued_at AND
+        excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))`);
   const actor = await externalMcpGrant(runtime, keyId);
-  return actor ? handler(actor) : denied(403);
+  if (!actor) return denied(403);
+  const granted=actor.permissions.filter(permission=>allowed.includes(permission));
+  return granted.length ? handler({...actor,permissions:granted}) : denied(403);
 }

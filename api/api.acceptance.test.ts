@@ -403,17 +403,18 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const approved = `${randomUUID()}@example.org`, keys = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
-    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), AUTH_ALLOWED_EMAILS:approved}),
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', AUTH_ALLOWED_EMAILS:approved}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
-  let nonce = '', email = approved, verified = true;
+  let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false;
   t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
     assert.equal(new URL(url).origin,issuer);
     switch(new URL(url).pathname) {
-      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys'});
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo'});
+      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified});
       case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
       case '/token': {
         const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
-        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:email,nonce,email,email_verified:verified}]
+        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,...(useUserInfo?{}:{email,email_verified:verified})}]
           .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
         return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
@@ -431,12 +432,30 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await request(path,'GET',cookie)).headers.get('location'),origin+'/?auth=error');
     return result;
   }
-  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE email=$1',[approved]);});
+  const subjects=[subject];
+  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
   verified=false;assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
   verified=true;email='someoneelse@example.org';assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
   email=approved;const result=await login();assert.equal(result.headers.get('location'),origin+'/');
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
-  assert.equal((await request('/v1/me','GET',session)).status,200);
+  const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string};
+  const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
+  assert.deepEqual(members.data.map(m=>[m.userId,m.email]),[[me.id,approved]]);
+  assert.equal((await db.query('SELECT FROM auth_user WHERE id=$1',[me.id])).rowCount,0);
+  const oldInvitation=randomUUID();
+  await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[oldInvitation,me.workspaceId,approved,me.id]);
+  email=`changed-${approved}`;useUserInfo=true;
+  const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request('/v1/me','GET',session)).status,401);
+  assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
+  assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
+  verified=false;await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
+  assert.equal((await request('/v1/me','GET',newSession)).status,401);
+  verified=true;subject=randomUUID();subjects.push(subject);email=approved;
+  const reassigned=await login();const reassignedSession=reassigned.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',reassignedSession,{})).status,200);
+  assert.equal((await request('/api/auth/sign-out','POST',reassignedSession)).status,200);
+  assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
   assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
   assert.equal((await request('/v1/me','GET',session)).status,401);
 });
@@ -468,7 +487,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
   try {
     assert.ok(manager);
     await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
-    assert.deepEqual(protectedResourceMetadata(runtime).authorization_servers,[issuer]);
+    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Bane',authorization_servers:[issuer],scopes_supported:['bane:read','bane:send','bane:manage'],bearer_methods_supported:['header'],scope_descriptions:{'bane:read':'Read workspace data.','bane:send':'Send email from the workspace.','bane:manage':'Manage workspace mail and resources.'}});
     assert.deepEqual(await (await run(token())).json(),['read']);
     for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
     assert.equal((await run(token({scope:'openid'}))).status,403);
@@ -478,7 +497,47 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     const proof=jwt(holder.privateKey,{typ:'dpop+jwt',alg:'ES256',jwk},{iat:now,jti:randomUUID(),htm:'POST',htu:resource,ath:createHash('sha256').update(bound).digest('base64url')});
     assert.equal((await run(bound,proof)).status,200);
     assert.equal((await run(bound,proof)).status,401);
+    assert.equal((await run(token({jti:randomUUID()}))).status,200);
+    const grants=await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,claims.client_id]);
+    assert.equal(grants.rowCount,1,'Two tokens from the same client must resolve to one approval');
+    const {createApp}=await import('./src/app.js');const app=createApp();
+    const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
+    const call=(path:string,method='GET')=>app.fetch(new Request('https://bane.example.org'+path,{method,headers:{cookie:manager!.cookie.replace(/^bane\./,'__Host-bane.'),origin:'https://bane.example.org'}}),dashboard);
+    const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
+    assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
+    assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
+    assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A new JWT cannot restore a revoked client');
+    const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);assert.match(await denied.text(),/Reconnect/);
   } finally { await db.query('ROLLBACK'); }
+});
+
+test('MCP cutover expires legacy approvals, credentials and their derived keys together',async t=>{
+  assert.ok(manager);
+  const db=await fixtureDatabase(t);
+  await db.query('BEGIN');
+  try {
+    for(const table of ['oauth_client','oauth_consent','oauth_access_token','oauth_refresh_token','agent_tokens','mail_grant_objects','api_keys','bane_expired_approvals','bane_resource_grants']) {
+      await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING INDEXES) ON COMMIT DROP`);
+    }
+    await db.query('CREATE TRIGGER mail_grant_removed AFTER DELETE ON mail_grant_objects FOR EACH ROW EXECUTE FUNCTION mail_disable_grant_object()');
+    await db.query("INSERT INTO oauth_client(id,client_id,name,redirect_uris) VALUES('client','legacy-client','Old app','{}')");
+    await db.query("INSERT INTO oauth_consent(id,client_id,user_id,scopes,created_at,updated_at) VALUES('consent','legacy-client',$1,'{bane:read}',now(),now())",[manager.userId]);
+    for(const table of ['oauth_access_token','oauth_refresh_token']) await db.query(`INSERT INTO ${table}(id,token,user_id,client_id,scopes,created_at,expires_at) VALUES('id','fixture',$1,'legacy-client','{bane:read}',now(),now()+interval '1 day')`,[manager.userId]);
+    await db.query("INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES('agent','default','mcp_consent','[\"read\"]','[]','fixture',now()+interval '1 day')");
+    await db.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT k,'default',k,k,k,'[\"read\"]','[]' FROM unnest(ARRAY['derived','independent']) k");
+    await db.query("INSERT INTO mail_grant_objects VALUES('consent','default','api_key','derived')");
+    const migrate=await readFile(new URL('./migrations/190_expire_mcp_legacy.sql',import.meta.url),'utf8');
+    await db.query(migrate);await db.query(migrate);
+    assert.equal((await db.query('SELECT FROM oauth_client WHERE NOT disabled')).rowCount,0);
+    for(const table of ['oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE revoked IS NULL OR expires_at>now()`)).rowCount,0);
+    assert.equal((await db.query('SELECT FROM agent_tokens WHERE revoked_at IS NULL')).rowCount,0);
+    assert.deepEqual((await db.query('SELECT id FROM api_keys WHERE revoked_at IS NULL')).rows,[{id:'independent'}]);
+    const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
+    const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
+    const response=await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections',{headers:{cookie:manager.cookie}}),runtime);
+    const {data}=await response.json() as {data:{clientId:string;status:string}[]};
+    assert.deepEqual(data.map(g=>[g.clientId,g.status]),[['legacy-client','expired']]);
+  } finally {await db.query('ROLLBACK');}
 });
 
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{

@@ -21,9 +21,10 @@ const base = '/v1/workspaces/current';
 export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId: string) {
   const result = await db.execute<{ workspace_id: string }>(sql`WITH pending AS (
     SELECT i.id FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
+    JOIN bane_users recipient ON recipient.id=${userId} AND recipient.email_verified AND lower(recipient.email)=i.email
     WHERE i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
       AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner'))
-      AND i.id = ${invitationId} FOR UPDATE OF i FOR SHARE OF inviter
+      AND i.id = ${invitationId} FOR UPDATE OF i FOR SHARE OF inviter,recipient
   ), claimed AS (
     UPDATE workspace_invitations i SET status = 'accepted' FROM pending WHERE i.id = pending.id RETURNING i.workspace_id, i.role
   ), joined AS (
@@ -152,7 +153,7 @@ export function registerWorkspaces(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: `${base}/members`, operationId: 'listWorkspaceMembers', tags, security, responses: { 200: response(z.object({ data: z.array(Member) })), ...errors } }), async c => {
     const a = dashboardSession(c, true);
-    const rows = await c.env.db.select({ id: workspaceMembers.id, userId: baneUsers.id, role: workspaceMembers.role, email: baneUsers.email, name: baneUsers.name }).from(workspaceMembers).innerJoin(baneUsers, eq(baneUsers.id, workspaceMembers.userId)).where(eq(workspaceMembers.workspaceId, a.workspaceId)).orderBy(baneUsers.email);
+    const rows = await c.env.db.select({ id: workspaceMembers.id, userId: workspaceMembers.userId, role: workspaceMembers.role, email: sql<string>`coalesce(${baneUsers.email}, '')`, name: baneUsers.name }).from(workspaceMembers).innerJoin(baneUsers, eq(baneUsers.id, workspaceMembers.userId)).where(eq(workspaceMembers.workspaceId, a.workspaceId)).orderBy(baneUsers.email,workspaceMembers.id);
     return c.json({ data: rows.map(row => Member.parse(row)) }, 200);
   });
   for (const [resource, operationId] of [['members', 'inviteWorkspaceMember'], ['invitations', 'createWorkspaceInvitation']] as const) {

@@ -78,6 +78,14 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "revoked",
+              "expired"
+            ]
           }
         },
         "required": [
@@ -87,7 +95,8 @@
           "userEmail",
           "scopes",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "status"
         ]
       },
       "ApiError": {

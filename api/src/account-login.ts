@@ -58,6 +58,11 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   const tokens = await oidc.processAuthorizationCodeResponse(metadata, client, response, {requireIdToken:true,expectedNonce:flow.nonce});
   await oidc.validateApplicationLevelSignature(metadata, response, options);
   const claims = oidc.getValidatedIdTokenClaims(tokens)!;
+  const profile = (claims.email === undefined || claims.email_verified === undefined) && metadata.userinfo_endpoint
+    ? await oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, options))
+    : claims;
+  const address = verifiedEmail.safeParse(profile.email).data ?? null;
+  const emailAtLogin = profile.email_verified === true ? address : null;
   const returnUrl = new URL(flow.return_url);
   if (returnUrl.origin !== new URL(runtime.config.publicUrl).origin) throw loginFailed();
   const invitation = returnUrl.pathname === '/' ? returnUrl.searchParams.get('invitation') : null;
@@ -67,9 +72,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     const existing = await db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub} FOR SHARE`);
     let userId: string | undefined = existing.rows[0]?.user_id;
     if (!userId) {
-      const verified = verifiedEmail.safeParse(claims.email);
-      if (claims.email_verified !== true || !verified.success) throw loginFailed();
-      const email = verified.data;
+      if (!emailAtLogin) throw loginFailed();
+      const email = emailAtLogin;
       const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},true) AS id`);
       userId = migrated.rows[0]?.id ?? undefined;
       if (!userId) {
@@ -79,7 +83,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         const name = typeof claims.name === 'string' ? claims.name.slice(0,200) : email;
         // A colliding legacy email is reserved; only the reviewed claim above can adopt it.
         const inserted = await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) SELECT ${userId},${name},${email},true
-          WHERE NOT EXISTS(SELECT FROM bane_users WHERE lower(email)=lower(${email})) ON CONFLICT DO NOTHING RETURNING id`);
+          WHERE NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${email})) ON CONFLICT DO NOTHING RETURNING id`);
         if (!inserted.rowCount) throw loginFailed();
         await db.execute(sql`INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
         if (runtime.config.multiTenant) {
@@ -89,7 +93,15 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         }
       }
     }
-    const emailAtLogin = claims.email_verified === true ? verifiedEmail.safeParse(claims.email).data : undefined;
+    // Serialize email ownership changes separately from the stable subject. A
+    // conflicting address must never transfer somebody else's user or memberships.
+    if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
+    const updated = await db.execute(sql`WITH observed AS (
+      SELECT ${address}::text AS email, (${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE id<>${userId}
+        AND email_verified AND lower(email)=lower(${address}))) AS verified
+    ) UPDATE bane_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
+      WHERE u.id=${userId} AND (u.email,u.email_verified) IS DISTINCT FROM (o.email,o.verified) RETURNING u.id`);
+    if(updated.rowCount) await db.execute(sql`DELETE FROM bane_sessions WHERE user_id=${userId}`);
     await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES
       (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},now()+interval '7 days')`);
   });

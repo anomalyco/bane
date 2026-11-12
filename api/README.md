@@ -95,6 +95,8 @@ Set `AUTH_ALLOWED_EMAILS` before first sign-in. A new hosted user may also follo
 
 Bane stores a hash of the browser's random session token and checks the session expiry and workspace membership in PostgreSQL. Signing out revokes the Bane session.
 
+On sign-in Bane refreshes the address and verification flag from the signed ID token or subject-checked UserInfo response. An address change invalidates prior sessions. A missing or unverified address cannot accept invitations. When moving a test installation from pairwise to public subjects, review the user's identity and current mailbox first. With sign-ins fenced, remove the obsolete `bane_oidc_identities` binding and approve the user's exact address in `bane_legacy_claims` for the expected issuer. The next verified sign-in binds the public subject to the original Bane user ID.
+
 ## Docker quickstart
 
 The image bundles the dashboard with the API on one origin, **http://127.0.0.1:8793**. The API and background worker are separate services using the same image and database. Stop any host API using port 8793 first.

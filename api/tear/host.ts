@@ -268,7 +268,7 @@ async function mintGrant(name: string, user: User, scope: string) {
   const claims={iss:fixtureIssuer,sub:user.id,aud:PUBLIC+'/mcp',client_id:clientId,scope,jti,iat:now,exp:now+300};
   const body=[{alg:'ES256',typ:'at+jwt',kid:'tear'},claims].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
   const access=body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
-  const consentId='at_'+createHash('sha256').update(JSON.stringify([fixtureIssuer,clientId,user.id,jti])).digest('hex');
+  const consentId='at_'+createHash('sha256').update(JSON.stringify([user.id,clientId])).digest('hex');
   const result=await rpc(access,'tools/list',{},true);
   if(result.status!==200)return {status:result.status};
   fx!.grants.set(name,{access,refresh:'',clientId,consentId,keyId:'mcp_'+consentId});

@@ -85,7 +85,7 @@ Requests are not retried automatically. `idempotencyKey` is forwarded as `Idempo
 
 ## Hosting and safety
 
-- OAuth discovery is available through the root and resource-path well-known metadata URLs. Public/confidential dynamic client registration supports authorization code with S256 PKCE. Client-ID metadata document fetching is not enabled; the server does not fetch arbitrary client JWKS or logout URLs.
+- OAuth discovery is available through the root and resource-path protected-resource metadata URLs. MCP clients register and authorize at the stage's account issuer using its discovery metadata.
 - HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`.
 - Long-lived keys created through MCP remain tied to the approval. Provider notifications, unsubscribe links and browser consent are not agent tools. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
 - The deployment, not the OAuth grant, controls SES simulation. Simulation is not a dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
@@ -119,10 +119,10 @@ A typical run: `createInbox` → give the address to the sign-up form → `waitF
 
 To manage receiving, request `bane:manage` and explicitly approve receiving on the human OAuth screen. Old approvals do not silently acquire these tools. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).
 
-## External authorization server (cutover preview)
+## Account authorization and Bane approvals
 
 Set `ACCOUNT_ISSUER` to the HTTPS issuer that signs access tokens for this installation. Resource discovery is available at `${PUBLIC_URL}/.well-known/oauth-protected-resource/mcp`. The resource indicator is the absolute `${PUBLIC_URL}/mcp` URI, including `/mcp`. Clients discover and request authorization at the issuer. During cutover each user authorizes their client again; existing Bane-issued grants cannot be exchanged at the new issuer.
 
 `bane:read`, `bane:send` and `bane:manage` request the corresponding Bane permissions. The resource verifies the JWT signature and audience, requires a matching Bane `(issuer, subject)` identity, and checks live workspace membership. Members cannot acquire `manage`. A token whose user belongs to several workspaces needs an explicit workspace binding; until that binding is available, access is denied. A sender-constrained access token requires its matching DPoP proof on every request.
 
-For hosted Bane, the resource identifiers are `https://dev.bane.mx/mcp` and `https://bane.mx/mcp`. Configure the appropriate resource and allowed scopes for **each MCP client** on its stage's issuer. Register a URL client ID in advance on issuers that require preregistration. The issuer must expose a subject Bane can resolve for this resource; a third-party client's pairwise subject can differ from the subject Bane sees on dashboard sign-in.
+For hosted Bane, the resource identifiers are `https://dev.bane.mx/mcp` and `https://bane.mx/mcp`. The account issuer supplies the same public subject on dashboard sign-in and on MCP access tokens. Bane maintains one approval per user and client ID, including across token refreshes. In **Settings → Account**, revoke a client to block subsequent tokens from that client in Bane. Use the **Manage connected apps** link to revoke the grant at the issuer. The cutover shows legacy approvals as expired and revokes their tokens and derived credentials. Reconnect through the account service to authorize again.
