@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
+import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
 import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { authUser } from './db/google-auth.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
@@ -18,7 +19,10 @@ const tags = ['Workspaces'];
 const base = '/v1/workspaces/current';
 
 // Accept only the invitation the verified recipient followed. Never overwrite an existing role.
-export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId: string) {
+// The joining user is the actor (not yet a member of the workspace they join); the request supplies the rest.
+export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId: string, request: Omit<AuditContext, 'actor'> = { requestId: null, ipNetwork: null, userAgent: null }) {
+  const audit = auditInsert({ ...request, actor: { type: 'member', id: userId, userId, via: 'dashboard' } },
+    { action: 'member.join', workspaceId: sql`joined.workspace_id`, target: { type: 'member', id: sql`joined.id` }, after: sql`jsonb_build_object('role', joined.role)`, details: { invitationId } }, { from: sql`joined` });
   const result = await db.execute<{ workspace_id: string }>(sql`WITH pending AS (
     SELECT i.id FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
     WHERE i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
@@ -28,8 +32,8 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
     UPDATE workspace_invitations i SET status = 'accepted' FROM pending WHERE i.id = pending.id RETURNING i.workspace_id, i.role
   ), joined AS (
     INSERT INTO workspace_members (id, workspace_id, user_id, role) SELECT ${id('mem')}, workspace_id, ${userId}, role FROM claimed
-    ON CONFLICT (workspace_id, user_id) DO NOTHING
-  ) UPDATE auth_user u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
+    ON CONFLICT (workspace_id, user_id) DO NOTHING RETURNING id, workspace_id, role
+  ), audit AS (${audit}) UPDATE auth_user u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
   return result.rows[0]?.workspace_id;
 }
 
@@ -55,7 +59,7 @@ export async function onboardNewUser(db: DbExecutor, user: { id: string; name: s
 // One statement: the workspace, its regional settings and the owner membership. With `ownedBelow`,
 // nothing is inserted once the user already owns that many workspaces (the caller holds the user lock)
 // or is no longer a member of `memberOf`, the workspace the request authenticated through.
-async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }) {
+async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }, audit?: AuditContext) {
   const workspaceId = id('ws');
   const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
   const result = await db.execute<{ id: string; name: string; slug: string }>(sql`WITH created AS (
@@ -68,7 +72,8 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
     SELECT id, ${id('install')}, ${region}, ${JSON.stringify([region])}::jsonb FROM created
   ), owner AS (
     INSERT INTO workspace_members(id, workspace_id, user_id, role) SELECT ${id('mem')}, id, ${userId}, 'owner' FROM created
-  ) SELECT id, name, slug FROM created`);
+  )${audit ? sql`, audit AS (${auditInsert(audit, { action: 'workspace.create', workspaceId: sql`created.id`, target: { type: 'workspace', id: sql`created.id` }, after: { name, region } }, { from: sql`created` })})` : sql``}
+  SELECT id, name, slug FROM created`);
   return result.rows[0];
 }
 const maxOwnedWorkspaces = 10;
@@ -94,12 +99,14 @@ const ownerRequired = () => new ApiError(403, 'OWNER_REQUIRED', 'Only an owner c
 function changeMember(c: Ctx, memberId: string, newRole?: Role) {
   return administer(c, async (db, wid, _uid, role) => {
     const filter = and(eq(workspaceMembers.workspaceId, wid), eq(workspaceMembers.id, memberId));
-    const [member] = await db.select({ role: workspaceMembers.role, otherOwner: sql<boolean>`EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ${wid} AND role = 'owner' AND id <> ${memberId})` }).from(workspaceMembers).where(filter);
+    const [member] = await db.select({ role: workspaceMembers.role, userId: workspaceMembers.userId, otherOwner: sql<boolean>`EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ${wid} AND role = 'owner' AND id <> ${memberId})` }).from(workspaceMembers).where(filter);
     if (!member) return notFound('Member');
     if ((member.role === 'owner' || newRole === 'owner') && role !== 'owner') throw ownerRequired();
     if (member.role === 'owner' && newRole !== 'owner' && !member.otherOwner) throw new ApiError(409, 'LAST_OWNER', 'Promote another owner before removing or demoting the last owner.');
     if (newRole) await db.update(workspaceMembers).set({ role: newRole }).where(filter);
     else await db.delete(workspaceMembers).where(filter);
+    if (newRole !== member.role) await recordAudit(db, c, { action: newRole ? 'member.role_change' : 'member.remove', workspaceId: wid, userId: member.userId, target: { type: 'member', id: memberId },
+      before: { role: member.role }, ...(newRole ? { after: { role: newRole } } : {}) });
   });
 }
 type InviteRow = { id: string; workspaceId: string; email: string; role: Role; expiresAt: Date };
@@ -109,12 +116,14 @@ function invitationView(c: Ctx, row: InviteRow) {
 async function invite(c: Ctx, input: z.infer<typeof Invite>) {
   return administer(c, async (db, wid, uid, role) => {
     if (input.role === 'owner' && role !== 'owner') throw ownerRequired();
-    const result = await db.execute<InviteRow>(sql`INSERT INTO workspace_invitations(id, workspace_id, email, role, inviter_id, expires_at)
+    const result = await db.execute<InviteRow>(sql`WITH invited AS (INSERT INTO workspace_invitations(id, workspace_id, email, role, inviter_id, expires_at)
       SELECT ${id('inv')}, ${wid}, ${input.email}, ${input.role}, ${uid}, now() + interval '7 days'
       WHERE NOT EXISTS(SELECT 1 FROM workspace_members m JOIN auth_user u ON u.id = m.user_id WHERE m.workspace_id = ${wid} AND lower(u.email) = ${input.email})
       ON CONFLICT (workspace_id, email) WHERE status = 'pending' DO UPDATE SET id = excluded.id, role = excluded.role, inviter_id = excluded.inviter_id, expires_at = excluded.expires_at, created_at = now()
       WHERE workspace_invitations.expires_at <= now()
-      RETURNING id, workspace_id AS "workspaceId", email, role, expires_at AS "expiresAt"`);
+      RETURNING id, workspace_id AS "workspaceId", email, role, expires_at AS "expiresAt"
+    ), audit AS (${auditInsert(auditContext(c), { action: 'member.invite', workspaceId: wid, userId: null, target: { type: 'invitation', id: sql`invited.id` }, after: { email: input.email, role: input.role } }, { from: sql`invited` })})
+    SELECT * FROM invited`);
     if (!result.rows[0]) throw new ApiError(409, 'ALREADY_INVITED_OR_MEMBER', 'This address already has a pending invitation or membership.');
     return invitationView(c, result.rows[0]);
   });
@@ -133,7 +142,7 @@ export function registerWorkspaces(app: App) {
       // Lock the user so concurrent creates count each other's workspaces.
       const [user] = await db.select({ email: authUser.email, verified: authUser.emailVerified, hd: authUser.googleHostedDomain }).from(authUser).where(eq(authUser.id, a.userId)).for('update');
       if (!user || !approvedGoogleIdentity(c.env, user.email, user.verified, user.hd)) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
-      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId });
+      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c));
       if (row) return row;
       const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
@@ -144,7 +153,10 @@ export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {
     const { name } = c.req.valid('json');
     const row = await administer(c, async (db, wid, _uid, role) => {
-      const [w] = await db.update(workspaces).set({ name }).where(eq(workspaces.id, wid)).returning({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug });
+      const { rows: [w] } = await db.execute<{ id: string; name: string; slug: string }>(sql`WITH old AS (SELECT name FROM workspaces WHERE id = ${wid}),
+        renamed AS (UPDATE workspaces SET name = ${name} WHERE id = ${wid} RETURNING id, name, slug),
+        audit AS (${auditInsert(auditContext(c), { action: 'workspace.rename', workspaceId: wid, target: { type: 'workspace', id: wid }, before: sql`jsonb_build_object('name', (SELECT name FROM old))`, after: { name } }, { from: sql`renamed` })})
+        SELECT id, name, slug FROM renamed`);
       return { ...w!, role };
     });
     return c.json(row, 200);
@@ -171,7 +183,9 @@ export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'delete', path: `${base}/invitations`, operationId: 'revokeWorkspaceInvitation', tags, security, request: { query: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const { id } = c.req.valid('query');
     await administer(c, async (db, wid, _uid, role) => {
-      const result = await db.execute(sql`UPDATE workspace_invitations SET status = 'canceled' WHERE id = ${id} AND workspace_id = ${wid} AND status = 'pending' AND (role <> 'owner' OR ${role} = 'owner') RETURNING id`);
+      const result = await db.execute(sql`WITH revoked AS (UPDATE workspace_invitations SET status = 'canceled' WHERE id = ${id} AND workspace_id = ${wid} AND status = 'pending' AND (role <> 'owner' OR ${role} = 'owner') RETURNING id, email, role),
+        audit AS (${auditInsert(auditContext(c), { action: 'member.invite_revoke', workspaceId: wid, userId: null, target: { type: 'invitation', id: sql`revoked.id` }, before: sql`jsonb_build_object('email', revoked.email, 'role', revoked.role)` }, { from: sql`revoked` })})
+        SELECT id FROM revoked`);
       if (!result.rowCount) notFound('Invitation');
     });
     return c.json({ id, deleted: true as const }, 200);
@@ -195,7 +209,7 @@ export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces/invitations/{id}/accept', operationId: 'acceptWorkspaceInvitation', tags, security, request: { params: IdParams }, responses: { 200: response(z.object({ workspaceId: z.string() })), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = await invitationRecipient(c.env, c.req.raw.headers), invitationId = c.req.valid('param').id;
-    const workspaceId = await claimInvitation(c.env.db, a.userId, a.email, invitationId);
+    const workspaceId = await claimInvitation(c.env.db, a.userId, a.email, invitationId, auditContext(c));
     if (workspaceId) return c.json({ workspaceId }, 200);
     // Following the URL immediately after sign-in is an idempotent success, never a rejoin.
     const existing = await c.env.db.execute<{ workspace_id: string }>(sql`SELECT i.workspace_id FROM workspace_invitations i JOIN workspace_members m ON m.workspace_id = i.workspace_id AND m.user_id = ${a.userId} WHERE i.id = ${invitationId} AND i.email = ${a.email.toLowerCase()} AND i.status = 'accepted'`);

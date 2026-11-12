@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { actor, ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, response, security, type Actor, type App, type JobHandler, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, response, security, type Actor, type App, type Database, type JobHandler, type Runtime } from './core.js';
+import { recordAudit } from './audit.js';
 import { apiKeys, jobs } from './db/core.js';
 import { domains } from './db/operations.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -52,7 +53,16 @@ export function registerSesRegions(app: App) {
     description: 'Enable/disable a region or choose the default. Requires unrestricted management access. Disabling never deletes AWS resources or historical mail.',
     request: { params: Params, body: json(z.object({ enabled: z.boolean().optional(), makeDefault: z.boolean().optional() }).strict().refine(value => value.enabled !== undefined || value.makeDefault === true, 'Choose enabled or makeDefault.').openapi('ConfigureRegion')) },
     responses: { 200: response(Catalog), ...errors },
-  }), async c => { const value = access(c, true); return c.json(Catalog.parse(await configureRegion(c.env, value.workspaceId, c.req.valid('param').region, c.req.valid('json'))), 200); });
+  }), async c => {
+    const value = access(c, true), { region } = c.req.valid('param'), input = c.req.valid('json');
+    // configureRegion's own transaction becomes a savepoint, so the change and its audit row commit together.
+    const catalog = await c.env.db.transaction(async tx => {
+      const catalog = await configureRegion({ ...c.env, db: tx as unknown as Database }, value.workspaceId, region, input);
+      await recordAudit(tx, c, { action: 'region.configure', workspaceId: value.workspaceId, target: { type: 'region', id: region }, after: { ...input, defaultRegion: catalog.defaultRegion } });
+      return catalog;
+    });
+    return c.json(Catalog.parse(catalog), 200);
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/regions/{region}/discovery', operationId: 'discoverRegion', tags: ['Regions'], security,
     description: 'Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache.',
     request: { params: Params, query: z.object({ refresh: z.enum(['true', 'false']).optional() }) }, responses: { 200: response(SesDiscoverySchema), ...errors },
@@ -93,6 +103,7 @@ export function registerSesRegions(app: App) {
         region, actorKeyId: value.keyId, credentialsFingerprint: await credentialFingerprint(c.env.config), publicUrl: discoveryTarget(c.env.config), requestId: c.get('requestId'),
       } });
       await tx.update(sesRegions).set({ provisionJobId: jobId }).where(regionWhere(value.workspaceId, region));
+      await recordAudit(tx, c, { action: 'region.provision', workspaceId: value.workspaceId, target: { type: 'region', id: region }, details: { jobId } });
       return { jobId, status: 'pending' as const };
     });
     return c.json(receipt, 202);
@@ -105,6 +116,8 @@ export function registerSesRegions(app: App) {
     const settings = await getRegionSettings(c.env.db, value.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before configuring Auto Validation.', 'region');
     await setAutoValidation(c.env, { region, installationId: settings.installationId }, input.stream, input.mode);
+    // The change is in SES, not in a database row: the audit row follows it.
+    await recordAudit(c.env.db, c, { action: 'region.auto_validation', workspaceId: value.workspaceId, target: { type: 'region', id: region }, after: { stream: input.stream, mode: input.mode } });
     const [row] = await c.env.db.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).limit(1);
     if (row?.report) {
       const report = SesDiscoverySchema.parse(row.report);

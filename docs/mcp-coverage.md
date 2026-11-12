@@ -247,3 +247,5 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `verifyConnection` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getPublicStats` | Public, installation-wide homepage numbers; no workspace data. |
 | `getOverviewSetup` | `settings` · `setup` · admin |
+| `listActivity` | Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity). |
+| `contactSupport` | Human step: a signed-in person contacts Bane support from the dashboard. |

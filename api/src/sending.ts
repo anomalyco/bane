@@ -1,6 +1,7 @@
 import { cachedDashboardRead } from './dashboard-cache.js';
 import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
+import { recordAudit } from './audit.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, or, sql, SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -1327,7 +1328,9 @@ export function registerSending(app: App) {
       const row = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, row.draft);
       if (row.state === 'done') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.');
       if (row.state === 'draft') throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a campaign that was sent or scheduled can be canceled.');
-      return cancelCampaignWork(db, a, row);
+      const canceled = await cancelCampaignWork(db, a, row);
+      await recordAudit(db, c, { action: 'campaign.cancel', workspaceId: a.workspaceId, target: { type: 'campaign', id: row.id }, before: { state: row.state } });
+      return canceled;
     });
     if (a.wakeJobs) { await wakeWebhooks(c.env,a.wakeJobs); a.wakeJobs=0; }
     return c.json(CampaignCanceled.parse(result), 200);
@@ -1352,6 +1355,7 @@ export function registerSending(app: App) {
     const ref = { workspaceId: a.workspaceId, id: campaign.id };
     await db.execute(pauseCampaign(ref, { code: 'PAUSED_BY_USER', message: 'Paused from the dashboard or API.' }));
     await db.execute(retireCampaignRun(ref, 'CAMPAIGN_PAUSED'));
+    await recordAudit(db, c, { action: 'campaign.pause', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state } });
   }));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/resume', operationId: 'resumeCampaign', description: 'Continue releasing recipients from where a paused campaign stopped, or where a campaign that failed after releasing some recipients stopped (it continues on the same frozen snapshot, never a new one). After an automatic pause, the next health check runs 30 minutes later.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (!campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign, or one that failed after releasing recipients, can be resumed.');
@@ -1359,6 +1363,7 @@ export function registerSending(app: App) {
     await db.execute(resumeCampaign(ref, next));
     if (campaign.state==='failed' && campaign.error?.code==='JOB_LEASE_EXHAUSTED') await checkCampaignCapacity(db,{...a,keyId:campaign.actorKeyId??a.keyId},0);
     await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {}, next === 'scheduled' ? campaign.scheduledAt : null));
+    await recordAudit(db, c, { action: 'campaign.resume', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state }, after: { state: next } });
     a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
   }));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.'), rateShare: z.number().min(0.05).max(1).optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {

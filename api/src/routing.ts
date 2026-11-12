@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
 import { actor, ApiError, errors, id, json, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
 import { ADDRESS, lockMailboxLane } from './mailbox-store.js';
@@ -248,7 +249,7 @@ async function save(
   version: number,
   before: Route[],
   after: Route[],
-  { dryRun = false, lenient = false, note = '' } = {},
+  { dryRun = false, lenient = false, note = '', audit }: { dryRun?: boolean; lenient?: boolean; note?: string; audit?: { action: string; details?: Record<string, unknown> } } = {},
 ) {
   if(after.length>10000)throw fail(422,'ROUTE_LIMIT','A workspace supports at most 10,000 routes.');
   checkRoutes(after);
@@ -299,8 +300,15 @@ async function save(
     VALUES(${w},${next},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(after.map(r=>r.id).sort())}::jsonb)),ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(diff.map(d=>(d.before??d.after)!.id).sort())}::jsonb)),${who.credential??'apiKey'},${who.keyId},${note||null})`);
   // At most one retired manifest on a normal write; its audit rows share the same transaction.
   await tx.execute(sql`DELETE FROM mail_routing_versions WHERE workspace_id=${w} AND version<=${next-256}`);
+  // One account audit row per committed version, in the statement that writes the per-route history.
+  const brief = (r: Route | null) => r && { match: r.match, key: r.key ?? null, enabled: r.enabled, destinations: Array.isArray(r.to) ? r.to.length : r.to };
+  const single = audit?.action.startsWith('route.') ? diff[0]! : null;
   await tx.execute(
-    sql`INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note) SELECT ${w},${next},coalesce(before->>'id',after->>'id'),before,after,${who.credential ?? 'apiKey'},${who.keyId},${c.get('requestId')},${note || null} FROM jsonb_to_recordset(${JSON.stringify(diff)}::jsonb) x(before jsonb,after jsonb)`,
+    sql`WITH changes AS (INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note) SELECT ${w},${next},coalesce(before->>'id',after->>'id'),before,after,${who.credential ?? 'apiKey'},${who.keyId},${c.get('requestId')},${note || null} FROM jsonb_to_recordset(${JSON.stringify(diff)}::jsonb) x(before jsonb,after jsonb) RETURNING 1)
+      ${audit ? sql`, audit AS (${auditInsert(auditContext(c), { action: audit.action, workspaceId: w, target: single ? { type: 'route', id: (single.before ?? single.after)!.id } : { type: 'routing', id: w },
+        ...(single ? { before: brief(single.before) ?? undefined, after: brief(single.after) ?? undefined } : {}),
+        details: { version: next, changes: diff.length, created: diff.filter(d => !d.before).length, deleted: diff.filter(d => !d.after).length, routes: after.length, ...audit.details } })})` : sql``}
+      SELECT count(*) FROM changes`,
   );
   // Exact routes are point lookups; only pattern and catch-all changes rewrite their host's plan.
   for (const domain of new Set(routes.filter((r) => r.match.includes('*')).map((r) => domains.get(hostOf(r.match)))))
@@ -446,7 +454,7 @@ export function registerRouting(app: App) {
     }),
     async (c) => {checkReferenceBudget(c.req.valid('json').routes);return c.json(
         await edit(c, (routes) => applyEntries(routes,c.req.valid('json').routes), {
-          dryRun: c.req.valid('query').dryRun === 'true',
+          dryRun: c.req.valid('query').dryRun === 'true', audit: { action: 'routing.apply' },
         }),
         200,
       );},
@@ -476,7 +484,7 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       const route = makeRoute(c.req.valid('json'));
-      await edit(c, (routes) => [...routes, route]);
+      await edit(c, (routes) => [...routes, route], { audit: { action: 'route.create' } });
       return c.json(route, 201);
     },
   );
@@ -509,7 +517,7 @@ export function registerRouting(app: App) {
         const previous = findRoute(routes, c.req.valid('param').id);
         updated = makeRoute({ ...previous, ...c.req.valid('json') }, previous);
         return routes.map((r) => (r === previous ? updated! : r));
-      });
+      }, { audit: { action: 'route.update', details: { fields: Object.keys(c.req.valid('json')) } } });
       return c.json(updated!, 200);
     },
   );
@@ -529,7 +537,7 @@ export function registerRouting(app: App) {
         await edit(c, (routes) => {
           const removed = findRoute(routes, c.req.valid('param').id);
           return routes.filter((r) => r !== removed);
-        }),
+        }, { audit: { action: 'route.delete' } }),
         200,
       ),
   );
@@ -629,7 +637,7 @@ export function registerRouting(app: App) {
             if (v > version) throw fail(404, 'NOT_FOUND', `Version ${v} does not exist yet. List versions with GET /v1/routing/versions.`);
             return historical(tx, w, v);
           },
-          { lenient: true, note: `Restore of v${v}` },
+          { lenient: true, note: `Restore of v${v}`, audit: { action: 'routing.restore', details: { restoredVersion: v } } },
         ),
         200,
       );

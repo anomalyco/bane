@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
+import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
@@ -171,7 +172,7 @@ export async function byoStackTopic(runtime: Runtime, arn: string) {
   if (!row || setupResources(row.id).topicName !== `${prefix}-feedback`) return;
   return (confirmation: Confirmation) => provision(runtime, row, account!, confirmation);
 }
-async function provision(runtime: Runtime, row: Row, account: string, confirmation?: Confirmation) {
+async function provision(runtime: Runtime, row: Row, account: string, confirmation?: Confirmation, audit?: AuditContext) {
   if (row.template_version==='v5') throw new ApiError(409,'REGIONAL_SETUP_REQUIRED','This connection requires regional setup, not stack import.');
   const roleArn = `arn:aws:iam::${account}:role/${stackName(row)}`;
   if (row.platform_principal_arn!.split(':')[4] === account) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'The shared sending account cannot be used as a customer account.');
@@ -218,6 +219,8 @@ async function provision(runtime: Runtime, row: Row, account: string, confirmati
       queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'byo.verify:'||id,'byo.verify',workspace_id,jsonb_build_object('connectionId',id) FROM bound WHERE state='provisioning'
         ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload=excluded.payload WHERE jobs.status IN ('failed','completed') OR
           (${!!confirmation} AND jobs.status='pending' AND (jobs.last_error='SNS_CONFIRMATION_PENDING' OR jobs.payload->>'retryCode'='SNS_CONFIRMATION_PENDING')))
+      ${audit && !join ? sql`, audit AS (${auditInsert(audit, { action: 'connection.verify', workspaceId: row.workspace_id, target: { type: 'connection', id: row.id }, before: { state: row.state },
+        after: sql`jsonb_build_object('state',bound.state,'kind',bound.kind,'region',bound.region)` }, { from: sql`bound` })})` : sql``}
       SELECT * FROM bound`);
     if (!result.rows[0]) throw busy();
     if (result.rows[0].state === 'provisioning') await wakeByoJob(runtime,row.id);
@@ -321,7 +324,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
     } catch (e) { if (e instanceof ModuleLoadError) throw e; const error=awsError(e); log('warn', { operation: 'shared-pool-setup', region, code: error.code, ...(error.code==='POOL_SENDING_DRIFT'?{message:error.message}:{}) }); }
   }
 }
-async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {
+async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>, context: AuditContext) {
   const { kind } = input, region = input.region ?? (kind === 'shared' ? sharedRegions(runtime)[0]! : platformRegion);
   if (kind === 'byo') template(runtime);
   // Offered regions come from SHARED_SENDING_REGIONS (Ohio at launch; Ireland is inside the IAM boundary).
@@ -330,15 +333,18 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   if (/^(cn-|us-gov-|us-iso|us-isob|eu-isoe|us-isof)/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region.', 'region');
   if (kind === 'byo' && !byoRegions.includes(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region where Amazon SES supports sending.', 'region');
   assertSesConfigured(runtime);
+  const audit = (from: SQL, where?: SQL) => auditInsert(context, { action: 'connection.create', workspaceId: wid, target: { type: 'connection', id: sql`${from}.id` }, after: { kind, region } }, { from, where });
   if (kind==='shared') {
     // Hosted is instant: `ready` on creation with zero AWS calls. The tenant job owns CreateTenant and flips
     // tenant_state; until then domains and sends answer TENANT_NOT_READY. Simulation has no tenant, so it is ready.
+    // The statement's snapshot predates its insert, so only a new connection is audited, not a repeated choice.
     const row = (await runtime.db.execute<Row & { queued: boolean }>(sql`WITH pool AS (SELECT aws_account_id FROM provider_pool_regions p WHERE region=${region} AND ${poolSends()}), connection AS (
       INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id,managed_tenant,pool_tenant_name) VALUES (${id('conn')},${wid},'shared',${region},'ready',${isSimulatedSes(runtime) ? 'ready' : 'pending'},(SELECT aws_account_id FROM pool),${!!runtime.config.regionalSending},${runtime.config.trustedPool?poolTenantName(wid,'probation'):null})
       ON CONFLICT(workspace_id) DO UPDATE SET aws_account_id=coalesce(provider_connections.aws_account_id,excluded.aws_account_id) WHERE provider_connections.kind='shared' AND provider_connections.region=excluded.region RETURNING *),
       settings AS (UPDATE ses_installation_settings s SET default_region=c.region,enabled_regions=CASE WHEN EXISTS(SELECT FROM provider_connection_regions r WHERE r.connection_id=c.id AND NOT r.legacy AND r.sending_state='ready') THEN s.enabled_regions ELSE jsonb_build_array(c.region) END FROM connection c WHERE c.workspace_id=s.workspace_id),
       stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL,report=NULL FROM connection c WHERE c.workspace_id=d.workspace_id AND d.report IS NOT NULL),
-      queued AS (${queueTenantJob(sql`SELECT c.id,c.workspace_id FROM connection c JOIN pool USING (aws_account_id) WHERE c.tenant_state<>'ready'`)} RETURNING 1)
+      queued AS (${queueTenantJob(sql`SELECT c.id,c.workspace_id FROM connection c JOIN pool USING (aws_account_id) WHERE c.tenant_state<>'ready'`)} RETURNING 1),
+      audit AS (${audit(sql`connection`, sql`NOT EXISTS (SELECT FROM provider_connections p WHERE p.workspace_id=${wid})`)})
       SELECT c.*, EXISTS (SELECT 1 FROM queued) AS queued FROM connection c`)).rows[0];
     if (!row) throw new ApiError(409,'CONNECTION_EXISTS','Disconnect the existing connection before choosing another.');
     return row;
@@ -346,9 +352,9 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   const principalArn = (await platformIdentity(runtime)).arn;
   // BYO sends from the customer's own account: there is no tenant to wait for.
   const connectionId = id('conn'), prefix = setupResources(connectionId).topicName.replace(/-feedback$/, '');
-  const result = await runtime.db.execute<Row>(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version,state,tenant_state,resource_prefix)
+  const result = await runtime.db.execute<Row>(sql`WITH created AS (INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version,state,tenant_state,resource_prefix)
     VALUES (${connectionId},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v4','awaiting_role','ready',${prefix})
-    ON CONFLICT(workspace_id) DO NOTHING RETURNING *`);
+    ON CONFLICT(workspace_id) DO NOTHING RETURNING *), audit AS (${audit(sql`created`)}) SELECT * FROM created`);
   const row = result.rows[0] ?? await get(runtime, wid);
   if (!row || row.kind !== kind || row.region !== region) throw new ApiError(409, 'CONNECTION_EXISTS', 'Disconnect the existing connection before choosing another.');
   return row;
@@ -377,7 +383,7 @@ export function registerProviderConnections(app: App) {
         if (input.awsAccountId) throw new ApiError(409,'CONNECTION_EXISTS','A different connection already exists.');
       }
       if (input.awsAccountId!==undefined) throw new ApiError(422,'VALIDATION_ERROR','Account ID is only accepted for regional BYO enrollment.');
-      const row = await create(c.env, wid, input);
+      const row = await create(c.env, wid, input, auditContext(c));
       if ('queued' in row && row.queued) c.get('actor').wakeJobs=1;
       return c.json(view(c.env, row), 201);
     } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
@@ -396,7 +402,7 @@ export function registerProviderConnections(app: App) {
     const row = await get(c.env, wid) ?? notFound('Connection');
     if (row.kind !== 'byo') throw new ApiError(409, 'BYO_CONNECTION_REQUIRED', 'Only bring-your-own connections require verification.');
     const account = c.req.valid('json').awsAccountId;
-    try { return c.json(view(c.env, await provision(c.env, row, account)), 200); } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
+    try { return c.json(view(c.env, await provision(c.env, row, account, undefined, auditContext(c))), 200); } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   });
   app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.', responses: { 200: response(z.object({ deleted: z.literal(true) })),202:response(z.object({operationId:z.string()})), ...errors } }), async c => {
     const wid = owner(c);
@@ -416,7 +422,8 @@ export function registerProviderConnections(app: App) {
         if (row.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', row.pause_reason);
         if (row.template_version==='v5' || (await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${row.id} AND NOT legacy AND NOT (${row.kind}='shared' AND region='us-east-1' AND pool_tenant_name IS NOT NULL AND receiving_state='off' AND sending_state='ready') LIMIT 1`)).rowCount) throw new ApiError(409,'REGIONAL_DISCONNECT_REQUIRED','A regional connection requires reviewed cleanup before disconnecting.');
         await (await wrapModuleLoad(() => import('./operations.js'))).releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_state: row.tenant_state });
-        await db.execute(sql`DELETE FROM provider_connections WHERE id=${row.id}`);
+        await db.execute(sql`WITH deleted AS (DELETE FROM provider_connections WHERE id=${row.id} RETURNING id),
+          audit AS (${auditInsert(auditContext(c), { action: 'connection.delete', workspaceId: wid, target: { type: 'connection', id: row.id }, before: { kind: row.kind, region: row.region, state: row.state } }, { from: sql`deleted` })}) SELECT 1`);
       });
     } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
     return c.json({ deleted: true as const }, 200);

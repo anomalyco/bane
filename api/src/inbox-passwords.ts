@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
+import { auditContext, auditInsert } from './audit.js';
 import { ApiError, errors, id, json, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
 
 export function passwordDigest(pepper: string, value: string) {
@@ -54,7 +55,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       const actor = c.get('actor');
       const grant = actor?.grantId ?? null;
       const { rows } = await c.env.db.execute<{ created: string }>(
-        sql`WITH allowed AS (UPDATE inbox_state s SET protocol_passwords=protocol_passwords+1, protocol_daily=coalesce(${q.perDay ?? null}::int,protocol_daily),protocol_monthly=coalesce(${q.perMonth ?? null}::int,protocol_monthly) FROM mailboxes b WHERE b.id=s.inbox_id AND b.workspace_id=${wid} AND b.id=${bid} AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND inbox_lock_visible(b.workspace_id,b.id,true) AND protocol_passwords<20 RETURNING s.inbox_id), issued AS (INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) SELECT ${kid},inbox_id,${q.name},${hash},${sql.param(protocols)}::text[] FROM allowed RETURNING id,created_at), bound AS (INSERT INTO mail_grant_objects SELECT ${grant}::text,${wid},'protocol',id FROM issued WHERE ${grant}::text IS NOT NULL) SELECT created_at::text AS created FROM issued`,
+        sql`WITH allowed AS (UPDATE inbox_state s SET protocol_passwords=protocol_passwords+1, protocol_daily=coalesce(${q.perDay ?? null}::int,protocol_daily),protocol_monthly=coalesce(${q.perMonth ?? null}::int,protocol_monthly) FROM mailboxes b WHERE b.id=s.inbox_id AND b.workspace_id=${wid} AND b.id=${bid} AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND inbox_lock_visible(b.workspace_id,b.id,true) AND protocol_passwords<20 RETURNING s.inbox_id), issued AS (INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) SELECT ${kid},inbox_id,${q.name},${hash},${sql.param(protocols)}::text[] FROM allowed RETURNING id,created_at), bound AS (INSERT INTO mail_grant_objects SELECT ${grant}::text,${wid},'protocol',id FROM issued WHERE ${grant}::text IS NOT NULL),
+          audit AS (${auditInsert(auditContext(c), { action: 'app_password.create', workspaceId: wid, target: { type: 'app_password', id: sql`issued.id` }, after: { name: q.name, inboxId: bid, protocols } }, { from: sql`issued` })}) SELECT created_at::text AS created FROM issued`,
       );
       if (!rows.length)
         throw new ApiError(
@@ -99,7 +101,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       const wid = manager(c),
         { id, passwordId } = c.req.valid('param');
       const { rows } = await c.env.db.execute<{ ok: boolean }>(
-        sql`SELECT inbox_revoke_password(${wid},${id},${passwordId}) ok`,
+        sql`WITH revoked AS MATERIALIZED (SELECT inbox_revoke_password(${wid},${id},${passwordId}) ok),
+          audit AS (${auditInsert(auditContext(c), { action: 'app_password.revoke', workspaceId: wid, target: { type: 'app_password', id: passwordId }, before: { inboxId: id } }, { from: sql`revoked`, where: sql`revoked.ok` })}) SELECT ok FROM revoked`,
       );
       if (!rows[0]?.ok) throw new ApiError(404, 'NOT_FOUND', 'No such active password.');
       return c.json({ revoked: true }, 200);

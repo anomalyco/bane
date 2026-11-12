@@ -3,7 +3,9 @@ import { createOpenApiApp } from '../src/app.js';
 import { createLlmsText, createMarkdownDocs, createOpenApiDocument } from '../src/openapi-docs.js';
 
 const document = createOpenApiDocument(await createOpenApiApp());
-const operations = Object.values(document.paths).flatMap(path => Object.values(path as Record<string, any>)).filter(operation => operation?.operationId);
+const all = Object.values(document.paths).flatMap(path => Object.values(path as Record<string, any>)).filter(operation => operation?.operationId);
+// Internal operations (x-internal: the support grant's /v1/support/* routes) stay out of customer docs.
+const operations = all.filter(operation => !operation['x-internal']), internal = all.filter(operation => operation['x-internal']);
 const llms = createLlmsText(document);
 const full = createMarkdownDocs(document)!;
 assert.match(llms, /Full Markdown API reference: \/docs\.md/);
@@ -19,4 +21,8 @@ for (const operation of operations) {
   assert.ok(!focused?.includes('[object Object]'), `${id} focused Markdown contains an unserialized value.`);
 }
 assert.equal(createMarkdownDocs(document, 'missingOperation'), null);
+for (const operation of internal) {
+  assert.ok(!llms.includes(`/docs/operations/${operation.operationId}.md`) && !full.includes(`\`${operation.operationId}\``), `${operation.operationId} is internal and must not be in customer docs.`);
+  assert.equal(createMarkdownDocs(document, operation.operationId), null, `${operation.operationId} has no customer doc page.`);
+}
 console.log(`Verified llms.txt and ${operations.length} focused Markdown operation pages.`);

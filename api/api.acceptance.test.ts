@@ -163,7 +163,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
-  const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
+  // Internal routes (operators and support grants) are never tools, whatever their security scheme.
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
   const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
@@ -3001,6 +3002,186 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, uid]);
       await run('email.dispatch');
       assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1', [second])).rows[0].error_code, 'ORIGIN_KEY_REVOKED');
+    });
+  });
+
+  // Ryan: support and operator routes are admin-only. Every route under /v1/operator and /v1/support, real or not, answers
+  // every customer credential with the same 403 and no data. The loop reads the route table, so new routes are covered.
+  test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
+      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, platformToken = `bane_ops_${hex()}`;
+      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [],
+        support: { platformToken, url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
+      secrets.add(platformToken);
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), outsider = await sessionFixture(t);
+      const other = unique('other-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [other, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$8,'member'),($9,$10,$11,'owner')`,
+        [unique('mem'), wid, admin.userId, unique('mem'), member.userId, unique('mem'), ops, operator.userId, unique('mem'), other, outsider.userId]);
+
+      // Every customer credential type.
+      const keys: Record<string, string> = {};
+      for (const permissions of [['read'], ['send'], ['read', 'send', 'manage']]) {
+        const secret = `bane_${hex()}`; secrets.add(secret); keys[permissions.at(-1)!] = secret;
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'audit fixture',$3,$4,$5,'[]')`, [unique('key'), wid, sha(secret), secret.slice(0, 14), JSON.stringify(permissions)]);
+      }
+      const inboxKey = `bane_mbx_${hex()}`; secrets.add(inboxKey);
+      await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES ($1,$2,'audit fixture',$3,$4,NULL,'["read","send","modify"]')`, [unique('mbk'), wid, sha(inboxKey), inboxKey.slice(0, 14)]);
+      const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25', origin: PUBLIC_ORIGIN };
+      const { token: mcpToken } = await oauthGrant(t, db, 'bane:read bane:manage offline_access', request);
+      const rpc = async (method: string, params: Json) => ok(await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken) }, { jsonrpc: '2.0', id: 1, method, params })).result;
+      const agentToken = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'audit trail fixture' }, confirm: true } })).structuredContent.token as string;
+      assert.match(agentToken, /^(?:bane|os)_agent_/); secrets.add(agentToken);
+      const tools = (await rpc('tools/list', {})).tools.map((tool: Json) => tool.name as string);
+      assert.ok(tools.length > 10 && !tools.some((name: string) => /support|operator|activity/i.test(name)), 'Internal routes are never MCP tools.');
+      const appPassword = hex().slice(0, 32).match(/.{4}/g)!.join('-'); secrets.add(appPassword);
+      const customers: [string, Record<string, string>][] = [
+        ['owner session', session(manager!)], ['admin session', session(admin)], ['member session', session(member)],
+        ['read API key', bearer(keys.read!)], ['send API key', bearer(keys.send!)], ['manage API key', bearer(keys.manage!)],
+        ['MCP OAuth grant', bearer(mcpToken)], ['inbox key', bearer(inboxKey)], ['agent token', bearer(agentToken)],
+        ['gateway app password', bearer(appPassword)], ['gateway app password (basic)', { authorization: `Basic ${Buffer.from(`${manager!.email}:${appPassword}`).toString('base64')}` }],
+        ['no credential', {}], ['forged operator token', bearer(`bane_ops_${hex()}`)], ['forged support grant', bearer(`bane_support_${hex()}`)],
+      ];
+      const { createOpenApiApp } = await import('./src/app.js');
+      const internal = [...new Map((await createOpenApiApp()).routes.filter(r => /^\/v1\/(?:operator|support)(?:\/|$)/.test(r.path) && r.method !== 'ALL')
+        .map(r => [`${r.method} ${r.path}`, [r.method, r.path.replace(/:([A-Za-z]+)/g, (_, name: string) => name === 'requestId' ? `req_${'0'.repeat(32)}` : name === 'id' ? `sho_${'0'.repeat(32)}` : 'x')] as const])).values()];
+      assert.ok(internal.filter(([, path]) => path.startsWith('/v1/support/')).length >= 11 && internal.filter(([, path]) => path.startsWith('/v1/operator/')).length >= 6, 'The route table lists the internal routes.');
+      const refused: string[] = [];
+      for (const [method, path] of [...internal, ['GET', '/v1/operator/no-such-route'], ['DELETE', '/v1/operator'], ['POST', '/v1/support/no-such-route'], ['GET', '/v1/support']] as const) {
+        for (const [name, headers] of customers) {
+          const reply = await send(method, path, headers, method === 'GET' || method === 'HEAD' ? undefined : {});
+          const codes = path.startsWith('/v1/support') ? ['SUPPORT_GRANT_REQUIRED'] : ['OPERATOR_REQUIRED'];
+          if (reply.status !== 403 || Object.keys(reply.body ?? {}).join() !== 'error' || !codes.includes(reply.body.error.code)) refused.push(`${name} ${method} ${path} → ${reply.status} ${redact(reply.body).slice(0, 160)}`);
+        }
+      }
+      assert.deepEqual(refused, [], 'Every customer credential must get the same 403 on every internal route.');
+      // A support grant is not an operator, and reads nothing outside /v1/support.
+      // (Checked below once a grant exists.)
+
+      // Changes customers make reach the trail with their request ID; the customer view hides operator internals.
+      const created = await local('POST', '/v1/api-keys', { name: 'audit trail key', permissions: ['read'] });
+      const key = ok(created, 201), createdRequest = created.headers.get('x-request-id')!; secrets.add(key.secret);
+      ok(await local('POST', `/v1/api-keys/${key.id}/revoke`));
+      const rows = (await db.query(`SELECT action, actor_type, actor_id, user_id, target_id, request_id, summary::text AS summary, internal FROM audit_events WHERE workspace_id = $1 AND target_id = $2 ORDER BY id`, [wid, key.id])).rows;
+      assert.deepEqual(rows.map(r => [r.action, r.actor_type, r.actor_id, r.user_id, r.internal]), [['api_key.create', 'member', manager!.userId, manager!.userId, false], ['api_key.revoke', 'member', manager!.userId, manager!.userId, false]]);
+      assert.equal(rows[0].request_id, createdRequest);
+      assert.ok(!rows.some(r => r.summary.includes(key.secret) || r.summary.includes(key.secret.slice(14))), 'An audit summary never holds a key.');
+
+      // Append-only in SQL, whoever asks: no update, no early delete, no truncate. Retention may delete an expired row.
+      for (const statement of [`UPDATE audit_events SET action = 'x.y' WHERE workspace_id = '${wid}'`, `DELETE FROM audit_events WHERE workspace_id = '${wid}'`, 'TRUNCATE audit_events']) {
+        await db.query('SAVEPOINT immutable');
+        await assert.rejects(db.query(statement), /append-only|permission denied/, statement);
+        await db.query('ROLLBACK TO SAVEPOINT immutable');
+      }
+      const { rows: [expired] } = await db.query(`INSERT INTO audit_events(at, workspace_id, actor_type, via, action, retain_until) VALUES (now() - interval '2 years', $1, 'system', 'job', 'test.expired', now() - interval '1 year') RETURNING id`, [wid]);
+      const { purgeExpiredAudit, redactSummary, ipNetwork, userAgentFamily } = await import('./src/audit.js');
+      assert.ok(await purgeExpiredAudit(runtime) >= 1);
+      assert.equal((await db.query('SELECT FROM audit_events WHERE id = $1', [expired.id])).rowCount, 0);
+      assert.deepEqual(redactSummary({ name: 'n', secret: 's', password: 'p', apiKey: 'k', url: 'https://hooks.example.com/abc/token1234', html: '<p>hi</p>', nested: { token: 't', role: 'admin' } }),
+        { name: 'n', secret: '[redacted]', password: '[redacted]', apiKey: '[redacted]', url: '••••1234', html: '[content]', nested: { token: '[redacted]', role: 'admin' } });
+      assert.equal(ipNetwork('203.0.113.77'), '203.0.113.0/24'); assert.equal(ipNetwork('2001:db8:abcd:12::1'), '2001:db8:abcd::/48'); assert.equal(ipNetwork('unknown'), null);
+      assert.equal(userAgentFamily('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'), 'Chrome 131 on macOS');
+
+      // Operators: everything about a workspace or a user, and each read is itself on the trail.
+      await db.query(`CREATE TABLE IF NOT EXISTS platform_operators (user_id text PRIMARY KEY, role text NOT NULL CHECK (role IN ('operator','operator:read')), granted_at timestamptz NOT NULL DEFAULT now(), reason text NOT NULL)`);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'audit trail acceptance fixture')`, [operator.userId]);
+      const trail = ok(await send('GET', `/v1/operator/workspaces/${wid}/audit?include=enforcement,billing&action=api_key.`, session(operator)));
+      assert.deepEqual(trail.data.map((e: Json) => e.action), ['api_key.revoke', 'api_key.create']);
+      assert.equal(trail.data[1].requestId, createdRequest); assert.equal(trail.data[1].actor.email, manager!.email);
+      const byUser = ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, session(operator)));
+      assert.equal(byUser.data.length, 1); assert.ok(byUser.nextCursor);
+      assert.ok(ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1&cursor=${byUser.nextCursor}`, session(operator))).data[0].id !== byUser.data[0].id);
+      const reads = (await db.query(`SELECT workspace_id, user_id, actor_id, internal FROM audit_events WHERE action = 'audit.read' AND actor_type = 'operator' ORDER BY id`)).rows;
+      assert.deepEqual(reads.map(r => [r.workspace_id, r.user_id, r.actor_id, r.internal]), [[wid, null, operator.userId, true], [null, manager!.userId, operator.userId, true], [null, manager!.userId, operator.userId, true]]);
+      error(await send('GET', '/v1/operator/no-such-route', session(operator)), 404);
+      error(await send('GET', `/v1/operator/workspaces/${unique('missing')}/audit`, session(operator)), 404);
+      // Owners and admins see their own workspace's Activity, without operator internals; members don't.
+      const activity = ok(await local('GET', '/v1/activity?limit=100')).data.map((e: Json) => e.action);
+      assert.ok(activity.includes('api_key.create') && !activity.includes('audit.read'), activity.join());
+      ok(await send('GET', '/v1/activity', session(admin)));
+      error(await send('GET', '/v1/activity', session(member)), 403, 'PERMISSION_DENIED');
+
+      // In-app "Contact support": a signed handoff the support platform can verify, but not mint.
+      const handoff = ok(await local('POST', '/v1/contact-support', { page: '/settings', requestIds: [createdRequest], shareContent: true, message: 'Why did my key stop working?' }), 201);
+      assert.match(handoff.id, /^sho_[0-9a-f]{32}$/); assert.ok(handoff.url.startsWith('https://support.example.com/start#handoff='));
+      const jwks = ok(await send('GET', '/v1/public/support-keys'));
+      const [header, payload, signature] = handoff.token.split('.');
+      const verifier = await crypto.subtle.importKey('jwk', jwks.keys[0], { name: 'Ed25519' }, false, ['verify']);
+      assert.ok(await crypto.subtle.verify({ name: 'Ed25519' }, verifier, Buffer.from(signature, 'base64url'), new TextEncoder().encode(`${header}.${payload}`)));
+      const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+      assert.deepEqual([claims.jti, claims.aud, claims.workspace.id, claims.user.id, claims.shareContent, claims.requestIds], [handoff.id, 'bane-support', wid, manager!.userId, true, [createdRequest]]);
+      ok(await send('POST', '/v1/contact-support', session(member), { shareContent: false }), 201);
+
+      // The support platform's server verifies an emailed request and mints a grant for that one user.
+      const service = bearer(platformToken);
+      const verified = ok(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email.toUpperCase(), evidence: { kind: 'dmarc', result: 'pass', aligned: true }, ticketRef: 'T-1' }));
+      assert.equal(verified.user.id, manager!.userId); assert.ok(verified.workspaces.some((w: Json) => w.id === wid && w.role === 'owner'));
+      assert.deepEqual(ok(await send('POST', '/v1/operator/support/verify-email', service, { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
+      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'dmarc', result: 'fail', aligned: true } }), 422);
+      const mint = (body: Json) => send('POST', '/v1/operator/support/grants', service, { reason: 'Customer asked about a revoked key', ...body });
+      const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
+      assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
+      assert.equal(grant.contentShared, true); assert.ok(grant.workspaceIds.includes(wid));
+      error(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 409, 'SUPPORT_GRANT_ACTIVE');
+      error(await mint({ userId: member.userId, ticketRef: 'T-9', verification: 'handoff', handoffId: handoff.id }), 404);
+      const plain = ok(await mint({ userId: manager!.userId, ticketRef: 'T-2', verification: 'dmarc', ttlMinutes: 30 }), 201); secrets.add(plain.token);
+      assert.equal(plain.contentShared, false);
+      secrets.add(ok(await send('POST', '/v1/operator/support/grants', session(operator), { userId: manager!.userId, ticketRef: 'T-3', reason: 'Operator console grant', verification: 'dmarc' }), 201).token);
+
+      // The grant reads only its customer, through /v1/support/* alone, without secrets; content only with the opt-in.
+      const support = bearer(grant.token), emailId = unique('email');
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, error_code)
+        VALUES ($1, $2, $3, 'fixture', 'sender@example.com', '["bounce@example.org"]', '[]', '[]', 'Your receipt', 'bounced', $4, true, 'BOUNCED')`,
+        [emailId, wid, REGION, JSON.stringify({ from: 'sender@example.com', to: ['bounce@example.org'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Your receipt', text: 'private body words', attachments: [], tracking: false })]);
+      const context = ok(await send('GET', '/v1/support/context', support));
+      assert.deepEqual([context.grant.contentShared, context.user.id, context.handoff.requestIds], [true, manager!.userId, [createdRequest]]);
+      assert.ok(context.workspaces.some((w: Json) => w.id === wid && w.role === 'owner') && !context.workspaces.some((w: Json) => w.id === other));
+      assert.ok(context.recentActivity.some((e: Json) => e.action === 'api_key.create') && context.links.requestIds.includes(createdRequest));
+      assert.ok(context.recentFailures.sends.some((f: Json) => f.workspaceId === wid && f.code === 'BOUNCED'), JSON.stringify(context.recentFailures));
+      const emails = ok(await send('GET', `/v1/support/emails?workspaceId=${wid}`, support));
+      assert.deepEqual(emails.data.map((e: Json) => e.id), [emailId]); assert.ok(!JSON.stringify(emails).includes('private body words'));
+      assert.equal(ok(await send('GET', `/v1/support/emails/${emailId}`, support)).content.text, 'private body words');
+      assert.equal(ok(await send('GET', `/v1/support/emails/${emailId}`, bearer(plain.token))).content, null, 'No content without the customer’s opt-in.');
+      for (const path of ['/v1/support/workspaces', '/v1/support/domains', '/v1/support/events', '/v1/support/webhook-deliveries', '/v1/support/standing', '/v1/support/billing', '/v1/support/audit']) {
+        const body = ok(await send('GET', path, support));
+        assert.ok(!JSON.stringify(body).includes(keys.manage!.slice(5, 20)), path);
+      }
+      const traced = ok(await send('GET', `/v1/support/requests/${createdRequest}`, support));
+      assert.equal(traced.found, true); assert.deepEqual(traced.auditEvents.map((e: Json) => e.action), ['api_key.create']);
+      error(await send('GET', `/v1/support/workspaces?workspaceId=${other}`, support), 404);
+      error(await send('POST', '/v1/support/context', support, {}), 403, 'SUPPORT_READ_ONLY');
+      error(await send('GET', '/v1/api-keys', support), 401);
+      error(await send('GET', `/v1/operator/workspaces/${wid}/audit`, support), 403, 'OPERATOR_REQUIRED');
+      error(await send('GET', '/v1/support/context', session(operator)), 403, 'SUPPORT_GRANT_REQUIRED');
+      // Every call is on the trail; the customer sees one "support viewed" per grant and workspace, not each call.
+      const calls = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND internal AND user_id = $2`, [grant.id, manager!.userId])).rows[0].n;
+      assert.ok(calls >= 13, String(calls));
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.view' AND actor_id = $1 AND workspace_id = $2 AND NOT internal`, [grant.id, wid])).rows[0].n, 1);
+      const seen = ok(await local('GET', '/v1/activity?actorType=support')).data;
+      assert.deepEqual(seen.map((e: Json) => [e.action, e.actor.id]).sort(), [['support.view', grant.id], ['support.view', plain.id]].sort());
+      // Rate limit, revocation and expiry.
+      await db.query('UPDATE support_grants SET used = 120 WHERE id = $1', [plain.id]);
+      error(await send('GET', '/v1/support/context', bearer(plain.token)), 429, 'REQUEST_RATE_LIMITED');
+      ok(await send('POST', `/v1/operator/support/grants/${grant.id}/revoke`, service));
+      error(await send('GET', '/v1/support/context', support), 403, 'SUPPORT_GRANT_REQUIRED');
+      const again = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 201); secrets.add(again.token);
+      await db.query(`UPDATE support_grants SET created_at = now() - interval '3 hours', expires_at = now() - interval '2 hours' WHERE id = $1`, [again.id]);
+      error(await send('GET', '/v1/support/context', bearer(again.token)), 403, 'SUPPORT_GRANT_REQUIRED');
+      // Another customer's grant sees only their own workspace.
+      const theirs = ok(await mint({ userId: outsider.userId, ticketRef: 'T-4', verification: 'magic_link' }), 201); secrets.add(theirs.token);
+      assert.deepEqual(ok(await send('GET', '/v1/support/workspaces', bearer(theirs.token))).data.map((w: Json) => w.id), [other]);
+      error(await send('GET', `/v1/support/emails/${emailId}`, bearer(theirs.token)), 404);
+      assert.deepEqual((await db.query(`SELECT action FROM audit_events WHERE user_id = $1 AND actor_type = 'operator' AND action LIKE 'support.%' ORDER BY id`, [manager!.userId])).rows.map(r => r.action),
+        ['support.verify_email', 'support.grant', 'support.grant', 'support.grant', 'support.grant_revoke', 'support.grant']);
     });
   });
 
@@ -14884,5 +15065,110 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(JSON.parse(recovered.text).error?.code, 'AUTH_REQUIRED');
       `, true),
     ]);
+  });
+});
+
+test('Audit trail: sensitive actions each write one redacted row', async t => {
+  await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+    const selfHosted = { multiTenant: false, allowedDomains: runtime.config.allowedDomains, allowedEmails: runtime.config.allowedEmails }, hosted = { multiTenant: true, allowedDomains: [], allowedEmails: [] };
+    Object.assign(runtime.config, hosted);
+    const { SESv2Client } = await import('@aws-sdk/client-sesv2');
+    t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+      if (cmd.constructor.name === 'CreateEmailIdentityCommand') return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: false, DkimAttributes: { Tokens: ['aaa', 'bbb', 'ccc'], Status: 'PENDING' } };
+      if (cmd.constructor.name === 'GetEmailIdentityCommand') throw Object.assign(new Error('missing'), { name: 'NotFoundException', $metadata: { httpStatusCode: 404 } });
+      return {};
+    });
+    runtime.mailR2 = { write: true, name: 'fixture-r2', bucket: { put: async () => {}, get: async () => null, delete: async () => {} } } as unknown as typeof runtime.mailR2;
+    const wid = runtime.config.workspaceId, uid = manager!.userId, hex = randomUUID().replaceAll('-', ''), host = `audit-${hex}.example.com`;
+    const secrets: string[] = [];
+    const rows = async (reply: Reply) => (await db.query('SELECT action, actor_type, actor_id, workspace_id, user_id, target_type, target_id, summary, via, internal FROM audit_events WHERE request_id=$1 ORDER BY id', [reply.headers.get('x-request-id')])).rows;
+    // One row per change, by this member, in this workspace, carrying the response's request ID.
+    const audited = async (reply: Reply, action: string, target?: [string, string]) => {
+      const found = await rows(reply);
+      assert.equal(found.length, 1, `${action}: ${JSON.stringify(found)}`);
+      const [row] = found;
+      assert.deepEqual([row.action, row.actor_type, row.actor_id, row.workspace_id, row.via, row.internal], [action, 'member', uid, wid, 'dashboard', false]);
+      if (target) assert.deepEqual([row.target_type, row.target_id], target);
+      return row;
+    };
+    const call = async (method: string, path: string, body?: Json, status = 200, headers: Record<string, string> = {}) => {
+      const reply = await local(method, path, body, 'live', headers); ok(reply, status); return reply;
+    };
+
+    // Members and invitations.
+    const invite = await call('POST', '/v1/workspaces/current/members', { email: `invitee-${hex}@example.net`, role: 'member' }, 201);
+    const invited = await audited(invite, 'member.invite', ['invitation', invite.body.id]);
+    assert.equal(invited.user_id, null); assert.deepEqual(invited.summary.after, { email: `invitee-${hex}@example.net`, role: 'member' });
+    await audited(await call('DELETE', `/v1/workspaces/current/invitations?id=${invite.body.id}`), 'member.invite_revoke', ['invitation', invite.body.id]);
+    const peer = unique('audit-peer'), membership = unique('mem');
+    await db.query("INSERT INTO auth_user (id, name, email, email_verified) VALUES ($1, 'Audit peer', $2, true)", [peer, `${peer}@example.net`]);
+    await db.query("INSERT INTO workspace_members (id, workspace_id, user_id, role) VALUES ($1, $2, $3, 'member')", [membership, wid, peer]);
+    const promoted = await audited(await call('PATCH', `/v1/workspaces/current/members/${membership}`, { role: 'admin' }), 'member.role_change', ['member', membership]);
+    assert.equal(promoted.user_id, peer); assert.deepEqual([promoted.summary.before, promoted.summary.after], [{ role: 'member' }, { role: 'admin' }]);
+    const removed = await audited(await call('DELETE', `/v1/workspaces/current/members/${membership}`), 'member.remove', ['member', membership]);
+    assert.equal(removed.user_id, peer);
+
+    // Settings.
+    const renamed = await audited(await call('PATCH', '/v1/settings/workspace', { name: 'Audited workspace' }), 'settings.update', ['workspace', wid]);
+    assert.deepEqual(renamed.summary.after, { name: 'Audited workspace' }); assert.deepEqual(renamed.summary.fields, ['name']);
+
+    // Domains: a hosted claim, then its release. SES is mocked above; the workspace transaction never commits.
+    Object.assign(runtime.config, { liveEnabled: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } });
+    await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state) VALUES ($1,$2,'shared',$3,'ready','ready')", [unique('conn'), wid, REGION]);
+    const domain = await call('POST', '/v1/domains', { name: host }, 201);
+    assert.deepEqual((await audited(domain, 'domain.create', ['domain', domain.body.id])).summary.after, { name: host, region: REGION });
+    await audited(await call('DELETE', `/v1/domains/${domain.body.id}`), 'domain.delete', ['domain', domain.body.id]);
+
+    // Webhooks: the URL and header value are secrets; the reveal itself is audited.
+    const hookUrl = `https://example.com/audit-${hex}`, headerValue = `Bearer header-${hex}`;
+    secrets.push(hookUrl, headerValue);
+    const hook = await call('POST', '/v1/webhooks', { url: hookUrl, headers: [{ name: 'Authorization', value: headerValue }] }, 201);
+    assert.deepEqual((await audited(hook, 'webhook.create', ['webhook', hook.body.id])).summary.after.headerNames, ['Authorization']);
+    const reveal = await call('GET', `/v1/webhooks/${hook.body.id}/secret`);
+    secrets.push(reveal.body.secret);
+    await audited(reveal, 'webhook.secret_reveal', ['webhook', hook.body.id]);
+    await audited(await call('DELETE', `/v1/webhooks/${hook.body.id}`), 'webhook.delete', ['webhook', hook.body.id]);
+
+    // Inbound keys; a failed revoke writes nothing.
+    const key = await call('POST', '/v1/inbound/keys', { name: 'Audit agent', permissions: ['read'] }, 201);
+    secrets.push(key.body.secret);
+    assert.deepEqual((await audited(key, 'inbox_key.create', ['inbox_key', key.body.id])).summary.after, { name: 'Audit agent', permissions: ['read'] });
+    await audited(await call('POST', `/v1/inbound/keys/${key.body.id}/revoke`), 'inbox_key.revoke', ['inbox_key', key.body.id]);
+    const missing = await local('POST', `/v1/inbound/keys/${key.body.id}/revoke`, undefined, 'live');
+    error(missing, 404); assert.deepEqual(await rows(missing), []);
+
+    // A persistent inbox and its app password, on a self-hosted receiving domain (hosted needs a proven claim; the audit path is the same).
+    Object.assign(runtime.config, selfHosted);
+    const mdom = unique('mdom');
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES ($1,$2,$1,$3,$4,'active','store')", [mdom, wid, host, REGION]);
+    await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES ($1,$2,$3,$4)', [wid, REGION, 'fixture-mail', `arn:aws:sns:${REGION}:111122223333:inbound`]);
+    const inbox = await call('POST', '/v1/inboxes', { type: 'persistent', localPart: 'audit', domain: host }, 201);
+    await audited(inbox, 'inbox.create', ['inbox', inbox.body.id]);
+    const password = await call('POST', `/v1/inboxes/${inbox.body.id}/app-passwords`, { name: 'Phone', protocols: ['imap'] }, 201);
+    secrets.push(password.body.password);
+    assert.deepEqual((await audited(password, 'app_password.create', ['app_password', password.body.id])).summary.after, { name: 'Phone', inboxId: inbox.body.id, protocols: ['imap'] });
+    await audited(await call('DELETE', `/v1/inboxes/${inbox.body.id}/app-passwords/${password.body.id}`), 'app_password.revoke', ['app_password', password.body.id]);
+    Object.assign(runtime.config, hosted);
+
+    // Endpoints, rituals and routing.
+    const endpointUrl = `https://example.com/endpoint-${hex}`;
+    secrets.push(endpointUrl);
+    const endpoint = await call('POST', '/v1/endpoints', { type: 'webhook', name: 'audit-endpoint', url: endpointUrl }, 201);
+    secrets.push(endpoint.body.secret);
+    const endpointRow = await audited(endpoint, 'endpoint.create');
+    assert.deepEqual(endpointRow.summary.after, { name: 'audit-endpoint', type: 'webhook' });
+    await audited(await call('DELETE', '/v1/endpoints/audit-endpoint'), 'endpoint.delete', ['endpoint', endpointRow.target_id]);
+    const source = `export default function route(email){label("secret-${hex}")}`;
+    secrets.push(`secret-${hex}`);
+    const ritual = await audited(await call('PUT', '/v1/rituals/scripts/note', { key: 'note', source }), 'ritual.save', ['ritual', 'note']);
+    assert.equal(ritual.summary.after.key, 'note');
+    const version = ok(await local('GET', '/v1/routing', undefined, 'live')).version;
+    const routing = await audited(await call('PUT', '/v1/routing', { routes: [{ match: `audit@${host}`, to: 'drop' }] }, 200, { 'if-match': `"${version}"` }), 'routing.apply', ['routing', wid]);
+    assert.deepEqual([routing.summary.version, routing.summary.changes, routing.summary.created], [version + 1, 1, 1]);
+
+    // Nothing in this workspace's trail repeats a secret, a URL or a ritual's source.
+    const trail = (await db.query('SELECT summary::text AS s FROM audit_events WHERE workspace_id=$1', [wid])).rows.map(row => row.s as string);
+    assert.ok(trail.length >= 18, `${trail.length} rows`);
+    for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
 });
