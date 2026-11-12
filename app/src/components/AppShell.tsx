@@ -1,16 +1,19 @@
-import { lazy, Suspense, useEffect, useRef } from 'react'
+import { Suspense, useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
-import { sidebarPaths, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
+import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
+import { chunk, ChunkFallback } from '../lib/preloadable'
+import { queries } from '../data/queries'
 import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from './ui'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 
-// The sender score card (hosted): its code loads after the shell, into a slot that already has its final size.
-const SidebarScore = lazy(() => import('../features/score').then(module => ({ default: module.SidebarScore })))
+// The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
+const score = chunk(() => import('../features/score'))
+const SidebarScore = score.page(module => module.SidebarScore)
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -35,13 +38,20 @@ export function AppShell() {
   const navigate = useNavigate()
   const prefetchRoute = usePrefetchRoute()
   const intent = useRouteIntent()
+  const prefetchQueries = usePrefetchQueries()
   const latest = useRef({ prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister })
   latest.current = { prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister }
+  const regionReady = access.multiTenant || Boolean(current)
+  // The page in front of the user: its first-screen requests start with its code, not after it, on a cold load too.
+  useEffect(() => {
+    const path = latest.current.pathname
+    if (api.mode === 'live' && regionReady && (sidebarPaths as readonly string[]).includes(path)) void latest.current.prefetchRoute(path)
+    if (api.mode === 'live' && access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
+  }, [api.mode, regionReady])
   // Once the page in front of the user has settled, warm every other sidebar page one at a time (its code and
   // first-screen queries, one request set per page, nothing already fresh). Hovering a link does the same at once.
   const warming = useRef(false)
   const content = useRef<HTMLElement>(null)
-  const regionReady = access.multiTenant || Boolean(current)
   useEffect(() => {
     const saveData = (navigator as { connection?: { saveData?: boolean } }).connection?.saveData
     if (warming.current || api.mode !== 'live' || !regionReady || saveData) return
@@ -103,7 +113,7 @@ export function AppShell() {
       </div>
       <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">
-        {access.multiTenant && <div className="sidebar-score-slot"><Suspense fallback={null}><SidebarScore /></Suspense></div>}
+        {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
         {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
       <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
         <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
@@ -113,12 +123,12 @@ export function AppShell() {
       </div>
     </aside>
     <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
-      <Suspense fallback={<RouteSkeleton />}>
+      <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
         {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
           : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />
           : needsRegion && regions.data && !enabled.length ? <EmptyState title="No enabled regions" action={!access.multiTenant && <Link to="/settings">Set up SES</Link>} />
           : <Outlet />}
-      </Suspense>
+      </Suspense></ChunkFallback.Provider>
     </main>
   </div>
 }

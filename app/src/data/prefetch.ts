@@ -36,6 +36,13 @@ export function prefetchQueries(cache: QueryClient, api: BaneApi, defs: QueryDef
   return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['bane', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
 }
 
+// Warms a few queries for the current API (GET only; anything fresh or in flight is skipped).
+export function usePrefetchQueries() {
+  const cache = useQueryClient()
+  const api = useApi()
+  return useCallback((defs: QueryDef<unknown>[]) => api.mode === 'live' ? prefetchQueries(cache, api, defs) : Promise.resolve([]), [cache, api])
+}
+
 // Loads a sidebar page's code and warms its first-screen queries. GET only; queries already fresh or in flight are skipped.
 export function usePrefetchRoute() {
   const cache = useQueryClient()

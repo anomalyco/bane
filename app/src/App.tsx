@@ -7,7 +7,7 @@ import { loadHome, useOnboardingStage, useSession } from './data/context'
 import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
 import { routeChunks } from './data/prefetch'
-import { chunk } from './lib/preloadable'
+import { chunk, ChunkFallback } from './lib/preloadable'
 const onboarding = chunk(() => import('./features/onboarding'))
 const overview = chunk(() => import('./features/overview'))
 const logs = chunk(() => import('./features/logs'))
@@ -87,7 +87,7 @@ function DashboardGate() {
 }
 function OnboardingRoute() {
   const stage = useOnboardingStage()
-  return stage ? <Suspense fallback={<BootLoader />}><OnboardingPage stage={stage} /></Suspense> : <Navigate to="/" replace />
+  return stage ? <ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><OnboardingPage stage={stage} /></Suspense></ChunkFallback.Provider> : <Navigate to="/" replace />
 }
 // Former sections that were folded into another page keep their links working, query and anchor included.
 function Moved({ to }: { to: (params: Readonly<Params>) => string }) {
@@ -103,7 +103,7 @@ function useRememberDashboardReady() {
 }
 export function App() {
   useRememberDashboardReady()
-  return <AppErrorBoundary><Routes><Route path="docs" element={<Suspense fallback={<BootLoader />}><DocsPage /></Suspense>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
+  return <AppErrorBoundary><Routes><Route path="docs" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><DocsPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
     <Route path="receiving/endpoints" element={<EndpointsPage/>}/><Route path="receiving/rituals" element={<RitualsPage />} /><Route path="receiving/routing" element={<RoutingPage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
