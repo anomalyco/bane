@@ -6,9 +6,8 @@ const permissions: Permission[] = ['read', 'send', 'manage'];
 const audience = (runtime: Runtime) => new URL('/mcp', runtime.config.publicUrl).href;
 export function protectedResourceMetadata(runtime: Runtime) {
   return { resource: audience(runtime), resource_name:'Bane', authorization_servers: [runtime.config.accountIssuer],
-    scopes_supported: permissions.map(p => `bane:${p}`), bearer_methods_supported: ['header'],
-    // Provisional extension name until the issuer publishes its metadata contract.
-    scope_descriptions:{'bane:read':'Read workspace data.', 'bane:send':'Send email from the workspace.', 'bane:manage':'Manage workspace mail and resources.'} };
+    scopes_supported: [...permissions.map(p => `bane:${p}`),'bane:receiving'], bearer_methods_supported: ['header'],
+    scope_descriptions:{'bane:read':'Read workspace data.', 'bane:send':'Send email from the workspace.', 'bane:manage':'Manage workspace mail and resources.', 'bane:receiving':'Use receiving tools within the granted workspace permissions.'} };
 }
 
 // Cache only completed public metadata. Each Worker request owns its fetches.
@@ -45,7 +44,8 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   function denied(status: 401 | 403) {
     const error = status === 401 ? 'invalid_token' : 'insufficient_scope';
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
-    return Response.json({error,error_description:status===401?'Reconnect and authorize this MCP client at the account service.':'This client has no active Bane approval for the requested access.'}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", resource_metadata="${metadata}", scope="bane:read"` }});
+    const message=status===401?'Reconnect and authorize this MCP client at the account service.':'This client has no active Bane approval for the requested access.';
+    return Response.json({jsonrpc:'2.0',id:null,error:{code:-32000,message}}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", resource_metadata="${metadata}", scope="bane:read"` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -56,6 +56,9 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
     claims = await oauth.validateJwtAccessToken(as, request, resource,
       { signingAlgorithms: ['ES256','RS256'], [oauth.clockTolerance]: 0, signal: AbortSignal.timeout(5000) });
   } catch { return denied(401); }
+  if (!Number.isFinite(claims.iat) || claims.iat>Math.floor(Date.now()/1000)) return denied(401);
+  const requiredAcr=runtime.config.accountClient?.requiredAcr;
+  if ((runtime.config.multiTenant && requiredAcr!=='urn:anomaly:acr:google') || (requiredAcr && claims.acr!==requiredAcr)) return denied(401);
   if (claims.aud !== resource && !(Array.isArray(claims.aud) && claims.aud.length === 1 && claims.aud[0] === resource)) return denied(401);
   const scopes = new Set(typeof claims.scope === 'string' ? claims.scope.split(' ') : []);
   const allowed = permissions.filter(p => scopes.has(`bane:${p}`));
@@ -74,19 +77,20 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // Pin the first approval to one workspace; later tokens may reuse that
   // binding, even if the user has since joined additional workspaces.
   await runtime.db.execute(sql`WITH memberships AS (
-    SELECT m.workspace_id, m.role FROM workspace_members m WHERE m.user_id=${userId} AND m.role IN ('owner','admin','member')
-      AND (NOT EXISTS(SELECT FROM bane_resource_grants WHERE id=${keyId}) OR m.workspace_id=(SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId})) LIMIT 2
-  ) INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at)
+    SELECT m.workspace_id, m.role FROM workspace_members m JOIN bane_users u ON u.id=m.user_id WHERE m.user_id=${userId} AND m.role IN ('owner','admin','member')
+      AND (NOT EXISTS(SELECT FROM bane_resource_grants WHERE id=${keyId}) OR m.workspace_id=(SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId}))
+      ORDER BY (m.workspace_id=u.selected_workspace_id) DESC NULLS LAST,m.created_at,m.id LIMIT 1
+  ) INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,receiving)
     SELECT ${keyId},${claims.iss},${claims.sub},${userId},${claims.client_id},workspace_id,
       CASE WHEN role='member' THEN array_remove(${sql.param(allowed)}::text[],'manage') ELSE ${sql.param(allowed)}::text[] END,
-      to_timestamp(${claims.exp}),${claims.iat} FROM memberships WHERE (SELECT count(*) FROM memberships)=1
+      to_timestamp(${claims.exp}),${claims.iat},${scopes.has('bane:receiving')} FROM memberships
     ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,
-      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject
+      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,receiving=excluded.receiving
     WHERE NOT bane_resource_grants.revoked AND bane_resource_grants.workspace_id=excluded.workspace_id
       AND (excluded.issued_at>bane_resource_grants.issued_at OR (excluded.issued_at=bane_resource_grants.issued_at AND
         excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))`);
   const actor = await externalMcpGrant(runtime, keyId);
   if (!actor) return denied(403);
   const granted=actor.permissions.filter(permission=>allowed.includes(permission));
-  return granted.length ? handler({...actor,permissions:granted}) : denied(403);
+  return granted.length ? handler({...actor,permissions:granted,receivingConsent:actor.receivingConsent && scopes.has('bane:receiving')}) : denied(403);
 }

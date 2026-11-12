@@ -4,6 +4,16 @@ set -euo pipefail
 # override a same-named Worker secret (or: no allowed values if none exists).
 # Never print argv or Wrangler's informational bindings table.
 config=$1
+# Validate the same vars Wrangler will publish, before any secret or deployment operation.
+node --input-type=module - "$config" <<'ACR'
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
+const path=process.argv[2];
+const result=ts.parseConfigFileTextToJson(path,readFileSync(path,'utf8'));
+if(result.error || result.config?.vars?.MULTI_TENANT!=='true' || result.config.vars.ACCOUNT_REQUIRED_ACR!=='urn:anomaly:acr:google') {
+  throw Error('Hosted deploy requires MULTI_TENANT=true and ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google');
+}
+ACR
 wrangler=./node_modules/.bin/wrangler
 args=(deploy --config "$config")
 # The Secrets Manager action masks these stage-specific values. Keep them out

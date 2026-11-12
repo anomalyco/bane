@@ -22,6 +22,7 @@
     "PUBLIC_URL": "https://dev.bane.mx",
     "ACCOUNT_ISSUER": "https://account.dev.anoma.ly",
     "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:google",
+    "AUTH_ALLOWED_DOMAINS": "anoma.ly,vogel.dev",
     "ACCOUNT_CLIENT_ID": "bane-dev",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "905840579680",

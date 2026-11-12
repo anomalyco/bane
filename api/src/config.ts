@@ -15,6 +15,7 @@ const values = z.object({
   ACCOUNT_ID_TOKEN_ALG: z.enum(['ES256', 'RS256']).default('ES256'),
   ACCOUNT_REQUIRED_ACR: optional(z.string().min(1).max(256).regex(/^\S+$/)),
   AUTH_ALLOWED_EMAILS: z.string().default(''),
+  AUTH_ALLOWED_DOMAINS: z.string().default(''),
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
@@ -89,6 +90,9 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  if (v.MULTI_TENANT === 'true' && v.ACCOUNT_REQUIRED_ACR !== 'urn:anomaly:acr:google') {
+    throw new ApiError(503,'CONFIG_INVALID','Hosted Bane requires ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google.');
+  }
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
   let aws: Config['aws'] = v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId:v.AWS_ACCESS_KEY_ID, secretAccessKey:v.AWS_SECRET_ACCESS_KEY, sessionToken:v.AWS_SESSION_TOKEN } : undefined;
   if (v.AWS_RUNTIME_CREDENTIALS !== undefined) {
@@ -109,6 +113,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
   }
   if (v.PREVIOUS_BANE_ROOT_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BANE_ROOT_SECRET.');
   const allowedEmails = list(v.AUTH_ALLOWED_EMAILS).map(e => e.toLowerCase());
+  const allowedSignupDomains = list(v.AUTH_ALLOWED_DOMAINS).map(d=>d.toLowerCase());
+  if(allowedSignupDomains.some(d=>!z.hostname().safeParse(d).success || !d.includes('.'))) throw new ApiError(503,'CONFIG_INVALID','Use exact DNS domains in AUTH_ALLOWED_DOMAINS.');
   const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS.toLowerCase());
   if (defaultWorkspaceOwners !== '*' && defaultWorkspaceOwners.some(e => !z.email().safeParse(e).success)) throw new ApiError(503, 'CONFIG_INVALID', 'Set DEFAULT_WORKSPACE_OWNERS to exact email addresses or a single *.');
   if (allowedEmails.some(e => !z.email().safeParse(e).success)) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact email addresses in AUTH_ALLOWED_EMAILS.');
@@ -130,7 +136,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
-    allowedEmails, defaultWorkspaceOwners,
+    allowedEmails, allowedSignupDomains, defaultWorkspaceOwners,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly',
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr:v.ACCOUNT_REQUIRED_ACR } : undefined,
     encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),

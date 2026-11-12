@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { ApiError, digest, type Actor, type Ctx, type Runtime } from './core.js';
 import { getCookie, setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
+import { canCreateWorkspace, googleAcr } from './account-policy.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -88,10 +89,10 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     if (!userId) {
       if (!emailAtLogin) throw loginFailed();
       const email = emailAtLogin;
-      const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},true) AS id`);
+      const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},${claims.acr===googleAcr}) AS id`);
       userId = migrated.rows[0]?.id ?? undefined;
       if (!userId) {
-        const allowed = runtime.config.allowedEmails.includes(email.toLowerCase());
+        const allowed = canCreateWorkspace(runtime.config,email,claims.acr);
         if (!allowed && (!runtime.config.multiTenant || !invitation || !await pendingInvitation(db,email,invitation))) throw loginFailed();
         userId = crypto.randomUUID();
         const name = typeof claims.name === 'string' ? claims.name.slice(0,200) : email;
@@ -116,8 +117,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     ) UPDATE bane_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
       WHERE u.id=${userId} AND (u.email,u.email_verified) IS DISTINCT FROM (o.email,o.verified) RETURNING u.id`);
     if(updated.rowCount) await db.execute(sql`DELETE FROM bane_sessions WHERE user_id=${userId}`);
-    await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES
-      (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},now()+interval '7 days')`);
+    await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,acr,expires_at) VALUES
+      (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},${typeof claims.acr==='string'?claims.acr:null},now()+interval '7 days')`);
   });
   return {session, returnUrl:returnUrl.href};
 }
@@ -137,7 +138,7 @@ async function currentSession(runtime: Runtime, headers: Headers) {
 export async function accountSessionUser(runtime: Runtime, headers: Headers, requireCurrentEmail = false) {
   const hash = await currentSession(runtime, headers);
   if (!hash) return null;
-  const {rows:[user]} = await runtime.db.execute<{id:string;email:string}>(sql`SELECT u.id,u.email FROM bane_sessions s
+  const {rows:[user]} = await runtime.db.execute<{id:string;email:string;acr:string|null}>(sql`SELECT u.id,u.email,s.acr FROM bane_sessions s
     JOIN bane_users u ON u.id=s.user_id WHERE s.token_hash=${hash} AND s.issuer=${runtime.config.accountIssuer}
     AND s.expires_at>now() AND u.email_verified ${requireCurrentEmail ? sql`AND lower(u.email)=lower(s.verified_email)` : sql``}`);
   return user ?? null;
