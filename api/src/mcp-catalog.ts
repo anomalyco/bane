@@ -223,6 +223,7 @@ const DESCRIPTIONS: Record<string, string> = {
   sendEndpointVerification: 'Email a forward recipient a new single-use confirmation link. Only the recipient can confirm by opening it and choosing Allow; poll getEndpoint for status.',
   createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
   createApiKey: 'Create a long-lived API key. Created over MCP, it is tied to this approval and revoked with it. The secret is returned once. Prefer createAgentToken for short scripts.',
+  createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP, it is tied to this approval: it delivers while the approval is active and is paused when the approval is removed, resuming only with its URL and a new signing secret.',
 };
 const PATH_IDS: Record<string, string> = {
   'mcp-connections': 'connectionId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',
