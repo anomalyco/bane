@@ -18,6 +18,7 @@ import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { useExclusive } from '../../lib/single-flight'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -80,14 +81,15 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
   const [ritual, setRitual] = useState('')
   const [busy, setBusy] = useState(false)
   const [routing, setRouting] = useState(false)
-  async function attach(change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) {
+  // Exclusive: attaching reads the saved version and writes against it, so a second click would conflict with the first.
+  const attach = useExclusive(async (change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) => {
     setBusy(true)
     try {
       const current = await request<RitualConfig>('/v1/rituals')
       await request('/v1/rituals/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
       toast(done, 'success'); setRitual(''); await overview.refetch()
     } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
-  }
+  })
   const attached = entry?.rituals ?? []
   const available = (overview.data?.rituals ?? []).filter(r => !attached.includes(r.key))
   const elsewhere = (entry?.to ?? []).filter(t => !(t.type === 'inbox' && t.id === address.id))

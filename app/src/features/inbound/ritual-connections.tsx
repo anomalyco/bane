@@ -8,6 +8,7 @@ import { queries } from '../../data/queries'
 import { idempotencyFor } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
+import { useExclusive } from '../../lib/single-flight'
 
 type EndpointType = 'slack' | 'discord' | 'webhook' | 'forward'
 type EndpointStatus = 'ready' | 'pending' | 'expired' | 'declined' | 'paused'
@@ -37,13 +38,13 @@ export function ConnectAgent({ id }: { id: string }) {
   const [busy, setBusy] = useState(false)
   const [attempt] = useState({ key: '', body: '' })
   useEffect(() => { if (open) { setResult(null); setError('') } }, [open])
-  async function create() {
+  const create = useExclusive(async () => {
     setBusy(true); setError('')
     const body = { inboxes: [id], client, auth, reply }
     try { setResult(await request<{ config: object; nextStep: string }>('/v1/inbox-connections', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) })) }
     catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
-  }
+  })
   const config = result ? JSON.stringify(result.config, null, 2) : ''
   const where = client === 'opencode' ? 'opencode.json' : client === 'claude' ? '.mcp.json or Claude Desktop settings' : 'your MCP client'
   return <>
@@ -76,13 +77,14 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated }: { open: boo
   const [busy, setBusy] = useState(false)
   const [attempt] = useState({ key: '', body: '' })
   useEffect(() => { if (open) { setName(''); setTarget(''); setError(''); setPreverify(false) } }, [open])
-  async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError('')
+  const send = useExclusive(async () => {
+    setBusy(true); setError('')
     const body = { type, name: name.trim(), ...(type === 'forward' ? { address: target.trim(), ...(from ? { from } : {}), ...(preverify ? { preverify } : {}) } : { url: target.trim() }) }
     try { onCreated(await request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) })) }
     catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
-  }
+  })
+  function submit(event: FormEvent) { event.preventDefault(); void send() }
   const nameValid = /^[a-z0-9][a-z0-9-]{0,62}$/.test(name)
   return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title="New endpoint"
     footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="endpoint-create" disabled={busy || !nameValid || !target.trim()}>Create</Button></>}>

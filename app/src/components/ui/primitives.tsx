@@ -10,6 +10,7 @@ import { label as formatLabel } from '../../lib/format';
 import { usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
 import { Sheet, SheetOpenEffects, useSheetDrag } from './sheet';
+import { isDuplicateSubmission } from '../../lib/single-flight';
 
 const cx = (...values: (string | false | null | undefined)[]) => values.filter(Boolean).join(' ');
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
@@ -96,7 +97,8 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { if (open) setError(null); }, [open]);
   const working = pending || busy;
-  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { setBusy(false); } }
+  // A second confirm while the first is in flight is dropped (lib/single-flight.ts); the first one closes the dialog.
+  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { setBusy(false); } }
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger">{error}</Alert> : null}</Dialog>;
 }
 export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean; hint?: ReactNode };

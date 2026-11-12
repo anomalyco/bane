@@ -20,6 +20,7 @@ import { ConceptLine } from './parts'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
+import { useExclusive } from '../../lib/single-flight'
 
 type Binding = { ritual: string; target: string; continue: boolean }
 type Config = { rituals: { key: string; source: string }[]; attachments: Binding[]; senderLists: Record<string, string[]>; evaluateDomains: string[]; evaluateRoutes: string[] }
@@ -149,7 +150,8 @@ export function RitualsPage() {
       return r.diagnostics
     } catch { return [] }
   }
-  async function save() {
+  // Exclusive: a second Save before the first answers would send the same version again and report a conflict.
+  const save = useExclusive(async () => {
     if (!saved || !config) return
     setPending(true); setNotice(null); setProblems([])
     try {
@@ -160,7 +162,7 @@ export function RitualsPage() {
       if (details?.length) setProblems(details)
       setNotice({ tone: 'danger', text: errorText(e) })
     } finally { setPending(false) }
-  }
+  })
   // Try runs only this ritual, unsaved, as if it were attached to the address the email was sent to.
   const choice = picked ?? defaultChoice(recent.data, (addresses.data ?? []).find(a => !a.expiresAt)?.address ?? '')
   const recipient = (choice.mode === 'sample' ? choice.to : as || (choice.mode === 'recent' ? choice.to ?? '' : (choice.mime.match(/^to:\s*(?:.*<)?([^\s<>,]+@[^\s<>,]+)/im)?.[1] ?? ''))).trim().toLowerCase()

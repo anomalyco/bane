@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
+import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowUpRight } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, Field, Input, SectionHeader, Select, StatusBadge } from '../../components/ui'
@@ -45,7 +46,7 @@ export function RegionSetup() {
   const [inspectedRegion, setInspectedRegion] = useState<string | null>(null)
   const entry = catalog.data?.data.find(item => item.region === (viewRegion ?? regionId))
   useEffect(() => {setViewRegion(new URLSearchParams(location.search).get('region') === regionId ? regionId : null); setInspectedRegion(null)}, [regionId, location.key, location.search])
-  const configure = useMutation({
+  const configure = useGuardedMutation({
     mutationFn: ({region, ...input}: {region: string; enabled?: boolean; makeDefault?: boolean}) => api.regions.configure(region, input),
     onSuccess: data => client.setQueryData(regionCatalogKey(api), data),
   })
@@ -91,7 +92,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   const [explicitInspection, setExplicitInspection] = useState(false)
   const discovery = useRegionDiscovery(entry, {auto: autoDiscover || inspected || explicitInspection})
   const [confirmOpen, setConfirmOpen] = useState(false)
-  const refresh = useMutation({
+  const refresh = useGuardedMutation({
     mutationFn: () => api.regions.discover(entry.region, {refresh: true}),
     onSuccess: report => {
       client.setQueryData(regionDiscoveryKey(api, entry.region), report)
@@ -99,7 +100,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
       void client.invalidateQueries({queryKey: regionCatalogKey(api)})
     },
   })
-  const provision = useMutation({
+  const provision = useGuardedMutation({
     mutationFn: () => api.regions.provision(entry.region),
     onSuccess: receipt => {
       setExplicitInspection(true)
@@ -172,7 +173,7 @@ function EmailValidation({report}: {report: SesDiscovery}) {
   const client = useQueryClient()
   const {canManage} = useRegionAccess()
   const [pending, setPending] = useState<{stream: Stream; mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>} | null>(null)
-  const update = useMutation({
+  const update = useGuardedMutation({
     mutationFn: (input: NonNullable<typeof pending>) => api.regions.updateAutoValidation(report.region, input.stream, input.mode),
     onSuccess: result => {
       client.setQueryData<SesDiscovery>(regionDiscoveryKey(api, report.region), old => old ? {...old, resources: {...old.resources, [result.stream]: {...old.resources[result.stream], autoValidation: result.mode}}} : old)

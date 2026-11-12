@@ -1,5 +1,5 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
@@ -10,6 +10,7 @@ import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, 
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { chunk } from '../lib/preloadable'
+import { useGuardedMutation } from '../lib/single-flight'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
 
@@ -85,7 +86,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       }
     },
   })
-  const join = useMutation({
+  const join = useGuardedMutation({
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
       await switchWorkspace(workspaceId)
@@ -249,7 +250,9 @@ export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TIn
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
-  const mutation = useMutation({
+  // One write per submission: a repeat of the same write, on the same target, while it is in flight is dropped
+  // (lib/single-flight.ts). The target is whatever this render's write closes over, such as the open conversation.
+  return useGuardedMutation({
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {
@@ -259,25 +262,6 @@ export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TIn
       if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'bane' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
     },
   })
-  // One write per submission. A double click (or Enter, then a click) lands before the button disables: React Query
-  // reports isPending a task later. A call with the same input as one still in flight is dropped instead of sending
-  // the write again (two lists, two keys, two invitations): its promise never settles, so the code after it (close
-  // the dialog, open what was created) runs once, for the first call. Different inputs (two rows' actions) still run.
-  const inflight = useRef(new Set<string>())
-  const keyOf = (input: TInput) => { try { return JSON.stringify(input ?? null) } catch { return undefined } }
-  const mutateAsync = (input: TInput, options?: Parameters<typeof mutation.mutateAsync>[1]): Promise<TResult> => {
-    const key = keyOf(input)
-    if (key !== undefined && inflight.current.has(key)) return new Promise<TResult>(() => {})
-    const call = mutation.mutateAsync(input, options)
-    if (key !== undefined) { inflight.current.add(key); const release = () => { inflight.current.delete(key) }; call.then(release, release) }
-    return call
-  }
-  const mutate = (input: TInput, options?: Parameters<typeof mutation.mutate>[1]) => {
-    const key = keyOf(input)
-    if (key !== undefined && inflight.current.has(key)) return
-    void mutateAsync(input, options).catch(() => {})
-  }
-  return { ...mutation, mutate, mutateAsync }
 }
 
 const RegionContext = createContext<{ regionId: string; setRegionId: (id: string) => void } | null>(null)
