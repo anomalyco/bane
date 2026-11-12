@@ -257,15 +257,17 @@ export const tenantStatusDrift = () => sql`SELECT pc.workspace_id FROM provider_
   OR (pc.paused_at IS NOT NULL AND EXISTS (SELECT FROM provider_connection_regions r WHERE r.connection_id=pc.id AND r.tenant_state='ready'
     AND NOT EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.region=r.region AND t.applied='DISABLED' AND t.generation=pc.tenant_generation)))
   OR (pc.paused_at IS NULL AND EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')))`;
-export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: { firstWeek: number; secondWeek: number; mature: number } };
+export type HostedCaps = { firstWeek: number; secondWeek: number; mature: number };
+export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: HostedCaps };
 /**
- * An operator resume, in one statement with its audit row. It lifts a pause or a marketing hold and starts a new
- * evidence epoch for the pause check; the limit's history is kept whole. With percent < 100 the limit is
- * min(current limit, percent of the limit before the resume) for 48 hours, an absolute cap that a second resume cannot
- * raise. A pause whose SES tenants were disabled stays held (pause_reason says it is resuming) until the tenant job
- * has enabled them again; otherwise sending restarts at once.
+ * The connection side of a resume, as CTEs ending in `resumed` (workspace_id, pending, ...). It lifts a pause or a
+ * marketing hold and starts a new evidence epoch for the pause check; the limit's history is kept whole. With
+ * percent < 100 the limit is min(current limit, percent of the limit before the resume) for 48 hours, an absolute cap
+ * that a second resume cannot raise. A pause whose SES tenants were disabled stays held (pause_reason says it is
+ * resuming) until the tenant job has enabled them again; otherwise sending restarts at once. Used by the operator
+ * script below and by the standing's applyChange (src/standing.ts), which writes its own audit.
  */
-export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null, caps }: HostedResume) => sql`WITH previous AS MATERIALIZED (
+const resumeConnection = (wid: string, percent: number, caps: HostedCaps) => sql`previous AS MATERIALIZED (
     SELECT pc.id,pc.paused_at,pc.pause_reason,pc.marketing_held_at,pc.marketing_hold_reason,CASE WHEN pc.restore_until>now() THEN pc.restore_cap END AS active_cap,
       hosted_base_cap(${wid},${caps.firstWeek},${caps.secondWeek},${caps.mature}) AS base,
       pc.paused_at IS NOT NULL AND (EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')
@@ -279,12 +281,18 @@ export const resumeHostedSending = (wid: string, { reason, percent = 50, via = '
       tenant_generation=pc.tenant_generation+CASE WHEN p.paused_at IS NOT NULL THEN 1 ELSE 0 END,
       restore_cap=${percent < 100 ? sql`CASE WHEN p.base IS NOT NULL THEN least(p.active_cap,greatest(1,p.base*${percent}/100)) END` : sql`NULL`},
       restore_until=${percent < 100 ? sql`CASE WHEN p.base IS NOT NULL THEN clock_timestamp()+interval '48 hours' END` : sql`NULL`}
-    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,p.marketing_hold_reason,p.paused_at IS NOT NULL AS was_paused,p.base,pc.restore_cap,pc.restore_until,pc.resume_pending_at),
-  audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'resume-hosted-sending',
+    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,p.marketing_hold_reason,p.paused_at IS NOT NULL AS was_paused,p.base,pc.restore_cap,pc.restore_until,
+      pc.resume_pending_at,pc.resume_pending_at IS NOT NULL AS pending),
+  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed WHERE was_paused`)})`;
+/** resumeConnection alone, for a caller that audits the resume itself (the standing's applyChange). */
+export const resumeHostedConnection = (wid: string, percent: 50 | 100, caps: HostedCaps) => sql`WITH ${resumeConnection(wid, percent, caps)}
+  SELECT workspace_id,pending,base,restore_cap FROM resumed`;
+/** An operator script resume, in one statement with its audit row (see resumeConnection). */
+export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null, caps }: HostedResume) => sql`WITH ${resumeConnection(wid, percent, caps)},
+  audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details,via,reason,operator_id) SELECT workspace_id,'resume-hosted-sending',
     jsonb_build_object('reason',${reason}::text,'via',${via}::text,'operator',${operator}::text,'pauseReason',pause_reason,'marketingHoldReason',marketing_hold_reason,
-      'restorePercent',${percent}::int,'limitBefore',base,'restoreCap',restore_cap,'restoreUntil',restore_until,'waitsForTenants',resume_pending_at IS NOT NULL) FROM resumed),
-  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed WHERE was_paused`)})
-  SELECT workspace_id,resume_pending_at IS NOT NULL AS pending FROM resumed`;
+      'restorePercent',${percent}::int,'limitBefore',base,'restoreCap',restore_cap,'restoreUntil',restore_until,'waitsForTenants',pending),${via}::text,${reason}::text,${operator}::text FROM resumed)
+  SELECT workspace_id,pending FROM resumed`;
 
 // Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its
 // delivery. `total`, `prepared` and `expanded` are cursors into the frozen recipient list, `canceled` counts

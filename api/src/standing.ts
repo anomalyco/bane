@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
-import { queueTenantStatus, terminalColumns, terminalEvents } from './states.js';
+import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
 import { dailyLimit, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
@@ -21,8 +21,11 @@ export type Change = {
   expectVersion?: number; step?: Step; reasons?: Reason[]; pauseKind?: 'bounce' | 'full' | null;
   /** Stop all sending (connection hold, SES tenants disabled). The message is the 409 HOSTED_SENDING_PAUSED text. */
   pause?: { message: string };
-  /** Lift the connection hold: restore percent of the limit for 48 hours; optionally hold marketing for a while. */
-  resume?: { percent: 50 | 100; marketingHours?: number };
+  /**
+   * Lift the connection hold: min(current limit, percent of the limit before it) for 48 hours (src/states.ts,
+   * resumeConnection); optionally hold marketing for a while. `caps` are the installation's limit tiers.
+   */
+  resume?: { percent: 50 | 100; marketingHours?: number; caps: HostedCaps };
   marketingHold?: boolean; release?: { percent: number; hours: number }; watch?: boolean;
   touch?: { lastRelease?: boolean; lastSelfResume?: boolean };
   details?: Record<string, unknown>; requestId?: string;
@@ -34,7 +37,9 @@ const STRIKE_DAYS = 90;
 export async function applyChange(db: DbExecutor, change: Change): Promise<{ eventId: string; version: number; sequence: number; step: Step; previousStep: Step } | null> {
   const wid = change.workspaceId;
   await db.execute(sql`INSERT INTO sender_standing(workspace_id) SELECT workspace_id FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' ON CONFLICT DO NOTHING`);
-  const [row] = (await db.execute<StandingRow & { paused_at: string | null; connection_id: string }>(sql`SELECT s.*,pc.paused_at,pc.id AS connection_id FROM sender_standing s
+  // A pause that is resuming (waiting for its SES tenants to be enabled again) counts as lifted: a new pause re-arms it.
+  const [row] = (await db.execute<StandingRow & { paused_at: string | null; held: boolean; connection_id: string }>(sql`SELECT s.*,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,
+    pc.marketing_held_at IS NOT NULL AS held,pc.id AS connection_id FROM sender_standing s
     JOIN provider_connections pc ON pc.workspace_id=s.workspace_id AND pc.kind='shared' WHERE s.workspace_id=${wid} FOR UPDATE OF s,pc`)).rows;
   if (!row) return null;
   if (change.expectVersion !== undefined && change.expectVersion !== row.version) throw new ApiError(412, 'STANDING_VERSION_CHANGED', `The standing changed since version ${change.expectVersion} (now ${row.version}). Reload and try again.`);
@@ -56,19 +61,24 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
     last_release_at=${change.touch?.lastRelease ? at : row.last_release_at}::timestamptz,last_self_resume_at=${change.touch?.lastSelfResume ? at : row.last_self_resume_at}::timestamptz,
     strikes=${JSON.stringify(strikes)}::jsonb,strike_until=${strikeUntil}::timestamptz,watch=${change.watch ?? row.watch},
     version=${version},sequence=${sequence} WHERE workspace_id=${wid}`);
+  // A pause bumps the tenant generation, so the SES tenant job disables the tenants even if a resume was in flight.
   if (change.pause && !row.paused_at) {
-    await db.execute(sql`UPDATE provider_connections SET paused_at=clock_timestamp(),pause_reason=${change.pause.message} WHERE id=${row.connection_id}`);
+    await db.execute(sql`UPDATE provider_connections SET paused_at=clock_timestamp(),pause_reason=${change.pause.message},resume_pending_at=NULL,tenant_generation=tenant_generation+1 WHERE id=${row.connection_id}`);
     await db.execute(queueTenantStatus(sql`SELECT ${wid}::text AS workspace_id`));
   }
+  let resumed: { pending: boolean; base: number | null; restore_cap: number | null } | undefined;
   if (change.resume && row.paused_at) {
+    [resumed] = (await db.execute<{ pending: boolean; base: number | null; restore_cap: number | null }>(resumeHostedConnection(wid, change.resume.percent, change.resume.caps))).rows;
     // A marketing hold after a self-resume ends by itself: the job releases it once release_until passes.
-    await db.execute(sql`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resumed_at=clock_timestamp(),
-      restore_until=${change.resume.percent < 100 ? sql`clock_timestamp()+interval '48 hours'` : sql`NULL`},restore_percent=${change.resume.percent < 100 ? change.resume.percent : null}::smallint WHERE id=${row.connection_id}`);
     if (change.resume.marketingHours) await db.execute(sql`UPDATE sender_standing SET release_until=clock_timestamp()+make_interval(hours=>${change.resume.marketingHours}),release_percent=NULL WHERE workspace_id=${wid}`);
-    await db.execute(queueTenantStatus(sql`SELECT ${wid}::text AS workspace_id`));
   }
+  // A marketing hold placed by the hourly check before the standing shipped ends here: a restrict or pause now holds
+  // marketing instead, and a release or resume lifts it with the step.
+  if (row.held && (stepRank(step) >= stepRank('restrict') || change.release || change.resume)) await db.execute(sql`UPDATE provider_connections SET marketing_held_at=NULL,marketing_hold_reason=NULL WHERE id=${row.connection_id}`);
   const actor = { kind: change.actor.kind, ...(change.actor.id ? { id: change.actor.id } : {}), via: change.actor.via ?? (change.actor.kind === 'system' ? 'job' : 'dashboard') };
-  const details = { ...change.details, ...(change.pause ? { paused: true } : {}), ...(change.resume ? { resumed: change.resume } : {}), ...(change.release ? { release: change.release } : {}),
+  const details = { ...change.details, ...(change.pause ? { paused: true } : {}),
+    ...(change.resume ? { resumed: { percent: change.resume.percent, marketingHours: change.resume.marketingHours, limitBefore: resumed?.base ?? null, restoreCap: resumed?.restore_cap ?? null, waitsForTenants: resumed?.pending ?? false } } : {}),
+    ...(change.release ? { release: change.release } : {}),
     ...(change.marketingHold !== undefined ? { marketingHold: change.marketingHold } : {}), strikes: strikes.length };
   await db.execute(sql`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,reasons,actor,details)
     VALUES(${eventId},${wid},${sequence},${at}::timestamptz,${change.kind},${previousStep},${step},${JSON.stringify(reasons)}::jsonb,${JSON.stringify(actor)}::jsonb,${JSON.stringify(details)}::jsonb)`);
@@ -89,7 +99,7 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
 }
 
 // ---------- the job ----------
-type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; screened_workspace: boolean; accepted_total: number;
+type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; screened_workspace: boolean; accepted_total: number;
   days: DayEvidence[] | null; domains: DomainAuth[] | null; win: { day: Window; week: Window } | null; screen: { screened: number; rejected: number } | null };
 const MAIL_ACCEPTED = sql`e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)`;
 /** Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). */
@@ -99,25 +109,33 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
     ), mail AS (
       SELECT d.workspace_id,(e.created_at AT TIME ZONE 'UTC')::date AS day,${MAIL_ACCEPTED} AS accepted,
         (e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
-        (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,e.error_code='CONTENT_REJECTED_SPAM' AS rejected,e.status='suppressed' AS suppressed,
+        (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,e.status='suppressed' AS suppressed,
         e.campaign_id IS NOT NULL AS first_send,coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL,false) AS marketing,e.event_outcomes & 32 <> 0 AS clicked
       FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND NOT e.simulated
         AND e.created_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
     ), days AS (
       SELECT workspace_id,day,count(*)::int AS emails,count(*) FILTER (WHERE accepted)::int AS accepted,count(*) FILTER (WHERE delivered)::int AS delivered,
         count(*) FILTER (WHERE bounced)::int AS bounced,count(*) FILTER (WHERE accepted AND first_send)::int AS first_sends,count(*) FILTER (WHERE bounced AND first_send)::int AS first_bounced,
-        count(*) FILTER (WHERE complained)::int AS complained,count(*) FILTER (WHERE accepted OR rejected)::int AS screened,count(*) FILTER (WHERE rejected)::int AS rejected,
-        count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE delivered AND marketing)::int AS marketing_delivered,count(*) FILTER (WHERE clicked AND marketing)::int AS clicked
+        count(*) FILTER (WHERE complained)::int AS complained,count(*) FILTER (WHERE suppressed)::int AS suppressed,
+        count(*) FILTER (WHERE delivered AND marketing)::int AS marketing_delivered,count(*) FILTER (WHERE clicked AND marketing)::int AS clicked
       FROM mail GROUP BY 1,2
+    ), screen AS (
+      -- What the screen judged, by the day it judged it (src/dispatcher.ts): mail it never saw does not dilute the rate.
+      SELECT d.workspace_id,(v.hour AT TIME ZONE 'UTC')::date AS day,sum(v.screened)::int AS screened,sum(v.rejected)::int AS rejected FROM due d JOIN hosted_screen_hourly v ON v.workspace_id=d.workspace_id
+        AND v.hour>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END GROUP BY 1,2
     ), unsub AS (
       SELECT a.workspace_id,(a.occurred_at AT TIME ZONE 'UTC')::date AS day,count(*)::int AS n FROM due d JOIN audience_consent_audit a ON a.workspace_id=d.workspace_id AND a.status='unsubscribed'
         AND a.source IN ('footer-confirm','rfc8058-post','ses-subscription') AND a.occurred_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
       GROUP BY 1,2
+    ), parts AS (
+      SELECT workspace_id,day,emails,accepted,delivered,bounced,first_sends,first_bounced,complained,0 AS screened,0 AS rejected,suppressed,marketing_delivered,0 AS unsubscribed,clicked FROM days
+      UNION ALL SELECT workspace_id,day,0,0,0,0,0,0,0,screened,rejected,0,0,0,0 FROM screen
+      UNION ALL SELECT workspace_id,day,0,0,0,0,0,0,0,0,0,0,0,n,0 FROM unsub
     ), upserted AS (
       INSERT INTO sender_score_daily AS s(workspace_id,day,emails,accepted,delivered,bounced,first_sends,first_bounced,complained,screened,rejected,suppressed,marketing_delivered,unsubscribed,clicked)
-      SELECT coalesce(d.workspace_id,u.workspace_id),coalesce(d.day,u.day),coalesce(d.emails,0),coalesce(d.accepted,0),coalesce(d.delivered,0),coalesce(d.bounced,0),coalesce(d.first_sends,0),
-        coalesce(d.first_bounced,0),coalesce(d.complained,0),coalesce(d.screened,0),coalesce(d.rejected,0),coalesce(d.suppressed,0),coalesce(d.marketing_delivered,0),coalesce(u.n,0),coalesce(d.clicked,0)
-      FROM days d FULL JOIN unsub u ON u.workspace_id=d.workspace_id AND u.day=d.day ORDER BY 1,2
+      SELECT workspace_id,day,sum(emails)::int,sum(accepted)::int,sum(delivered)::int,sum(bounced)::int,sum(first_sends)::int,sum(first_bounced)::int,sum(complained)::int,sum(screened)::int,
+        sum(rejected)::int,sum(suppressed)::int,sum(marketing_delivered)::int,sum(unsubscribed)::int,sum(clicked)::int
+      FROM parts GROUP BY 1,2 ORDER BY 1,2
       ON CONFLICT(workspace_id,day) DO UPDATE SET (emails,accepted,delivered,bounced,first_sends,first_bounced,complained,screened,rejected,suppressed,marketing_delivered,unsubscribed,clicked)=
         (excluded.emails,excluded.accepted,excluded.delivered,excluded.bounced,excluded.first_sends,excluded.first_bounced,excluded.complained,excluded.screened,excluded.rejected,excluded.suppressed,excluded.marketing_delivered,excluded.unsubscribed,excluded.clicked)
     ), marked AS (UPDATE sender_standing s SET evidence_at=now() FROM due d WHERE s.workspace_id=d.workspace_id)
@@ -135,9 +153,12 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
       SELECT s.* FROM sender_standing s WHERE ${only ? sql`s.workspace_id=${only}` : sql`(s.computed_at IS NULL OR s.computed_at<now()-interval '6 hours' OR s.step<>'ok' OR s.phase='seed' OR (s.phase='calibrating' AND s.calibrated_at IS NOT NULL)
         OR s.score IS DISTINCT FROM s.target OR s.evidence_at>s.computed_at OR s.release_until IS NOT NULL OR s.strike_until IS NOT NULL
         OR EXISTS (SELECT FROM hosted_usage_hourly u WHERE u.workspace_id=s.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '47 hours')
-        OR EXISTS (SELECT FROM hosted_health_hourly h WHERE h.workspace_id=s.workspace_id AND h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours'))`}
+        OR EXISTS (SELECT FROM hosted_health_hourly h WHERE h.workspace_id=s.workspace_id AND h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours')
+        OR EXISTS (SELECT FROM hosted_screen_hourly v WHERE v.workspace_id=s.workspace_id AND v.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours')
+        OR EXISTS (SELECT FROM provider_connections pc WHERE pc.workspace_id=s.workspace_id AND pc.kind='shared' AND (pc.marketing_held_at IS NOT NULL OR pc.paused_at IS NOT NULL)))`}
       ORDER BY s.computed_at NULLS FIRST LIMIT ${limit})
-    SELECT c.*,pc.id AS connection_id,pc.paused_at,pc.pause_reason,${screened} AND pc.kind='shared' AS screened_workspace,
+    SELECT c.*,pc.id AS connection_id,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,pc.pause_reason,
+      pc.marketing_held_at IS NOT NULL AS legacy_hold,pc.marketing_hold_reason,${screened} AND pc.kind='shared' AS screened_workspace,
       (SELECT coalesce(sum(accepted),0)::int FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id) AS accepted_total,
       (SELECT json_agg(d ORDER BY d.day) FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id AND d.day>=(now() AT TIME ZONE 'UTC')::date-180) AS days,
       (SELECT json_agg(json_build_object('name',name,'dkim',identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
@@ -157,9 +178,9 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
           'marketingBounces',coalesce(sum(h.marketing_bounces) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '167 hours'),0),
           'marketingComplaints',coalesce(sum(h.marketing_complaints) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '167 hours'),0)))
         FROM hosted_health_hourly h WHERE h.workspace_id=c.workspace_id AND h.epoch=coalesce(pc.resumed_at,'-infinity') AND h.hour>=date_trunc('hour',now(),'UTC')-interval '191 hours') AS win,
-      CASE WHEN EXISTS (SELECT FROM hosted_usage_hourly u WHERE u.workspace_id=c.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') THEN
-        (SELECT json_build_object('screened',count(*) FILTER (WHERE e.error_code='CONTENT_REJECTED_SPAM' OR ${MAIL_ACCEPTED}),'rejected',count(*) FILTER (WHERE e.error_code='CONTENT_REJECTED_SPAM'))
-          FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND NOT e.simulated AND e.created_at>=now()-interval '24 hours' AND e.created_at>coalesce(pc.resumed_at,'-infinity')) END AS screen
+      -- Screen verdicts in the current epoch, counted when the dispatcher's screen judged the mail (src/dispatcher.ts).
+      (SELECT json_build_object('screened',coalesce(sum(v.screened),0),'rejected',coalesce(sum(v.rejected),0)) FROM hosted_screen_hourly v
+        WHERE v.workspace_id=c.workspace_id AND v.epoch=coalesce(pc.resumed_at,'-infinity') AND v.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS screen
     FROM c JOIN provider_connections pc ON pc.workspace_id=c.workspace_id AND pc.kind='shared'`)).rows;
 }
 
@@ -194,11 +215,14 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     // and a pause lifted outside it (an operator resume) leaves the workspace at warn, with its limit frozen.
     if (row.paused_at && next.step !== 'pause') next = { step: 'pause', reasons: [{ code: 'ACCOUNT_PAUSED', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'pause', message: row.pause_reason ?? 'Sending is paused.' }], since: row.paused_at, clearSince: null, pauseKind: 'full' };
     else if (!row.paused_at && prev.step === 'pause' && next.step === 'pause') next = { step: 'warn', reasons: prev.reasons, since: now.toISOString(), clearSince: null, pauseKind: null };
+    // A bounce-only marketing hold from before the standing shipped becomes a restrict, so the ladder releases it.
+    if (row.legacy_hold && stepRank(next.step) < stepRank('restrict')) next = { step: 'restrict', reasons: [...next.reasons.filter(r => r.step !== 'restrict'), { code: 'MARKETING_HELD', metric: 'bounces', value: 0, count: 0, threshold: 0, minimum: 0, window: '24h', step: 'restrict',
+      message: row.marketing_hold_reason ?? 'Marketing was held after a high hard-bounce rate.' }], since: now.toISOString(), clearSince: null, pauseKind: null };
     const strikeCapped = !!row.strike_until && Date.parse(row.strike_until) > now.getTime();
     const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, currentLimit: row.daily_limit, strikeCapped });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();
-    if (next.step !== prev.step || releaseExpired) {
+    if (next.step !== prev.step || releaseExpired || row.legacy_hold) {
       const pause = next.step === 'pause' && !row.paused_at;
       const why = next.reasons.find(r => r.step === 'pause');
       const message = pause ? `Hosted sending paused: ${why ? `${PAUSE_LEAD[why.metric]}. ${why.message}` : 'the reputation ladder reached pause.'}` : '';
@@ -231,6 +255,8 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     INSERT INTO sender_score_daily(workspace_id,day,score,quality,target,daily_limit,step) SELECT workspace_id,(now() AT TIME ZONE 'UTC')::date,score,quality,target,daily_limit,step FROM updated
     ON CONFLICT(workspace_id,day) DO UPDATE SET score=excluded.score,quality=excluded.quality,target=excluded.target,daily_limit=excluded.daily_limit,step=excluded.step`);
   await settlePaused(runtime);
+  // Any workspace whose SES tenants differ from what Bane wants (a missed job, a tenant ready after the pause) is queued.
+  if (!options.only) await runtime.db.execute(queueTenantStatus(tenantStatusDrift()));
   return { evaluated: rows.length, changed };
 }
 
@@ -238,7 +264,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
 async function settlePaused(runtime: Runtime) {
   await runtime.db.execute(sql`WITH due AS MATERIALIZED (
       SELECT e.id FROM provider_connections pc JOIN sending_emails e ON e.workspace_id=pc.workspace_id AND e.status='queued'
-      WHERE pc.kind='shared' AND pc.paused_at<now()-interval '72 hours' AND (e.campaign_id IS NULL OR EXISTS (
+      WHERE pc.kind='shared' AND pc.paused_at<now()-interval '72 hours' AND pc.resume_pending_at IS NULL AND (e.campaign_id IS NULL OR EXISTS (
         SELECT 1 FROM sending_campaigns p WHERE p.workspace_id=e.workspace_id AND p.id=e.campaign_id FOR NO KEY UPDATE OF p SKIP LOCKED))
       ORDER BY e.id LIMIT 1000 FOR UPDATE OF e SKIP LOCKED
     ), canceled AS (UPDATE sending_emails e SET status='canceled',error_code='ACCOUNT_PAUSED',lease_until=NULL,updated_at=clock_timestamp()

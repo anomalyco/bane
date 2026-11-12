@@ -104,7 +104,7 @@ function ScoreLimit({ report, limit }: { report: SenderScore; limit: SenderLimit
     : [daily, `score ${whole(report.score!)} (${report.grade})`, limit.next ? `next ${number(limit.next.limit)} at ${limit.next.atScore}` : limit.source === 'score' ? 'top band' : null].filter(Boolean).join(' · ')
   const adjustments = [
     limit.override && (limit.override.expiresAt ? `Override until ${shortDateTime(limit.override.expiresAt)} UTC` : 'Override with no expiry'),
-    limit.restore && `${limit.restore.percent}% after a resume, until ${shortDateTime(limit.restore.until)} UTC`,
+    limit.restore && `${limit.restore.daily.toLocaleString('en-US')} a day after a resume, until ${shortDateTime(limit.restore.until)} UTC`,
     limit.strikeCapUntil && `Strike cap at 50% until ${shortDateTime(limit.strikeCapUntil)} UTC`,
   ].filter(Boolean).join(' · ')
   const bursts = `${number(limit.perMinute)} a minute · ${number(limit.transactionalReserve)} kept for receipts`

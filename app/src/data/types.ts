@@ -47,7 +47,7 @@ export interface ChartPoint { at: ISODate; sent: number; delivered: number; boun
 export type SenderGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
 export interface SenderScoreFactor { key: 'complaints' | 'content' | 'bounces' | 'hygiene' | 'auth' | 'engagement'; label: string; weight: number; value: number | null; score: number | null; points: number | null; source: 'measured' | 'neutral'; basis: string }
 /** Hosted only: the daily limit the score sets (rolling 24 hours, recipients) and what changes it. */
-export interface SenderLimit { daily: number | null; source: 'calibrating' | 'score' | 'override' | 'exempt'; band: number; next: { limit: number; atScore: number } | null; override: { daily: number; expiresAt: ISODate | null } | null; restore: { percent: number; until: ISODate } | null; strikeCapUntil: ISODate | null; perMinute: number; marketingPerHour: number; transactionalReserve: number }
+export interface SenderLimit { daily: number | null; source: 'calibrating' | 'score' | 'override' | 'exempt'; band: number; next: { limit: number; atScore: number } | null; override: { daily: number; expiresAt: ISODate | null } | null; restore: { daily: number; until: ISODate } | null; strikeCapUntil: ISODate | null; perMinute: number; marketingPerHour: number; transactionalReserve: number }
 export type StandingStep = 'ok' | 'notice' | 'warn' | 'restrict' | 'pause'
 export interface StandingReason { code: string; metric: 'complaints' | 'bounces' | 'marketing_bounces' | 'transactional_bounces' | 'screen' | 'external'; value: number; count: number; threshold: number; minimum: number; window: '24h' | '7d' | null; step: StandingStep; message: string }
 /** Hosted only: the enforcement step, why, and what an owner may release from the dashboard. */

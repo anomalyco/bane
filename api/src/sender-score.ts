@@ -38,7 +38,7 @@ const LimitSchema = z.object({
   band: z.number().int().describe('The limit the score earns, before a resume or strike reduction.'),
   next: z.object({ limit: z.number().int(), atScore: z.number() }).nullable().describe('The next band up and the score it starts at.'),
   override: z.object({ daily: z.number().int(), expiresAt: z.iso.datetime().nullable() }).nullable(),
-  restore: z.object({ percent: z.number().int(), until: z.iso.datetime() }).nullable().describe('After a resume: this share of the limit until then.'),
+  restore: z.object({ daily: z.number().int(), until: z.iso.datetime() }).nullable().describe('After a resume: the limit is at most this many recipients a day until then (half the limit before the resume, unless an operator restored all of it).'),
   strikeCapUntil: z.iso.datetime().nullable(), perMinute: z.number().int(), marketingPerHour: z.number().int(), transactionalReserve: z.number().int(),
 }).openapi('SenderLimit');
 const SenderScoreSchema = z.object({
@@ -64,7 +64,7 @@ type Stored = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded'; 
   factors: Factor[]; band_limit: number; daily_limit: number; step: Step; reasons: Reason[]; since: string; pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null;
   release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null; strikes: unknown[]; strike_until: string | null; version: number; sequence: number; computed_at: string | null };
 type Row = { standing: Stored | null; history: { date: string; score: number }[]; last30: number; override: number | null; override_expires_at: string | null; exempt: boolean;
-  restore_until: string | null; restore_percent: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean };
+  restore_until: string | null; restore_cap: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean };
 const iso = (v: string | null | undefined) => v ? new Date(v).toISOString() : null;
 
 /** What an owner may release now, from the stored standing (the POST re-checks the live 24-hour figures). */
@@ -99,7 +99,7 @@ export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> 
       coalesce((SELECT sum(d.accepted) FROM sender_score_daily d WHERE d.workspace_id=${wid} AND d.day>(now() AT TIME ZONE 'UTC')::date-30),0)::int AS last30,
       (SELECT send_cap_override FROM workspaces WHERE id=${wid}) AS override,(SELECT send_cap_override_expires_at FROM workspaces WHERE id=${wid}) AS override_expires_at,
       coalesce((SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}),false) AS exempt,
-      (SELECT restore_until FROM pc) AS restore_until,(SELECT restore_percent FROM pc) AS restore_percent,(SELECT paused_at FROM pc) AS paused_at,${screened} AND EXISTS (SELECT FROM pc) AS screened,
+      (SELECT restore_until FROM pc) AS restore_until,(SELECT restore_cap FROM pc) AS restore_cap,(SELECT CASE WHEN resume_pending_at IS NULL THEN paused_at END FROM pc) AS paused_at,${screened} AND EXISTS (SELECT FROM pc) AS screened,
       (SELECT json_agg(x) FROM (SELECT to_char(day,'YYYY-MM-DD') AS day,count(*)::int AS emails,
         count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
         count(*) FILTER (WHERE status='delivered' OR event_outcomes & 2 <> 0)::int AS delivered,count(*) FILTER (WHERE status='bounced' OR event_outcomes & 4 <> 0)::int AS bounced,
@@ -128,8 +128,10 @@ export function scoreView(row: Row, now = new Date()): SenderScore {
   }
   const score = s.phase === 'graded' && s.score !== null ? round(Number(s.score)) : null;
   const overrideActive = row.override !== null && (!row.override_expires_at || Date.parse(row.override_expires_at) > now.getTime());
-  const restore = row.restore_until && Date.parse(row.restore_until) > now.getTime() && row.restore_percent && !overrideActive ? { percent: row.restore_percent, until: iso(row.restore_until)! } : null;
-  const daily = row.exempt && !overrideActive ? null : overrideActive ? row.override! : restore ? Math.max(1, Math.floor(s.daily_limit * restore.percent / 100)) : s.daily_limit;
+  // As admission computes it (hosted_allowance_read): the base is the override or the score's limit; a resume caps it.
+  const base = row.exempt && !overrideActive ? null : overrideActive ? row.override! : s.daily_limit;
+  const restore = base !== null && row.restore_until && Date.parse(row.restore_until) > now.getTime() && row.restore_cap && row.restore_cap < base ? { daily: row.restore_cap, until: iso(row.restore_until)! } : null;
+  const daily = restore ? restore.daily : base;
   const next = score === null ? null : nextBand(score);
   const effective = daily ?? 10_000;
   const release = s.release_until && Date.parse(s.release_until) > now.getTime() && s.release_percent ? { percent: s.release_percent, until: iso(s.release_until)! } : null;
@@ -162,13 +164,16 @@ export async function protocolScoreCap(runtime: Runtime, w: string) {
 const dashboardSecurity = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
-    description: 'The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds. Workspace-wide: keys restricted to domains get 403.',
+    description: 'The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds; a change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.',
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
     const compute = async () => scoreView(await loadStanding(c.env, a.workspaceId));
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
-    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, Math.floor(Date.now() / 60_000)].join('|'), compute);
+    // Keyed by the standing's version and sequence too: a release, resume or operator action (or a limit change) shows at
+    // once, on every isolate, instead of after the minute. One indexed read.
+    const { rows: [standing] } = await c.env.db.execute<{ v: string | null }>(sql`SELECT version||'.'||sequence AS v FROM sender_standing WHERE workspace_id=${a.workspaceId}`);
+    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, standing?.v ?? '-', Math.floor(Date.now() / 60_000)].join('|'), compute);
     c.header('x-bane-sender-score-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value, 200);
   });
@@ -187,7 +192,7 @@ export function registerSenderScore(app: App) {
       if (live && stepRank(evaluateLadder(live).level) >= stepRank('warn')) throw new ApiError(409, 'STANDING_STILL_ABOVE_LINE', 'The last 24 hours are still over the warn line. Remove the contacts that bounced or complained, then try again once the rate is under it.');
     }
     await c.env.db.transaction(tx => applyChange(tx, { workspaceId: session.workspaceId, actor: { kind: 'owner', id: session.userId, via: 'dashboard' }, kind: 'release', expectVersion: stored.version, step: 'warn',
-      reasons: stored.reasons, ...(offer.action === 'release_marketing' ? { release: { percent: 50, hours: 48 }, touch: { lastRelease: true } } : { resume: { percent: 50, marketingHours: 24 }, touch: { lastSelfResume: true } }),
+      reasons: stored.reasons, ...(offer.action === 'release_marketing' ? { release: { percent: 50, hours: 48 }, touch: { lastRelease: true } } : { resume: { percent: 50, marketingHours: 24, caps: c.env.config.hostedSendCaps }, touch: { lastSelfResume: true } }),
       details: { checklist: ['bouncedRemoved', 'listSourceConfirmed'], action: offer.action } }));
     return c.json(scoreView(await loadStanding(c.env, session.workspaceId)), 200);
   });

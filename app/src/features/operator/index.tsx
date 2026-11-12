@@ -156,7 +156,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
         {standing?.reasons.length ? <ul className="op-reasons">{standing.reasons.map(reason => <li key={reason.code}><span>{reason.message}</span><span className="muted">{reason.code}{reason.window ? ` · ${reason.window}` : ''} · {reason.step}</span></li>)}</ul> : null}
         <Rows rows={[
           ['Pause', connection?.paused ? `${standing?.pauseKind === 'bounce' ? 'Bounce-only' : 'Full'}${connection.pauseReason ? ` · ${connection.pauseReason}` : ''}` : 'Not paused'],
-          ['SES tenant', connection?.tenantStatusApplied ?? '—'],
+          ['SES tenants', !connection ? '—' : connection.resuming ? 'Enabling before sending resumes' : connection.tenants.length ? connection.tenants.map(t => `${t.region} ${t.applied === 'DISABLED' ? 'disabled' : 'enabled'}`).join(' · ') : 'Enabled'],
           ['Marketing', standing?.marketingRelease ? `Released at ${standing.marketingRelease.percent}% until ${when(standing.marketingRelease.until)}` : standing?.marketingHeld ? 'Held' : 'Flowing'],
           ['Self-service', !offer ? '—' : offer.available ? `${label(offer.action ?? 'none')} available` : offer.reason ? `${offer.reason}${offer.availableAt ? ` From ${when(offer.availableAt)}.` : ''}` : 'Nothing to release'],
           ['Version', standing ? `${standing.version} · sequence ${standing.sequence}` : '—'],
@@ -170,7 +170,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
           ['Score band', `${number(limit.band)} a day${limit.next ? ` · next ${number(limit.next.limit)} at ${limit.next.atScore}` : ''}`],
           ['Score', graded ? `${score.score!.toFixed(1)} → target ${score.target.toFixed(1)} · quality ${score.raw.toFixed(1)}` : `Calibrating${score.calibratedAt ? `, graded from ${when(new Date(Date.parse(score.calibratedAt) + 86_400_000).toISOString())}` : ''}`],
           ['Override', limit.override ? `${number(limit.override.daily)} a day${limit.override.expiresAt ? ` until ${when(limit.override.expiresAt)}` : ', no expiry'}` : data.exempt ? 'Exempt from hosted quotas' : 'None'],
-          ['Restore', limit.restore ? `${limit.restore.percent}% until ${when(limit.restore.until)}` : 'None'],
+          ['Restore', limit.restore ? `${number(limit.restore.daily)} a day until ${when(limit.restore.until)}` : 'None'],
           ['Strike cap', limit.strikeCapUntil ? `50% until ${when(limit.strikeCapUntil)}` : 'None'],
           ['Bursts', `${number(limit.perMinute)} a minute · marketing ${number(limit.marketingPerHour)} an hour`],
           ['Transactional reserve', number(limit.transactionalReserve)],
@@ -206,11 +206,11 @@ const timelineColumns: Column<OperatorTimelineItem & { key: string }>[] = [
   { ...def(timelineColumnDefs, 'at'), render: item => <At value={item.at} /> },
 ]
 // The evidence timeline: standing changes, operator actions, the daily score, bounces and complaints by recipient
-// domain and screen rejections, newest first. "Load more" pages back with `before`.
+// domain and screen rejections, newest first. "Load more" pages back with the API's cursor.
 function Timeline({ workspaceId }: { workspaceId: string }) {
   const timeline = useInfiniteQuery({
     queryKey: ['operator', 'timeline', workspaceId], initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam, signal }) => operatorApi.timeline(workspaceId, pageParam, signal), getNextPageParam: page => page.nextBefore ?? undefined,
+    queryFn: ({ pageParam, signal }) => operatorApi.timeline(workspaceId, pageParam, signal), getNextPageParam: page => page.nextCursor ?? undefined,
   })
   const rows = (timeline.data?.pages ?? []).flatMap((page, p) => page.items.map((item, i) => ({ ...item, key: `${p}:${i}:${item.at}:${item.kind}` })))
   return <section className="op-section"><SectionHeader title="Evidence timeline" />

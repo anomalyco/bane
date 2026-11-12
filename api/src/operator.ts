@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, dashboardSession, errors, json, notFound, response, security, type App, type Ctx, type DbExecutor } from './core.js';
 import { operatorRole, type OperatorRole } from './operator-identity.js';
 import { applyChange, type Change } from './standing.js';
@@ -37,12 +37,25 @@ const Action = z.object({ at: z.string(), workspaceId: z.string(), action: z.str
 const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit', 'quarantine', 'release', 'tenant', 'operator', 'score', 'audit', 'bounces', 'rejection']),
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
-  connection: z.object({ region: z.string(), paused: z.boolean(), pauseReason: z.string().nullable(), tenantStatusApplied: z.string().nullable() }).nullable(),
+  connection: z.object({ region: z.string(), paused: z.boolean(), resuming: z.boolean(), pauseReason: z.string().nullable(), tenantGeneration: z.number().int(),
+    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLED']), generation: z.number().int(), appliedAt: z.string() }))
+      .describe('What Bane last applied to each regional SES tenant (none: never switched, so enabled).') }).nullable(),
   domains: z.array(z.object({ name: z.string(), region: z.string().nullable(), pool: z.string(), dkim: z.boolean(), mailFrom: z.boolean(), dmarc: z.string().nullable() })),
   members: z.array(z.object({ userId: z.string(), email: z.string(), role: z.string() })), siblings: z.array(z.object({ id: z.string(), name: z.string() })),
   override: z.object({ daily: z.number().int(), expiresAt: z.string().nullable() }).nullable(), exempt: z.boolean(),
   campaigns: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), pauseReason: z.unknown().nullable(), quarantines: z.number().int() })) }).openapi('OperatorWorkspace');
 
+// Timestamps leave as ISO 8601 with microseconds; a page cursor is the last row's "at|key", opaque to clients.
+const isoAt = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+// hosted_operator_audit has no id column: its rows are keyed by their content (identical rows in one microsecond are one entry).
+const auditKey = sql`'a:'||md5(at::text||action||details::text||coalesce(operator_id,'')||coalesce(request_id,''))`;
+const Cursor = z.string().max(600).regex(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\|.+$/).optional().describe('nextCursor from the previous page.');
+function readCursor(cursor?: string) {
+  if (!cursor) return null;
+  const split = cursor.indexOf('|'), at = cursor.slice(0, split);
+  if (!Number.isFinite(Date.parse(at))) throw new ApiError(422, 'INVALID_CURSOR', 'Use nextCursor from the previous page.', 'cursor');
+  return { at, key: cursor.slice(split + 1) };
+}
 type Audit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string };
 /** Idempotency, If-Match and the audit row around one mutation, all in one transaction. */
 async function mutate<T>(c: Ctx, operator: OperatorIdentity, workspaceId: string, body: unknown, work: (tx: DbExecutor, expectVersion: number | undefined) => Promise<{ result: T; audit: Audit }>): Promise<T> {
@@ -95,7 +108,9 @@ export function registerOperator(app: App) {
     const score = scoreView(await loadStanding(c.env, wid));
     const { rows: [row] } = await c.env.db.execute<z.infer<typeof WorkspaceView>>(sql`SELECT
       (SELECT json_build_object('id',id,'name',name,'createdAt',created_at) FROM workspaces WHERE id=${wid}) AS workspace,
-      (SELECT json_build_object('region',region,'paused',paused_at IS NOT NULL,'pauseReason',pause_reason,'tenantStatusApplied',tenant_status_applied) FROM provider_connections WHERE workspace_id=${wid} AND kind='shared') AS connection,
+      (SELECT json_build_object('region',pc.region,'paused',pc.paused_at IS NOT NULL,'resuming',pc.resume_pending_at IS NOT NULL,'pauseReason',pc.pause_reason,'tenantGeneration',pc.tenant_generation,
+        'tenants',coalesce((SELECT json_agg(json_build_object('region',t.region,'applied',t.applied,'generation',t.generation,'appliedAt',${isoAt(sql`t.applied_at`)}) ORDER BY t.region)
+          FROM hosted_tenant_status t WHERE t.connection_id=pc.id),'[]')) FROM provider_connections pc WHERE pc.workspace_id=${wid} AND pc.kind='shared') AS connection,
       coalesce((SELECT json_agg(json_build_object('name',dc.name,'region',b.region,'pool',coalesce(t.tier,'probation'),
         'dkim',coalesce(dc.identity #>> '{ses,DkimAttributes,Status}'='SUCCESS',false),'mailFrom',coalesce(dc.identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS',false),'dmarc',dc.identity #>> '{dmarc,status}') ORDER BY dc.name)
         FROM domain_claims dc LEFT JOIN domain_sending_bindings b USING(workspace_id,name,connection_id) LEFT JOIN hosted_domain_tiers t ON t.connection_id=dc.connection_id AND t.name=dc.name
@@ -109,32 +124,34 @@ export function registerOperator(app: App) {
     return c.json({ ...row!, score, standing: score.standing }, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/workspaces/{id}/timeline', operationId: 'operatorWorkspaceTimeline',
-    request: { params: WorkspaceParam, query: z.object({ before: z.iso.datetime().optional(), limit: z.coerce.number().int().min(1).max(200).default(100) }) },
-    responses: { 200: response(z.object({ data: z.array(TimelineItem), nextBefore: z.string().nullable() })), ...errors } }), async c => {
+    request: { params: WorkspaceParam, query: z.object({ cursor: Cursor, limit: z.coerce.number().int().min(1).max(200).default(100) }) },
+    responses: { 200: response(z.object({ data: z.array(TimelineItem), nextCursor: z.string().nullable() })), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
-    const wid = c.req.valid('param').id, q = c.req.valid('query'), before = q.before ?? new Date(Date.now() + 60_000).toISOString();
+    const wid = c.req.valid('param').id, q = c.req.valid('query'), after = readCursor(q.cursor), upTo = after?.at ?? new Date(Date.now() + 60_000).toISOString();
     await hostedWorkspace(c.env.db, wid);
     // One stream: standing events, operator actions, the daily score, hourly hard bounces and complaints by recipient
-    // domain (never an address), and screen rejections with their spam score and subject. No message bodies.
-    const { rows } = await c.env.db.execute<z.infer<typeof TimelineItem>>(sql`SELECT * FROM (
-      SELECT at::text AS at,CASE kind WHEN 'step' THEN 'standing' ELSE kind END AS kind,
+    // domain (never an address), and screen rejections with their spam score and subject. No message bodies. Each row
+    // has a stable key, so rows sharing a timestamp are never skipped across pages.
+    const { rows } = await c.env.db.execute<z.infer<typeof TimelineItem> & { key: string; ts: string }>(sql`SELECT ${isoAt(sql`t.ts`)} AS at,t.key,t.kind,t.title,t.detail FROM (
+      SELECT at AS ts,'s:'||id AS key,CASE kind WHEN 'step' THEN 'standing' ELSE kind END AS kind,
         CASE WHEN from_step IS DISTINCT FROM to_step THEN coalesce(from_step,'?')||' → '||to_step WHEN kind='limit' AND details ? 'from' THEN 'Daily limit '||(details->>'from')||' → '||(details->>'to')
           WHEN kind='limit' THEN 'Limit override changed' ELSE kind||' ('||(actor->>'kind')||')' END AS title,
-        jsonb_build_object('reasons',reasons,'actor',actor,'details',details,'sequence',sequence) AS detail FROM standing_events WHERE workspace_id=${wid} AND at<${before}::timestamptz
-      UNION ALL SELECT at::text,'audit',action,jsonb_build_object('operatorId',operator_id,'via',via,'reason',coalesce(reason,details->>'reason'),'ticketRef',ticket_ref,'before',before,'after',after)
-        FROM hosted_operator_audit WHERE workspace_id=${wid} AND at<${before}::timestamptz
-      UNION ALL SELECT (day::timestamp AT TIME ZONE 'UTC')::text,'score','Score '||coalesce(round(score,1)::text,'calibrating')||' · limit '||coalesce(daily_limit::text,'?'),
+        jsonb_build_object('reasons',reasons,'actor',actor,'details',details,'sequence',sequence) AS detail FROM standing_events WHERE workspace_id=${wid} AND at<=${upTo}::timestamptz
+      UNION ALL SELECT at,${auditKey},'audit',action,jsonb_build_object('operatorId',operator_id,'via',via,'reason',coalesce(reason,details->>'reason'),'ticketRef',ticket_ref,'before',before,'after',after)
+        FROM hosted_operator_audit WHERE workspace_id=${wid} AND at<=${upTo}::timestamptz
+      UNION ALL SELECT day::timestamp AT TIME ZONE 'UTC','d:'||day,'score','Score '||coalesce(round(score,1)::text,'calibrating')||' · limit '||coalesce(daily_limit::text,'?'),
         jsonb_build_object('accepted',accepted,'bounced',bounced,'complained',complained,'rejected',rejected,'quality',quality,'target',target,'step',step)
-        FROM sender_score_daily WHERE workspace_id=${wid} AND (day::timestamp AT TIME ZONE 'UTC')<${before}::timestamptz AND day>(now() AT TIME ZONE 'UTC')::date-60
-      UNION ALL SELECT hour::text,'bounces',sum(b)||' hard bounces, '||sum(cpl)||' complaints at '||domain,jsonb_build_object('domain',domain,'bounces',sum(b),'complaints',sum(cpl)) FROM (
+        FROM sender_score_daily WHERE workspace_id=${wid} AND (day::timestamp AT TIME ZONE 'UTC')<=${upTo}::timestamptz AND day>(now() AT TIME ZONE 'UTC')::date-60
+      UNION ALL SELECT hour,'b:'||hour::text||':'||domain,'bounces',sum(b)||' hard bounces, '||sum(cpl)||' complaints at '||domain,jsonb_build_object('domain',domain,'bounces',sum(b),'complaints',sum(cpl)) FROM (
         SELECT date_trunc('hour',e.created_at,'UTC') AS hour,lower(split_part(e.to_addresses->>0,'@',2)) AS domain,(e.status='bounced' OR e.event_outcomes & 4 <> 0)::int AS b,(e.status='complained' OR e.event_outcomes & 8 <> 0)::int AS cpl
-        FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND e.created_at>now()-interval '7 days' AND e.created_at<${before}::timestamptz AND (e.status IN ('bounced','complained') OR e.event_outcomes & 12 <> 0)) x
+        FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND e.created_at>now()-interval '7 days' AND e.created_at<=${upTo}::timestamptz+interval '1 hour' AND (e.status IN ('bounced','complained') OR e.event_outcomes & 12 <> 0)) x
         GROUP BY hour,domain
-      UNION ALL SELECT e.created_at::text,'rejection','Screen rejected: '||left(e.subject,120),jsonb_build_object('spam',v.data->'screen'->'spam','model',v.data->'screen'->'model','campaignId',e.campaign_id,'emailId',e.id)
+      UNION ALL SELECT e.created_at,'r:'||e.id,'rejection','Screen rejected: '||left(e.subject,120),jsonb_build_object('spam',v.data->'screen'->'spam','model',v.data->'screen'->'model','campaignId',e.campaign_id,'emailId',e.id)
         FROM sending_emails e LEFT JOIN LATERAL (SELECT data FROM sending_email_events WHERE workspace_id=e.workspace_id AND email_id=e.id AND type='reject' ORDER BY created_at DESC LIMIT 1) v ON true
-        WHERE e.workspace_id=${wid} AND e.error_code='CONTENT_REJECTED_SPAM' AND e.created_at>now()-interval '7 days' AND e.created_at<${before}::timestamptz
-    ) t ORDER BY at DESC LIMIT ${q.limit + 1}`);
-    return c.json({ data: rows.slice(0, q.limit), nextBefore: rows.length > q.limit ? rows[q.limit - 1]!.at : null }, 200);
+        WHERE e.workspace_id=${wid} AND e.error_code='CONTENT_REJECTED_SPAM' AND e.created_at>now()-interval '7 days' AND e.created_at<=${upTo}::timestamptz
+    ) t ${after ? sql`WHERE (t.ts,t.key)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY t.ts DESC,t.key DESC LIMIT ${q.limit + 1}`);
+    const page = rows.slice(0, q.limit), last = page.at(-1);
+    return c.json({ data: page.map(({ key: _, ts: __, ...item }) => item), nextCursor: rows.length > q.limit && last ? `${last.at}|${last.key}` : null }, 200);
   });
 
   const MutationBody = z.object({ reason: Reason, ticketRef: TicketRef }).strict();
@@ -166,7 +183,7 @@ export function registerOperator(app: App) {
     const body = c.req.valid('json'), wid = c.req.valid('param').id;
     return c.json(await change(c, wid, body, 'operator-resume', current => {
       if (!current.paused) throw new ApiError(409, 'NOT_PAUSED', 'This workspace is not paused.');
-      return { kind: 'operator', step: 'warn', resume: { percent: body.restore }, details: { restore: body.restore } };
+      return { kind: 'operator', step: 'warn', resume: { percent: body.restore, caps: c.env.config.hostedSendCaps }, details: { restore: body.restore } };
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/workspaces/{id}/marketing', operationId: 'operatorSetMarketingHold',
@@ -188,8 +205,11 @@ export function registerOperator(app: App) {
     return c.json(await mutate(c, operator, wid, body, async (tx, expectVersion) => {
       const current = await standingOf(tx, wid);
       if (expectVersion !== undefined && current && current.version !== expectVersion) throw new ApiError(412, 'STANDING_VERSION_CHANGED', `The standing changed since version ${expectVersion} (now ${current.version}).`);
-      const { rows: [before] } = await tx.execute<{ daily: number | null; expiresAt: string | null }>(sql`SELECT send_cap_override AS daily,send_cap_override_expires_at AS "expiresAt" FROM workspaces WHERE id=${wid} FOR UPDATE`);
+      const { rows: [before] } = await tx.execute<{ daily: number | null; expiresAt: string | null; restoreCap: number | null }>(sql`SELECT w.send_cap_override AS daily,w.send_cap_override_expires_at AS "expiresAt",
+        CASE WHEN pc.restore_until>now() THEN pc.restore_cap END AS "restoreCap" FROM workspaces w JOIN provider_connections pc ON pc.workspace_id=w.id AND pc.kind='shared' WHERE w.id=${wid} FOR UPDATE OF w,pc`);
       await tx.execute(sql`UPDATE workspaces SET send_cap_override=${body.daily},send_cap_override_expires_at=${body.daily === null ? null : body.expiresAt ?? null}::timestamptz WHERE id=${wid}`);
+      // An operator's explicit limit is the decision: it ends a resume's reduced limit (kept in the audit's before).
+      if (body.daily !== null && before?.restoreCap) await tx.execute(sql`UPDATE provider_connections SET restore_cap=NULL,restore_until=NULL WHERE workspace_id=${wid} AND kind='shared'`);
       await tx.execute(sql`WITH s AS (UPDATE sender_standing SET sequence=sequence+1 WHERE workspace_id=${wid} RETURNING workspace_id,sequence,step)
         INSERT INTO standing_events(id,workspace_id,sequence,kind,from_step,to_step,actor,details) SELECT 'stev_'||replace(gen_random_uuid()::text,'-',''),workspace_id,sequence,'limit',step,step,
           ${JSON.stringify({ kind: 'operator', id: operator.userId, via: 'console' })}::jsonb,${JSON.stringify({ override: { from: before, to: { daily: body.daily, expiresAt: body.expiresAt ?? null } }, reason: body.reason })}::jsonb FROM s`);
@@ -215,14 +235,15 @@ export function registerOperator(app: App) {
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/actions', operationId: 'operatorListActions',
-    request: { query: z.object({ workspaceId: z.string().max(100).optional(), operator: z.string().max(100).optional(), before: z.iso.datetime().optional(), limit: z.coerce.number().int().min(1).max(200).default(100) }) },
-    responses: { 200: response(z.object({ data: z.array(Action) })), ...errors } }), async c => {
+    request: { query: z.object({ workspaceId: z.string().max(100).optional(), operator: z.string().max(100).optional(), cursor: Cursor, limit: z.coerce.number().int().min(1).max(200).default(100) }) },
+    responses: { 200: response(z.object({ data: z.array(Action), nextCursor: z.string().nullable() })), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
-    const q = c.req.valid('query');
-    const { rows } = await c.env.db.execute<z.infer<typeof Action>>(sql`SELECT at::text AS at,workspace_id AS "workspaceId",action,operator_id AS "operatorId",via,coalesce(reason,details->>'reason') AS reason,
-      ticket_ref AS "ticketRef",request_id AS "requestId",before,after,details FROM hosted_operator_audit
-      WHERE true ${q.workspaceId ? sql`AND workspace_id=${q.workspaceId}` : sql``} ${q.operator ? sql`AND operator_id=${q.operator}` : sql``} ${q.before ? sql`AND at<${q.before}::timestamptz` : sql``}
-      ORDER BY at DESC LIMIT ${q.limit}`);
-    return c.json({ data: rows }, 200);
+    const q = c.req.valid('query'), after = readCursor(q.cursor);
+    const { rows } = await c.env.db.execute<z.infer<typeof Action> & { key: string; ts: string }>(sql`SELECT * FROM (SELECT ${isoAt(sql`at`)} AS at,at AS ts,${auditKey} AS key,workspace_id AS "workspaceId",action,operator_id AS "operatorId",via,
+      coalesce(reason,details->>'reason') AS reason,ticket_ref AS "ticketRef",request_id AS "requestId",before,after,details FROM hosted_operator_audit
+      WHERE true ${q.workspaceId ? sql`AND workspace_id=${q.workspaceId}` : sql``} ${q.operator ? sql`AND operator_id=${q.operator}` : sql``} ${after ? sql`AND at<=${after.at}::timestamptz` : sql``}) a
+      ${after ? sql`WHERE (a.ts,a.key)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY a.ts DESC,a.key DESC LIMIT ${q.limit + 1}`);
+    const page = rows.slice(0, q.limit), last = page.at(-1);
+    return c.json({ data: page.map(({ key: _, ts: __, ...row }) => row as z.infer<typeof Action>), nextCursor: rows.length > q.limit && last ? `${last.at}|${last.key}` : null }, 200);
   });
 }

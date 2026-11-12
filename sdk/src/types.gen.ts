@@ -1642,10 +1642,10 @@ export type SenderLimit = {
         expiresAt: string | null;
     } | null;
     /**
-     * After a resume: this share of the limit until then.
+     * After a resume: the limit is at most this many recipients a day until then (half the limit before the resume, unless an operator restored all of it).
      */
     restore: {
-        percent: number;
+        daily: number;
         until: string;
     } | null;
     strikeCapUntil: string | null;

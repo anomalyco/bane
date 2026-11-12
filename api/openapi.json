@@ -5058,7 +5058,7 @@
               ]
             },
             "minItems": 1,
-            "maxItems": 10,
+            "maxItems": 11,
             "default": [
               "email.sent",
               "email.delivered",
@@ -5146,7 +5146,7 @@
               ]
             },
             "minItems": 1,
-            "maxItems": 10
+            "maxItems": 11
           },
           "regions": {
             "type": [
@@ -6144,7 +6144,7 @@
               "null"
             ],
             "properties": {
-              "percent": {
+              "daily": {
                 "type": "integer"
               },
               "until": {
@@ -6153,10 +6153,10 @@
               }
             },
             "required": [
-              "percent",
+              "daily",
               "until"
             ],
-            "description": "After a resume: this share of the limit until then."
+            "description": "After a resume: the limit is at most this many recipients a day until then (half the limit before the resume, unless an operator restored all of it)."
           },
           "strikeCapUntil": {
             "type": [
@@ -32602,7 +32602,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds; a change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
