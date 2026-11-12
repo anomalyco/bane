@@ -36,7 +36,8 @@ The deploy's `Report the dev E2E failure` job opens an issue labeled `dev-e2e` (
 
 Production stays blocked, as before: it deploys only a commit whose dev E2E passed. To unblock:
 
-1. Read the issue: the failed step and request ID usually name the operation and the error code (a `40P01` is a deadlock: see the deadlock guard below).
+1. Read the issue: the failed step and request ID usually name the operation and the error code (a `40P01` is a deadlock: see the deadlock guard below). The Worker log section quotes the failed requests' lines, plus every server error and exception the tail saw during the run. A step's last request is often a successful status poll that the tail sampled away.
+   A campaign held with `hosted_daily_quota` means the fixture's capacity, which the deploy sets before the E2E (`api/scripts/dev-e2e-fixture.ts`, see `api/README.md`).
 2. Fix forward in a PR. If the failure was flaky rather than a regression, say so in the issue and re-run the deploy for the same SHA.
 3. Close the issue once a dev E2E passes.
 
