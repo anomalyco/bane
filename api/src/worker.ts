@@ -150,7 +150,7 @@ export default {
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(pathname)) {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
