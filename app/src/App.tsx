@@ -46,9 +46,8 @@ const SettingsPage = settings.page(m => m.SettingsPage)
 const WebhookDetailPage = settings.page(m => m.WebhookDetailPage)
 const DocsPage = docs.page(m => m.DocsPage)
 const InboundPage = inbound.page(m => m.InboundPage)
-const EndpointsPage = chunk(()=>import('./features/inbound/ritual-connections')).page(m=>m.EndpointsPage)
 const RitualsPage = chunk(()=>import('./features/inbound/rituals')).page(m=>m.RitualsPage)
-const RoutingPage = inbound.page(m => m.RoutingPage)
+const TracePage = inbound.page(m => m.TracePage)
 const ReceivingPage = inbound.page(m => m.ReceivingPage)
 const InboundAddressDetailPage = inbound.page(m => m.InboundAddressDetailPage)
 const InboundWebhooksPage = inbound.page(m => m.InboundWebhooksPage)
@@ -111,7 +110,7 @@ export function App() {
   return <AppErrorBoundary><Routes><Route path="docs" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><DocsPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
-    <Route path="receiving/endpoints" element={<EndpointsPage/>}/><Route path="receiving/rituals" element={<RitualsPage />} /><Route path="receiving/routing" element={<RoutingPage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
+    <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals" element={<RitualsPage />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
     <Route path="receiving/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound" element={<Moved to={() => '/receiving/inbox'} />} /><Route path="inbound/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound/addresses/:id" element={<Moved to={params => `/receiving/addresses/${id(params)}`} />} /><Route path="inbound/webhooks" element={<Moved to={() => '/receiving/webhooks'} />} /><Route path="inbound/webhooks/:id" element={<Moved to={params => `/receiving/webhooks/${id(params)}`} />} />
     <Route path="receiving/inboxes" element={<AgentInboxesPage />} /><Route path="receiving/inboxes/:id" element={<AgentInboxPage />} />
     <Route path="mailboxes" element={<LegacyMailboxesRedirect />} /><Route path="mailboxes/webhooks" element={<LegacyMailboxWebhooksRedirect />} /><Route path="mailboxes/webhooks/:id" element={<LegacyMailboxWebhookRedirect />} /><Route path="mailboxes/:id" element={<LegacyMailboxRedirect />} />

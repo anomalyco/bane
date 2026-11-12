@@ -1,159 +1,193 @@
+// Receiving: Routes, Rituals and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
 import { useState, type ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router'
-import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, LoadingRegion, PageHeader, SectionHeader, SkeletonText, StatusBadge } from '../../components/ui'
-import { useApiDef, useApiMutation, useWorkspaceAccess } from '../../data/context'
-import { useRouteIntent } from '../../data/prefetch'
-import { queries } from '../../data/queries'
-import type { InboundAddress, MailboxDomain, MailboxDomainStatus } from '../../data/types'
+import { Link, useNavigate, useSearchParams } from 'react-router'
+import { Check } from 'lucide-react'
+import { Button, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { useWorkspaceAccess } from '../../data/context'
+import { request } from '../../data/live'
+import { ApiError } from '../../data/types'
 import { number } from '../../lib/format'
-import { MutationError } from '../settings/shared'
-import { AddressesSection } from './addresses'
-import { catchAllLabel, mxTone, receivingStatus } from './status'
+import { useCursorPagination } from '../../lib/pagination'
+import { CreateAddressDialog } from './addresses'
+import { concepts, kindNote, kinds, type KindFilter } from './concepts'
+import { NewInboxDialog } from './inboxes'
+import { ago, expiresIn, receivingDomains, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
+import { Chain, ConceptLine, Match, RitualIcon, RouteIcon, TargetIcon, Targets } from './parts'
+import { CreatedEndpointDialog, endpointStatusLabel, endpointStatusTone, NewEndpointDialog, type Endpoint } from './ritual-connections'
+import { RouteEditor } from './routing'
 import '../settings/settings.css'
 import './inbound.css'
+import './receiving.css'
 
-// Receiving domains first, then the ones still being set up; domains that only send are left out.
-const order: Record<MailboxDomainStatus, number> = { active: 0, failed: 1, provisioning: 2, disabling: 3, waiting_for_mx: 4, off: 5, disabled: 5 }
-const settingUp = (domain: MailboxDomain) => !['off', 'disabled'].includes(domain.status)
-const plural = (count: number, word: string) => `${number(count)} ${word}${count === 1 ? '' : 's'}`
+type Tab = 'routes' | 'rituals' | 'endpoints'
+const PAGE = 50
+const kindQuery: Record<KindFilter, { kind?: string; origin?: 'api' | 'auto' }> = {
+  all: {}, address: { kind: 'address,route', origin: 'api' }, pattern: { kind: 'pattern' }, catch_all: { kind: 'catch_all' }, inbox: { kind: 'inbox' }, auto: { kind: 'address', origin: 'auto' },
+}
+const kindCount = (counts: Overview['counts'], kind: KindFilter) => kind === 'all' ? counts.address + counts.auto + counts.route + counts.pattern + counts.catch_all + counts.inbox
+  : kind === 'address' ? counts.address + counts.route : counts[kind]
+const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 
-function DomainsSection({ onOpen }: { onOpen: (id: string) => void }) {
-  const { canAdminister, multiTenant } = useWorkspaceAccess()
-  const domains = useApiDef(queries.inboundDomains(), { interval: rows => rows?.some(domain => ['provisioning', 'disabling'].includes(domain.status)) ? 15_000 : false })
-  const [showWaiting, setShowWaiting] = useState(false)
-  const all = domains.data ?? []
-  const receiving = all.filter(settingUp).sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name))
-  const waiting = receiving.filter(domain => domain.status === 'waiting_for_mx').length
-  // Domains still waiting for their MX record fold away once at least one other domain is set up.
-  const folded = waiting > 0 && waiting < receiving.length
-  const rows = folded && !showWaiting ? receiving.filter(domain => domain.status !== 'waiting_for_mx') : receiving
-  const sendOnly = all.length - receiving.length
-  return <section className="section stack" aria-labelledby="receiving-domains">
-    <SectionHeader title={<span id="receiving-domains">Domains</span>} />
-    {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable loading={domains.isPending} skeletonRows={2} rows={rows} rowKey={domain => domain.id} onRowClick={domain => onOpen(domain.id)}
-        empty={<EmptyState title="No domain receives mail yet" description={!canAdminister ? undefined : multiTenant ? 'Add the receiving MX record shown on a domain’s page. Receiving turns on once it resolves; Check MX now there picks it up right away.' : 'Open a verified domain in Domains and choose Enable receiving.'} action={canAdminister ? <Link to="/domains">Open Domains</Link> : undefined} />}
-        columns={[
-          { key: 'name', label: 'Domain', width: '36%', render: domain => <div className="settings-cell-stack"><span>{domain.name}</span>{domain.subdomains?.enabled && <span className="muted receiving-clip">Subdomains too · {number(domain.subdomains.count)}</span>}</div> },
-          { key: 'status', label: 'Status', width: '22%', render: domain => <StatusBadge status={receivingStatus[domain.status].label} tone={receivingStatus[domain.status].tone} /> },
-          { key: 'catchAll', label: 'Unknown addresses', width: '26%', render: domain => catchAllLabel[domain.catchAll] },
-          { key: 'addresses', label: 'Addresses', align: 'right', render: domain => number(domain.addressCount) },
-        ]} />
-      {domains.isPending ? <div className="receiving-foot"><SkeletonText width={240} /></div>
-        : (folded || (canAdminister && sendOnly > 0)) && <div className="receiving-foot">
-          {folded && <Button variant="ghost" size="sm" aria-expanded={showWaiting} onClick={() => setShowWaiting(!showWaiting)}>{showWaiting ? 'Hide' : 'Show'} {number(waiting)} waiting for MX</Button>}
-          {canAdminister && sendOnly > 0 && <span className="muted">{sendOnly === 1 ? '1 domain only sends' : `${number(sendOnly)} domains only send`}. {multiTenant ? 'Add a domain’s receiving MX record' : 'Turn on receiving'} in <Link to="/domains">Domains</Link>.</span>}
-        </div>}
-    </>}
-  </section>
+// Under each route's address: what it is, in a few words.
+function note(r: RouteEntry) {
+  const a = r.address
+  if (r.kind === 'catch_all') return r.catchAll ? (r.catchAll === 'create_address' ? 'Catch-all · creates an address per recipient' : 'Catch-all · unknown addresses') : 'Catch-all route'
+  if (r.kind === 'route') return kindNote.route
+  if (r.kind === 'pattern') return a ? `Pattern of ${a.address}` : kindNote.pattern
+  if (r.kind === 'inbox') return [a?.displayName, expiresIn(a?.expiresAt)].filter(Boolean).join(' · ') || kindNote.inbox
+  if (a?.origin === 'auto') return kindNote.auto
+  const also = a?.aliases.length ? `also ${a.aliases.map(x => x.slice(0, x.indexOf('@') + 1)).join(', ')}` : null
+  return [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean).join(' · ') || 'Address'
+}
+// Where a row leads: its address, its agent inbox, the domain that owns a default, or the route editor.
+const hrefOf = (r: RouteEntry) => r.kind === 'inbox' && r.address ? `/receiving/inboxes/${r.address.id}` : r.address ? `/receiving/addresses/${r.address.id}` : r.id.startsWith('default:') ? `/domains/${r.id.slice(8)}` : null
+
+/** A new account: the three steps everything else builds on, each with the one action that starts it. */
+function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: () => void }) {
+  const live = overview.domains.filter(d => d.status === 'active'), sendOnly = overview.domains.filter(d => ['off', 'disabled'].includes(d.status))
+  const step = (n: number, done: boolean, title: string, body: ReactNode, action: ReactNode) => <li className="rcv-step" data-done={done || undefined}>
+    <span className="rcv-step__n" aria-hidden="true">{done ? <Check size={13} /> : n}</span><div className="rcv-step__body"><h3>{title}</h3><p className="muted">{body}</p>{action}</div></li>
+  return <ol className="rcv-steps">
+    {step(1, live.length > 0, 'Receive on a domain', live.length ? `${live.map(d => d.name).join(', ')} receives mail.` : sendOnly.length ? `${sendOnly.map(d => d.name).join(', ')} only sends. Publish its receiving MX record to get mail too.` : 'Add a domain and publish its receiving MX record.',
+      !live.length && <Link className="ui-button ui-button--secondary ui-button--md" to={sendOnly[0] ? `/domains/${sendOnly[0].id}` : '/domains'}>Set up receiving</Link>)}
+    {step(2, false, 'Create an address', <>Mail to it lands in the Inbox, where you, the API and agents read it. For example <code>support@{live[0]?.name ?? 'acme.com'}</code>.</>, <Button disabled={!live.length} onClick={onCreate}>New address</Button>)}
+    {step(3, false, 'Choose what happens', <>Optional. A ritual labels, filters or sends mail on to an endpoint: Slack, Discord, a webhook or a forward.</>,
+      <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rituals">Write a ritual</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=endpoints">Add an endpoint</Link></div>)}
+    <li className="rcv-steps__aside muted">Testing sign-up mail? An <Link to="/receiving/inboxes">agent inbox</Link> works before any DNS is set up.</li>
+  </ol>
 }
 
-function DomainDialog({ domain: listed, onClose }: { domain: MailboxDomain; onClose: () => void }) {
-  const { canAdminister } = useWorkspaceAccess()
-  const check = useApiMutation((api, id: string) => api.mailboxes.checkDomain(id), 'MX records checked')
-  // Hosted checks report fresh DNS without saving it, so the dialog shows the check's own result over the cached list.
-  const checked = check.data?.id === listed.id ? check.data : null
-  const domain = checked ? { ...listed, status: checked.status, mx: checked.mx, lastError: checked.lastError, dns: checked.dns, subdomains: checked.subdomains ?? listed.subdomains } : listed
-  const status = receivingStatus[domain.status]
-  const live = domain.status === 'active' && domain.mx?.state === 'active'
-  const records = [...domain.dns, ...(domain.subdomains?.enabled ? domain.subdomains.dns : [])]
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={domain.name} footer={<>
-    {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to={`/domains/${domain.id}`}>Domain settings</Link>}
-    {canAdminister && !live && ['waiting_for_mx', 'active', 'failed'].includes(domain.status) && <Button variant="primary" loading={check.isPending} onClick={async () => { try { await check.mutateAsync(domain.id) } catch { /* Shown inline. */ } }}>Check MX</Button>}
-  </>}>
-    <div className="stack">
-      <dl className="settings-facts">
-        <div><dt>Status</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
-        <div><dt>Unknown addresses</dt><dd>{catchAllLabel[domain.catchAll]}</dd></div>
-        <div><dt>Addresses</dt><dd>{number(domain.addressCount)}</dd></div>
-        {domain.subdomains?.enabled && <div><dt>Subdomains</dt><dd>{plural(domain.subdomains.count, 'subdomain')}</dd></div>}
-      </dl>
-      <MutationError error={check.error} />
-      {domain.lastError && <Alert tone="danger">{domain.lastError}</Alert>}
-      {domain.mx && domain.status !== 'provisioning' && !live && <Alert tone={mxTone(domain.mx.state)}>{domain.mx.message}</Alert>}
-      {records.length > 0 && <div className="stack receiving-records">
-        <p className="receiving-records__title">{live ? 'MX records' : `Add ${records.length === 1 ? 'this MX record' : 'these MX records'} at your DNS provider`}</p>
-        {records.map(record => <dl key={`${record.name} ${record.value}`} className="receiving-record">
-          <dt>Host</dt><dd className="settings-copy-cell"><code>{record.name}</code><CopyButton value={record.name} label="Copy host" /></dd>
-          <dt>Type</dt><dd>MX</dd>
-          <dt>Priority</dt><dd>{record.priority}</dd>
-          <dt>Value</dt><dd className="settings-copy-cell"><code>{record.value}</code><CopyButton value={record.value} label="Copy value" /></dd>
-        </dl>)}
-      </div>}
-    </div>
-  </Dialog>
-}
-
-type Route = { key: string; match: ReactNode; to: ReactNode; kind: string; open?: () => void }
-function RoutesSection({ onOpenDomain }: { onOpenDomain: (id: string) => void }) {
-  const { canAdminister } = useWorkspaceAccess()
+function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: () => void; onEditRoute: (r: RouteEntry) => void }) {
   const navigate = useNavigate()
-  // Domains and webhooks are admin-only reads; rules and aliases come from the addresses every member can list.
-  const domains = useApiDef(queries.inboundDomains(), { enabled: canAdminister })
-  const addresses = useApiDef(queries.inboundAddressOptions())
-  const webhooks = useApiDef(queries.inboundWebhooks(), { enabled: canAdminister })
-  const routing = useApiDef(queries.routing(), { enabled: canAdminister })
-  const byId = new Map((addresses.data ?? []).map(address => [address.id, address]))
-  const loading = addresses.isPending || (canAdminister && ((domains.isPending && !domains.error) || (webhooks.isPending && !webhooks.error) || (routing.isPending && !routing.error)))
-  const partial = canAdminister ? domains.error ?? webhooks.error ?? routing.error : null
-  const routes = canAdminister ? routing.data?.routes ?? [] : []
-  const routed = new Set(routes.map(route => route.match))
-  const named = (id: string) => byId.get(id)?.address ?? webhooks.data?.find(h => h.id === id)?.description ?? id
-  const target = (address: InboundAddress) => <Link to={`/receiving/addresses/${address.id}`}>{address.address}</Link>
-  const rows: Route[] = [
-    ...(addresses.data ?? []).flatMap(address => [
-      ...address.rules.map(rule => ({ key: `rule:${address.id}:${rule}`, match: rule, to: target(address), kind: 'Wildcard rule', open: () => navigate(`/receiving/addresses/${address.id}`) })),
-      ...address.aliases.map(alias => ({ key: `alias:${address.id}:${alias}`, match: alias, to: target(address), kind: 'Alias', open: () => navigate(`/receiving/addresses/${address.id}`) })),
-    ]),
-    ...routes.map(route => ({ key: `route:${route.id}`, match: route.match, kind: route.enabled ? 'Route' : 'Route · off', open: () => navigate('/receiving/routing'),
-      to: route.to === 'drop' ? <span className="muted">Dropped</span> : route.to.length ? <span className="receiving-clip">{route.to.map(named).join(', ')}</span> : <span className="muted">Stored as unrouted</span> })),
-    // A catch-all only routes mail once the domain receives, and a *@domain route replaces it.
-    ...(canAdminister ? domains.data ?? [] : []).filter(domain => domain.status === 'active' && !routed.has(`*@${domain.name}`)).sort((a, b) => a.name.localeCompare(b.name)).map(domain => ({
-      key: `catch-all:${domain.id}`, match: `*@${domain.name}`, kind: 'Catch-all', open: () => onOpenDomain(domain.id),
-      to: domain.catchAll === 'create_address' ? 'A new address per recipient' : <span className="muted">Stored as unrouted</span>,
-    })),
-    ...(canAdminister ? webhooks.data ?? [] : []).filter(h=>h.eventTypes.length>0).map(webhook => ({
-      key: `webhook:${webhook.id}`, kind: webhook.paused ? 'Webhook · paused' : 'Webhook', open: () => navigate(`/receiving/webhooks/${webhook.id}`),
-      match: <div className="settings-cell-stack"><span className="receiving-clip">{webhook.addressIds ? webhook.addressIds.map(id => byId.get(id)?.address ?? id).join(', ') : 'Every address'}</span><span className="muted receiving-clip">{webhook.eventTypes.length === 1 ? webhook.eventTypes[0] : plural(webhook.eventTypes.length, 'event')}</span></div>,
-      to: <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${webhook.id}`}>{webhook.description || webhook.url}</Link>{webhook.description && <span className="muted receiving-clip">{webhook.url}</span>}</div>,
-    })),
-  ]
-  return <section className="section stack" aria-labelledby="receiving-routes">
-    <SectionHeader title={<span id="receiving-routes">Routes</span>} actions={canAdminister && <><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/endpoints">Endpoints</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rituals">Rituals</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/routing">Manage routing</Link></>} />
-    {addresses.error ? <ErrorState error={addresses.error} onRetry={() => void addresses.refetch()} /> : <>
-      <DataTable loading={loading} skeletonRows={3} rows={rows} rowKey={row => row.key} onRowClick={row => row.open?.()}
-        empty={<EmptyState title="No routes yet" description="Routes, aliases, wildcard rules, catch-alls and webhooks show here." />}
-        columns={[
-          { key: 'match', label: 'Mail to', width: '40%', render: row => row.match },
-          { key: 'to', label: 'Goes to', width: '40%', render: row => row.to },
-          { key: 'kind', label: 'Type', render: row => <span className="muted">{row.kind}</span> },
-        ]} />
-      {!loading && partial && <Alert tone="warning">{domains.error ? 'Catch-alls' : webhooks.error ? 'Webhooks' : 'Routes'} could not be loaded. <Button variant="ghost" size="sm" onClick={() => { if (domains.error) void domains.refetch(); if (webhooks.error) void webhooks.refetch(); if (routing.error) void routing.refetch() }}>Retry</Button></Alert>}
-      {!loading && addresses.data?.nextCursor && <p className="muted receiving-foot">Rules and aliases of the first 100 addresses.</p>}
-    </>}
-  </section>
+  const { canAdminister } = useWorkspaceAccess()
+  const [newInbox, setNewInbox] = useState(false)
+  const hosts = receivingDomains(overview.domains)
+  const total = kindCount(overview.counts, 'all')
+  if (!overview.manage && !total && !filters.q) return <EmptyState title="No addresses to show" description="Addresses you can read show up here." />
+  if (overview.manage && !hosts.length && !total) return <GettingStarted overview={overview} onCreate={onCreate} />
+  const rows = overview.routes.data
+  const empty = filters.q ? { title: 'Nothing matches', description: `No route at ${filters.domain || 'any domain'} matches “${filters.q}”.` }
+    : { title: filters.kind === 'all' ? 'No routes yet' : `No ${kinds[filters.kind].label.toLowerCase()} yet`, description: [kinds[filters.kind].line, kinds[filters.kind].example && `Example: ${kinds[filters.kind].example}`].filter(Boolean).join(' ') }
+  const open = (r: RouteEntry) => { const href = hrefOf(r); if (href) navigate(href); else if (r.route) onEditRoute(r) }
+  return <div className="stack rcv-tab">
+    <div className="rcv-toolbar">
+      <div className="rcv-filters" role="group" aria-label="Show">{(Object.keys(kinds) as KindFilter[]).filter(k => overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k)).map(k =>
+        <button key={k} type="button" className="rcv-filter" aria-pressed={filters.kind === k} onClick={() => setFilter({ kind: k })}>{kinds[k].label}<span>{number(kindCount(overview.counts, k))}</span></button>)}</div>
+      <div className="rcv-toolbar__end">
+        {hosts.length > 1 && <Select className="rcv-domain" aria-label="Domain" value={filters.domain || 'all'} onValueChange={v => setFilter({ domain: v === 'all' ? '' : v })} options={[{ value: 'all', label: 'All domains' }, ...hosts.map(d => ({ value: d.name, label: d.name }))]} />}
+        <SearchField className="search-box--list" aria-label="Search routes" placeholder="Search address or name" value={filters.q} onChange={e => setFilter({ q: e.target.value })} />
+      </div>
+    </div>
+    <div className="rcv-kindline">
+      <ConceptLine line={kinds[filters.kind].line} example={kinds[filters.kind].example} />
+      {canAdminister && filters.kind === 'inbox' && <Button size="sm" onClick={() => setNewInbox(true)}>New agent inbox</Button>}
+      {canAdminister && filters.kind === 'address' && <Button size="sm" disabled={!hosts.length} onClick={onCreate}>New address</Button>}
+    </div>
+    <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} onRowClick={open} loading={false} minRows={Math.min(8, rows.length)}
+      empty={<EmptyState title={empty.title} description={empty.description} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={onCreate}>New address</Button> : undefined} />}
+      columns={[
+        { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip">{note(r)}</span></div></div> },
+        { key: 'rituals', label: 'Rituals', width: '17%', render: r => <Chain keys={r.rituals} empty={overview.manage && r.address && r.kind !== 'pattern'
+          ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}#rituals`} onClick={e => e.stopPropagation()}>No ritual · add</Link> : <span className="muted">—</span>} /> },
+        { key: 'to', label: 'Goes to', width: '32%', render: r => <Targets to={r.to} total={r.toTotal} ownId={r.address?.id} /> },
+        { key: 'unread', label: 'Unread', align: 'right', width: '8%', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
+        { key: 'last', label: 'Last mail', align: 'right', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span> },
+      ]} />
+    <div className="rcv-foot" data-busy={fetching || undefined}>
+      <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'route' : 'routes'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
+      <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
+    </div>
+    <NewInboxDialog open={newInbox} onOpenChange={setNewInbox} />
+  </div>
+}
+
+function RitualsTab({ overview }: { overview: Overview }) {
+  const navigate = useNavigate()
+  const byName = new Map(overview.endpoints.filter(e => e.source === 'endpoint').map(e => [e.name, e]))
+  return <div className="stack rcv-tab">
+    <div className="rcv-kindline"><ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} /><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals?new=1">New ritual</Link></div>
+    <DataTable className="rcv-table" rows={overview.rituals} rowKey={r => r.key} onRowClick={r => navigate(`/receiving/rituals?key=${encodeURIComponent(r.key)}`)}
+      empty={<EmptyState title="No rituals yet" description="A ritual is a short script that runs on a route’s mail. For example: if the subject mentions a refund, label it and post it to Slack." action={<Link to="/receiving/rituals?new=1">Write a ritual</Link>} />}
+      columns={[
+        { key: 'key', label: 'Ritual', width: '20%', render: r => <span className="rcv-cell"><RitualIcon /><code>{r.key}</code></span> },
+        { key: 'on', label: 'Runs on', width: '20%', render: r => r.attachedTo.length ? `${number(r.attachedTo.length)} ${r.attachedTo.length === 1 ? 'route' : 'routes'}` : <Link className="rcv-add" to={`/receiving/rituals?key=${encodeURIComponent(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link> },
+        { key: 'calls', label: 'Can send to', width: '34%', render: r => r.calls.length || r.delivers.length ? <span className="rcv-targets">{r.calls.map(c => { const e = byName.get(c); return <span key={c} className="rcv-target"><TargetIcon type={e?.type ?? 'webhook'} size={13} /><span>{c}</span></span> })}{r.delivers.map(k => <span key={k} className="rcv-target"><TargetIcon type="inbox" size={13} /><span>{k} inbox</span></span>)}</span> : <span className="muted">Labels and filters only</span> },
+        { key: 'jev', label: 'Asks Jev', width: '12%', render: r => r.omens.length ? `${r.omens.length} ${r.omens.length === 1 ? 'question' : 'questions'}` : <span className="muted">No</span> },
+        { key: 'try', label: '', align: 'right', render: r => <Link className="ui-button ui-button--ghost ui-button--sm" to={`/receiving/rituals?key=${encodeURIComponent(r.key)}#try`} onClick={e => e.stopPropagation()}>Try it</Link> },
+      ]} />
+  </div>
+}
+
+function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () => void }) {
+  const navigate = useNavigate()
+  const toast = useToast()
+  const [creating, setCreating] = useState(false)
+  const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
+  async function act(e: OverviewEndpoint, path: string, method: string, body: unknown, done: string) {
+    try {
+      const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
+      toast(result.ok === false ? `${e.name} answered ${result.error ?? 'an error'}.` : done, result.ok === false ? 'error' : 'success')
+      refresh()
+    } catch (error) { toast(errorText(error), 'error') }
+  }
+  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'route' : 'routes'}` : null, e.rituals.length ? `ritual ${e.rituals.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
+  return <div className="stack rcv-tab">
+    <div className="rcv-kindline"><ConceptLine line={concepts.endpoints.line} example={concepts.endpoints.example} />
+      <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/webhooks">Event webhooks</Link><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
+    <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} onRowClick={e => e.source === 'inbound_webhook' ? navigate(`/receiving/webhooks/${e.id}`) : undefined}
+      empty={<EmptyState title="No endpoints yet" description="An endpoint is a named place rituals and routes send mail: Slack, Discord, a webhook or a forward. For example, a ritual calls endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
+      columns={[
+        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip">{e.target}</span></div></div> },
+        { key: 'type', label: 'Type', width: '14%', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
+        { key: 'used', label: 'Used by', width: '30%', render: e => used(e) || <span className="muted">Nothing yet</span> },
+        { key: 'status', label: 'Status', width: '16%', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
+        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <span /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+          ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
+          ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
+          { label: e.status === 'paused' ? 'Resume' : 'Pause', onSelect: () => void act(e, '', 'PATCH', { paused: e.status !== 'paused' }, e.status === 'paused' ? 'Resumed.' : 'Paused. Calls wait until you resume.') },
+          { label: 'Delete', destructive: true, onSelect: () => void act(e, '', 'DELETE', undefined, `${e.name} deleted.`) },
+        ]} /> },
+      ]} />
+    {overview.endpointsTruncated && <p className="muted rcv-truncated">Showing the first 100 endpoints and 100 inbound webhooks. <Link to="/receiving/webhooks">Event webhooks</Link> lists every inbound webhook.</p>}
+    <NewEndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
+    <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />
+  </div>
 }
 
 export function ReceivingPage() {
+  const [params, setParams] = useSearchParams()
   const { canAdminister } = useWorkspaceAccess()
-  const intent = useRouteIntent()
-  const domains = useApiDef(queries.inboundDomains(), { enabled: canAdminister })
-  // The sections' first reads. Their tables and empty states differ in height, so the sections appear together once
-  // every read has settled, and none of them pushes the next one down while loading.
-  const options = useApiDef(queries.inboundAddressOptions()), addresses = useApiDef(queries.receivingAddresses('', undefined))
-  const webhooks = useApiDef(queries.inboundWebhooks(), { enabled: canAdminister }), routing = useApiDef(queries.routing(), { enabled: canAdminister })
-  const settled = (query: { data?: unknown; error: unknown }, enabled = true) => !enabled || query.data !== undefined || Boolean(query.error)
-  const ready = settled(options) && settled(addresses) && settled(domains, canAdminister) && settled(webhooks, canAdminister) && settled(routing, canAdminister)
-  const [openDomain, setOpenDomain] = useState<string | null>(null)
-  const selected = domains.data?.find(domain => domain.id === openDomain)
+  const tab = (['routes', 'rituals', 'endpoints'].includes(params.get('tab') ?? '') ? params.get('tab') : 'routes') as Tab
+  const kind = (params.get('kind') ?? 'all') as KindFilter
+  const filters = { kind: kind in kinds ? kind : 'all' as KindFilter, domain: params.get('domain') ?? '', q: params.get('q') ?? '' }
+  const pagination = useCursorPagination()
+  const overview = useOverview({ ...kindQuery[filters.kind], domain: filters.domain || undefined, q: filters.q.trim() || undefined, cursor: pagination.cursor, limit: PAGE }, true)
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState<RouteEntry | null>(null)
+  function update(patch: Record<string, string | null | undefined>) {
+    const next = new URLSearchParams(params)
+    for (const [k, v] of Object.entries(patch)) { if (v === null || v === undefined || v === '' || (k === 'kind' && v === 'all') || (k === 'tab' && v === 'routes')) next.delete(k); else next.set(k, v) }
+    setParams(next, { replace: true })
+    pagination.reset()
+  }
+  const data = overview.data
+  const manage = data?.manage ?? canAdminister
+  const counts = data && { routes: kindCount(data.counts, 'all'), rituals: data.rituals.length, endpoints: data.endpoints.length }
   return <div className="stack inbound-stack">
-    <PageHeader title="Receiving" actions={<Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox" {...intent('/receiving/inbox')}>Inbox</Link>} />
-    {!ready ? <LoadingRegion label="Loading receiving"><div className="receiving-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : <div className="receiving-sections">
-      {canAdminister && <DomainsSection onOpen={setOpenDomain} />}
-      <section className="section stack" aria-labelledby="receiving-inboxes"><SectionHeader title={<span id="receiving-inboxes">Agent inboxes</span>} actions={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/inboxes" {...intent('/receiving/inboxes')}>View inboxes</Link>} /><p className="muted">Expiring addresses that agents and end-to-end tests create, wait on and read through the API or MCP.</p></section>
-      <RoutesSection onOpenDomain={setOpenDomain} />
-      <AddressesSection domains={domains.data} />
+    <PageHeader title="Receiving" actions={<>
+      {manage && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>}
+      {manage && <Button disabled={!data || !receivingDomains(data.domains).length} onClick={() => setCreating(true)}>New address</Button>}
+      <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox">Inbox</Link>
+    </>} />
+    {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
+      <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null })}
+        items={[{ value: 'routes', label: concepts.routes.title, count: counts.routes }, ...(data.manage ? [{ value: 'rituals', label: concepts.rituals.title, count: counts.rituals }, { value: 'endpoints', label: concepts.endpoints.title, count: counts.endpoints }] : [])]} />
+      {tab === 'rituals' && data.manage ? <RitualsTab overview={data} />
+        : tab === 'endpoints' && data.manage ? <EndpointsTab overview={data} refresh={() => void overview.refetch()} />
+        : <RoutesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={() => setCreating(true)} onEditRoute={setEditing}
+          page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
-    {selected && <DomainDialog key={selected.id} domain={selected} onClose={() => setOpenDomain(null)} />}
+    {data && <CreateAddressDialog open={creating} onOpenChange={setCreating} domains={data.domains} />}
+    {editing?.route && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
   </div>
 }

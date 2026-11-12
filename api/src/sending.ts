@@ -1488,10 +1488,14 @@ export async function verifiedAttachment(runtime: Runtime, row: typeof attachmen
 // validation_suppressed is an SES Bounce with bounceSubType EmailValidationSuppressed: SES Auto Validation dropped the
 // recipient before sending, so it is not a delivery bounce (AWS excludes it from Reputation.BounceRate). The email becomes
 // suppressed rather than bounced, and its public email.bounced event carries no bounced outcome (migration 034).
+// It drops one recipient, so it ranks below any outcome SES reports for a recipient it did send to: on a multi-recipient
+// email a delivery, hard bounce or complaint wins in either arrival order. Migration 153 enforces this ranking and the
+// EMAIL_VALIDATION_SUPPRESSED error code (kept only while suppressed, never over an earlier error) in the database, so a
+// Worker still running an older rank table during a deploy cannot restore 'suppressed' or skip a delivery either.
 export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', non_permanent_bounce: 'delayed', validation_suppressed: 'suppressed', complaint: 'complained', complaint_feedback: 'accepted', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 // Publish email.sent from the SendEmail response; a later SES Send is status feedback only.
 export const publicEventType: Record<string, string> = { accepted: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', non_permanent_bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', acceptance_unknown: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
-export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
+export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, suppressed: 5, delivered: 6, bounced: 7, complained: 8, rejected: 7, rendering_failed: 7, canceled: 7, simulated: 7 };
 type EmailEventInput = { workspaceId: string; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; recipientHashes?: string[]; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
@@ -1589,9 +1593,12 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
        FROM matched x ORDER BY x.workspace_id,x.email_id,x.ordinal
       ON CONFLICT DO NOTHING RETURNING *
     ) ${effects ? sql`, contact_events AS (
+      -- Effects follow the receipt this statement processed, not a newly inserted event: a recovery
+      -- job that stored the event and died before its suppression left the receipt open for us.
+      -- The merges below are idempotent, so overlapping with that job's own retry is harmless.
       SELECT x.workspace_id,r.address,x.ordinal,x.event_time,x.effects->>'suppress' AS reason,x.effects->>'observe' AS observe,
         min(x.ordinal) FILTER (WHERE x.effects->>'suppress' IS NOT NULL) OVER (PARTITION BY x.workspace_id,r.address) AS first_suppression
-      FROM matched x JOIN inserted ins ON ins.id=x.event_id JOIN recipients r USING(event_id)
+      FROM matched x JOIN recipients r USING(event_id)
     ), contact_changes AS (
       -- One write per address. A missing contact starts existing at its first suppression;
       -- an earlier open must not create it or retroactively contribute engagement.

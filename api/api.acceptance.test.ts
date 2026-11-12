@@ -2652,6 +2652,44 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // PR #55 review P2 (both): the overview was missing from receivingConsentRoute, so credentials minted by a management
+  // approval without receiving consent could read it over REST; and a read grant with consent was offered a tool REST
+  // refuses. It is now gated by core.ts's shared predicates (mailboxRoute, receivingConsentRoute), which REST and both MCP
+  // listings use.
+  test('inbound overview: REST and both MCP listings require manage and explicit receiving consent', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      const { resourceInventory } = await import('./src/mcp-resources.js'); const actions = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
+      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', `/mcp?codemode=${codemode}`, token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
+        return new Set(codemode ? tools.map(x => x.name as string) : tools.flatMap(x => ((x.inputSchema?.properties?.action?.enum ?? []) as string[]).map(a => actions.get(`${x.name}.${a}`)!).filter(Boolean))); };
+      const offered = async (token: string) => [await listed(token, true), await listed(token, false)].map(set => set.has('getInboundOverview'));
+      const mint = async (token: string, name: 'createApiKey' | 'createAgentToken') => {
+        const args = name === 'createApiKey' ? { confirm: true, body: { name: 'overview fixture', permissions: ['manage'] } } : { confirm: true, body: { permissions: ['read', 'manage'], expiresInSeconds: 120, domains: [], purpose: 'overview fixture' } };
+        const out = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result.structuredContent;
+        const secret = out.secret ?? out.token; assert.ok(secret, JSON.stringify(Object.keys(out))); secrets.add(secret); return secret as string;
+      };
+      // A management approval without receiving consent: neither catalog offers it, and what it mints is refused like the other receiving reads.
+      const manage = await oauthGrant(t, db, writableScope, request);
+      assert.deepEqual(await offered(manage.token), [false, false]);
+      const minted = [await mint(manage.token, 'createApiKey'), await mint(manage.token, 'createAgentToken')];
+      for (const secret of minted) {
+        error(await request('GET', '/v1/inbound/overview', secret), 403, 'ADMIN_REQUIRED');
+        error(await request('GET', '/v1/inbound/addresses', secret), 403, 'ADMIN_REQUIRED');
+      }
+      // With receiving consent the same credentials read it, and both catalogs offer it.
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [manage.consentId]);
+      assert.deepEqual(await offered(manage.token), [true, true]);
+      for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
+      // A read approval with receiving consent: REST refuses it (mailboxAuth needs a manage credential), so it is not offered.
+      const read = await oauthGrant(t, db, 'bane:read offline_access', request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [read.consentId]);
+      assert.deepEqual(await offered(read.token), [false, false]);
+      const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
+      const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId))!; assert.ok(reader?.receivingConsent);
+      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader);
+      assert.equal(refused.status, 403);
+    });
+  });
+
   // tear witness (recheck 2 of #51): mint g-s; probe g-s code|plain -> getCurrentIdentity missing; probe g-s call -> TOOL_UNAVAILABLE.
   test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
     await simulatedSesFixture(t,async({db,request})=>{
@@ -5668,6 +5706,28 @@ test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
 });
 
+// PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
+test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and filter by address; stdio inbox keys are not offered it', async () => {
+  const [{ spawnSync }, { mkdtemp, writeFile }, { tmpdir }, { join }, { createOpenApiApp }, { buildMcpCatalog }] = await Promise.all([import('node:child_process'), import('node:fs/promises'), import('node:os'), import('node:path'), import('./src/app.js'), import('./src/mcp-catalog.js')]);
+  const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
+  const fields = (schema: unknown): string[] => !schema || typeof schema !== 'object' ? [] : Object.entries(schema as Json).flatMap(([k, v]) => k === 'properties' ? [...Object.keys(v as Json), ...Object.values(v as Json).flatMap(fields)] : fields(v));
+  const hosted = buildMcpCatalog(app).get('listInboundWebhooks')!;
+  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(hosted.tool.inputSchema).includes(name), `hosted input ${name}`);
+  assert.ok(fields(hosted.tool.outputSchema).includes('nextCursor'), 'hosted output nextCursor');
+  const file = join(await mkdtemp(join(tmpdir(), 'bane-stdio-')), 'openapi.json'); await writeFile(file, JSON.stringify(spec));
+  const fixture = `import {readFileSync} from 'node:fs';globalThis.fetch=async url=>{if(url.href==='http://127.0.0.1/health')return Response.json({status:'ok',service:'bane'});if(url.href==='http://127.0.0.1/openapi.json')return Response.json(JSON.parse(readFileSync(process.env.SPEC_FILE,'utf8')));throw Error('unexpected request')}`;
+  const tools = (key: string) => {
+    const input = [{ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } } }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }].map(m => JSON.stringify(m)).join('\n') + '\n';
+    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(fixture), '--import', 'tsx', '../mcp/src/server.ts'], { env: { PATH: process.env.PATH, BANE_API_URL: 'http://127.0.0.1', BANE_API_KEY: key, SPEC_FILE: file } as unknown as NodeJS.ProcessEnv, input, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    return new Map<string, Json>(result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(m => m.id === 2).result.tools.map((t: Json) => [t.name, t]));
+  };
+  const workspace = tools('bane_' + '1'.repeat(64)), inbox = tools('bane_mbx_' + '1'.repeat(64));
+  assert.ok(workspace.has('getInboundOverview') && workspace.has('getInboundWebhook'));
+  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(workspace.get('listInboundWebhooks')?.inputSchema).includes(name), `stdio input ${name}`);
+  assert.deepEqual([inbox.has('listInboundWebhooks'), inbox.has('getInboundWebhook'), inbox.has('getInboundOverview')], [false, false, true], 'REST refuses inbox keys webhook administration');
+});
+
 test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   // The operator script owns its transactions and inventories the entire installation. A separately
   // migrated schema exercises the real triggers/views without exposing any jobs to the harness runner.
@@ -7819,6 +7879,138 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
+    // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`, to=address();
+      const email=ok(await local('POST','/v1/emails/send',mail({to})),202), provider=unique('fixture-provider');
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,provider,topicArn]);
+      const item={topicArn,region:REGION,messageId:unique('sns'),message:{eventType:'Bounce',mail:{messageId:provider,sendingAccountId:account},bounce:{bounceType:'Permanent',bounceSubType:'General',bouncedRecipients:[{emailAddress:to}]}}};
+      // The SNS route without a queue opened the receipt for its recovery job.
+      await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+      const job={id:unique('job'),attempts:1,workspaceId:wid};
+      // The worker stores the event and status, then is evicted before its suppression transaction.
+      const dying={...runtime,db:new Proxy(runtime.db,{get:(target,key)=>key==='transaction'?async()=>{throw new Error('worker evicted');}:Reflect.get(target,key)})};
+      await assert.rejects(operationJobs['operation.ses']!(dying as typeof runtime,item,job));
+      assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE id=$1',[email.id])).rows,[{status:'bounced'}]);
+      // The queue delivers the same notification: it processes the open receipt, so it owns the suppression.
+      assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+      await operationJobs['operation.ses']!(runtime,item,{...job,attempts:2});
+      assert.deepEqual((await db.query('SELECT processed_at IS NOT NULL AS processed FROM operation_sns_receipts WHERE topic_arn=$1 AND message_id=$2',[topicArn,item.messageId])).rows,[{processed:true}]);
+      assert.deepEqual((await db.query('SELECT suppressed,suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,to.toLowerCase()])).rows,[{suppressed:true,suppression_reason:'hard_bounce'}]);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_email_events WHERE workspace_id=$1 AND external_id=$2',[wid,`${topicArn}:${item.messageId}`])).rows[0].n,1);
+    });
+  });
+
+  test('MX: a validation-suppressed recipient never outranks a delivery or bounce SES reported for the same email', async t => {
+    // tear witness (api/tear/ses --ext): accept e2, q d2, q v2.
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      const cases=(['Delivery','Bounce'] as const).flatMap(outcome=>(['batch','job'] as const).flatMap(path=>[false,true].map(validationFirst=>({outcome,path,validationFirst,kept:address(),dropped:address()}))));
+      const sent:Json[]=[];
+      for (const c of cases) sent.push(ok(await local('POST','/v1/emails/send',mail({to:c.kept,cc:[c.dropped]})),202));
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const feedback=(provider:string,kind:string,detail:Json)=>({topicArn,region:REGION,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:provider,sendingAccountId:account},[kind.toLowerCase()]:detail}});
+      for (const [i,{outcome,path,validationFirst,kept,dropped}] of cases.entries()) {
+        const email=sent[i]!, provider=unique('fixture-provider');
+        await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,provider,topicArn]);
+        const validation=feedback(provider,'Bounce',{bounceType:'Permanent',bounceSubType:'EmailValidationSuppressed',bouncedRecipients:[{emailAddress:dropped}]});
+        const other=outcome==='Delivery'?feedback(provider,'Delivery',{recipients:[kept]}):feedback(provider,'Bounce',{bounceType:'Permanent',bounceSubType:'General',bouncedRecipients:[{emailAddress:kept}]});
+        for (const item of validationFirst?[validation,other]:[other,validation]) {
+          if (path==='batch') assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+          else {
+            await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+            await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
+          }
+        }
+        const label=`${outcome} via ${path}, validation ${validationFirst?'first':'last'}`;
+        assert.deepEqual((await db.query('SELECT status,error_code,suppression_reason FROM sending_emails WHERE id=$1',[email.id])).rows,
+          [{status:outcome==='Delivery'?'delivered':'bounced',error_code:null,suppression_reason:null}],label);
+        assert.deepEqual((await db.query('SELECT suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,dropped.toLowerCase()])).rows,[{suppression_reason:'email_validation'}],label);
+      }
+    });
+  });
+
+  test('MX: a Worker with the pre-153 rank table cannot restore suppressed or skip a delivery, and the repair fixes older rows', async t => {
+    // tear witnesses (api/tear/ses): accept e2, q d2, old q v2; accept e2, q v2, old q d2.
+    await simulatedSesFixture(t,async ({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const {rank}=await import('./src/sending.js');
+      // The table a Worker deployed before migration 153 embeds; its statements are otherwise the same.
+      const current={...rank}, old={...current,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
+      const asOld=async<T>(work:()=>Promise<T>)=>{Object.assign(rank,old);try{return await work();}finally{Object.assign(rank,current);}};
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      const recipients=Array.from({length:9},()=>[address(),address()] as const);
+      const sent:Json[]=[];
+      for (const [kept,dropped] of recipients) sent.push(ok(await local('POST','/v1/emails/send',mail({to:kept,cc:[dropped]})),202));
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const providers=sent.map(()=>unique('fixture-provider'));
+      for (const [i,email] of sent.entries()) await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`,[email.id,providers[i],topicArn]);
+      const feedback=(i:number,kind:string,detail:Json)=>({topicArn,region:REGION,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:providers[i]!,sendingAccountId:account},[kind.toLowerCase()]:detail}});
+      const validation=(i:number)=>feedback(i,'Bounce',{bounceType:'Permanent',bounceSubType:'EmailValidationSuppressed',bouncedRecipients:[{emailAddress:recipients[i]![1]}]});
+      const delivery=(i:number)=>feedback(i,'Delivery',{recipients:[recipients[i]![0]]});
+      const bounce=(i:number)=>feedback(i,'Bounce',{bounceType:'Permanent',bounceSubType:'General',bouncedRecipients:[{emailAddress:recipients[i]![0]}]});
+      type Item=ReturnType<typeof feedback>;
+      const batch=async(item:Item)=>assert.deepEqual(await ingestFeedbackBatch(runtime,[item]),[{ok:true}]);
+      const job=async(item:Item)=>{
+        await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+        await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
+      };
+      const row=async(i:number)=>(await db.query('SELECT status,error_code,suppression_reason FROM sending_emails WHERE id=$1',[sent[i].id])).rows[0];
+      // The current version commits the outcome first; the old one then commits the validation suppression.
+      await batch(delivery(0)); await asOld(()=>batch(validation(0)));
+      await job(bounce(1)); await asOld(()=>job(validation(1)));
+      // The current version suppresses first; the old one skips the delivery (5 < 6), which the event trigger applies.
+      await batch(validation(2)); await asOld(()=>batch(delivery(2)));
+      await job(validation(3)); await asOld(()=>job(delivery(3)));
+      // Both in one old batch: the old winner is the validation suppression.
+      await asOld(async()=>assert.deepEqual(await ingestFeedbackBatch(runtime,[delivery(4),validation(4)]),[{ok:true},{ok:true}]));
+      // An earlier error code survives an old validation suppression.
+      await db.query(`UPDATE sending_emails SET error_code='SES_ACCEPTANCE_UNKNOWN' WHERE id=$1`,[sent[5].id]);
+      await asOld(()=>batch(validation(5)));
+      assert.deepEqual(await row(0),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(1),{status:'bounced',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(2),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(3),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(4),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(5),{status:'suppressed',error_code:'SES_ACCEPTANCE_UNKNOWN',suppression_reason:'email_validation'});
+      for (const i of [0,1,2,3,4,5]) assert.deepEqual((await db.query('SELECT suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,recipients[i]![1].toLowerCase()])).rows,[{suppression_reason:'email_validation'}]);
+
+      // Rows the old version left before migration 153: the outcome event stored, then 'suppressed'
+      // written over it. Migration 154's repair derives the status from the stored events.
+      const stored=async(i:number,type:string)=>db.query('INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES($1,$2,$3,$4,false)',[unique('event'),wid,sent[i].id,type]);
+      const suppress=async(i:number)=>db.query(`UPDATE sending_emails SET status='suppressed',suppression_reason='email_validation',error_code='EMAIL_VALIDATION_SUPPRESSED' WHERE id=$1`,[sent[i].id]);
+      await stored(6,'delivery'); await stored(6,'validation_suppressed'); await suppress(6);
+      await stored(7,'bounce'); await stored(7,'delivery'); await stored(7,'validation_suppressed'); await suppress(7);
+      // A genuinely validation-suppressed email (no outcome for a sent recipient) stays suppressed.
+      await stored(8,'validation_suppressed'); await suppress(8);
+      // A stale code on a superseded suppression (bounced, EMAIL_VALIDATION_SUPPRESSED), as the old coalesce left it.
+      const stale=unique('email').replace(/[^a-z0-9]/g,'').slice(0,40);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,error_code,provider_id)
+        SELECT $2,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,false,'bounced','EMAIL_VALIDATION_SUPPRESSED',$3 FROM sending_emails WHERE id=$1`,[sent[8].id,`email_${stale}`,unique('provider')]);
+      assert.deepEqual((await row(6)).status,'suppressed');
+      const repair=async()=>{for(let cursor:string|null='';cursor!==null;)cursor=(await db.query('SELECT repair_feedback_status($1,$2) AS c',[cursor,wid])).rows[0].c;};
+      await repair();
+      assert.deepEqual(await row(6),{status:'delivered',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(7),{status:'bounced',error_code:null,suppression_reason:null});
+      assert.deepEqual(await row(8),{status:'suppressed',error_code:'EMAIL_VALIDATION_SUPPRESSED',suppression_reason:'email_validation'});
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[`email_${stale}`])).rows,[{status:'bounced',error_code:null}]);
+      // Idempotent: a second pass changes nothing.
+      const before=(await db.query('SELECT id,status,error_code,suppression_reason,updated_at FROM sending_emails WHERE workspace_id=$1 ORDER BY id',[wid])).rows;
+      await repair();
+      assert.deepEqual((await db.query('SELECT id,status,error_code,suppression_reason,updated_at FROM sending_emails WHERE workspace_id=$1 ORDER BY id',[wid])).rows,before);
+    });
+  });
+
   test('MX: multi-recipient SES feedback uses real destinations, yesterday’s volume and the last operator resume', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const { ingestFeedbackBatch } = await import('./src/operations.js');
@@ -9837,6 +10029,149 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query('EXPLAIN INSERT INTO mailbox_webhook_deliveries DEFAULT VALUES ON CONFLICT(webhook_id,event_seq) DO NOTHING');
         await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
         const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});
+      });
+      await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rituals and endpoints; dry runs step through each condition', async () => {
+        const box2 = await call('POST', '/v1/inbound/addresses', { address: 'overview@receive.example', key: 'overview', displayName: 'Overview desk', aliases: ['ov-alias@receive.example'], rules: ['ov+*@receive.example'] }, 201);
+        const only = await route('ov-route@receive.example', [hook.id]), dropped = await route('ov-drop@receive.example', 'drop');
+        const source = 'export default function route(email){ if(/refund/i.test(email.subject)) { label("refund"); endpoints["support-hook"]({ s: email.subject }) } else junk("other") }';
+        await call('PUT', '/v1/rituals', { rituals: [{ key: 'ovtriage', source }], attachments: [{ target: box2.id, ritual: 'ovtriage' }] });
+        const overview = await call('GET', '/v1/inbound/overview?q=ov');
+        const byMatch = (m: string) => overview.routes.data.find((r: Json) => r.match === m);
+        const own = byMatch('overview@receive.example');
+        assert.equal(own.kind, 'address'); assert.equal(own.address.id, box2.id); assert.deepEqual(own.address.aliases, ['ov-alias@receive.example']); assert.deepEqual(own.rituals, ['ovtriage']);
+        assert.deepEqual(own.to.map((t: Json) => [t.type, t.id, t.via]), [['inbox', box2.id, null], ['webhook', hook.id, 'ovtriage']], 'its inbox by routing, then the endpoint the ritual can call');
+        assert.deepEqual([own.toTotal, own.toTruncated, own.toMore], [2, false, null], 'a short list is the whole list');
+        assert.equal(byMatch('ov+*@receive.example').kind, 'pattern'); assert.equal(byMatch('ov+*@receive.example').address.id, box2.id);
+        assert.deepEqual([byMatch('ov-route@receive.example').kind, byMatch('ov-route@receive.example').route.id, byMatch('ov-route@receive.example').to[0].id], ['route', only.id, hook.id]);
+        assert.deepEqual(byMatch('ov-drop@receive.example').to.map((t: Json) => t.type), ['drop']);
+        assert.equal(overview.manage, true); assert.ok(overview.counts.address >= 1 && overview.counts.route >= 2 && overview.counts.pattern >= 1);
+        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { key: 'ovtriage', calls: ['support-hook'], delivers: [], omens: [], attachedTo: [box2.id] });
+        const endpoint = overview.endpoints.find((e: Json) => e.id === hook.id);
+        assert.deepEqual([endpoint.source, endpoint.name, endpoint.rituals], ['endpoint', 'support-hook', ['ovtriage']]); assert.ok(endpoint.routes >= 1);
+        assert.ok(!JSON.stringify(overview).includes('hooks.example.org'), 'webhook URLs stay write-only');
+        assert.equal((await call('GET', '/v1/inbound/overview?q=ov-alias')).routes.data[0].address.id, box2.id, 'search reaches aliases');
+        const first = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1'), second = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1&cursor=' + first.routes.nextCursor);
+        assert.deepEqual([first.routes.data[0].match, second.routes.data[0].match, second.routes.nextCursor], ['ov-drop@receive.example', 'ov-route@receive.example', null]);
+        error(await local('GET', '/v1/inbound/overview?cursor=bogus'), 422, 'INVALID_CURSOR');
+        const mine = await call('GET', '/v1/inbound/overview?q=ov&kind=address,route&origin=api'), auto = await call('GET', '/v1/inbound/overview?q=ov&kind=address,route&origin=auto');
+        assert.deepEqual(mine.routes.data.map((r: Json) => r.match).sort(), ['ov-drop@receive.example', 'ov-route@receive.example', 'overview@receive.example'], 'origin filters address rows only; routes stay');
+        assert.deepEqual(auto.routes.data.map((r: Json) => r.kind), ['route', 'route']);
+        const catchAll = (await call('GET', '/v1/inbound/overview?kind=catch_all')).routes.data.find((r: Json) => r.host === 'receive.example');
+        assert.deepEqual([catchAll.kind, catchAll.route.id, catchAll.to[0].id], ['catch_all', compat.id, inbound.id]);
+        const scoped = await call('POST', '/v1/inbound/keys', { name: 'overview reader', addressIds: [box2.id], permissions: ['read'] }, 201); secrets.add(scoped.secret);
+        const limited = ok(await request('GET', '/v1/inbound/overview', scoped.secret));
+        assert.equal(limited.manage, false); assert.deepEqual(limited.routes.data.map((r: Json) => r.match), ['overview@receive.example', 'ov+*@receive.example']);
+        assert.deepEqual([limited.rituals, limited.endpoints, limited.domains, limited.routes.data[0].to.map((t: Json) => t.type)], [[], [], [], ['inbox']]);
+        const step = async (subject: string) => (await call('POST', '/v1/rituals/test', { mime: `From: a@example.net\r\nTo: overview@receive.example\r\nSubject: ${subject}\r\n\r\nHello` })).trace[0].timeline;
+        const at = source.indexOf('/refund/') + 1, end = source.indexOf(') {') + 1;
+        assert.deepEqual(await step('Refund please'), [
+          { kind: 'condition', line: 1, column: at, endLine: 1, endColumn: end, result: true },
+          { kind: 'action', line: 1, op: 'label', value: 'refund' },
+          { kind: 'action', line: 1, op: 'endpoint', ref: 'endpoint:support-hook' },
+        ]);
+        assert.deepEqual((await step('Hello')).map((s: Json) => [s.kind, s.result ?? s.op]), [['condition', false], ['action', 'junk']]);
+        await call('PUT', '/v1/rituals', {});
+        for (const r of [only, dropped]) await call('DELETE', '/v1/routing/routes/' + r.id);
+        await call('DELETE', `/v1/inbound/addresses/${box2.id}?detach=true`);
+      });
+      // PR #55 review P2: one overview used to fan out to seven concurrent statements and 17-18 in total, and to unnest
+      // every route destination. It is now two statements, the same two whatever the route count.
+      await t.test('inbound overview: two statements whatever the route count, measured at 10,000 routes; endpoint lists stay bounded', async it => {
+        const tagged = (q: { arguments: unknown[] }) => { const text = q.arguments[0] as string | { text?: string } | undefined; return String(typeof text === 'string' ? text : text?.text ?? '').includes('/* inbound-overview'); };
+        const original = pg.Client.prototype.query, timings: number[] = [];
+        const measure = async (path = '/v1/inbound/overview') => {
+          timings.length = 0;
+          // Counts every statement, and times the overview's own (tagged) statements in the driver.
+          const queries = it.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+            const result = (original as (...a: unknown[]) => unknown).apply(this, args);
+            if (tagged({ arguments: args }) && result instanceof Promise) { const started = performance.now(); return result.finally(() => timings.push(performance.now() - started)); }
+            return result;
+          });
+          try { const started = performance.now(), body = await call('GET', path), ms = performance.now() - started; return { body, ms, total: queries.mock.callCount(), overview: queries.mock.calls.filter(tagged).length, sql: timings.map(x => x.toFixed(1)).join(' + ') }; }
+          finally { queries.mock.restore(); }
+        };
+        await measure();
+        const small = await measure();
+        assert.equal(small.overview, 2, 'one routes statement and one workspace statement');
+        await db.query("INSERT INTO mail_routes(id,workspace_id,domain_id,match,destinations) SELECT 'rte_ovbulk'||n,$1,$2,'bulk'||lpad(n::text,5,'0')||'@receive.example',jsonb_build_array($3::text) FROM generate_series(1,10000) n", [wid, domain, hook.id]);
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) SELECT 'mwh_ovbulk'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/bulk'||n,'[]'::jsonb,'synthetic' FROM generate_series(1,105) n", [wid]);
+        await db.query('ANALYZE mail_routes, mailbox_webhooks'); // as autovacuum would after a bulk load; the rows are in this test's transaction
+        try {
+          await measure();
+          const large = await measure(), deep = await measure('/v1/inbound/overview?kind=route&q=bulk09&limit=100');
+          assert.equal(large.overview, 2); assert.equal(deep.overview, 2);
+          assert.equal(large.total, small.total, 'the same statements, whatever the route count');
+          assert.ok(large.body.counts.route >= 10000, JSON.stringify(large.body.counts));
+          assert.equal(large.body.routes.data.length, 50); assert.ok(large.body.routes.nextCursor);
+          assert.equal(deep.body.routes.data.length, 100); assert.ok(deep.body.routes.data.every((r: Json) => r.match.startsWith('bulk09')));
+          assert.ok(large.body.endpoints.find((e: Json) => e.id === hook.id).routes >= 10000, 'route counts come from the destinations index');
+          assert.equal(large.body.endpoints.filter((e: Json) => e.source === 'inbound_webhook').length, 100, 'inbound webhooks are capped at 100');
+          assert.equal(large.body.endpointsTruncated, true);
+          it.diagnostic(`overview at ${large.body.counts.route} routes: ${large.overview} statements (${large.total} with auth), SQL ${large.sql} ms, request ${large.ms.toFixed(1)} ms; filtered page of 100: SQL ${deep.sql} ms; at ${small.body.counts.route} routes: SQL ${small.sql} ms, request ${small.ms.toFixed(1)} ms`);
+        } finally {
+          await db.query("DELETE FROM mail_routes WHERE id LIKE 'rte_ovbulk%'"); await db.query("DELETE FROM mailbox_webhooks WHERE id LIKE 'mwh_ovbulk%'");
+        }
+        assert.equal((await call('GET', '/v1/inbound/overview')).endpointsTruncated, false);
+      });
+      // PR #55 review P3: Trace showed the sender-written header To in full. The dashboard's one rule (app/src/lib/received-to.ts),
+      // now shared by Logs and Trace, shows only our receiving address or envelope recipient in full and masks the rest.
+      await t.test('inbound received To: real log rows show only our own address in full; a header To is masked', async () => {
+        const { receivedTo } = await import('../app/src/lib/received-to.js');
+        const stored = await route('mask-store@receive.example', []);
+        const mail = async (mid: string, to: string) => {
+          raw.set(mid, Buffer.from(`From: Agent <a@example.org>\r\nTo: Someone Else <someone@elsewhere.example>\r\nSubject: Masking ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
+          await submit(mid, [to]); await run('mailbox.ingest', { sesMessageId: mid });
+        };
+        const row = async (mid: string) => (await call('GET', '/v1/logs?direction=received&limit=100')).data.find((r: Json) => r.subject === `Masking ${mid}`);
+        try {
+          await mail('mask-unrouted', 'mask-store@receive.example'); await mail('mask-routed', box.address);
+          const unrouted = await row('mask-unrouted');
+          assert.deepEqual([unrouted.addresses, unrouted.to], [[], ['someone@elsewhere.example']]);
+          assert.deepEqual(receivedTo(unrouted), { address: 'mask-store@receive.example', own: true }, 'the envelope recipient is ours');
+          assert.deepEqual(receivedTo(await row('mask-routed')), { address: box.address, own: true }, 'the receiving address it was delivered to');
+          // A message stored without its envelope (older mail): only the sender-written header To is known, so it is masked.
+          await db.query("UPDATE mail_messages SET envelope_to='[]'::jsonb WHERE workspace_id=$1 AND subject='Masking mask-unrouted'", [wid]);
+          assert.deepEqual(receivedTo(await row('mask-unrouted')), { address: 'someone@elsewhere.example', own: false });
+          assert.equal(receivedTo({ to: [], addresses: [], envelopeTo: [] }), null);
+        } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
+      });
+      // PR #55 recheck P2: listInboundWebhooks returned 100 webhooks with no cursor, and a route's subscribers were cut at
+      // 100 by ID, so 200 paused hooks could hide an active one. Webhooks now page completely; each route lists active
+      // subscribers before paused ones, and a longer list says so (toTotal, toTruncated, toMore).
+      await t.test('inbound webhooks: 201 hooks page completely by cursor; an active subscriber past 100 is on its route, and a long list says so', async () => {
+        const { OVERVIEW_SUBSCRIBERS } = await import('./src/inbound-overview.js');
+        const sub = await call('POST', '/v1/inbound/addresses', { address: 'subs@receive.example' }, 201);
+        const read = async (path: string, filter: Record<string, string> = {}) => {
+          const ids: string[] = []; let cursor: string | null = null, pages = 0;
+          do {
+            const page = await call('GET', `${path}?${new URLSearchParams({ ...filter, limit: '100', ...(cursor ? { cursor } : {}) })}`);
+            assert.ok(page.data.length <= 100); ids.push(...page.data.map((h: Json) => h.id)); cursor = page.nextCursor; pages++;
+          } while (cursor);
+          assert.equal(new Set(ids).size, ids.length, 'no webhook twice'); return { ids, pages };
+        };
+        const entry = async () => (await call('GET', '/v1/inbound/overview?q=subs%40receive.example&kind=address')).routes.data.find((r: Json) => r.address?.id === sub.id);
+        // 200 paused subscribers to every address whose IDs sort first, and one active subscriber of this address that sorts last.
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,paused,encrypted_secret) SELECT 'mwh_aasub'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/sub'||n,'[\"message.received\"]'::jsonb,true,'synthetic' FROM generate_series(1,200) n", [wid]);
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,mailbox_ids,paused,encrypted_secret,description) VALUES ('mwh_zzactive',$1,'https://hooks.example.org/active','[\"message.received\"]'::jsonb,jsonb_build_array($2::text),false,'synthetic','Active subscriber')", [wid, sub.id]);
+        try {
+          const all = await read('/v1/inbound/webhooks');
+          const every = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') ORDER BY id DESC", [wid])).rows.map(r => r.id);
+          assert.ok(every.length >= 201 && all.pages >= 3, `${every.length} webhooks in ${all.pages} pages`);
+          assert.deepEqual(all.ids, every, 'every webhook, once, by following nextCursor');
+          const subscribers = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') AND event_types ? 'message.received' AND (mailbox_ids IS NULL OR mailbox_ids ? $2) ORDER BY id DESC", [wid, sub.id])).rows.map(r => r.id);
+          const route = await entry(), ids = route.to.map((x: Json) => x.id), firstPaused = route.to.findIndex((x: Json) => x.status === 'paused');
+          assert.ok(ids.includes('mwh_zzactive'), 'the active subscriber is listed though 200 paused ones sort before it');
+          assert.ok(firstPaused > ids.indexOf('mwh_zzactive') && route.to.slice(firstPaused).every((x: Json) => x.status === 'paused'), 'active subscribers come before paused ones');
+          assert.deepEqual([route.toTruncated, route.toTotal, route.to.length], [true, 1 + subscribers.length, 1 + OVERVIEW_SUBSCRIBERS], 'its inbox and every subscriber, counted; the list says it is cut');
+          assert.equal(route.toMore, `/v1/inbound/webhooks?addressId=${sub.id}&eventType=message.received`);
+          const [path, query] = route.toMore.split('?');
+          assert.deepEqual((await read(path, Object.fromEntries(new URLSearchParams(query)))).ids, subscribers, 'toMore lists every subscriber');
+        } finally {
+          await db.query("DELETE FROM mailbox_webhooks WHERE workspace_id=$1 AND (id LIKE 'mwh_aasub%' OR id='mwh_zzactive')", [wid]);
+        }
+        const after = await entry();
+        assert.deepEqual([after.toTruncated, after.toTotal, after.toMore], [false, after.to.length, null]);
+        await call('DELETE', `/v1/inbound/addresses/${sub.id}?detach=true`);
       });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;

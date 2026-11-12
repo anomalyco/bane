@@ -272,7 +272,7 @@ With the SDK it is `createInbox({ client, body: { type: 'sandbox' } })`, then `s
 
 ## Dashboard
 
-**Receiving → Agent inboxes** lists every inbox with its status, expiry and counts. Admins create inboxes there, and anyone in the workspace can read them. These screenshots come from the real app against a local harness database with synthetic data.
+**Receiving → Routes → Agent inboxes** lists every inbox with its expiry, unread count and last mail; open one for its status and messages. Admins create inboxes there (**New agent inbox**), and anyone in the workspace can read them. These screenshots come from the real app against a local harness database with synthetic data.
 
 | | |
 |---|---|

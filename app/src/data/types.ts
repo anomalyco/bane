@@ -270,6 +270,8 @@ export interface BaneApi {
     reply(threadId: string, input: InboundReplyInput, signal?: AbortSignal): Promise<InboundMessage>
     startThread(input: InboundThreadInput, signal?: AbortSignal): Promise<InboundMessage>
     webhooks(signal?: AbortSignal): Promise<InboundWebhook[]>
+    /** One page of inbound webhooks; addressId keeps those that get that address's received mail. */
+    webhookPage(input: { cursor?: string; addressId?: string }, signal?: AbortSignal): Promise<{ data: InboundWebhook[]; nextCursor: string | null }>
     webhook(id: string, signal?: AbortSignal): Promise<InboundWebhook>
     createWebhook(input: InboundWebhookInput, signal?: AbortSignal): Promise<{ webhook: InboundWebhook; secret: string }>
     updateWebhook(id: string, patch: Partial<InboundWebhookInput> & { paused?: boolean }, signal?: AbortSignal): Promise<InboundWebhook>

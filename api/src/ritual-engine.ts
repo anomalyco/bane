@@ -14,12 +14,20 @@ export type Omen = {
   threshold: number;
   onError: number | boolean | 'defer';
 };
-type I = { op: string; l: number; k?: string; v?: string | number | boolean | null; a?: I[] };
+type I = { op: string; l: number; k?: string; v?: string | number | boolean | null; a?: I[]; p?: [number, number, number, number] };
 /** One endpoint call in the source. Checked against the endpoint's type when the ritual is saved. */
 export type CallSite = { ref: string; line: number; column: number; args: number; fields: string[] | null };
 export type ListSite = { name: string; line: number; column: number };
 export type RitualIR = { v: 1; root: I; refs: string[]; omens: Record<string, Omen>; sites?: CallSite[]; lists?: ListSite[] };
 export type Intent = { op: string; ref?: string; body?: unknown; value?: string };
+/** One step of a dry run, in the order it happened: a condition and what it evaluated to, the omen answers a ritual read,
+ * an action it took, or the return that ended it. Positions are 1-based like diagnostics. Recorded only when asked. */
+export type TimelineStep =
+  | { kind: 'condition'; line: number; column: number; endLine: number; endColumn: number; result: boolean }
+  | { kind: 'omens'; line: number; scores: Record<string, number | boolean> }
+  | { kind: 'action'; line: number; op: string; ref?: string; value?: string }
+  | { kind: 'return'; line: number };
+export const TIMELINE_STEPS = 128;
 export type Diagnostic = { line: number; column: number; endLine: number; endColumn: number; message: string; hint?: string; ritual?: string };
 
 /** A compile error with a source position. `message` keeps the "Line L, column C:" form. */
@@ -67,6 +75,8 @@ function staticPath(n: N): string[] | null {
   }
 }
 const dotted = (n: N) => staticPath(n)?.join('.') ?? '';
+/** A source span in the 1-based form diagnostics use, kept on conditions so a dry run can point at them. */
+const span = (n: N): [number, number, number, number] => [n.loc!.start.line, n.loc!.start.column + 1, n.loc!.end.line, n.loc!.end.column + 1];
 function diagnostic(n: N, message: string, hint?: string): never {
   throw new RitualError({
     line: n.loc?.start.line ?? 1,
@@ -190,7 +200,7 @@ export function compileRitual(source: string): RitualIR {
         return ir('bind', d.id.name, [val]);
       }
       case 'IfStatement':
-        return ir('if', undefined, [sub(n.test), compile(n.consequent, new Set(env), depth + 1), ...(n.alternate ? [sub(n.alternate)] : [])]);
+        return { ...ir('if', undefined, [sub(n.test), compile(n.consequent, new Set(env), depth + 1), ...(n.alternate ? [sub(n.alternate)] : [])]), p: span(n.test) };
       case 'Identifier': {
         if (env.has(n.name)) return ir('load', n.name);
         if (n.name === 'undefined') return ir('literal', undefined, undefined, null);
@@ -245,7 +255,7 @@ export function compileRitual(source: string): RitualIR {
         if (n.operator === '==' || n.operator === '!=') diagnostic(n, `Use ${n.operator}= instead of ${n.operator}.`, 'Loose equality is not available.');
         return diagnostic(n, `The ${n.operator} operator is not available.`, 'Available: === !== < <= > >= + && || ??');
       case 'ConditionalExpression':
-        return ir('if', undefined, [sub(n.test), sub(n.consequent), sub(n.alternate)]);
+        return { ...ir('if', undefined, [sub(n.test), sub(n.consequent), sub(n.alternate)]), p: span(n.test) };
       case 'CallExpression':
         return call(n, env, ir, sub);
     }
@@ -368,7 +378,9 @@ export function runRitual(
   scores: Record<string, number | boolean>,
   lists: Record<string, string[]> = {},
   limit = RUN_STEPS,
+  timeline?: TimelineStep[],
 ) {
+  const record = (step: TimelineStep) => { if (timeline && timeline.length < TIMELINE_STEPS) timeline.push(step); };
   const intents: Intent[] = [],
     trace: number[] = [],
     vars = new Map<string, unknown>([
@@ -409,6 +421,7 @@ export function runRitual(
         return;
       case 'return':
         if (a.length) x();
+        record({ kind: 'return', line: i.l });
         returned = true;
         return;
       case 'block':
@@ -418,8 +431,11 @@ export function runRitual(
           visit(s);
         }
         return;
-      case 'if':
-        return x() ? y() : a[2] ? visit(a[2]) : undefined;
+      case 'if': {
+        const test = x();
+        if (i.p) record({ kind: 'condition', line: i.p[0], column: i.p[1], endLine: i.p[2], endColumn: i.p[3], result: !!test });
+        return test ? y() : a[2] ? visit(a[2]) : undefined;
+      }
       case 'not':
         return !x();
       case 'array':
@@ -455,8 +471,11 @@ export function runRitual(
         }
         return k === '>' ? v > w : k === '<' ? v < w : k === '>=' ? v >= w : v <= w;
       }
-      case 'scores':
-        return Object.fromEntries(a.map(e => [e.k!, scores[e.k!]]));
+      case 'scores': {
+        const answered = Object.fromEntries(a.map(e => [e.k!, scores[e.k!]]));
+        record({ kind: 'omens', line: i.l, scores: answered as Record<string, number | boolean> });
+        return answered;
+      }
       case 'regex': {
         const s = x();
         if (typeof s !== 'string') throw Error('Regex expected text');
@@ -508,6 +527,7 @@ export function runRitual(
           op: k,
           ...(ref ? { ref, ...(args.length > 1 ? { body: args[1] } : {}) } : args.length ? { value: scalar(args[0]).slice(0, 128) } : {}),
         });
+        record({ kind: 'action', line: i.l, op: k, ...(ref ? { ref } : args.length ? { value: scalar(args[0]).slice(0, 128) } : {}) });
         return;
       }
       default:
