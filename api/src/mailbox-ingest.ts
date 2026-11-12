@@ -616,7 +616,7 @@ const deleteMailObjects:JobHandler=async(runtime,payload,job)=>{
     throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);
   }
 };
-export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId)),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
+export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':retryDatabaseFailures(async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId))),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
   const key=JSON.stringify([job.workspaceId,payload.sesMessageId]),claim:{recipients?:string[];createdAt?:string}={recipients:job.ingest?.recipients,createdAt:job.ingest?.createdAt};
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());

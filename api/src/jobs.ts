@@ -1,7 +1,7 @@
 import {ActionRetry,actionDelay} from './ritual-retry.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, databaseCodeOf, databaseUnavailable, id, log, ModuleLoadError, transientDatabaseError } from './core.js';
+import { ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, id, log, ModuleLoadError, transientDatabaseError } from './core.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
@@ -79,16 +79,19 @@ export function jobConcurrency(value: unknown, maximum = 8) {
 }
 // Input comes only from the actual claimed rows, never a caller-supplied endpoint. Hold the
 // endpoint lock until paused deliveries are parked, so a concurrent resume sees and requeues them.
+// An endpoint test goes to a paused endpoint, except one held with its approval (reconfirm): that one parks everything.
+// `owned`: the endpoint is tied to an approval, so its delivery first checks that the approval is active.
 export const webhookClaimCtes = sql`hook_inputs AS MATERIALIZED (
-  SELECT j.id AS job_id,d.workspace_id,d.id AS delivery_id,d.generation,d.webhook_id,d.event_id,d.payload,d.synthetic,w.url,w.encrypted_secret,w.encrypted_headers,w.paused
+  SELECT j.id AS job_id,d.workspace_id,d.id AS delivery_id,d.generation,d.webhook_id,d.event_id,d.payload,d.synthetic,w.url,w.encrypted_secret,w.encrypted_headers,w.paused,w.reconfirm,
+    EXISTS(SELECT FROM mail_grant_objects g WHERE g.workspace_id=d.workspace_id AND g.kind='webhook' AND g.resource=d.webhook_id) AS owned
   FROM claimed j JOIN operation_deliveries d ON d.workspace_id=j.workspace_id AND d.id=j.payload->>'deliveryId'
     AND to_jsonb(d.generation)=j.payload->'generation' AND d.status<>'delivered'
-  LEFT JOIN LATERAL (SELECT url,encrypted_secret,encrypted_headers,paused FROM operation_webhooks WHERE workspace_id=d.workspace_id AND id=d.webhook_id FOR SHARE) w ON true
+  LEFT JOIN LATERAL (SELECT url,encrypted_secret,encrypted_headers,paused,reconfirm FROM operation_webhooks WHERE workspace_id=d.workspace_id AND id=d.webhook_id FOR SHARE) w ON true
   WHERE j.type='operation.webhook'
 ), parked AS (UPDATE operation_deliveries d SET status=CASE WHEN h.url IS NULL THEN 'failed' ELSE 'paused' END,
   last_error=CASE WHEN h.url IS NULL THEN 'ENDPOINT_DELETED' ELSE 'ENDPOINT_PAUSED' END,updated_at=now()
-  FROM hook_inputs h WHERE d.id=h.delivery_id AND d.workspace_id=h.workspace_id AND d.generation=h.generation AND (h.url IS NULL OR (h.paused AND NOT h.synthetic)))`;
-const hookJoin = sql`LEFT JOIN hook_inputs h ON h.job_id=j.id AND h.url IS NOT NULL AND (NOT h.paused OR h.synthetic)`;
+  FROM hook_inputs h WHERE d.id=h.delivery_id AND d.workspace_id=h.workspace_id AND d.generation=h.generation AND (h.url IS NULL OR h.reconfirm OR (h.paused AND NOT h.synthetic)))`;
+const hookJoin = sql`LEFT JOIN hook_inputs h ON h.job_id=j.id AND h.url IS NOT NULL AND NOT h.reconfirm AND (NOT h.paused OR h.synthetic)`;
 export const inboundHookClaim=sql`inbound_hooks AS MATERIALIZED (SELECT j.id AS job_id,d.id AS delivery_id,d.generation,d.routed,d.webhook_id,d.payload,d.payload->>'id' AS event_id,d.format,w.name,w.include,w.retry_attempts,w.timeout_seconds,w.url,w.encrypted_secret,w.encrypted_headers,
   CASE WHEN w.paused THEN 'ENDPOINT_PAUSED' WHEN d.payload->>'type'='message.junk' AND w.junk<>'include' THEN 'SUBSCRIPTION_CHANGED' WHEN NOT d.routed AND NOT((w.event_types ? (d.payload->>'type') OR (d.payload->>'type'='message.junk' AND w.event_types ? 'message.received')) AND (w.mailbox_ids IS NULL OR (d.payload->>'type'<>'message.stored' AND w.mailbox_ids ? (d.payload->>'addressId')))) THEN 'SUBSCRIPTION_CHANGED' END AS blocked
   FROM claimed j JOIN mailbox_webhook_deliveries d ON j.type='mailbox.webhook' AND d.workspace_id=j.workspace_id AND d.id=j.payload->>'deliveryId' AND d.status='pending' AND d.generation=coalesce((j.payload->>'generation')::int,0)
@@ -163,7 +166,8 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       }
       // A refused or dropped database connection retries like any retryable failure instead of failing the job for good:
       // one transient refusal used to strand a campaign in preparing.
-      const failure = transientDatabaseError(error) ? databaseUnavailable(true) : error;
+      // So does a deadlock or serialization victim, which used to fail any handler not wrapped in retryDatabaseFailures.
+      const failure = transientDatabaseError(error) || databaseConflict(error) ? databaseUnavailable(true) : error;
       const code = failure instanceof ApiError ? failure.code : 'JOB_INTERNAL_ERROR';
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
