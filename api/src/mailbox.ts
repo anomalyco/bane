@@ -643,6 +643,8 @@ export function registerMailbox(app: App) {
         used=least(${max+1},excluded.used+CASE WHEN b.window_start=excluded.window_start THEN b.used ELSE 0 END),window_start=excluded.window_start RETURNING used`);
       checkBudget(c, debit!.used, max);
     }
+    // Up to 19 digits passes the schema, but past 2^53 Number() rounds and past the bigint range the query failed with a 500.
+    if (q.after !== undefined && !Number.isSafeInteger(Number(q.after))) throw new ApiError(422, 'INVALID_CURSOR', 'Use the cursor a previous response returned.', 'after');
     let after = q.after !== undefined ? Number(q.after) : await latestCursor(c.env.db, value.workspaceId, scope);
     const deadline = Date.now() + q.wait * 1000;
     for (let remaining = q.wait; ; remaining--) {
