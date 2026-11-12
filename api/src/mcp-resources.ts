@@ -21,7 +21,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     upload: 'uploadAttachment', get: 'getAttachment', content: 'getAttachmentContent', delete: 'deleteAttachment', getInbox: 'getInboxAttachment', getInbound: 'getInboundAttachment',
   } },
   addresses: { label: 'Receiving addresses', actions: {
-    list: 'listInboundAddresses', get: 'getInboundAddress', create: 'createInboundAddress', update: 'updateInboundAddress', delete: 'deleteInboundAddress', release: 'releaseRetiredAddress',
+    list: 'listInboundAddresses', overview: 'getInboundOverview', get: 'getInboundAddress', create: 'createInboundAddress', update: 'updateInboundAddress', delete: 'deleteInboundAddress', release: 'releaseRetiredAddress',
   } },
   routes: { label: 'Inbound routing rules', actions: {
     list: 'listRoutes', get: 'getRoute', create: 'createRoute', update: 'updateRoute', delete: 'deleteRoute',

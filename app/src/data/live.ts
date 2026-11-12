@@ -293,6 +293,7 @@ export function createLiveApi(): BaneApi {
       reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, idempotencyKey }),
       startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, idempotencyKey }),
       webhooks: async signal => (await inboundCall<{ data: InboundWebhook[] }>('/webhooks', 'GET', undefined, signal)).data,
+      webhookPage: (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.cursor ? { cursor: input.cursor } : {}), ...(input.addressId ? { addressId: input.addressId, eventType: 'message.received' } : {}) }); return inboundCall<{ data: InboundWebhook[]; nextCursor: string | null }>(`/webhooks?${query}`, 'GET', undefined, signal) },
       webhook: (id, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'GET', undefined, signal),
       createWebhook: async (input, signal) => { const { secret, ...webhook } = await inboundCall<InboundWebhook & { secret: string }>('/webhooks', 'POST', input, signal); return { webhook, secret } },
       updateWebhook: (id, patch, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'PATCH', patch, signal),

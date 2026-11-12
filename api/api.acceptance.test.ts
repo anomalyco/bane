@@ -2652,6 +2652,44 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // PR #55 review P2 (both): the overview was missing from receivingConsentRoute, so credentials minted by a management
+  // approval without receiving consent could read it over REST; and a read grant with consent was offered a tool REST
+  // refuses. It is now gated by core.ts's shared predicates (mailboxRoute, receivingConsentRoute), which REST and both MCP
+  // listings use.
+  test('inbound overview: REST and both MCP listings require manage and explicit receiving consent', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      const { resourceInventory } = await import('./src/mcp-resources.js'); const actions = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
+      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', `/mcp?codemode=${codemode}`, token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
+        return new Set(codemode ? tools.map(x => x.name as string) : tools.flatMap(x => ((x.inputSchema?.properties?.action?.enum ?? []) as string[]).map(a => actions.get(`${x.name}.${a}`)!).filter(Boolean))); };
+      const offered = async (token: string) => [await listed(token, true), await listed(token, false)].map(set => set.has('getInboundOverview'));
+      const mint = async (token: string, name: 'createApiKey' | 'createAgentToken') => {
+        const args = name === 'createApiKey' ? { confirm: true, body: { name: 'overview fixture', permissions: ['manage'] } } : { confirm: true, body: { permissions: ['read', 'manage'], expiresInSeconds: 120, domains: [], purpose: 'overview fixture' } };
+        const out = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result.structuredContent;
+        const secret = out.secret ?? out.token; assert.ok(secret, JSON.stringify(Object.keys(out))); secrets.add(secret); return secret as string;
+      };
+      // A management approval without receiving consent: neither catalog offers it, and what it mints is refused like the other receiving reads.
+      const manage = await oauthGrant(t, db, writableScope, request);
+      assert.deepEqual(await offered(manage.token), [false, false]);
+      const minted = [await mint(manage.token, 'createApiKey'), await mint(manage.token, 'createAgentToken')];
+      for (const secret of minted) {
+        error(await request('GET', '/v1/inbound/overview', secret), 403, 'ADMIN_REQUIRED');
+        error(await request('GET', '/v1/inbound/addresses', secret), 403, 'ADMIN_REQUIRED');
+      }
+      // With receiving consent the same credentials read it, and both catalogs offer it.
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [manage.consentId]);
+      assert.deepEqual(await offered(manage.token), [true, true]);
+      for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
+      // A read approval with receiving consent: REST refuses it (mailboxAuth needs a manage credential), so it is not offered.
+      const read = await oauthGrant(t, db, 'bane:read offline_access', request);
+      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [read.consentId]);
+      assert.deepEqual(await offered(read.token), [false, false]);
+      const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
+      const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId))!; assert.ok(reader?.receivingConsent);
+      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader);
+      assert.equal(refused.status, 403);
+    });
+  });
+
   // tear witness (recheck 2 of #51): mint g-s; probe g-s code|plain -> getCurrentIdentity missing; probe g-s call -> TOOL_UNAVAILABLE.
   test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
     await simulatedSesFixture(t,async({db,request})=>{
@@ -5568,6 +5606,43 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
 
+// Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
+// node-postgres lets query parameters redirect it, and never established that the database was
+// disposable. tear/disposable.ts is the rule every tear host imports.
+test('a tear host refuses redirecting URLs, databases not marked disposable and databases holding foreign data', async t => {
+  const { disposableUrl, assertDisposable, DISPOSABLE } = await import('./tear/disposable.js');
+  const { execFile } = await import('node:child_process'), { fileURLToPath } = await import('node:url');
+  for (const url of ['postgresql://tear:x@127.0.0.1/tear?host=192.0.2.1&port=5432', 'postgresql://tear:x@127.0.0.1:1/tear?hostaddr=192.0.2.1',
+    'postgresql://tear:x@127.0.0.1/tear?options=-c%20search_path%3Dpublic', 'postgresql://tear:x@127.0.0.1/tear?', 'postgresql://tear:x@192.0.2.1:5432/tear',
+    'postgresql://tear:x@localhost.example.com/tear', 'mysql://tear:x@127.0.0.1/tear', 'not a url', undefined]) assert.throws(() => disposableUrl(url), /^Error: tear host:/, String(url));
+  for (const url of ['postgresql://tear:x@127.0.0.1:5432/tear', 'postgres://tear:x@localhost/tear', 'postgresql://tear:x@[::1]:5432/tear']) assert.equal(disposableUrl(url), url);
+  const client = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+  await client.connect(); cleanup(t, () => client.end());
+  const check = () => assertDisposable(text => client.query(text));
+  // The acceptance database is shared by every scenario and carries no marker.
+  await assert.rejects(check(), /not marked disposable/);
+  // Marked, but holding a workspace tear did not create: still refused. Rolled back.
+  await client.query('BEGIN');
+  try {
+    await client.query(`DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), '${DISPOSABLE}'); END $$`);
+    await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
+    await assert.rejects(check(), /holds [1-9]\d* workspaces/);
+  } finally { await client.query('ROLLBACK'); }
+  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
+  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
+      (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
+    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
+  });
+  const unmarked = await host(FIXTURE_DATABASE_URL!);
+  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
+  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
+  const refused = await host(redirected.toString());
+  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+});
+
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
   const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
   const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_SHADOW:'false',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};
@@ -5629,6 +5704,28 @@ test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   const env={PATH:process.env.PATH,OPENSEND_API_URL:'http://127.0.0.1',OPENSEND_API_KEY:'os_mbx_'+'1'.repeat(64)};
   const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
+});
+
+// PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
+test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and filter by address; stdio inbox keys are not offered it', async () => {
+  const [{ spawnSync }, { mkdtemp, writeFile }, { tmpdir }, { join }, { createOpenApiApp }, { buildMcpCatalog }] = await Promise.all([import('node:child_process'), import('node:fs/promises'), import('node:os'), import('node:path'), import('./src/app.js'), import('./src/mcp-catalog.js')]);
+  const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
+  const fields = (schema: unknown): string[] => !schema || typeof schema !== 'object' ? [] : Object.entries(schema as Json).flatMap(([k, v]) => k === 'properties' ? [...Object.keys(v as Json), ...Object.values(v as Json).flatMap(fields)] : fields(v));
+  const hosted = buildMcpCatalog(app).get('listInboundWebhooks')!;
+  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(hosted.tool.inputSchema).includes(name), `hosted input ${name}`);
+  assert.ok(fields(hosted.tool.outputSchema).includes('nextCursor'), 'hosted output nextCursor');
+  const file = join(await mkdtemp(join(tmpdir(), 'bane-stdio-')), 'openapi.json'); await writeFile(file, JSON.stringify(spec));
+  const fixture = `import {readFileSync} from 'node:fs';globalThis.fetch=async url=>{if(url.href==='http://127.0.0.1/health')return Response.json({status:'ok',service:'bane'});if(url.href==='http://127.0.0.1/openapi.json')return Response.json(JSON.parse(readFileSync(process.env.SPEC_FILE,'utf8')));throw Error('unexpected request')}`;
+  const tools = (key: string) => {
+    const input = [{ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } } }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }].map(m => JSON.stringify(m)).join('\n') + '\n';
+    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(fixture), '--import', 'tsx', '../mcp/src/server.ts'], { env: { PATH: process.env.PATH, BANE_API_URL: 'http://127.0.0.1', BANE_API_KEY: key, SPEC_FILE: file } as unknown as NodeJS.ProcessEnv, input, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    return new Map<string, Json>(result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(m => m.id === 2).result.tools.map((t: Json) => [t.name, t]));
+  };
+  const workspace = tools('bane_' + '1'.repeat(64)), inbox = tools('bane_mbx_' + '1'.repeat(64));
+  assert.ok(workspace.has('getInboundOverview') && workspace.has('getInboundWebhook'));
+  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(workspace.get('listInboundWebhooks')?.inputSchema).includes(name), `stdio input ${name}`);
+  assert.deepEqual([inbox.has('listInboundWebhooks'), inbox.has('getInboundWebhook'), inbox.has('getInboundOverview')], [false, false, true], 'REST refuses inbox keys webhook administration');
 });
 
 test('Hosted account re-home: drained legacy Ohio installation',async t=>{
@@ -6031,6 +6128,220 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         while (pending.length) await Promise.all(pending.splice(0));
       } } finally { globalThis.fetch = previousFetch; }
       assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
+    });
+  });
+  // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
+  // lease, claim, send, record and the next lease, which found nothing and ended the run.
+  test('a dispatcher lease that passes the last owner wraps to the first, so a run never stops with mail due', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      // A region of its own: this workspace is its only owner, so a one-row lease's cursor is
+      // the last owner, exactly as with 24 owners and the normal 24-row lease.
+      const region = 'te-cursor-1', status = async (ids: string[]) => (await db.query('SELECT status FROM sending_emails WHERE id=ANY($1) ORDER BY id', [ids])).rows.map(r => r.status);
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=ANY($1)', [ids, region]);
+      const gate = initialGate();
+      const report = await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate });
+      assert.deepEqual(await status(ids), ['accepted', 'accepted', 'accepted'], 'One run drains every due row.');
+      assert.equal(report.sent, 3);
+      // A cursor left by the previous run must not end the next run before it reaches the first owner.
+      const later = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('UPDATE sending_emails SET region=$2 WHERE id=$1', [later, region]);
+      gate.ownerCursor = runtime.config.workspaceId;
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, gate })).sent, 1);
+      assert.deepEqual(await status([later]), ['accepted']);
+      // With every remaining row leased elsewhere the run still ends after one pass.
+      const held = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query("UPDATE sending_emails SET region=$2, lease_until=now()+interval '2 minutes' WHERE id=$1", [held, region]);
+      assert.equal((await runDispatcher(runtime, { region, lanes: 1, batchSize: 1, gate })).claimed, 0);
+      assert.deepEqual(await status([held]), ['queued']);
+    });
+  });
+  // Review of #52 (P1): the wrap above counted a lease as progress even when the local
+  // marketing allowance released every row it leased, so 24 unaffordable owners were leased
+  // and released until the run's time budget (237 leases in 500 ms, then a non-idle report
+  // that re-armed the Durable Object at once).
+  test('a lease the marketing allowance cannot afford ends the run as a quota hold in a bounded number of statements', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const region = 'te-allowance-1', w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent;
+      // 24 owners (one lease's worth), each with one two-recipient marketing envelope.
+      const owners = Array.from({ length: 24 }, (_, i) => `${w}-o${String(i).padStart(2, '0')}`), later = `${w}-o24`;
+      const pair = ok(await local('POST', '/v1/emails/send', mail({ to: [address(), address()] })), 202).id;
+      const single = ok(await local('POST', '/v1/emails/send', mail()), 202).id;
+      await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [[...owners, later]]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+        SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [[...owners, later], region]);
+      const clone = (ids: string[], template: string) => db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||md5(o||e.id),o,e.actor_key_id,$2,e.from_address,e.to_addresses,'[]','[]',e.subject,jsonb_set(jsonb_set(e.snapshot,'{kind}','"marketing"'),'{region}',to_jsonb($2::text)),e.simulated
+        FROM sending_emails e,unnest($1::text[]) o WHERE e.id=$3`, [ids, region, template]);
+      await clone(owners, pair);
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // One campaign credit left (a cached, current sample): every envelope needs two.
+      const max = 100, gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const queued = async (o: string[]) => (await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=ANY($1) AND region=$2 AND status='queued' AND lease_until IS NULL`, [o, region])).rows[0].n;
+      for (const lanes of [1, 2]) {
+        const run = counted(), started = Date.now();
+        const report = await runDispatcher(run.runtime, { region, lanes, batchSize: 24, gate: gate(1), until: Date.now() + 5000 });
+        assert.equal(report.sent, 0);
+        assert.equal(report.idle, true, 'An unaffordable pass is an idle hold, not unfinished work that re-arms at once.');
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, 'It retries when the quota sample can change.');
+        // Per lane: the page, its release, and the lease past the last owner; nothing more.
+        t.diagnostic(`ALLOWANCE-HOLD lanes ${lanes}: ${run.statements()} statements in ${Date.now() - started} ms`);
+        assert.ok(run.statements() <= 3 * lanes, `${run.statements()} statements with ${lanes} lane(s)`);
+        assert.equal(await queued(owners), 24, 'Nothing was claimed, and no lease is left behind.');
+      }
+      // Four concurrent shards splitting four credits (one each): the same bound on every shard.
+      const shards = [0, 1, 2, 3].map(() => counted());
+      const reports = await Promise.all(shards.map((run, index) => runDispatcher(run.runtime, { region, lanes: 1, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 })));
+      t.diagnostic(`ALLOWANCE-HOLD shards: ${shards.map(run => run.statements()).join(',')} statements`);
+      for (const [index, report] of reports.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(shards[index]!.statements() <= 3, `shard ${index}: ${shards[index]!.statements()} statements`);
+      }
+      assert.equal(await queued(owners), 24);
+      // A later owner's affordable one-recipient envelope is still reached and sent.
+      await clone([later], single);
+      // Its own send key, so the claim's origin check passes for that owner.
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'later',$1,'bane_later','["send"]','[]')`, [`${later}-key`, later]);
+      await db.query('UPDATE sending_emails SET actor_key_id=$2 WHERE workspace_id=$1', [later, `${later}-key`]);
+      const [{ email }] = (await db.query('SELECT to_addresses->>0 AS email FROM sending_emails WHERE workspace_id=$1', [later])).rows;
+      await db.query("INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ($1,$2,$3,'subscribed')", [`${later}-contact`, later, email]);
+      const run = counted();
+      const report = await runDispatcher(run.runtime, { region, lanes: 1, batchSize: 24, gate: gate(1), until: Date.now() + 5000 });
+      assert.equal(report.sent, 1);
+      assert.deepEqual((await db.query('SELECT status FROM sending_emails WHERE workspace_id=$1', [later])).rows, [{ status: 'accepted' }]);
+      assert.equal(await queued(owners), 24);
+      t.diagnostic(`ALLOWANCE-HOLD later owner: ${run.statements()} statements`);
+      assert.ok(run.statements() <= 8, `${run.statements()} statements`);
+    });
+  });
+  // Recheck of #52 (P1): one owner's full page set no owner cursor, so the no-progress check
+  // never ran (24 two-recipient envelopes and one credit: 133 leases / 266 statements in 500 ms,
+  // idle false). (P2): the fair page took every owner's oversized head, so the hold starved the
+  // affordable mail behind it (24 one-recipient followers left queued, idle). The lease now skips
+  // the specific envelopes the allowance cannot afford, and a batch that advanced nothing ends.
+  test('the allowance skips specific unaffordable envelopes: one owner\'s full page holds, and mail behind oversized heads sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent, max = 100;
+      const template = ok(await local('POST', '/v1/emails/send', mail()), 202).id, contacts = [address(), address()];
+      // Owners with their own send key and two subscribed contacts; each owner's envelopes are
+      // queued oldest first with the given recipient counts and streams.
+      const seed = async (region: string, owners: string[], envelopes: { cost: number; kind?: string }[]) => {
+        await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [owners]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+          SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [owners, region]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT o||'-key',o,'owner',o||'-key','bane_owner','["send"]','[]' FROM unnest($1::text[]) o`, [owners]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT o||'-c'||n,o,($2::text[])[n],'subscribed' FROM unnest($1::text[]) o,generate_series(1,2) n`, [owners, contacts]);
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+          SELECT 'email_'||md5(o||x.n),o,o||'-key',$2,e.from_address,x.dest,'[]','[]',e.subject,
+            jsonb_set(jsonb_set(jsonb_set(e.snapshot,'{kind}',to_jsonb(x.kind)),'{region}',to_jsonb($2::text)),'{to}',x.dest),e.simulated,clock_timestamp()-interval '1 hour'+x.n*interval '1 second'
+          FROM sending_emails e,unnest($1::text[]) o,jsonb_to_recordset($4::jsonb) x(n int,kind text,dest jsonb) WHERE e.id=$3`,
+          [owners, region, template, JSON.stringify(envelopes.map((v, n) => ({ n, kind: v.kind ?? 'marketing', dest: contacts.slice(0, v.cost) })))]);
+      };
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // `credits` marketing recipients left in a cached, current sample.
+      const gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const state = async (region: string) => (await db.query(`SELECT count(*) FILTER (WHERE status='queued' AND lease_until IS NULL)::int AS free,
+        count(*) FILTER (WHERE status='queued')::int AS queued, count(*) FILTER (WHERE status='accepted')::int AS accepted,
+        count(*) FILTER (WHERE status='accepted' AND jsonb_array_length(to_addresses)>1)::int AS oversized FROM sending_emails WHERE region=$1`, [region])).rows[0];
+      const run = async (label: string, region: string, credits: number | 'blind', options: { lanes?: number } = {}) => {
+        const counter = counted(), started = Date.now();
+        const report = await runDispatcher(counter.runtime, { region, lanes: options.lanes ?? 1, batchSize: 24, gate: credits === 'blind' ? initialGate() : gate(credits), until: Date.now() + 5000 });
+        t.diagnostic(`ALLOWANCE-SKIP ${label}: sent ${report.sent}, ${counter.statements()} statements in ${Date.now() - started} ms, idle ${report.idle}`);
+        assert.equal(report.idle, true, `${label}: a quota hold is idle, not unfinished work that re-arms at once`);
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, `${label}: it retries when the quota sample can change`);
+        return { report, statements: counter.statements() };
+      };
+
+      // P1: one owner, 24 two-recipient envelopes (a full page), one credit.
+      const solo = 'te-allowance-2', soloOwner = [`${w}-solo`];
+      await seed(solo, soloOwner, Array.from({ length: 24 }, () => ({ cost: 2 })));
+      for (const lanes of [1, 2]) {
+        const { report, statements } = await run(`one owner, ${lanes} lane(s)`, solo, 1, { lanes });
+        assert.equal(report.sent, 0);
+        assert.ok(statements <= 2 * lanes, `${statements} statements with ${lanes} lane(s)`);
+        assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      }
+      // Leased before the allowance is known (a fresh database sample, no gate yet): the page
+      // comes back unaffordable once, the next lease skips it, and the run ends.
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at) VALUES ($1,$2,1000,$3,$4,clock_timestamp())`,
+        [soloOwner[0], solo, max, max - sesDailyReserve(max, percent) - 1]);
+      const blind = await run('one owner, blind first lease', solo, 'blind');
+      assert.equal(blind.report.sent, 0); assert.ok(blind.statements <= 4, `${blind.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      // Four shards, two lanes each, splitting four credits: the same bound on every shard.
+      const shards = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: solo, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP one owner, four shards: ${shards.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of shards.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 4, `shard ${index}: ${statements} statements`);
+      }
+      // The same owner's affordable envelope behind the 24 is reached and sent.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT 'email_'||md5(e.id||'follower'),e.workspace_id,e.actor_key_id,e.region,e.from_address,$2,'[]','[]',e.subject,jsonb_set(e.snapshot,'{to}',$2),e.simulated,clock_timestamp()
+        FROM sending_emails e WHERE e.workspace_id=$1 ORDER BY e.created_at LIMIT 1`, [soloOwner[0], JSON.stringify(contacts.slice(0, 1))]);
+      const follower = await run('one owner, follower', solo, 1);
+      assert.equal(follower.report.sent, 1); assert.ok(follower.statements <= 8, `${follower.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 1, oversized: 0 });
+
+      // P2: 24 owners (one lease's worth), each with an older two-recipient head and a
+      // one-recipient follower. Each new sample's credit sends one follower; no head is sent.
+      const deep = 'te-allowance-3', owners = Array.from({ length: 24 }, (_, i) => `${w}-h${String(i).padStart(2, '0')}`);
+      await seed(deep, owners, [{ cost: 2 }, { cost: 1 }]);
+      let sent = 0;
+      for (const [label, lanes] of [['heads', 1], ['heads, next idle cycle', 1], ['heads, two lanes', 2]] as const) {
+        const { report, statements } = await run(label, deep, 1, { lanes });
+        assert.equal(report.sent, 1, `${label}: the credit sends an affordable follower`); sent += 1;
+        assert.ok(statements <= 8 * lanes, `${label}: ${statements} statements`);
+        assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+      }
+      // Four shards, one credit each: no shard sends more than its share or spins, and the mail
+      // one shard held while a sibling leased is released for the next run.
+      const parallel = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: deep, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP heads, four shards: sent ${parallel.map(s => s.report.sent).join(',')}; ${parallel.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of parallel.entries()) {
+        assert.ok(report.sent <= 1, `shard ${index} sent ${report.sent}`); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 16, `shard ${index}: ${statements} statements`);
+      }
+      const shardSent = parallel.reduce((n, s) => n + s.report.sent, 0); sent += shardSent;
+      assert.ok(shardSent >= 1, 'The shards send affordable followers');
+      assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+
+      // The reserve: transactional followers behind oversized marketing heads spend the 11
+      // recipients the account has left; the marketing heads, needing two of one credit, wait.
+      const reserve = 'te-allowance-4', tx = Array.from({ length: 24 }, (_, i) => `${w}-t${String(i).padStart(2, '0')}`);
+      await seed(reserve, tx, [{ cost: 2 }, { cost: 1, kind: 'transactional' }]);
+      const priority = await run('transactional behind heads', reserve, 1);
+      assert.equal(priority.report.sent, sesDailyReserve(max, percent) + 1);
+      assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
@@ -9374,6 +9685,149 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query('EXPLAIN INSERT INTO mailbox_webhook_deliveries DEFAULT VALUES ON CONFLICT(webhook_id,event_seq) DO NOTHING');
         await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
         const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});
+      });
+      await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rituals and endpoints; dry runs step through each condition', async () => {
+        const box2 = await call('POST', '/v1/inbound/addresses', { address: 'overview@receive.example', key: 'overview', displayName: 'Overview desk', aliases: ['ov-alias@receive.example'], rules: ['ov+*@receive.example'] }, 201);
+        const only = await route('ov-route@receive.example', [hook.id]), dropped = await route('ov-drop@receive.example', 'drop');
+        const source = 'export default function route(email){ if(/refund/i.test(email.subject)) { label("refund"); endpoints["support-hook"]({ s: email.subject }) } else junk("other") }';
+        await call('PUT', '/v1/rituals', { rituals: [{ key: 'ovtriage', source }], attachments: [{ target: box2.id, ritual: 'ovtriage' }] });
+        const overview = await call('GET', '/v1/inbound/overview?q=ov');
+        const byMatch = (m: string) => overview.routes.data.find((r: Json) => r.match === m);
+        const own = byMatch('overview@receive.example');
+        assert.equal(own.kind, 'address'); assert.equal(own.address.id, box2.id); assert.deepEqual(own.address.aliases, ['ov-alias@receive.example']); assert.deepEqual(own.rituals, ['ovtriage']);
+        assert.deepEqual(own.to.map((t: Json) => [t.type, t.id, t.via]), [['inbox', box2.id, null], ['webhook', hook.id, 'ovtriage']], 'its inbox by routing, then the endpoint the ritual can call');
+        assert.deepEqual([own.toTotal, own.toTruncated, own.toMore], [2, false, null], 'a short list is the whole list');
+        assert.equal(byMatch('ov+*@receive.example').kind, 'pattern'); assert.equal(byMatch('ov+*@receive.example').address.id, box2.id);
+        assert.deepEqual([byMatch('ov-route@receive.example').kind, byMatch('ov-route@receive.example').route.id, byMatch('ov-route@receive.example').to[0].id], ['route', only.id, hook.id]);
+        assert.deepEqual(byMatch('ov-drop@receive.example').to.map((t: Json) => t.type), ['drop']);
+        assert.equal(overview.manage, true); assert.ok(overview.counts.address >= 1 && overview.counts.route >= 2 && overview.counts.pattern >= 1);
+        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { key: 'ovtriage', calls: ['support-hook'], delivers: [], omens: [], attachedTo: [box2.id] });
+        const endpoint = overview.endpoints.find((e: Json) => e.id === hook.id);
+        assert.deepEqual([endpoint.source, endpoint.name, endpoint.rituals], ['endpoint', 'support-hook', ['ovtriage']]); assert.ok(endpoint.routes >= 1);
+        assert.ok(!JSON.stringify(overview).includes('hooks.example.org'), 'webhook URLs stay write-only');
+        assert.equal((await call('GET', '/v1/inbound/overview?q=ov-alias')).routes.data[0].address.id, box2.id, 'search reaches aliases');
+        const first = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1'), second = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1&cursor=' + first.routes.nextCursor);
+        assert.deepEqual([first.routes.data[0].match, second.routes.data[0].match, second.routes.nextCursor], ['ov-drop@receive.example', 'ov-route@receive.example', null]);
+        error(await local('GET', '/v1/inbound/overview?cursor=bogus'), 422, 'INVALID_CURSOR');
+        const mine = await call('GET', '/v1/inbound/overview?q=ov&kind=address,route&origin=api'), auto = await call('GET', '/v1/inbound/overview?q=ov&kind=address,route&origin=auto');
+        assert.deepEqual(mine.routes.data.map((r: Json) => r.match).sort(), ['ov-drop@receive.example', 'ov-route@receive.example', 'overview@receive.example'], 'origin filters address rows only; routes stay');
+        assert.deepEqual(auto.routes.data.map((r: Json) => r.kind), ['route', 'route']);
+        const catchAll = (await call('GET', '/v1/inbound/overview?kind=catch_all')).routes.data.find((r: Json) => r.host === 'receive.example');
+        assert.deepEqual([catchAll.kind, catchAll.route.id, catchAll.to[0].id], ['catch_all', compat.id, inbound.id]);
+        const scoped = await call('POST', '/v1/inbound/keys', { name: 'overview reader', addressIds: [box2.id], permissions: ['read'] }, 201); secrets.add(scoped.secret);
+        const limited = ok(await request('GET', '/v1/inbound/overview', scoped.secret));
+        assert.equal(limited.manage, false); assert.deepEqual(limited.routes.data.map((r: Json) => r.match), ['overview@receive.example', 'ov+*@receive.example']);
+        assert.deepEqual([limited.rituals, limited.endpoints, limited.domains, limited.routes.data[0].to.map((t: Json) => t.type)], [[], [], [], ['inbox']]);
+        const step = async (subject: string) => (await call('POST', '/v1/rituals/test', { mime: `From: a@example.net\r\nTo: overview@receive.example\r\nSubject: ${subject}\r\n\r\nHello` })).trace[0].timeline;
+        const at = source.indexOf('/refund/') + 1, end = source.indexOf(') {') + 1;
+        assert.deepEqual(await step('Refund please'), [
+          { kind: 'condition', line: 1, column: at, endLine: 1, endColumn: end, result: true },
+          { kind: 'action', line: 1, op: 'label', value: 'refund' },
+          { kind: 'action', line: 1, op: 'endpoint', ref: 'endpoint:support-hook' },
+        ]);
+        assert.deepEqual((await step('Hello')).map((s: Json) => [s.kind, s.result ?? s.op]), [['condition', false], ['action', 'junk']]);
+        await call('PUT', '/v1/rituals', {});
+        for (const r of [only, dropped]) await call('DELETE', '/v1/routing/routes/' + r.id);
+        await call('DELETE', `/v1/inbound/addresses/${box2.id}?detach=true`);
+      });
+      // PR #55 review P2: one overview used to fan out to seven concurrent statements and 17-18 in total, and to unnest
+      // every route destination. It is now two statements, the same two whatever the route count.
+      await t.test('inbound overview: two statements whatever the route count, measured at 10,000 routes; endpoint lists stay bounded', async it => {
+        const tagged = (q: { arguments: unknown[] }) => { const text = q.arguments[0] as string | { text?: string } | undefined; return String(typeof text === 'string' ? text : text?.text ?? '').includes('/* inbound-overview'); };
+        const original = pg.Client.prototype.query, timings: number[] = [];
+        const measure = async (path = '/v1/inbound/overview') => {
+          timings.length = 0;
+          // Counts every statement, and times the overview's own (tagged) statements in the driver.
+          const queries = it.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
+            const result = (original as (...a: unknown[]) => unknown).apply(this, args);
+            if (tagged({ arguments: args }) && result instanceof Promise) { const started = performance.now(); return result.finally(() => timings.push(performance.now() - started)); }
+            return result;
+          });
+          try { const started = performance.now(), body = await call('GET', path), ms = performance.now() - started; return { body, ms, total: queries.mock.callCount(), overview: queries.mock.calls.filter(tagged).length, sql: timings.map(x => x.toFixed(1)).join(' + ') }; }
+          finally { queries.mock.restore(); }
+        };
+        await measure();
+        const small = await measure();
+        assert.equal(small.overview, 2, 'one routes statement and one workspace statement');
+        await db.query("INSERT INTO mail_routes(id,workspace_id,domain_id,match,destinations) SELECT 'rte_ovbulk'||n,$1,$2,'bulk'||lpad(n::text,5,'0')||'@receive.example',jsonb_build_array($3::text) FROM generate_series(1,10000) n", [wid, domain, hook.id]);
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) SELECT 'mwh_ovbulk'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/bulk'||n,'[]'::jsonb,'synthetic' FROM generate_series(1,105) n", [wid]);
+        await db.query('ANALYZE mail_routes, mailbox_webhooks'); // as autovacuum would after a bulk load; the rows are in this test's transaction
+        try {
+          await measure();
+          const large = await measure(), deep = await measure('/v1/inbound/overview?kind=route&q=bulk09&limit=100');
+          assert.equal(large.overview, 2); assert.equal(deep.overview, 2);
+          assert.equal(large.total, small.total, 'the same statements, whatever the route count');
+          assert.ok(large.body.counts.route >= 10000, JSON.stringify(large.body.counts));
+          assert.equal(large.body.routes.data.length, 50); assert.ok(large.body.routes.nextCursor);
+          assert.equal(deep.body.routes.data.length, 100); assert.ok(deep.body.routes.data.every((r: Json) => r.match.startsWith('bulk09')));
+          assert.ok(large.body.endpoints.find((e: Json) => e.id === hook.id).routes >= 10000, 'route counts come from the destinations index');
+          assert.equal(large.body.endpoints.filter((e: Json) => e.source === 'inbound_webhook').length, 100, 'inbound webhooks are capped at 100');
+          assert.equal(large.body.endpointsTruncated, true);
+          it.diagnostic(`overview at ${large.body.counts.route} routes: ${large.overview} statements (${large.total} with auth), SQL ${large.sql} ms, request ${large.ms.toFixed(1)} ms; filtered page of 100: SQL ${deep.sql} ms; at ${small.body.counts.route} routes: SQL ${small.sql} ms, request ${small.ms.toFixed(1)} ms`);
+        } finally {
+          await db.query("DELETE FROM mail_routes WHERE id LIKE 'rte_ovbulk%'"); await db.query("DELETE FROM mailbox_webhooks WHERE id LIKE 'mwh_ovbulk%'");
+        }
+        assert.equal((await call('GET', '/v1/inbound/overview')).endpointsTruncated, false);
+      });
+      // PR #55 review P3: Trace showed the sender-written header To in full. The dashboard's one rule (app/src/lib/received-to.ts),
+      // now shared by Logs and Trace, shows only our receiving address or envelope recipient in full and masks the rest.
+      await t.test('inbound received To: real log rows show only our own address in full; a header To is masked', async () => {
+        const { receivedTo } = await import('../app/src/lib/received-to.js');
+        const stored = await route('mask-store@receive.example', []);
+        const mail = async (mid: string, to: string) => {
+          raw.set(mid, Buffer.from(`From: Agent <a@example.org>\r\nTo: Someone Else <someone@elsewhere.example>\r\nSubject: Masking ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
+          await submit(mid, [to]); await run('mailbox.ingest', { sesMessageId: mid });
+        };
+        const row = async (mid: string) => (await call('GET', '/v1/logs?direction=received&limit=100')).data.find((r: Json) => r.subject === `Masking ${mid}`);
+        try {
+          await mail('mask-unrouted', 'mask-store@receive.example'); await mail('mask-routed', box.address);
+          const unrouted = await row('mask-unrouted');
+          assert.deepEqual([unrouted.addresses, unrouted.to], [[], ['someone@elsewhere.example']]);
+          assert.deepEqual(receivedTo(unrouted), { address: 'mask-store@receive.example', own: true }, 'the envelope recipient is ours');
+          assert.deepEqual(receivedTo(await row('mask-routed')), { address: box.address, own: true }, 'the receiving address it was delivered to');
+          // A message stored without its envelope (older mail): only the sender-written header To is known, so it is masked.
+          await db.query("UPDATE mail_messages SET envelope_to='[]'::jsonb WHERE workspace_id=$1 AND subject='Masking mask-unrouted'", [wid]);
+          assert.deepEqual(receivedTo(await row('mask-unrouted')), { address: 'someone@elsewhere.example', own: false });
+          assert.equal(receivedTo({ to: [], addresses: [], envelopeTo: [] }), null);
+        } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
+      });
+      // PR #55 recheck P2: listInboundWebhooks returned 100 webhooks with no cursor, and a route's subscribers were cut at
+      // 100 by ID, so 200 paused hooks could hide an active one. Webhooks now page completely; each route lists active
+      // subscribers before paused ones, and a longer list says so (toTotal, toTruncated, toMore).
+      await t.test('inbound webhooks: 201 hooks page completely by cursor; an active subscriber past 100 is on its route, and a long list says so', async () => {
+        const { OVERVIEW_SUBSCRIBERS } = await import('./src/inbound-overview.js');
+        const sub = await call('POST', '/v1/inbound/addresses', { address: 'subs@receive.example' }, 201);
+        const read = async (path: string, filter: Record<string, string> = {}) => {
+          const ids: string[] = []; let cursor: string | null = null, pages = 0;
+          do {
+            const page = await call('GET', `${path}?${new URLSearchParams({ ...filter, limit: '100', ...(cursor ? { cursor } : {}) })}`);
+            assert.ok(page.data.length <= 100); ids.push(...page.data.map((h: Json) => h.id)); cursor = page.nextCursor; pages++;
+          } while (cursor);
+          assert.equal(new Set(ids).size, ids.length, 'no webhook twice'); return { ids, pages };
+        };
+        const entry = async () => (await call('GET', '/v1/inbound/overview?q=subs%40receive.example&kind=address')).routes.data.find((r: Json) => r.address?.id === sub.id);
+        // 200 paused subscribers to every address whose IDs sort first, and one active subscriber of this address that sorts last.
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,paused,encrypted_secret) SELECT 'mwh_aasub'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/sub'||n,'[\"message.received\"]'::jsonb,true,'synthetic' FROM generate_series(1,200) n", [wid]);
+        await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,mailbox_ids,paused,encrypted_secret,description) VALUES ('mwh_zzactive',$1,'https://hooks.example.org/active','[\"message.received\"]'::jsonb,jsonb_build_array($2::text),false,'synthetic','Active subscriber')", [wid, sub.id]);
+        try {
+          const all = await read('/v1/inbound/webhooks');
+          const every = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') ORDER BY id DESC", [wid])).rows.map(r => r.id);
+          assert.ok(every.length >= 201 && all.pages >= 3, `${every.length} webhooks in ${all.pages} pages`);
+          assert.deepEqual(all.ids, every, 'every webhook, once, by following nextCursor');
+          const subscribers = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') AND event_types ? 'message.received' AND (mailbox_ids IS NULL OR mailbox_ids ? $2) ORDER BY id DESC", [wid, sub.id])).rows.map(r => r.id);
+          const route = await entry(), ids = route.to.map((x: Json) => x.id), firstPaused = route.to.findIndex((x: Json) => x.status === 'paused');
+          assert.ok(ids.includes('mwh_zzactive'), 'the active subscriber is listed though 200 paused ones sort before it');
+          assert.ok(firstPaused > ids.indexOf('mwh_zzactive') && route.to.slice(firstPaused).every((x: Json) => x.status === 'paused'), 'active subscribers come before paused ones');
+          assert.deepEqual([route.toTruncated, route.toTotal, route.to.length], [true, 1 + subscribers.length, 1 + OVERVIEW_SUBSCRIBERS], 'its inbox and every subscriber, counted; the list says it is cut');
+          assert.equal(route.toMore, `/v1/inbound/webhooks?addressId=${sub.id}&eventType=message.received`);
+          const [path, query] = route.toMore.split('?');
+          assert.deepEqual((await read(path, Object.fromEntries(new URLSearchParams(query)))).ids, subscribers, 'toMore lists every subscriber');
+        } finally {
+          await db.query("DELETE FROM mailbox_webhooks WHERE workspace_id=$1 AND (id LIKE 'mwh_aasub%' OR id='mwh_zzactive')", [wid]);
+        }
+        const after = await entry();
+        assert.deepEqual([after.toTruncated, after.toTotal, after.toMore], [false, after.to.length, null]);
+        await call('DELETE', `/v1/inbound/addresses/${sub.id}?detach=true`);
       });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;

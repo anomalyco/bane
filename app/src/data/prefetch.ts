@@ -3,6 +3,7 @@ import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { rememberedPageSize } from '../lib/pagination'
 import { useApi, useRegion, useWorkspaceAccess } from './context'
 import { queries, type QueryDef } from './queries'
+import { firstOverview, overviewQuery } from '../features/inbound/overview'
 import type { BaneApi } from './types'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
@@ -18,8 +19,8 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
   switch (path) {
     case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ direction: 'all', page: 1, pageSize: 7 })] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
-    // Receiving domains and inbound webhooks are admin-only reads.
-    case '/receiving': return [queries.inboundAddressOptions(), ...(canAdminister ? [queries.inboundDomains(), queries.inboundWebhooks()] : [])]
+    // Receiving is one read: routes, counts, rituals, endpoints and domains.
+    case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
     case '/receiving/inbox': return [queries.inboundAddressOptions(), queries.inboundThreads(undefined, 'inbox', '', undefined)]
     case '/campaigns': return [queries.campaigns({ search: '', archived: false, status: undefined, page: 1, pageSize: 10 })]
     case '/audience': { const pageSize = rememberedPageSize('contacts'); return [queries.audienceLists(), ...(pageSize ? [queries.contacts({ page: 1, pageSize, search: '', status: '', listId: '' })] : [])] }
