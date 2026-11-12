@@ -2,6 +2,7 @@ config:
   bane:deployRoleArn: arn:aws:iam::905840579680:role/bane-deploy
   bane:permissionsBoundary: arn:aws:iam::905840579680:policy/bane-runtime-boundary
   bane:writeWorkerSecrets: "true"
+  bane:mailGatewayEnabled: "true"
   bane:mailControlImports:
     - "bane-905840579680-mail-us-east-2"
     - "bane-inbound:bane-inbound-all"
