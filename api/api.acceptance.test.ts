@@ -526,6 +526,26 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
   assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
   assert.equal((await request('/v1/me','GET',session)).status,401);
+  // Carry-over (migration 247): a Google-only legacy user's first Google sign-in adopts the existing user ID,
+  // so its workspace and role are unchanged; the claim is used once and audited.
+  const legacyId=randomUUID(), legacyEmail=`legacy-${randomUUID()}@example.org`;
+  cleanup(t,async()=>{await db.query('DELETE FROM auth_user WHERE id=$1',[legacyId]);});
+  await db.query("INSERT INTO auth_user(id,name,email,email_verified) VALUES($1,'Legacy',$2,true)",[legacyId,legacyEmail]);
+  await db.query("INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES($1,$2,'google',$3)",[randomUUID(),randomUUID(),legacyId]);
+  await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),legacyId,me.workspaceId]);
+  await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source) VALUES($1,NULL,$2,'google')",[legacyId,legacyEmail]);
+  subject=randomUUID();subjects.push(subject);email=legacyEmail;useUserInfo=false;
+  tokenAcr='urn:anomaly:acr:passkey';
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=google_required');
+  tokenAcr=googleAcr;
+  const carried=await login();assert.equal(carried.headers.get('location'),origin+'/');
+  const carriedSession=carried.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const carriedMe=await (await request('/v1/me','GET',carriedSession)).json() as {id:string;workspaceId:string;role:string};
+  assert.deepEqual([carriedMe.id,carriedMe.workspaceId,carriedMe.role],[legacyId,me.workspaceId,'admin']);
+  assert.equal((await db.query('SELECT FROM bane_legacy_claims WHERE user_id=$1',[legacyId])).rowCount,0);
+  assert.deepEqual((await db.query('SELECT subject,source FROM bane_legacy_claim_audit WHERE user_id=$1',[legacyId])).rows,[{subject,source:'google'}]);
+  subject=randomUUID();subjects.push(subject);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error','A second subject cannot claim the same address');
 });
 
 test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
