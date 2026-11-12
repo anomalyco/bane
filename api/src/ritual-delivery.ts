@@ -10,7 +10,8 @@ type Sent = { status: number; retryAfter?: string | null; parked?: true };
  * The one delivery path for every ritual endpoint call (Slack, Discord, webhook, forward).
  * Order: grant still active → endpoint policy and pause → per-action fence → per-endpoint rate slot → send.
  * The claim checks the pause too, but a pause can commit between the claim and this fence: the
- * fence holds the endpoint row (FOR SHARE) and parks the delivery, so unpause resumes it.
+ * fence holds the endpoint row (FOR SHARE) and parks the delivery, so unpause resumes it. It also
+ * holds the delivery row and stops unless that is still pending at the claimed generation.
  * Retries all leave through ActionRetry, so backoff, jitter and Retry-After are identical for
  * every endpoint type. An attempt with an unknown outcome is replayed only when the endpoint is
  * idempotent or opted in to retryOnTimeout. Plain event subscriptions keep their webhook semantics.
@@ -27,13 +28,17 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
   const action = (h.payload as { ritualAction?: string }).ritualAction;
   if (!action && !h.routed) return send();
   const fence = await runtime.db.transaction(async tx => {
-    const row = (await tx.execute<{ type: EndpointType | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null; paused: boolean }>(sql`
-      SELECT nullif(split_part(d.ref,':',1),'') AS type,p.per_minute,p.retry_on_timeout,p.idempotent,h.paused
-      FROM mailbox_webhooks h LEFT JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
+    const row = (await tx.execute<{ type: EndpointType | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null; paused: boolean; current: boolean }>(sql`
+      SELECT nullif(split_part(d.ref,':',1),'') AS type,p.per_minute,p.retry_on_timeout,p.idempotent,h.paused,(q.status='pending' AND q.generation=${h.generation}) AS current
+      FROM mailbox_webhooks h JOIN mailbox_webhook_deliveries q ON q.workspace_id=h.workspace_id AND q.id=${h.delivery_id} AND q.webhook_id=h.id
+      LEFT JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
       LEFT JOIN mail_action_policies p ON p.workspace_id=h.workspace_id AND p.hook_id=h.id
-      WHERE h.workspace_id=${w} AND h.id=${h.webhook_id} FOR SHARE OF h`)).rows[0];
+      WHERE h.workspace_id=${w} AND h.id=${h.webhook_id} FOR SHARE OF h,q`)).rows[0];
     if (!row) throw new ApiError(422, 'UNKNOWN_DESTINATION', 'Endpoint no longer exists.');
     const policy = endpointPolicy(row.type ?? 'webhook', row);
+    // A runner whose claim went stale (its lease expired, then the delivery settled or was resumed
+    // as a new generation) must not send: the delivery is no longer its to attempt.
+    if (!row.current) return { policy, done: true, parked: true as const };
     if (row.paused) {
       await tx.execute(sql`UPDATE mailbox_webhook_deliveries SET status='paused',last_error='ENDPOINT_PAUSED',updated_at=now() WHERE workspace_id=${w} AND id=${h.delivery_id} AND generation=${h.generation} AND status='pending'`);
       return { policy, done: true, parked: true as const };

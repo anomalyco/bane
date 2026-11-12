@@ -9526,6 +9526,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
         }finally{await call('PUT','/v1/rituals',{});for(const id of Object.values(ids))await call('DELETE',`/v1/inbound/webhooks/${id}?detach=true`);}
       });
+      await t.test('delivery: a runner whose claim went stale sends nothing once the delivery settled or resumed',async()=>{
+        // tear/delivery witnesses: ingest m1 a, claim K m1:W, expire m1:W, run L m1:W, reply L 400, go K;
+        // ingest m1 z, claim K m1:V, pause V, expire m1:V, run L m1:V, unpause V, go K.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{inboundHookClaim}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'stale-claim',url:'https://hooks.example.org/stale-claim'},201);
+        await route('stale@receive.example',['webhook:stale-claim'],'stale-claim');
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='stale-claim'",[wid])).rows[0].id;
+        const deliveryOf=async(mid:string)=>{const m=await ingest(mid,['stale@receive.example']);return (await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0].id as string;};
+        const claim=async(delivery:string)=>(await runtime.db.execute<import('./src/core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT 'job_stale'::text AS id,${wid}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify({deliveryId:delivery})}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0]!;
+        const runJob=(delivery:string,webhook?:import('./src/core.js').ClaimedWebhook,generation?:number)=>mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:delivery,...(generation===undefined?{}:{generation})},{id:'job_stale',workspaceId:wid,attempts:1,...(webhook?{webhook}:{})});
+        const state=async(delivery:string)=>(await db.query('SELECT status,generation FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0];
+        const prev=runtime.webhookFetch;let posts=0,reply=400;runtime.webhookFetch=async()=>{posts++;return {status:reply}};
+        try{
+          // Another runner takes over the expired lease and the endpoint refuses it.
+          const refused=await deliveryOf('stale-refused'),staleRefused=await claim(refused);
+          await assert.rejects(runJob(refused),{code:'DESTINATION_REFUSED'});
+          assert.equal(posts,1);assert.deepEqual(await state(refused),{status:'failed',generation:0});
+          reply=204;await runJob(refused,staleRefused);
+          assert.equal(posts,1);assert.deepEqual(await state(refused),{status:'failed',generation:0});
+          // The endpoint is paused and resumed meanwhile: the delivery is a new generation.
+          const resumed=await deliveryOf('stale-resumed'),staleResumed=await claim(resumed);
+          await call('PATCH','/v1/endpoints/stale-claim',{paused:true});await runJob(resumed);
+          await call('PATCH','/v1/endpoints/stale-claim',{paused:false});
+          await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:hookId},{id:'job_stale_resume',workspaceId:wid,attempts:1});
+          await runJob(resumed,staleResumed);
+          assert.equal(posts,1);assert.deepEqual(await state(resumed),{status:'pending',generation:1});
+          await runJob(resumed,undefined,1);
+          assert.equal(posts,2);assert.deepEqual(await state(resumed),{status:'delivered',generation:1});
+        }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const importer=runtime.importPublicImage;let imports=0;

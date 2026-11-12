@@ -67,15 +67,17 @@ pub struct D {
     pub delay: Value,
     /// Attempts the fence let through, recorded or not.
     pub tries: u32,
+    /// Bumped by every resume; a claim belongs to one generation.
+    pub generation: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Wk {
     Idle,
     /// Claimed and parked before the handler. `hook` is what the claim statement joined.
-    Parked { d: String, attempts: u32, stale: bool, hook: bool },
+    Parked { d: String, attempts: u32, stale: bool, hook: bool, generation: u32 },
     /// A request is in flight to `ep`.
-    Flight { d: String, attempts: u32, stale: bool, ep: String },
+    Flight { d: String, attempts: u32, stale: bool, ep: String, generation: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -265,9 +267,9 @@ impl Model {
             Act::Ingest { m, rcpts, variant } => self.ingest(&m, &rcpts, &variant),
             Act::Run { w, d, gate } => self.run(&w, &d, gate),
             Act::Go { w } => {
-                let Wk::Parked { d, attempts, stale, hook } = self.worker(&w).clone() else { unreachable!() };
+                let Wk::Parked { d, attempts, stale, hook, generation } = self.worker(&w).clone() else { unreachable!() };
                 self.workers.insert(w.clone(), Wk::Idle);
-                self.handle(&w, &d, attempts, stale, hook)
+                self.handle(&w, &d, attempts, stale, hook, generation)
             }
             Act::Reply { w, resp } => self.reply(&w, &resp, &mut sends),
             Act::Crash { w, sent } => {
@@ -302,6 +304,7 @@ impl Model {
                         d.err = None;
                         // The attempts already made still count: a pause holds retries, it does not refill them.
                         d.job = Some(Job { status: "pending".into(), attempts: d.count.max(d.tries), expired: false });
+                        d.generation += 1;
                         d.delay = json!(0);
                     }
                 }
@@ -438,6 +441,7 @@ impl Model {
                 job: Some(Job { status: "pending".into(), attempts: 0, expired: false }),
                 delay: json!(0),
                 tries: 0,
+                generation: 0,
             });
         }
     }
@@ -459,6 +463,7 @@ impl Model {
         job.attempts += 1;
         job.expired = false;
         let attempts = job.attempts;
+        let generation = d.generation;
         // The claim joins the endpoint: a paused one parks the delivery, a settled one is skipped.
         let ep = d.ep.clone();
         let hook = if d.status != "pending" {
@@ -472,10 +477,10 @@ impl Model {
             true
         };
         if gate {
-            self.workers.insert(w.into(), Wk::Parked { d: label.into(), attempts, stale: false, hook });
+            self.workers.insert(w.into(), Wk::Parked { d: label.into(), attempts, stale: false, hook, generation });
             return json!("claimed");
         }
-        self.handle(w, label, attempts, false, hook)
+        self.handle(w, label, attempts, false, hook, generation)
     }
 
     /// Settles the worker's job and (in the same statement) its delivery record.
@@ -505,7 +510,7 @@ impl Model {
         }
     }
 
-    fn handle(&mut self, w: &str, label: &str, attempts: u32, stale: bool, hook: bool) -> Value {
+    fn handle(&mut self, w: &str, label: &str, attempts: u32, stale: bool, hook: bool, generation: u32) -> Value {
         let Some(d) = self.d(label).cloned() else { return json!("done") };
         let done = json!("done");
         if !hook {
@@ -514,6 +519,11 @@ impl Model {
         }
         let ep = d.ep.clone();
         let Some(e) = self.eps.get(&ep).cloned() else { return done };
+        // The fence attempts only a delivery still pending at the claimed generation.
+        if d.status != "pending" || d.generation != generation {
+            self.settle(label, attempts, stale, Some(("completed", json!(null))), None);
+            return done;
+        }
         if e.paused {
             // Decided after the pause committed: park like the claim does.
             if self.d(label).is_some_and(|d| d.status == "pending") {
@@ -569,12 +579,12 @@ impl Model {
             self.settle(label, attempts, stale, Some(("pending", json!("d"))), None);
             return done;
         }
-        self.workers.insert(w.into(), Wk::Flight { d: label.into(), attempts, stale, ep: ep.clone() });
+        self.workers.insert(w.into(), Wk::Flight { d: label.into(), attempts, stale, ep: ep.clone(), generation });
         json!({"sending": ep, "d": label})
     }
 
     fn reply(&mut self, w: &str, resp: &str, sends: &mut Vec<Value>) -> Value {
-        let Wk::Flight { d: label, attempts, stale, ep } = self.worker(w).clone() else { unreachable!() };
+        let Wk::Flight { d: label, attempts, stale, ep, .. } = self.worker(w).clone() else { unreachable!() };
         self.workers.insert(w.into(), Wk::Idle);
         sends.push(json!([ep, label, ep != "S"]));
         let mut words = resp.split(' ');
