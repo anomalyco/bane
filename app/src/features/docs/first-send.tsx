@@ -8,6 +8,7 @@ import { useApi, useApiQuery, usePublicOrigin, useSession } from '../../data/con
 import { request } from '../../data/live'
 import type { Domain } from '../../data/types'
 import './developer.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const simulator = ['success', 'bounce', 'complaint'].map(local => `${local}@simulator.amazonses.com`)
 
@@ -38,7 +39,7 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
   return <>
     <div className="first-send-test">
       <Button loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
-      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to {to}{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? `From ${from} to ${to}.` : `Available once ${domain.name} is verified.`}</span>
+      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} />.</> : `Available once ${domain.name} is verified.`}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}
   </>
