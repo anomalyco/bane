@@ -10,7 +10,7 @@ import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
-import { addressName, cleanName, full, idempotencyFor, Sender, senderLabel, when } from './shared'
+import { addressName, cleanName, full, idempotencyFor, nameOf, Sender, when } from './shared'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
@@ -80,7 +80,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         {detail.error && <Alert tone="danger">{detail.error instanceof Error ? detail.error.message : 'The full message could not be loaded.'}</Alert>}
         {loaded ? loaded.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full.</Alert>
           : message.bodyTruncated && <Alert tone="info">This is a preview of a long message. <Button variant="ghost" size="sm" loading={pending && wanted === 'full'} onClick={() => setWanted('full')}>Show the full message</Button></Alert>}
-        {formatted && loaded?.html ? <ReceivedEmailPreview html={loaded.html} title={`Message from ${senderLabel(message.from)}`} className="mailbox-message__html" />
+        {formatted && loaded?.html ? <ReceivedEmailPreview html={loaded.html} title={`Message from ${nameOf(message.from)}`} className="mailbox-message__html" />
           : <div className="mailbox-message__body">{(showQuoted ? text : replyText || text) || <span className="muted">(no text)</span>}</div>}
         {loaded && wanted === 'formatted' && !loaded.html && <p className="mailbox-message__attachments-note muted">This message has no formatted version.</p>}
         <div className="cluster mailbox-message__toggles">
@@ -218,7 +218,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const changed = send.error instanceof ApiError && send.error.code === 'INBOUND_RECIPIENTS_CHANGED'
   return <form className="mailbox-composer" data-filled={text ? true : undefined} onSubmit={submit}>
     <div className="inbound-composer__target">
-      <label className="mailbox-composer__to" htmlFor="inbound-reply">{explicit ? `Replying to ${target.direction === 'outbound' ? 'your message' : `${senderLabel(target.from)}’s message`} from ${when(target.receivedAt)}` : 'Replying to the newest message'}</label>
+      <label className="mailbox-composer__to" htmlFor="inbound-reply">{explicit ? `Replying to ${target.direction === 'outbound' ? 'your message' : `${nameOf(target.from)}’s message`} from ${when(target.receivedAt)}` : 'Replying to the newest message'}</label>
       {explicit && <IconButton variant="ghost" size="sm" label="Reply to the newest message instead" onClick={onClearTarget}><X size={14} /></IconButton>}
     </div>
     {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" hint="This message reached more than one of your addresses. Choose which one replies." error={fieldError(send.error, 'addressId')}>

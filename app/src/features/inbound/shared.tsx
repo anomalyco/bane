@@ -6,7 +6,7 @@ export { cleanName }
 /** A sender in a list: the display name, or the masked address when there is none (or it only repeats the address). */
 export function Sender({ value }: { value: MailAddress }) { const parts = nameParts(value.name, value.address); return parts ? <NameText parts={parts} /> : <PrivateAddress value={value.address} /> }
 /** A sender in words, for a label or a title: the display name, never a piece of the address. */
-export const senderLabel = (value: MailAddress) => { const parts = nameParts(value.name, value.address); return parts && parts.every(part => !part.address) ? parts.map(part => part.text).join('') : 'this sender' }
+export const nameOf = (value: MailAddress) => { const parts = nameParts(value.name, value.address); return parts && parts.every(part => !part.address) ? parts.map(part => part.text).join('') : 'this sender' }
 export const full = (value: MailAddress) => cleanName(value.name) ? `${cleanName(value.name)} <${value.address}>` : value.address
 export const addressName = (addresses: Map<string, InboundAddress>, id: string) => addresses.get(id)?.address ?? id
 export function when(value: string) {
