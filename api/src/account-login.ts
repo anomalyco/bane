@@ -111,16 +111,16 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         // A new subject is admitted only by a sub-bound decision: hosted staff (the provider identity, see
         // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
         // anyone else by subject (scripts/cutover-fresh-start.ts --owner-sub, or a bane_oidc_identities row).
-        if (!emailAtLogin) throw new NotAdmitted('unverified_email');
+        // Only the invitation path reads the address: it must be the verified invitation target.
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
-        const invited = runtime.config.multiTenant && !staff && !!invitation && await pendingInvitation(db, emailAtLogin, invitation);
+        const invited = runtime.config.multiTenant && !staff && !!invitation && !!emailAtLogin && await pendingInvitation(db, emailAtLogin, invitation);
         if (!staff && !invited && !selfHosted) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
         userId = crypto.randomUUID();
-        const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : emailAtLogin;
-        await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
-        // Verified addresses stay unique for display; a taken one is stored unverified rather than refusing the subject.
-        await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) VALUES(${userId},${name},${emailAtLogin},
-          NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${emailAtLogin})))`);
+        const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? 'Bane user';
+        if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
+        // The address is display and contact data. Verified addresses stay unique; a taken one is stored unverified.
+        await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) VALUES(${userId},${name},${address}::text,
+          ${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${address}::text)))`);
         await db.execute(sql`INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: staff ? 'staff' : invited ? 'invitation' : 'subject' });
         if (runtime.config.multiTenant) {
@@ -166,7 +166,7 @@ export async function accountSessionUser(runtime: Runtime, headers: Headers, req
   if (!hash) return null;
   const {rows:[user]} = await runtime.db.execute<{id:string;email:string}>(sql`SELECT u.id,u.email FROM bane_sessions s
     JOIN bane_users u ON u.id=s.user_id WHERE s.token_hash=${hash} AND s.issuer=${runtime.config.accountIssuer}
-    AND s.expires_at>now() AND u.email_verified ${requireCurrentEmail ? sql`AND lower(u.email)=lower(s.verified_email)` : sql``}`);
+    AND s.expires_at>now() ${requireCurrentEmail ? sql`AND u.email_verified AND lower(u.email)=lower(s.verified_email)` : sql``}`);
   return user ?? null;
 }
 
@@ -186,7 +186,7 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
   const {rows:[m]} = await runtime.db.execute<{id:string;email:string;name:string;workspace:string;role:string}>(sql`
     WITH member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role FROM bane_sessions s JOIN bane_users u ON s.user_id=u.id
       JOIN workspace_members m ON m.user_id=u.id WHERE s.token_hash=${hash} AND s.issuer=${runtime.config.accountIssuer} AND s.expires_at>now()
-      AND u.email_verified AND m.role IN ('owner','admin','member')
+      AND m.role IN ('owner','admin','member')
       ${runtime.config.multiTenant ? sql`` : sql`AND m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? s.subject`}
       ${selected && runtime.config.multiTenant ? sql`AND m.workspace_id=${selected}` : sql``}
       ORDER BY (m.workspace_id=u.selected_workspace_id) DESC NULLS LAST,m.created_at,m.id LIMIT 1

@@ -48,9 +48,9 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
-  if (!allowSignup) return !!invitationId && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`, region);
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null) {
+  if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
+  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || 'Bane').slice(0, 105)}'s Organization`, region);
   return true;
 }
 

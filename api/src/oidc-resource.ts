@@ -32,7 +32,7 @@ export async function externalMcpGrant(runtime: Runtime, keyId: string, db: DbEx
     JOIN bane_users u ON u.id=i.user_id
     JOIN workspace_members m ON m.workspace_id = g.workspace_id AND m.user_id = i.user_id
     WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked AND g.expires_at > now()
-      AND m.role IN ('owner','admin','member') AND u.email_verified
+      AND m.role IN ('owner','admin','member')
       AND (${runtime.config.multiTenant} OR (m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? i.subject)) FOR SHARE OF g, i, m, u`);
   if (!grant) return null;
   const allowed = grant.permissions.filter(p => p !== 'manage' || grant.role !== 'member');

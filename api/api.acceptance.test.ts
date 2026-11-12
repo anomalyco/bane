@@ -536,8 +536,6 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const subjects=[subject];
   cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
   const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM bane_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
-  verified=false;assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
-  verified=true;
   // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
   // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
   for (const [name,hd] of [['google',null],['github','example.org'],['google','other.example']] as const) {
@@ -545,8 +543,11 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
   }
-  providerName='google';providerHd='example.org';
+  // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
+  providerName='google';providerHd='example.org';verified=false;
   const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
+  verified=true;
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string};
   const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
@@ -574,8 +575,11 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
   assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
-  verified=false;await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
+  verified=false;const unverified=await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
+  // An address change ends older sessions; the new session of the same admitted subject works without a verified address.
   assert.equal((await request('/v1/me','GET',newSession)).status,401);
+  const unverifiedSession=unverified.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request('/v1/me','GET',unverifiedSession)).status,200);
   verified=true;subject=randomUUID();subjects.push(subject);email=approved;
   const reassigned=await login();const reassignedSession=reassigned.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',reassignedSession,{})).status,200);
@@ -646,6 +650,10 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     }
     assert.deepEqual(await (await run(token({acr:'urn:anomaly:acr:google',jti:randomUUID()}))).json(),['read']);
     runtime.config.accountRequiredAcr=undefined;
+    // The address is not an identity input: an unverified one leaves the admitted subject's MCP access alone.
+    await db.query('UPDATE bane_users SET email_verified=false WHERE id=$1',[manager.userId]);
+    assert.deepEqual(await (await run(token({jti:randomUUID()}))).json(),['read']);
+    await db.query('UPDATE bane_users SET email_verified=true WHERE id=$1',[manager.userId]);
     assert.equal((await run(token({scope:'openid'}))).status,403);
     const thumbprint=createHash('sha256').update(JSON.stringify({crv:jwk.crv,kty:jwk.kty,x:jwk.x,y:jwk.y})).digest('base64url');
     const bound=token({cnf:{jkt:thumbprint}});
