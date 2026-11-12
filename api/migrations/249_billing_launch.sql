@@ -70,8 +70,9 @@ BEGIN
   SELECT CASE WHEN (NEW.feedback_topic_arn IS NULL AND kind='shared') OR EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=NEW.feedback_topic_arn)
          THEN 'send' ELSE 'byo_send' END INTO m FROM provider_connections WHERE workspace_id=NEW.workspace_id ORDER BY kind LIMIT 1;
   IF d=0 OR m IS NULL THEN RETURN NULL; END IF;
+  -- Month arithmetic on UTC wall-clock timestamps: timestamptz + interval '1 month' would follow the session TimeZone.
   h := CASE WHEN date_trunc('month',NEW.created_at,'UTC') < date_trunc('month',now(),'UTC')
-         THEN date_trunc('month',NEW.created_at,'UTC') + interval '1 month' - interval '1 hour'
+         THEN (date_trunc('month',NEW.created_at AT TIME ZONE 'UTC') + interval '1 month' - interval '1 hour') AT TIME ZONE 'UTC'
          ELSE date_trunc('hour',now(),'UTC') END;
   INSERT INTO billing_usage_hourly AS u VALUES (NEW.workspace_id,h,m,1,d,0)
     ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity;

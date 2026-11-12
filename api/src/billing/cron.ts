@@ -14,7 +14,7 @@ export async function billingHourly(runtime: Runtime): Promise<void> {
   if (!cfg || cfg.mode === 'off') return;
   // One runner a day: the same durable election as maintenance:sending-depth, due again at the next 00:05 UTC.
   const { rows: elected } = await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,next_wake_at)
-    VALUES ('billing:daily', date_trunc('day', now(), 'UTC') + interval '1 day 5 minutes')
+    VALUES ('billing:daily', (date_trunc('day', now() AT TIME ZONE 'UTC') + interval '1 day 5 minutes') AT TIME ZONE 'UTC')
     ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
   if (elected.length) await billingDaily(runtime);
   await settleClosedHours(runtime);
