@@ -24,11 +24,14 @@ export const templateColumns: SkeletonColumn[] = [
 export function CampaignAudienceSkeleton() {
   return <LoadingRegion label="Loading audience" className="campaign-audience-review-skeleton">
     <div><SkeletonText width={70} /><p className="muted">eligible recipients</p></div>
+    <p className="campaign-audience-source"><SkeletonText width={120} /></p>
     <div className="campaign-audience-summary">
       <div className="campaign-summary-line"><span>Matched contacts</span><SkeletonText width={45} /></div>
       <div className="campaign-summary-line muted"><span>Suppressed</span><SkeletonText width={35} /></div>
-      <div className="campaign-summary-line muted"><span>Not subscribed (including unknown)</span><SkeletonText width={35} /></div>
+      <div className="campaign-summary-line muted"><span>Not subscribed</span><SkeletonText width={35} /></div>
     </div>
+    <p className="muted campaign-audience-note">Eligible means subscribed and not suppressed. Consent is checked again as each email sends.</p>
+    <Button disabled>Refresh count</Button>
   </LoadingRegion>
 }
 
@@ -40,8 +43,9 @@ export function CampaignEditorSkeleton() {
   return <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
     <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
       <div className="campaign-compose-metadata" aria-hidden="true">
-        {['Name', 'From', 'To'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
-        <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Preview text</Button></div>
+        {['Name', 'From', 'Reply to', 'To', 'Segment'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
+        <div className="campaign-compose-row campaign-audience-line"><span /><span className="campaign-audience-line__text"><SkeletonText width="60%" /></span></div>
+        <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Inbox preview</Button></div>
       </div>
       <ComposerSkeleton />
     </div></div>
@@ -70,7 +74,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     </LoadingRegion>
   </div>
   if (kind === 'editor') return <div className="campaign-compose-page">
-    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions"><Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
+    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
     <CampaignEditorSkeleton />
   </div>
   return <div className="stack campaign-review">

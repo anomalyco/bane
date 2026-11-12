@@ -755,6 +755,30 @@ export function createMockApi(): BaneApi {
       // Demo sends finish instantly, so there is never an in-progress send to pause, resume, or re-pace.
       pause: (campaignId, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); throw new ApiError('Only a campaign that is still releasing recipients can be paused.', 'CAMPAIGN_NOT_PAUSABLE', {}, undefined, 409) }),
       resume: (campaignId, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); throw new ApiError('This campaign is not paused.', 'CAMPAIGN_NOT_PAUSED', {}, undefined, 409) }),
+      unschedule: (campaignId, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        if (campaign.status !== 'scheduled') throw new ApiError('Only a scheduled campaign that has not started sending can be unscheduled.', 'CAMPAIGN_NOT_SCHEDULED', {}, undefined, 409)
+        Object.assign(campaign, { status: 'draft', scheduledAt: null, updatedAt: now() })
+        return campaignTotals(s, campaign)
+      }),
+      reschedule: (campaignId, scheduledAt, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        if (campaign.status !== 'scheduled') throw new ApiError('Only a scheduled campaign that has not started sending can be rescheduled.', 'CAMPAIGN_NOT_SCHEDULED', {}, undefined, 409)
+        if (!validDateTime(scheduledAt) || Date.parse(scheduledAt) <= Date.now()) invalid('scheduledAt', 'Schedule between now and one year from now.')
+        Object.assign(campaign, { scheduledAt: new Date(Date.parse(scheduledAt)).toISOString(), updatedAt: now() })
+        return campaignTotals(s, campaign)
+      }),
+      cancel: (campaignId, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        if (campaign.status !== 'scheduled') throw new ApiError('Only a campaign that was sent or scheduled and has not finished can be canceled.', 'CAMPAIGN_NOT_SENDING', {}, undefined, 409)
+        Object.assign(campaign, { status: 'canceled', updatedAt: now() })
+        return { canceled: campaign.recipients, inFlight: 0 }
+      }),
+      stats: (campaignId, signal) => run(signal, false, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign'), delivered = campaign.delivered ?? 0
+        const rate = (numerator: number, denominator: number) => ({ value: denominator ? numerator / denominator : null, numerator, denominator })
+        return { tracking: false, totals: { accepted: 0, delivered, bounced: campaign.bounced ?? 0, complained: campaign.complaints ?? 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: delivered }, rates: { delivery: rate(delivered, delivered), bounce: rate(campaign.bounced ?? 0, delivered), complaint: rate(campaign.complaints ?? 0, delivered), open: rate(0, 0), click: rate(0, 0) } }
+      }),
       setPacing: (campaignId, input, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); validPerDay(input.perDay); validRateShare(input.rateShare); throw new ApiError('Only a campaign that is still sending can change its daily limit.', 'CAMPAIGN_NOT_SENDING', {}, undefined, 409) }),
     },
     templates: {

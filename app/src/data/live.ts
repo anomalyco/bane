@@ -190,7 +190,7 @@ export function createLiveApi(): BaneApi {
         if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region}, signal, idempotencyKey: input.idempotencyKey}))
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
-        const draft = { ...existing, name: input.name, region, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
+        const draft = { ...existing, name: input.name, region, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], defaults: input.defaults ?? existing.defaults ?? {}, audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
         return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },
@@ -203,7 +203,11 @@ export function createLiveApi(): BaneApi {
       pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),
       resume: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/resume`, 'POST', {}, signal)),
       setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause}), ...(input.rateShare === undefined ? {} : {rateShare: input.rateShare})}, signal)),
-      test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
+      unschedule: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/unschedule`, 'POST', {}, signal)),
+      reschedule: async (id, scheduledAt, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/reschedule`, 'POST', {scheduledAt}, signal)),
+      cancel: async (id, signal) => { const result = await request<{canceled: number; inFlight: number}>(`/v1/campaigns/${idPath(id)}/cancel`, {method: 'POST', signal, idempotencyKey: crypto.randomUUID()}); return {canceled: result.canceled, inFlight: result.inFlight} },
+      stats: (id, signal) => call(`/campaigns/${idPath(id)}/stats`, 'GET', undefined, signal),
+      test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to, ...(input.data && Object.keys(input.data).length ? {data: input.data} : {})}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),

@@ -20,3 +20,5 @@
   .page-surface .email-detail-grid { row-gap: var(--space-24); }
   .page-surface .delivery-timeline { border-top-color: var(--color-border-muted); }
 }
+/* Long campaign names truncate, so the filter row keeps one height and Export stays on it. */
+.logs-campaign-chip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
