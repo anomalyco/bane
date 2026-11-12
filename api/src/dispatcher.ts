@@ -1,6 +1,6 @@
 import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
@@ -409,7 +409,7 @@ async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, requir
     if(!(error instanceof ApiError) || error.code!=='CONTENT_SCREEN_UNAVAILABLE') throw error;
     if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
     if(hostedGate){if((hostedGate.screenRetryAt??0)>Date.now())return;hostedGate.screenRetryAt=Date.now()+30_000;}
-    log('warn', { code: 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id, message: error instanceof ApiError ? error.message : 'The content classifier failed; sending unscreened.' });
+    log('warn', { code: error instanceof ApiError ? error.code : 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id }); // Sending unscreened.
     return;
   }
   if (!result || result.spam < settings.threshold) return;
@@ -499,7 +499,7 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
   await wakeWebhooks(runtime,rejected.rows[0]!.n);
   // Screen rejections are an expected policy outcome, not a dispatcher fault.
   if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
-  else log('error', { code, emailId: mail.id, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
+  else logError(error, { code, emailId: mail.id });
   if (mail.campaignId) await finishSettledCampaigns(runtime, [{ workspace_id: mail.workspaceId, campaign_id: mail.campaignId }]);
 }
 
@@ -657,7 +657,8 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
     const status = failure.$metadata?.httpStatusCode;
     const { denial, diagnostics } = redactDenial(runtime, failure);
-    if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, region: s.region, ...diagnostics });
+    // The log keeps the denied action and AWS request ID; the resource and AWS's message stay in the email's own event.
+    if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, region: s.region, deniedAction: diagnostics.deniedAction, awsRequestId: diagnostics.awsRequestId });
     const providerRetries = item.rateRetries;
     const definitive = status !== undefined && status >= 400 && status < 500;
     // Only a definitive provider refusal proves non-acceptance. A transport error,

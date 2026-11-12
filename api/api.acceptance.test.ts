@@ -5702,7 +5702,8 @@ describe('Dashboard API capabilities', () => {
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Refusal reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
       const execute = runtime.db.execute.bind(runtime.db);
       let fault: unknown = null;
-      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault; fault = null; throw thrown; } return execute(...args); }) as typeof execute);
+      // Built where it is thrown, as a driver's error is: a stack shows where an error was made, and the log keeps Bane's frames.
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw new Error(thrown.message, { cause: thrown.cause }); } return execute(...args); }) as typeof execute);
       const refused = async (failure: unknown) => { fault = failure; logs.length = 0; return request('GET', '/v1/emails', reader.secret); };
       for (const failure of [wrapped('58000', 'Failed to acquire a connection from the pool.'), wrapped('58000', 'Server connection attempt failed: connection_refused'), wrapped('53300', 'sorry, too many clients already'), wrapped('08006', 'connection failure'), new Error('Connection terminated unexpectedly')]) {
         const reply = await refused(failure);
@@ -7526,6 +7527,190 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(logged?.field, 'statement'); assert.equal(logged.message, undefined);
       assert.ok(!logs.some(line => line.includes(email)));
     });
+  });
+  // The nightly report (scripts/nightly-report.ts) counts these lines; the Worker writes them to Workers Logs.
+  test('request logs: one line per request with its route template, code, workspace and principal, and no addresses, tokens, bodies or smuggled stack text', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const lines: string[] = [];
+      for (const level of ['error', 'info', 'warn'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+      t.mock.method(Math, 'random', () => 0); // Keep every sampled success.
+      const wid = runtime.config.workspaceId, email = `${unique('log-subject')}@private.example`, body = unique('Confidential body text');
+      const forged = `bane_${'5e'.repeat(32)}`;
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Log reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
+      const execute = runtime.db.execute.bind(runtime.db);
+      let fault: unknown = null; // Thrown as a new Error with its name and message, so the stack is the API's call, as a driver's error would be.
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw Object.assign(new Error(thrown.message), { name: thrown.name }); } return execute(...args); }) as typeof execute);
+      const seen = async (reply: Reply, expected: Json) => {
+        const requestId = reply.headers.get('x-request-id'), entries = lines.map(line => JSON.parse(line) as Json).filter(entry => entry.requestId === requestId && entry.event === 'request');
+        assert.equal(entries.length, 1, `one request line for ${requestId}`);
+        const [entry] = entries;
+        assert.equal(typeof entry.durationMs, 'number'); assert.equal(entry.status, reply.status);
+        for (const [key, value] of Object.entries(expected)) assert.deepEqual(entry[key], value, `${key} of ${requestId}`);
+        return entry;
+      };
+      await seen(await request('GET', '/v1/emails?limit=1', reader.secret), { route: '/v1/emails', method: 'GET', code: undefined, workspace: wid, principal: 'apiKey', sampleRate: 0.1, level: 'info' });
+      const lookup = await request('GET', `/v1/emails/${encodeURIComponent(email)}`, reader.secret);
+      assert.ok(lookup.status >= 400 && lookup.status < 500, diagnostic(lookup));
+      await seen(lookup, { route: '/v1/emails/:id', code: lookup.body.error.code, workspace: wid, principal: 'apiKey', level: 'warn' });
+      const anonymous = await request('GET', '/v1/emails', forged);
+      await seen(anonymous, { route: '/v1/emails', status: 401, code: anonymous.body.error.code, workspace: undefined, principal: 'anonymous' });
+      const sent = await local('POST', '/v1/emails/send', { from: email, to: [email], subject: body, html: `<p>${body}</p>`, unsupported: body });
+      assert.ok(sent.status >= 400 && sent.status < 500, diagnostic(sent));
+      await seen(sent, { route: '/v1/emails/send', method: 'POST', code: sent.body.error.code, principal: 'dashboard', workspace: wid });
+      await seen(await request('GET', `/v1/no-such-route/${encodeURIComponent(email)}`, reader.secret), { route: 'unmatched', status: 404, code: 'NOT_FOUND' });
+      // An unexpected failure: the request line plus one error line with Bane's own stack frames, never the message. A
+      // message can span lines that look like frames, even like a frame in the Worker bundle (PR #131 review).
+      const errorLine = (reply: Reply) => lines.map(line => JSON.parse(line) as Json).find(entry => entry.requestId === reply.headers.get('x-request-id') && entry.event !== 'request');
+      const ownFrames = (stack: string) => stack.split('\n').every(frame => /^[\w$.<>[\]]+(?: \[as [\w$]+\])? \((?:worker\.js|(?:src|dist)\/[\w./-]+\.(?:ts|js)):\d+:\d+\)$/.test(frame));
+      fault = new Error(`insert failed for ${email} using ${forged}: ${body}\n    at injectedframe (worker.js:1:1)\n    at https://example.invalid/?code=oauth-private-code ip=192.0.2.13`);
+      const broken = await request('GET', '/v1/emails', reader.secret);
+      await seen(broken, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR', level: 'error' });
+      const failure = errorLine(broken);
+      assert.ok(failure?.stack && failure.errorType === 'Error' && failure.code === 'INTERNAL_ERROR' && failure.route === '/v1/emails' && failure.message === undefined, JSON.stringify(failure));
+      assert.ok(ownFrames(failure.stack) && /\(src\/[\w./-]+\.ts:\d+:\d+\)/.test(failure.stack), failure.stack);
+      // The same through the error's name, which is a property like any other (PR #131 recheck).
+      fault = Object.assign(new Error(''), { name: 'Error\n    at InjectedName (worker.js:1:1)' });
+      const renamed = await request('GET', '/v1/emails', reader.secret);
+      await seen(renamed, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR' });
+      const renamedLine = errorLine(renamed);
+      assert.ok(renamedLine?.stack && ownFrames(renamedLine.stack) && renamedLine.errorType === 'Error', JSON.stringify(renamedLine));
+      // An object-valued name (its own toString, extra fields) is logged as the string `Error`, never serialized.
+      fault = Object.assign(new Error('boom'), { name: { toString: () => 'TypeError', secret: 'object-name-secret' } });
+      const objectNamed = await request('GET', '/v1/emails', reader.secret);
+      await seen(objectNamed, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR' });
+      assert.equal(errorLine(objectNamed)?.errorType, 'Error');
+      // Unsupported keys are caller text: the line names no field rather than the key (an IP address, a code).
+      const unsupported = await local('POST', '/v1/contacts', { email: address(), pr131_OAuthCode_123: 1, '192.0.2.131': 1 });
+      await seen(unsupported, { route: '/v1/contacts', status: 422, code: 'VALIDATION_FAILED', field: undefined });
+      await seen(await local('POST', '/v1/contacts', { email: address(), name: 7 }), { route: '/v1/contacts', status: 422, field: 'name' });
+      // A request the first middlewares refuse is still one line.
+      await seen(await local('GET', '/v1/emails', undefined, 'test'), { route: '/v1/emails', status: 400, code: 'ENVIRONMENT_REMOVED' });
+      // MCP is an app.all handler that authenticates itself and answers natively.
+      const rpc = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'log-fixture', version: '1' } } };
+      const mcpHeaders = { accept: 'application/json, text/event-stream' };
+      await seen(await request('POST', '/mcp', undefined, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'MCP_AUTH_REQUIRED', principal: 'anonymous' });
+      await seen(await request('POST', '/mcp', forged, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'MCP_AUTH_REQUIRED' });
+      await seen(await request('POST', '/mcp', undefined, rpc, { ...mcpHeaders, origin: 'https://elsewhere.example' }), { route: '/mcp', status: 403, code: 'ORIGIN_NOT_ALLOWED' });
+      // A caller that does pass caller data still cannot log an address or a credential.
+      const { log } = await import('./src/core.js');
+      log('warn', { code: 'LOG_SCRUB_FIXTURE', note: `to ${email} with ${forged}` });
+      assert.match(lines.at(-1)!, /"note":"to \[email\] with \[redacted\]"/);
+      // The review's real case: PostgreSQL refuses a NUL byte (SQLSTATE 22021) and the driver's message quotes the
+      // parameters, so the request's own lines come first in that error's message. It is a 422 now, and its request line
+      // carries the SQLSTATE, never the message. Last, behind a savepoint: it aborts the statement.
+      await db.query('SAVEPOINT log_privacy');
+      const nul = await local('POST', '/v1/contacts', { email: address(), name: 'Person\u0000\n    at pr131-confidential-subject Authorization: Bearer short-secret\n    at https://example.invalid/?code=oauth-private-code&email=customer%40private.invalid ip=192.0.2.13' });
+      await db.query('ROLLBACK TO SAVEPOINT log_privacy');
+      await seen(nul, { route: '/v1/contacts', status: 422, code: 'VALIDATION_FAILED', field: undefined, databaseCode: '22021', principal: 'dashboard', workspace: wid });
+      assert.equal(errorLine(nul), undefined, 'a refused value is a client error: no error line');
+      const leaked = [email, encodeURIComponent(email), body, forged, reader.secret, manager!.cookie.split('=').slice(1).join('='), 'injectedframe', 'pr131-confidential-subject',
+        'short-secret', 'oauth-private-code', 'example.invalid', 'private.invalid', '192.0.2.13', 'pr131_OAuthCode_123', '192.0.2.131', 'InjectedName', 'object-name-secret'].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
+      assert.deepEqual(leaked, [], 'no address, body, token, session cookie or text a request smuggled into an error reaches a log line');
+    });
+  });
+
+  // PR #131 recheck: an error's name and message are both caller-reachable text, and either can span lines that look
+  // exactly like frames. stackFrames reads frames only after the exact header text, and keeps Bane's own.
+  test('stack frames: an error name or message that looks like frames is never logged as one, and error fields are logged only as allowlisted strings', async t => {
+    const { stackFrames, errorTypeOf, databaseCodeOf, logError, log } = await import('./src/core.js');
+    const real = '    at realHandler (worker.js:5:5)\n    at async Pool.query (/app/node_modules/pg/lib/client.js:9:9)\n    at async handler (/app/dist/app.js:7:3)';
+    const formatted = (name: string, message: string) => {
+      const error = Object.assign(new Error(message), { name });
+      error.stack = `${!name ? message : !message ? name : `${name}: ${message}`}\n${real}`;
+      return error;
+    };
+    const fake = '\n    at InjectedName (worker.js:1:1)', fakeMessage = '\n    at InjectedMessage (src/app.ts:1:1)\n    at https://example.invalid/?code=x ip=192.0.2.13';
+    for (const [name, message] of [
+      [`Error${fake}`, ''], // The reviewer's probe.
+      [`Error${fake}`, 'boom'],
+      [`TypeError${fake}${fake}`, `boom${fakeMessage}`],
+      ['Error', `boom${fakeMessage}`],
+      ['', `boom${fakeMessage}`],
+      [`Error: x${fake}`, `y${fakeMessage}`],
+      [fake.slice(1), ''],
+    ] as const) {
+      const error = formatted(name, message);
+      assert.equal(stackFrames(error), 'realHandler (worker.js:5:5)\nhandler (dist/app.js:7:3)', JSON.stringify({ name, message }));
+      assert.equal(errorTypeOf(error), /^[A-Z][A-Za-z0-9]{0,40}$/.test(name) ? name : 'Error');
+    }
+    // Formatted by V8 itself, from this file: no frame of Bane's, and none of the injected ones.
+    const lazy = Object.assign(new Error(`boom${fakeMessage}`), { name: `Error${fake}` });
+    assert.equal(stackFrames(lazy), undefined);
+    // Fails closed when the stack does not start with the current header, or has a line that is not a frame after it.
+    const renamedLater = formatted('Error', 'boom'); renamedLater.name = `Error${fake}`;
+    const trailing = formatted('Error', 'boom'); trailing.stack += '\nnot a frame';
+    const headless = formatted('Error', 'boom'); headless.stack = real;
+    const getter = Object.defineProperty(new Error('x'), 'name', { get() { throw new Error('no'); } });
+    for (const error of [renamedLater, trailing, headless, getter, { stack: real }, 'Error\n    at realHandler (worker.js:5:5)']) assert.equal(stackFrames(error), undefined);
+
+    // PR #131 recheck: an object-valued name with its own toString was returned as errorType and serialized whole.
+    const objectName = { toString: () => 'TypeError', secret: 'object-name-secret' };
+    const named = Object.assign(new Error('boom'), { name: objectName });
+    assert.equal(typeof errorTypeOf(named), 'string');
+    assert.equal(stackFrames(named), undefined);
+    const throwingName = Object.defineProperty(new Error('x'), 'name', { get() { throw new Error('no'); } });
+    for (const [error, type] of [[named, 'Error'], [throwingName, 'Error'], [Object.assign(new Error('x'), { name: 'Bad Name' }), 'Error'], [Object.assign(new Error('x'), { name: 'X'.repeat(65) }), 'Error'],
+      [Object.assign(new Error('x'), { name: 'DrizzleQueryError' }), 'DrizzleQueryError'], [new TypeError('t'), 'TypeError'], ['text', 'string'], [null, 'null']] as const) assert.equal(errorTypeOf(error), type);
+    // The SQLSTATE is a five-character string along the cause chain, never an object; a throwing getter ends the chain.
+    assert.equal(databaseCodeOf(Object.assign(new Error('x'), { code: { toString: () => '40P01', secret: 'object-code-secret' } })), undefined);
+    assert.equal(databaseCodeOf(new Error('x', { cause: Object.assign(new Error('y'), { code: '40P01' }) })), '40P01');
+    assert.equal(databaseCodeOf(Object.defineProperty(new Error('x'), 'cause', { get() { throw new Error('no'); } })), undefined);
+    // logError and log write only primitives: object-valued names, codes, causes and fields never reach a line.
+    const lines: string[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+    const loaded = Object.assign(new Error('boom', { cause: { secret: 'object-cause-secret' } }),
+      { name: objectName, code: { toString: () => '40P01', secret: 'object-code-secret' }, errno: { secret: 'object-errno-secret' }, detail: 'object-detail-secret' });
+    logError(loaded, { code: { toString: () => 'INTERNAL_ERROR', secret: 'object-field-secret' } as unknown as string, requestId: 'req_fixture' });
+    log('warn', { code: 'LOG_OBJECT_FIXTURE', error: loaded, nested: { deeper: { deepest: { secret: 'deep-object-secret' } } }, instance: new URL('https://object.invalid/?secret=url-object-secret'), big: 10n });
+    t.mock.restoreAll();
+    const [errorEntry, warnEntry] = lines.map(line => JSON.parse(line) as Json);
+    assert.deepEqual([errorEntry.code, errorEntry.errorType, errorEntry.databaseCode, errorEntry.stack], ['UNKNOWN_ERROR', 'Error', undefined, undefined]);
+    assert.deepEqual([warnEntry.error, warnEntry.instance, warnEntry.nested.deeper.deepest, warnEntry.big], ['[object]', '[object]', '[object]', '10']);
+    assert.ok(!lines.some(line => /object-(?:name|code|cause|errno|field|detail)-secret|deep-object-secret|url-object-secret/.test(line)), lines.join('\n'));
+  });
+
+  // PR #131 recheck: hostile values (proxies, overridden array methods, getters, toJSON) at the logging helpers.
+  test('logging never throws and never runs a method, getter or toJSON of what it logs', async t => {
+    const { log, logError } = await import('./src/core.js');
+    const lines: string[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+    const marker = 'pr131-variant-private-marker', arrayMarker = 'pr131-array-proxy-private';
+    let calls = 0;
+    class PrivateData { toJSON() { calls++; return { authorization: `Bearer ${arrayMarker}` }; } }
+    // The reviewer's probes: a revoked proxy and a proxy whose getPrototypeOf throws, as the error.
+    const revoked = Proxy.revocable(new Error('fixed'), {}); revoked.revoke();
+    const hostile = new Proxy(new Error('fixed'), { getPrototypeOf() { throw new Error(marker); } });
+    for (const error of [revoked.proxy, hostile]) {
+      lines.length = 0;
+      assert.doesNotThrow(() => logError(error, { code: 'RECHECK_VARIANT' }));
+      assert.equal(lines.length, 1);
+      const entry = JSON.parse(lines[0]!) as Json;
+      assert.deepEqual([entry.code, entry.errorType, entry.stack], ['RECHECK_VARIANT', 'Error', undefined]);
+    }
+    // Fields that cannot be read at all: the fixed fallback line, never a throw.
+    lines.length = 0;
+    const unreadable = new Proxy({}, { ownKeys() { throw new Error(marker); } });
+    assert.doesNotThrow(() => log('warn', unreadable as Record<string, unknown>));
+    assert.doesNotThrow(() => logError(new Error('x'), unreadable as Record<string, unknown> & { code: string }));
+    assert.deepEqual(lines, ['{"level":"error","code":"LOG_SERIALIZE_FAILED"}', '{"level":"error","code":"LOG_SERIALIZE_FAILED"}']);
+    // The reviewer's array probe, and variants: methods, length, elements and getters are never trusted.
+    lines.length = 0;
+    const arrayProxy = new Proxy([], { get(target, key, receiver) { return key === 'slice' || key === 'map' ? () => ({ map: () => new PrivateData() }) : Reflect.get(target, key, receiver); } });
+    const overridden = Object.assign([1, 'two'], { slice: () => ({ map: () => new PrivateData() }), map: () => new PrivateData(), toJSON: () => new PrivateData() });
+    const huge = new Proxy([] as unknown[], { get(target, key, receiver) { return key === 'length' ? 1e9 : key === '0' ? new PrivateData() : Reflect.get(target, key, receiver); } });
+    const accessor: unknown[] = [0]; Object.defineProperty(accessor, 0, { enumerable: true, get() { calls++; return new PrivateData(); } });
+    const throwingElement = new Proxy([1], { getOwnPropertyDescriptor() { throw new Error(marker); } });
+    const getterObject = { get secret() { calls++; return arrayMarker; }, kept: 1 };
+    const withToJson = { toJSON() { calls++; return { authorization: arrayMarker }; }, kept: 2 };
+    log('warn', { code: 'RECHECK_ARRAY_PROXY', arrayProxy, overridden, huge, accessor, throwingElement, instances: [new PrivateData()], getterObject, withToJson, revokedValue: revoked.proxy, hostileValue: hostile });
+    const entry = JSON.parse(lines[0]!) as Json;
+    assert.deepEqual(entry.arrayProxy, []);
+    assert.deepEqual(entry.overridden, [1, 'two']);
+    assert.deepEqual(entry.huge, Array(50).fill(null));
+    assert.deepEqual([entry.accessor, entry.throwingElement, entry.instances], [['[object]'], ['[object]'], ['[object]']]);
+    assert.deepEqual([entry.getterObject, entry.withToJson, entry.revokedValue, entry.hostileValue], [{ secret: '[object]', kept: 1 }, { kept: 2 }, '[object]', '[object]']);
+    assert.equal(calls, 0, 'no toJSON or getter of a logged value ran');
+    assert.ok(!lines.some(line => line.includes(marker) || line.includes(arrayMarker)), lines.join('\n'));
   });
 
   test('MX Worker placement uses bounded public edge HEAD probes, not raw TLS',async t=>{
