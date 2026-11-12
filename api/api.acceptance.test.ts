@@ -9349,6 +9349,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     } finally { await a.query('ROLLBACK'); }
     assert.equal(await count('m2'),103);
   });
+  // Recheck of #57, R3 (tear witness, 3 steps: accept m3 a, W accept m2 a, X accept m3 ac -> the reopen did not
+  // wait on the window row). A held-envelope replay batch and an ordinary reopen took the window and the
+  // receipt in opposite orders and deadlocked.
+  test('receive route: a held-envelope replay and a reopen of one of its messages do not deadlock',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{acceptInboundNotification,recoverHeldReceipts}=await import('./src/mailbox-receipts.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    const g=await fixtureDatabase(t),w=unique('rdead'),host=w+'.invalid',bucket=w,topicArn=`arn:aws:sns:${REGION}:111122223333:${w}`,dom=unique('dom');
+    runtime.config.workspaceId=w;runtime.config.multiTenant=false;
+    cleanup(t,async()=>{
+      for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_ingest_turns','mailbox_domains','mailbox_regions'])await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await g.query('DELETE FROM mail_receipt_holds WHERE bucket=$1',[bucket]);
+    });
+    await g.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    await g.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[w,REGION,bucket,topicArn]);
+    const to=(...local:string[])=>local.map(l=>`${l}@${host}`);
+    const notify=(mid:string,recipients:string[])=>acceptInboundNotification(runtime,{topicArn,region:REGION,message:{notificationType:'Received',mail:{messageId:mid,timestamp:new Date().toISOString()},
+      receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
+    // z-known was processed; held envelopes for a new message and for z-known with another recipient are due.
+    assert.equal(await notify('z-known',to('a')),1);
+    await g.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1",[w]);
+    await g.query("UPDATE mail_receipts SET status='processed',processed_at=now() WHERE workspace_id=$1",[w]);
+    for(const [mid,rcpt] of [['a-new',to('a')],['z-known',to('a','b')]] as const)
+      await g.query(`INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,binding_workspace,owners,recipients,notification,received_at,expires_at,next_check,status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,'{}',now(),now()+interval '48 hours',now()-interval '1 second','held')`,[bucket,mid,REGION,topicArn,w,JSON.stringify(Object.fromEntries(rcpt.map(a=>[a,[w]]))),JSON.stringify(rcpt)]);
+    const waiting=async()=>Number((await g.query("SELECT count(*) n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'WITH source AS MATERIALIZED%'")).rows[0].n);
+    const until=async(n:number,done=()=>false)=>{for(let i=0;i<400&&await waiting()<n&&!done();i++)await new Promise(r=>setTimeout(r,5));};
+    // A gate holds the window row; the replay batch waits on it, then the ordinary reopen of z-known.
+    await g.query('BEGIN');
+    let results:PromiseSettledResult<number>[];
+    try {
+      await g.query('UPDATE mail_receive_windows SET messages=messages WHERE workspace_id=$1',[w]);
+      const replay=recoverHeldReceipts(runtime);await until(1);
+      assert.equal(await waiting(),1,'the replay waits on the window row');
+      // Before 157 the reopen locked the receipt first and was chosen as the deadlock victim (40P01).
+      let settled=false;const reopen=notify('z-known',to('a','c')).finally(()=>{settled=true;});await until(2,()=>settled);
+      await g.query('COMMIT');
+      results=await Promise.allSettled([replay,reopen]);
+    } finally { await g.query('ROLLBACK'); }
+    assert.deepEqual(results.map(r=>r.status==='rejected'?String((r.reason as Json)?.cause?.code??(r.reason as Json)?.code??r.reason):'ok'),['ok','ok']);
+    const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
+    assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
+  });
   // tear witness (5 steps): U1 upload, expire, sweep, purge, U1 ok -> the object outlived its reservation with no deletion queued.
   test('attachment upload: a put that outlasts its swept reservation still queues the object for deletion',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{

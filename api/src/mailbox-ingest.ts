@@ -456,7 +456,10 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   try {
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,store.rawKey,receipt.recipients,initiallyKept?'kept':'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
-      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE),
+      // The window row before the receipt, the order every route statement takes them in (157).
+      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean}>(sql`WITH r AS MATERIALIZED (SELECT r.reserved_bytes FROM (SELECT 1) one
+          LEFT JOIN LATERAL (SELECT FROM mail_receive_windows WHERE workspace_id=${scope.workspaceId} FOR UPDATE) w ON true
+          CROSS JOIN LATERAL (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE) r),
         policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
         debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=(SELECT bytes FROM policy)
           ON CONFLICT(workspace_id) DO UPDATE SET bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
