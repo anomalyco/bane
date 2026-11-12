@@ -217,6 +217,31 @@ impl Drop for Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn a_waiting_share_never_reserves_another_tenants_capacity() {
+        use futures_util::FutureExt;
+        let global = Arc::new(Semaphore::new(2));
+        let inbox = Arc::new(Semaphore::new(1));
+        let one = Arc::new(Semaphore::new(1));
+        let held = Reservation::take(global.clone(), Some((one.clone(), inbox.clone())), 1)
+            .await
+            .unwrap();
+        let sibling = Arc::new(Semaphore::new(1));
+        let mut waiting = Box::pin(Reservation::take(global.clone(), Some((sibling, inbox)), 1));
+        assert!(waiting.as_mut().now_or_never().is_none());
+        assert_eq!(global.available_permits(), 1);
+        let other = Reservation::take(
+            global.clone(),
+            Some((Arc::new(Semaphore::new(1)), Arc::new(Semaphore::new(1)))),
+            1,
+        )
+        .await
+        .unwrap();
+        drop(held);
+        assert!(waiting.await.is_some());
+        drop(other);
+        assert_eq!(global.available_permits(), 2);
+    }
     #[test]
     fn peer_failure_window_is_shared_across_names_not_peers() {
         let mut a = Limits::default();
