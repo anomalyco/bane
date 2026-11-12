@@ -7123,6 +7123,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
+  test('a routed inbound webhook whose connection was refused retries instead of failing as an unknown outcome', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { ritualDelivery, ActionRetry } = await import('./src/ritual-delivery.js'), wid = runtime.config.workspaceId;
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('routed')}.example.org/hook`, eventTypes: [] }), 201);
+      const fence = async (id: string) => (await db.query('SELECT state FROM mail_action_attempts WHERE workspace_id=$1 AND delivery_id=$2', [wid, id])).rows[0]?.state;
+      const attempt = async (id: string, send: () => Promise<{ status: number }>) => {
+        await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,routed) VALUES($1,$2,$3,$4,true) ON CONFLICT DO NOTHING", [id, wid, hook.id, { id: 'mev_' + id, type: 'message.received' }]);
+        return ritualDelivery(runtime, wid, { delivery_id: id, generation: 0, routed: true, webhook_id: hook.id, payload: { id: 'mev_' + id, type: 'message.received' } } as unknown as import('./src/core.js').ClaimedWebhook, send);
+      };
+      // Nothing left the box (Node's connect and DNS errors): a known outcome, retried like a 503.
+      for (const code of ['ECONNREFUSED', 'ENOTFOUND']) {
+        const id = `mwd_unreachable_${code.toLowerCase()}`;
+        await assert.rejects(attempt(id, () => Promise.reject(Object.assign(new Error(`connect ${code} 203.0.113.9:443`), { code, syscall: 'connect' }))), (e: unknown) => e instanceof ActionRetry && e.code === 'DESTINATION_UNREACHABLE');
+        assert.equal(await fence(id), 'retry');
+        // The next attempt sends.
+        assert.equal((await attempt(id, async () => ({ status: 200 }))).status, 200);
+        assert.equal(await fence(id), 'delivered');
+      }
+      // A reset after connecting may follow a sent request: still unknown, and this endpoint does not replay unknown outcomes.
+      await assert.rejects(attempt('mwd_unreachable_reset', () => Promise.reject(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))), { code: 'ACTION_UNKNOWN' });
+      assert.equal(await fence('mwd_unreachable_reset'), 'unknown');
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
