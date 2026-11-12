@@ -264,7 +264,7 @@ pub fn walk(seed: u64, len: usize, labels: &[String], cfg: &Config) -> Vec<Strin
         // A client retries a refused or failed command half the time (COPY replay, upload
         // lanes, refreshes after faults all hinge on the retry).
         if let Some(label) = failed.take()
-            && splitmix(&mut x) % 2 == 0
+            && splitmix(&mut x).is_multiple_of(2)
             && parse(&label).is_some_and(|a| m.enabled(cfg, a))
         {
             let a = parse(&label).unwrap_or(Act::Deliver);
@@ -807,6 +807,24 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
             "A store +seen loud 1",
         ],
     ),
+    // Model: a slot left unfetchable in INBOX is not blind in the next selection (EXAMINE
+    // Archive, whose UID 1 is another message).
+    (
+        "remote-3",
+        &[
+            "deliver",
+            "C store +todo silent 1:*",
+            "A uid-expunge",
+            "A fetch-body 1",
+            "B uid-expunge",
+            "B move 1 Archive",
+            "fail-snapshot",
+            "C move 1 INBOX",
+            "deliver",
+            "B append INBOX",
+            "C examine Archive",
+        ],
+    ),
     // A clock stepping back across midnight reopened the SMTP caps (Memory sink).
     (
         "smtp",
@@ -839,6 +857,9 @@ pub fn named(kind: &str) -> Config {
     if kind == "remote-uploads" {
         cfg.uploads = true;
         cfg.sessions = 4;
+    }
+    if kind == "remote-3" {
+        cfg.sessions = 3;
     }
     if kind == "remote-bulk" {
         cfg.bulk = true;

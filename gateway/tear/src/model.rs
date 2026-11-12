@@ -1272,6 +1272,8 @@ impl Model {
                 let x = &mut self.sessions[s];
                 x.sel = None;
                 x.view.clear();
+                // Blind slots belong to the previous selection's view.
+                x.blind.clear();
                 out.sync = Some(s);
                 if cfg.backend == Backend::Remote {
                     if let Some(k) = self.sessions[s].known.as_mut() {
@@ -1509,6 +1511,7 @@ impl Model {
                     let x = &mut self.sessions[s];
                     x.sel = None;
                     x.view.clear();
+                    x.blind.clear();
                 } else {
                     out.ok = self.sync_fill(cfg, s);
                 }
