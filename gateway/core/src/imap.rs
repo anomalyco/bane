@@ -585,8 +585,11 @@ impl Imap {
                                 && let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
                             {
                                 let e = &f.entries[j];
-                                *ms = e.modseq;
+                                // .SILENT leaves the recorded MODSEQ alone, so the next update
+                                // reports the merged flags, including another session's earlier
+                                // change (RFC 3501 6.4.6).
                                 if *response == StoreResponse::Answer {
+                                    *ms = e.modseq;
                                     r.line(format!(
                                         "* {} FETCH ({}FLAGS ({}))",
                                         i + 1,
