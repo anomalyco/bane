@@ -747,6 +747,9 @@ def large_folder(tmp):
             start=time.perf_counter();assert ok(c.uid('SEARCH',None,'UNSEEN'))==[b'1'];ok(c.uid('FETCH','50001','(UID FLAGS RFC822.SIZE)'));samples.append((time.perf_counter()-start)*1000)
         p95=sorted(samples)[18];print(f'CAPACITY 50001 entries, SELECT {cold:.3f}s, selected RSS delta {delta/1024:.1f} MiB, p95 SEARCH+FETCH {p95:.1f}ms',flush=True)
         assert cold<5 and delta<96*1024 and p95<250, 'capacity budget exceeded'
+        with connect(p['IMAPS']) as sibling:
+            assert ok(sibling.select('Capacity'))==[b'50001']
+            assert ok(sibling.uid('FETCH','50001','(UID FLAGS)'))
         for name,op,count in [
             ('header sync',lambda:sum(isinstance(v,tuple) and b'From: alias@example.invalid' in v[1] for v in ok(c.uid('FETCH','1:*','(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])'))),50001),
             ('compound',lambda:len(ok(c.uid('SEARCH',None,'OR','FROM','alias','SUBJECT','none'))[0].split()),50001),

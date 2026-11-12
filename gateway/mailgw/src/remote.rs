@@ -368,10 +368,10 @@ impl Store {
                 .values()
                 .find(|g| g.inbox == p.inbox)
                 .map(|g| g.lanes.0[1].clone())
-                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(2, 2, 2, 80)));
+                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(3, 2, 3, 136)));
             let g = gates.entry(p.kid.clone()).or_insert_with(|| Gate {
                 lanes: crate::admission::Lanes([
-                    Arc::new(crate::admission::Shares::new(1, 1, 1, 64)),
+                    Arc::new(crate::admission::Shares::new(3, 2, 3, 128)),
                     inbox_share,
                     workspace_share,
                 ]),
@@ -437,7 +437,7 @@ impl Store {
     }
     fn reserve_view(&self, bytes: usize) -> Result<(), store::Error> {
         let target = bytes.div_ceil(1024);
-        if target > 64 * 1024 {
+        if target > 96 * 1024 {
             return Err(store::Error::Limit);
         }
         let mut slot = self.bytes.borrow_mut();
@@ -457,6 +457,16 @@ impl Store {
             }
         }
         Ok(())
+    }
+    fn clear_selection(&mut self) {
+        if let Some(f) = self.selected.take().and_then(|p| self.folders.get_mut(&p)) {
+            f.entries = Vec::new();
+        }
+        self.handles.clear();
+        self.headers.get_mut().clear();
+        self.page.get_mut().clear();
+        self.checkpoint = None;
+        drop(self.bytes.get_mut().take());
     }
     pub fn refresh(&mut self) -> Result<(), store::Error> {
         self.reload(false)
@@ -667,9 +677,14 @@ impl MailStore for Store {
         Ok(())
     }
     fn select(&mut self, path: &str) -> Result<(), store::Error> {
-        self.checkpoint = None;
+        // RFC SELECT deselects the old mailbox even if the new selection fails.
+        self.clear_selection();
         self.selected = Some(path.into());
-        self.refresh()
+        let result = self.refresh().and_then(|()| self.folder(path).map(|_| ()));
+        if result.is_err() {
+            self.clear_selection();
+        }
+        result
     }
     fn budget(&self) -> Result<(), store::Error> {
         if Instant::now() > self.deadline + self.page_wait.get() {
@@ -945,6 +960,22 @@ mod auth_tests {
         let a = store("a", "w");
         let b = store("b", "w");
         let c = store("c", "other");
+        let sibling = store("a", "w");
+        let responses = Arc::new(tokio::sync::Semaphore::new(6));
+        let mut concurrent = vec![];
+        for session in [&a, &sibling, &a] {
+            concurrent.push(
+                Reservation::take(
+                    responses.clone(),
+                    Some(session.lanes.pools(|s| &s.responses)),
+                    1,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        assert_eq!(sibling.lanes.0[0].responses.available_permits(), 0);
+        drop(concurrent);
         type Resource = fn(&Shares) -> &Arc<tokio::sync::Semaphore>;
         for (resource, global) in [
             ((|s| &s.responses) as Resource, 6),
