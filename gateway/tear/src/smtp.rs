@@ -335,6 +335,17 @@ impl Model {
         if x.rcpt == 0 {
             return 503;
         }
+        // The shell reserves a DATA permit (Remote: credential, inbox and workspace lanes of 2
+        // and a process pool of 4; Memory: the pool only). None: 452 and the core drops the
+        // transaction (refuse_data).
+        let busy = self.sessions.iter().filter(|o| o.up && o.data).count();
+        let limit = if self.remote { 2 } else { 4 };
+        let x = &mut self.sessions[s];
+        if busy >= limit {
+            x.from = false;
+            x.rcpt = 0;
+            return 452;
+        }
         x.data = true;
         354
     }
@@ -437,6 +448,7 @@ struct Conn {
     smtp: Smtp,
     login: Option<Login>,
     store: Option<Store>,
+    data: Option<crate::admission::Reservation>,
 }
 enum Back {
     Memory {
@@ -449,6 +461,8 @@ enum Back {
     },
 }
 struct Fixture {
+    /// The process-wide SMTP DATA pool (4).
+    data_pool: Arc<tokio::sync::Semaphore>,
     back: Back,
     conns: Vec<Option<Conn>>,
     clock: i64,
@@ -509,6 +523,7 @@ impl Fixture {
             }
         };
         let mut f = Self {
+            data_pool: Arc::new(tokio::sync::Semaphore::new(4)),
             back,
             conns: (0..sessions).map(|_| None).collect(),
             clock: 0,
@@ -533,6 +548,7 @@ impl Fixture {
             smtp: Smtp::new(true),
             login,
             store: None,
+            data: None,
         });
     }
     /// One line through the core, as the shell steps it (DATA lines included).
@@ -588,6 +604,10 @@ impl Fixture {
             };
             let Event::Complete(line) = event else { break };
             let r = self.line(s, &line);
+            if self.refused_data(s) {
+                codes.push(452);
+                continue;
+            }
             if let Some(code) = std::str::from_utf8(&r.bytes)
                 .ok()
                 .and_then(|t| t.trim_end().rsplit("\r\n").next()?.get(..3)?.parse().ok())
@@ -596,6 +616,32 @@ impl Fixture {
             }
         }
         codes
+    }
+    /// The shell after each SMTP line: a session entering DATA reserves a DATA permit, a
+    /// session leaving it releases it; with none free it answers 452 instead of 354.
+    fn refused_data(&mut self, s: usize) -> bool {
+        let global = self.data_pool.clone();
+        let Some(conn) = self.conns[s].as_mut() else {
+            return false;
+        };
+        if !conn.smtp.receiving_data() {
+            conn.data = None;
+            return false;
+        }
+        if conn.data.is_some() {
+            return false;
+        }
+        let lanes = conn.store.as_ref().map(|st| st.lanes.pools(|l| &l.data));
+        match crate::fixture::paused(crate::admission::Reservation::take(global, lanes, 1)) {
+            Some(p) => {
+                conn.data = Some(p);
+                false
+            }
+            None => {
+                conn.smtp.refuse_data();
+                true
+            }
+        }
     }
     fn act(&mut self, label: &str, serial: usize) -> R<Value> {
         let a = parse(label).ok_or_else(|| Error::new(format!("unknown action {label}")))?;
@@ -748,6 +794,12 @@ impl Host for Check {
                 }
                 if matches!(a, Act::Skew) {
                     *self.coverage.entry("smtp:clock-back".into()).or_default() += 1;
+                }
+                if codes.contains(&452) && matches!(a, Act::Data(_) | Act::Pipeline(_)) {
+                    *self
+                        .coverage
+                        .entry("smtp:data-lane-busy".into())
+                        .or_default() += 1;
                 }
                 json!({"expected": m.expected(&codes), "state": m})
             }

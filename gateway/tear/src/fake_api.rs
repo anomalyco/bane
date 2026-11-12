@@ -102,6 +102,11 @@ pub struct Fake {
     pub vanished: Vec<(String, u32, u64)>,
     pub credentials: Vec<Credential>,
     pub fail_snapshot: bool,
+    /// A fault on an upcoming mutation that reaches its commit point: (calls until it fires,
+    /// kind). Refused calls (missing folder, bad ticket) do not count.
+    pub fault: Option<(u8, crate::model::Fault)>,
+    /// A `Crash` fault fired: the fixture kills the acting gateway process.
+    pub crashed: bool,
     pub page: usize,
     pub next_mid: u64,
     pub next_validity: u32,
@@ -157,6 +162,8 @@ impl Fake {
                 })
                 .collect(),
             fail_snapshot: false,
+            fault: None,
+            crashed: false,
             page: 2,
             next_mid: 1,
             next_validity: 100,
@@ -456,7 +463,46 @@ impl Fake {
                 (200, raw.clone())
             }
             "edit" => self.edit(p),
-            "mutate" => self.mutate(p),
+            "mutate" => {
+                use crate::model::Fault;
+                let firing = matches!(self.fault, Some((1, _)));
+                let saved =
+                    (firing && matches!(self.fault, Some((_, Fault::Fail)))).then(|| self.clone());
+                let r = self.mutate(p);
+                if r.0 != 200 {
+                    return r;
+                }
+                let Some((n, kind)) = self.fault else {
+                    return r;
+                };
+                if n > 1 {
+                    self.fault = Some((n - 1, kind));
+                    return r;
+                }
+                self.fault = None;
+                match kind {
+                    // Before the commit: roll the call back.
+                    Fault::Fail => {
+                        if let Some(mut before) = saved {
+                            before.fault = None;
+                            before.calls = self.calls.clone();
+                            *self = before;
+                        }
+                        err(503, "UNAVAILABLE")
+                    }
+                    Fault::Lost => err(503, "UNAVAILABLE"),
+                    Fault::Crash => {
+                        self.crashed = true;
+                        err(503, "UNAVAILABLE")
+                    }
+                    Fault::Race => {
+                        if let Some(uid) = self.folders[0].entries.last().map(|e| e.uid) {
+                            self.mutate_one(0, uid, "expunge", &BTreeMap::new(), &[], &[], None);
+                        }
+                        r
+                    }
+                }
+            }
             "submit" => self.submit(p),
             "projections" => self.projections(p),
             "subject" => ok(json!([])),
@@ -605,8 +651,13 @@ impl Fake {
             let Some(nonce) = p["ticket"]["nonce"].as_str().filter(|n| n.len() == 32) else {
                 return err(422, "MISSING_COPY_TICKET");
             };
-            let key = (p["kid"].as_str().unwrap_or_default().to_owned(), nonce.to_owned());
-            let digest = hex::encode(Sha256::digest(json!([p["folder"], p["to"], p["uids"]]).to_string()));
+            let key = (
+                p["kid"].as_str().unwrap_or_default().to_owned(),
+                nonce.to_owned(),
+            );
+            let digest = hex::encode(Sha256::digest(
+                json!([p["folder"], p["to"], p["uids"]]).to_string(),
+            ));
             if let Some((d, result)) = self.receipts.get(&key) {
                 if *d != digest {
                     return err(409, "MUTATION_REFUSED");
@@ -730,22 +781,32 @@ impl Fake {
         let Some(f) = self.index(p["folder"].as_str().unwrap_or_default()) else {
             return ok(json!([]));
         };
-        let uids: Vec<u64> = p["uids"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        let uids: Vec<u64> = p["uids"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
         let mut rows = vec![];
         for e in &self.folders[f].entries {
             if !uids.contains(&u64::from(e.uid)) {
                 continue;
             }
-            let Some(m) = self.messages.get(&e.mid) else { continue };
+            let Some(m) = self.messages.get(&e.mid) else {
+                continue;
+            };
             let raw = &m.raw;
             let complete = raw.len() <= 2048;
             let n = if complete {
                 raw.len()
             } else {
-                raw[..2048].windows(4).position(|w| w == b"\r\n\r\n").map_or(0, |i| i + 4)
+                raw[..2048]
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map_or(0, |i| i + 4)
             };
             if n > 0 {
-                rows.push(json!({"uid": e.uid, "raw": STANDARD.encode(&raw[..n]), "complete": complete}));
+                rows.push(
+                    json!({"uid": e.uid, "raw": STANDARD.encode(&raw[..n]), "complete": complete}),
+                );
             }
         }
         ok(Value::Array(rows))
@@ -1047,6 +1108,11 @@ fn handle(request: &str, h: &BTreeMap<String, String>, body: Vec<u8>) -> (u16, V
     let Some(fake) = guard.as_mut() else {
         return err(503, "NO_FIXTURE");
     };
+    // The process that crashed makes no further calls; until the fixture reaps it, whatever
+    // it still sends is lost.
+    if fake.crashed {
+        return err(503, "CRASHED");
+    }
     if request != "POST /internal/v1/mail HTTP/1.1" {
         fake.violations
             .push(format!("unexpected request line {request}"));

@@ -47,6 +47,8 @@ struct Conn {
     imap: Imap,
     idle: bool,
     remote: Option<RemoteConn>,
+    /// An APPEND literal being spooled: (folder, upload, message bytes).
+    spooling: Option<(String, crate::upload::Upload, Vec<u8>)>,
 }
 enum Back {
     Memory {
@@ -56,7 +58,8 @@ enum Back {
     Remote {
         apis: Vec<Arc<Api>>,
         hints: Vec<Hints>,
-        uploads: Arc<Semaphore>,
+        /// The process-wide upload pool of each gateway process.
+        uploads: Vec<Arc<Semaphore>>,
     },
 }
 
@@ -73,7 +76,12 @@ pub struct Fixture {
     retired: BTreeMap<String, BTreeSet<u32>>,
 }
 
-const PASSWORDS: [&str; 3] = ["fixture-secret-a", "fixture-secret-b", "fixture-secret-c"];
+const PASSWORDS: [&str; 4] = [
+    "fixture-secret-a",
+    "fixture-secret-b",
+    "fixture-secret-c",
+    "fixture-secret-d",
+];
 
 fn message(n: u32) -> Vec<u8> {
     format!(
@@ -96,9 +104,14 @@ impl Fixture {
             },
             Backend::Remote => {
                 let kids: Vec<(String, &str)> =
-                    (0..3).map(|i| (format!("kid_{i}"), PASSWORDS[i])).collect();
+                    (0..4).map(|i| (format!("kid_{i}"), PASSWORDS[i])).collect();
                 let kids: Vec<(&str, &str)> = kids.iter().map(|(k, p)| (k.as_str(), *p)).collect();
-                fake_api::install(Fake::new(&kids));
+                let mut fake = Fake::new(&kids);
+                if cfg.bulk {
+                    // 1,000-message folders: page by 256 rather than 2.
+                    fake.page = 256;
+                }
+                fake_api::install(fake);
                 let url = fake_api::url();
                 let apis = (0..2)
                     .map(|_| {
@@ -111,7 +124,7 @@ impl Fixture {
                 Back::Remote {
                     apis,
                     hints: vec![Hints::default(), Hints::default()],
-                    uploads: Arc::new(Semaphore::new(8)),
+                    uploads: (0..2).map(|_| Arc::new(Semaphore::new(8))).collect(),
                 }
             }
         };
@@ -214,6 +227,7 @@ impl Fixture {
             imap,
             idle: false,
             remote,
+            spooling: None,
         });
         true
     }
@@ -303,6 +317,13 @@ impl Fixture {
         let Some(reply) = self.send(s, bytes) else {
             return vec![];
         };
+        // A crash mid-command: the process is gone before it could answer.
+        if matches!(self.back, Back::Remote { .. })
+            && fake_api::with(|f| std::mem::take(&mut f.crashed)).unwrap_or(false)
+        {
+            self.crash(self.cfg.instance(s));
+            return vec![];
+        }
         if kind == Kind::Select {
             self.clients[s].reset();
         }
@@ -353,46 +374,73 @@ impl Fixture {
     }
 
     fn append(&mut self, s: usize, folder: &str) -> bool {
+        if matches!(self.back, Back::Remote { .. }) {
+            return self.append_begin(s, folder) && self.append_end(s);
+        }
         let raw = self.next_message();
         if !self.up(s) {
             return false;
         }
         let tag = self.clients[s].next_tag();
-        let global = match &self.back {
-            Back::Remote { uploads, .. } => Some(uploads.clone()),
-            Back::Memory { .. } => None,
-        };
-        if let Some(global) = global {
-            // The shell diverts the literal into an owned upload spool, then steps the core
-            // with an empty literal; the Remote store streams the spool to the API.
-            self.wake(s);
-            let Some(rc) = self.conns[s].as_mut().and_then(|c| c.remote.as_mut()) else {
-                return false;
-            };
-            let shares = rc.store.lanes.pools(|s| &s.uploads);
-            let Some(permit) =
-                fake_api::runtime().block_on(crate::admission::Reservation::take(global, Some(shares), 1))
-            else {
-                // The shell answers "NO [LIMIT] Upload capacity busy" and keeps the session.
-                self.clients[s].last = "NO [LIMIT] Upload capacity busy".into();
-                return false;
-            };
-            let Ok(mut up) = crate::upload::Upload::new(raw.len(), permit) else {
-                self.hang_up(s);
-                return false;
-            };
-            if fake_api::runtime().block_on(up.write(&raw)).is_err() {
-                self.hang_up(s);
-                return false;
-            }
-            rc.store.upload = Some(up);
-            let line = format!("{tag} APPEND {folder} {{0+}}\r\n\r\n");
-            return self.exchange(s, line.as_bytes(), Kind::Plain) == ["OK"] && self.fill(s);
-        }
         let mut line = format!("{tag} APPEND {folder} {{{}+}}\r\n", raw.len()).into_bytes();
         line.extend(&raw);
         line.extend(b"\r\n");
         self.exchange(s, &line, Kind::Plain) == ["OK"] && self.fill(s)
+    }
+
+    /// The shell reads `APPEND folder {n+}` and reserves an upload in the credential, inbox
+    /// and workspace lanes and the process pool, then spools the literal. A busy lane answers
+    /// `NO [LIMIT] Upload capacity busy` after a 2 s wait (a paused clock here) and the session
+    /// stays.
+    fn append_begin(&mut self, s: usize, folder: &str) -> bool {
+        let raw = self.next_message();
+        self.wake(s);
+        let instance = self.cfg.instance(s);
+        let Back::Remote { uploads, .. } = &self.back else {
+            return false;
+        };
+        let global = uploads[instance].clone();
+        let Some(conn) = self.conns[s].as_mut() else {
+            return false;
+        };
+        let Some(rc) = conn.remote.as_mut() else {
+            return false;
+        };
+        let lanes = rc.store.lanes.pools(|s| &s.uploads);
+        let Some(permit) = paused(crate::admission::Reservation::take(global, Some(lanes), 1))
+        else {
+            self.clients[s].next_tag();
+            self.clients[s].last = "NO [LIMIT] Upload capacity busy".into();
+            return false;
+        };
+        let Ok(up) = crate::upload::Upload::new(raw.len(), permit) else {
+            self.hang_up(s);
+            return false;
+        };
+        conn.spooling = Some((folder.to_owned(), up, raw));
+        true
+    }
+
+    /// The literal ends: the core runs `APPEND folder {0+}` with the spool (Store::imap).
+    fn append_end(&mut self, s: usize) -> bool {
+        self.wake(s);
+        let Some(conn) = self.conns[s].as_mut() else {
+            return false;
+        };
+        let Some((folder, mut up, raw)) = conn.spooling.take() else {
+            return false;
+        };
+        let Some(rc) = conn.remote.as_mut() else {
+            return false;
+        };
+        if fake_api::runtime().block_on(up.write(&raw)).is_err() {
+            self.hang_up(s);
+            return false;
+        }
+        rc.store.upload = Some(up);
+        let tag = self.clients[s].next_tag();
+        let line = format!("{tag} APPEND {folder} {{0+}}\r\n\r\n");
+        self.exchange(s, line.as_bytes(), Kind::Plain) == ["OK"] && self.fill(s)
     }
 
     fn deliver(&mut self) -> bool {
@@ -442,6 +490,27 @@ impl Fixture {
         }
     }
 
+    /// The gateway process `instance` dies: every connection on it ends without a reply and
+    /// a fresh process (new login, wake and admission state) takes new connections.
+    fn crash(&mut self, instance: usize) {
+        for s in 0..self.conns.len() {
+            if self.cfg.instance(s) == instance {
+                self.hang_up(s);
+            }
+        }
+        if let Back::Remote {
+            apis,
+            hints,
+            uploads,
+        } = &mut self.back
+            && let Ok(api) = Api::new(fake_api::url(), fake_api::KEY.into())
+        {
+            api.online.store(true, std::sync::atomic::Ordering::Release);
+            apis[instance] = Arc::new(api);
+            hints[instance] = Hints::default();
+            uploads[instance] = Arc::new(Semaphore::new(8));
+        }
+    }
     fn notify(&mut self, instance: Option<usize>, channel: &str) {
         if let Back::Remote { apis, hints, .. } = &self.back {
             for i in 0..apis.len() {
@@ -550,7 +619,10 @@ impl Fixture {
                 } else {
                     "UID EXPUNGE 1:*"
                 };
-                let ok = self.command(s, cmd, Kind::Plain) && self.fill(s);
+                // A partial NO still reports the committed batches; the client fetches
+                // what it was told about either way.
+                let ok = self.command(s, cmd, Kind::Plain);
+                let ok = self.fill(s) && ok;
                 sync = ok.then_some(s);
                 ok
             }
@@ -567,8 +639,16 @@ impl Fixture {
                 sync = ok.then_some(s);
                 ok
             }
-            Transfer { s, to, moving, uid } => {
-                let set = if uid {
+            Transfer {
+                s,
+                to,
+                moving,
+                uid,
+                all,
+            } => {
+                let set = if all {
+                    "1:*".to_owned()
+                } else if uid {
                     self.clients[s].first_uid().unwrap_or(1).to_string()
                 } else {
                     "1".into()
@@ -579,7 +659,8 @@ impl Fixture {
                     if moving { "MOVE" } else { "COPY" },
                     FOLDERS[to]
                 );
-                let ok = self.command(s, &body, Kind::Plain) && self.fill(s);
+                let ok = self.command(s, &body, Kind::Plain);
+                let ok = self.fill(s) && ok;
                 sync = ok.then_some(s);
                 ok
             }
@@ -588,6 +669,24 @@ impl Fixture {
                 sync = ok.then_some(s);
                 ok
             }
+            AppendBegin(s, f) => self.append_begin(s, FOLDERS[f]),
+            AppendEnd(s) => {
+                let ok = self.append_end(s);
+                sync = ok.then_some(s);
+                ok
+            }
+            Bulk => {
+                let raws: Vec<Vec<u8>> = (0..crate::model::Config::BATCH)
+                    .map(|_| self.next_message())
+                    .collect();
+                fake_api::with(|f| {
+                    for r in raws {
+                        f.deliver(r);
+                    }
+                })
+                .is_some()
+            }
+            Arm(f) => fake_api::with(|x| x.fault = Some((f.countdown(), f))).is_some(),
             Create(s) => self.command(s, "CREATE Work", Kind::Plain),
             Delete(s) => self.command(s, "DELETE Work", Kind::Plain),
             Reconnect(s) => {
@@ -623,6 +722,7 @@ impl Fixture {
         if self.revision() != rev {
             self.push();
         }
+
         self.checks();
         let mut v =
             json!({"ok": ok, "safety": self.safety, "server": self.server(), "gone": self.gone()});
@@ -832,4 +932,16 @@ impl Fixture {
         }
         self.prev = now;
     }
+}
+
+/// Run an admission future on a paused clock: a reservation that would wait for its 2 s
+/// timeout (nothing can release a permit while this fixture is single-threaded) times out at
+/// once instead of in real time. The semaphores are the gateway's own.
+pub fn paused<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap_or_else(|e| panic!("paused runtime: {e}"))
+        .block_on(f)
 }

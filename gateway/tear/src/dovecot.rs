@@ -401,7 +401,9 @@ impl Fixture {
                 sync = ok.then_some(s);
                 ok
             }
-            Transfer { s, to, moving, uid } => {
+            Transfer {
+                s, to, moving, uid, ..
+            } => {
                 let set = if uid {
                     self.clients[s].first_uid().unwrap_or(1).to_string()
                 } else {

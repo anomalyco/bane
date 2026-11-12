@@ -28,7 +28,7 @@ pub const FOLDERS: [&str; 3] = ["INBOX", "Archive", "Work"];
 pub const SERVER: [&str; 4] = ["INBOX", "Archive", "Work", "Trash"];
 pub const WORK: usize = 2;
 pub const TRASH: usize = 3;
-pub const SESSIONS: [&str; 3] = ["A", "B", "C"];
+pub const SESSIONS: [&str; 4] = ["A", "B", "C", "D"];
 pub const FLAG_NAMES: [(&str, &str); 4] = [
     ("seen", "\\Seen"),
     ("flagged", "\\Flagged"),
@@ -66,6 +66,11 @@ pub struct Config {
     /// takes `1:*`, so a server that announces changes after any command (Dovecot) and one
     /// that announces them only at sync points (Bane) see the same set. Conformance runs.
     pub eager: bool,
+    /// Remote: bulk delivery and `1:*` COPY/MOVE, to reach the 1,000-UID mutation bound.
+    pub bulk: bool,
+    /// Remote: APPEND split into its literal phase (`append-begin`) and completion
+    /// (`append-end`), so upload reservations are held across other sessions' commands.
+    pub uploads: bool,
 }
 impl Config {
     pub fn memory() -> Self {
@@ -83,6 +88,8 @@ impl Config {
             idle: true,
             copy: true,
             eager: false,
+            bulk: false,
+            uploads: false,
         }
     }
     pub fn remote() -> Self {
@@ -98,6 +105,12 @@ impl Config {
     pub fn instance(&self, s: usize) -> usize {
         usize::from(self.split && s > 0)
     }
+    /// The Remote store refuses a STORE or COPY over this many UIDs before writing anything;
+    /// MOVE and UID EXPUNGE go to the API in chunks of this size.
+    pub const BATCH: usize = 1000;
+    /// Upload lanes: per credential, per inbox and per workspace (one process's shares), and
+    /// the process-wide pool. A busy lane makes the APPEND answer `NO [LIMIT]`.
+    pub const UPLOADS: [usize; 4] = [3, 3, 4, 8];
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -146,8 +159,17 @@ pub enum Act {
         to: usize,
         moving: bool,
         uid: bool,
+        all: bool,
     },
     Append(usize, usize),
+    /// The client sends `APPEND f {n+}`: the shell reserves an upload and spools the literal.
+    AppendBegin(usize, usize),
+    /// The literal ends: the core runs the APPEND with the spool.
+    AppendEnd(usize),
+    /// 1,000 messages arrive in INBOX at once.
+    Bulk,
+    /// Arm a fault on an upcoming internal mutation call (see `Fault`).
+    Arm(Fault),
     Create(usize),
     Delete(usize),
     Reconnect(usize),
@@ -184,6 +206,8 @@ impl Act {
             | Close(s)
             | Unselect(s)
             | Append(s, _)
+            | AppendBegin(s, _)
+            | AppendEnd(s)
             | Create(s)
             | Delete(s)
             | Reconnect(s)
@@ -227,6 +251,11 @@ pub fn parse(label: &str) -> Option<Act> {
         ["prune"] => return Some(Prune),
         ["fail-snapshot"] => return Some(FailSnapshot),
         ["revoke"] => return Some(Revoke),
+        ["bulk"] => return Some(Bulk),
+        ["lose-response"] => return Some(Arm(Fault::Lost)),
+        ["fail-batch"] => return Some(Arm(Fault::Fail)),
+        ["crash-batch"] => return Some(Arm(Fault::Crash)),
+        ["race-batch"] => return Some(Arm(Fault::Race)),
         _ => {}
     }
     let s = session_index(words.first()?)?;
@@ -262,12 +291,19 @@ pub fn parse(label: &str) -> Option<Act> {
         ["uid-expunge"] => UidExpunge(s),
         ["close"] => Close(s),
         ["unselect"] => Unselect(s),
-        [cmd @ ("copy" | "move" | "uid-copy" | "uid-move"), "1", f] => Transfer {
+        [
+            cmd @ ("copy" | "move" | "uid-copy" | "uid-move"),
+            set @ ("1" | "1:*"),
+            f,
+        ] => Transfer {
             s,
             to: folder_index(f)?,
             moving: cmd.ends_with("move"),
             uid: cmd.starts_with("uid"),
+            all: *set == "1:*",
         },
+        ["append-begin", f] => AppendBegin(s, folder_index(f)?),
+        ["append-end"] => AppendEnd(s),
         ["append", f] => Append(s, folder_index(f)?),
         ["create", "Work"] => Create(s),
         ["delete", "Work"] => Delete(s),
@@ -290,7 +326,20 @@ pub fn alphabet(cfg: &Config) -> Vec<String> {
         }
         out.extend(["ext-seen", "ext-expunge", "prune"].map(String::from));
         if cfg.faults {
-            out.extend(["fail-snapshot", "revoke"].map(String::from));
+            out.extend(
+                [
+                    "fail-snapshot",
+                    "revoke",
+                    "lose-response",
+                    "fail-batch",
+                    "crash-batch",
+                    "race-batch",
+                ]
+                .map(String::from),
+            );
+        }
+        if cfg.bulk {
+            out.push("bulk".into());
         }
     }
     let folders = if cfg.folders {
@@ -342,6 +391,16 @@ pub fn alphabet(cfg: &Config) -> Vec<String> {
                 out.push(format!("{s} uid-move 1 {f}"));
             }
             out.push(format!("{s} append {f}"));
+            if cfg.bulk {
+                out.push(format!("{s} copy 1:* {f}"));
+                out.push(format!("{s} move 1:* {f}"));
+            }
+            if cfg.uploads && remote {
+                out.push(format!("{s} append-begin {f}"));
+            }
+        }
+        if cfg.uploads && remote {
+            out.push(format!("{s} append-end"));
         }
         if cfg.folders {
             out.push(format!("{s} create Work"));
@@ -361,6 +420,10 @@ pub fn weight(act: Act) -> u64 {
     use Act::*;
     match act {
         Revoke => 1,
+        Bulk => 40,
+        Arm(_) => 3,
+        AppendBegin(..) => 20,
+        AppendEnd(_) => 6,
         FailSnapshot | Prune | Create(_) | Delete(_) | Close(_) | Unselect(_) => 3,
         Select { ro: true, .. } => 4,
         ExtSeen | ExtExpunge | Age(_) => 4,
@@ -432,6 +495,52 @@ pub struct Session {
     /// position until the next update expunges them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<u32>,
+    /// The connection's COPY replay ticket: kept until a COPY succeeds, replaced by a COPY
+    /// with other arguments. `receipt` is what the API committed under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<Ticket>,
+    /// An APPEND whose literal is still arriving (holds an upload reservation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uploading: Option<usize>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Ticket {
+    /// (source, its generation, destination, its generation in the snapshot, UIDs).
+    pub of: (usize, u32, usize, Option<u32>, Vec<u32>),
+    /// Per 1,000-UID batch: the API holds a receipt for it (a retry replays it).
+    pub done: Vec<bool>,
+}
+/// What an armed fault does to the internal mutation call it hits.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub enum Fault {
+    /// The call commits, then its response is lost (503).
+    Lost,
+    /// The second call from now fails before committing (503): mid-command for a batched one.
+    Fail,
+    /// The second call from now commits, then the gateway process dies with all its sessions.
+    Crash,
+    /// After the call commits, another writer expunges INBOX's highest UID (a concurrent
+    /// session between batches).
+    Race,
+}
+impl Fault {
+    pub fn countdown(self) -> u8 {
+        match self {
+            Fault::Lost | Fault::Race => 1,
+            Fault::Fail | Fault::Crash => 2,
+        }
+    }
+}
+/// How a batched mutation ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Run {
+    Done,
+    /// The first batch failed (or its response was lost): the command answers the error.
+    Failed,
+    /// A later batch failed: earlier ones stay committed; the command reports them, then NO.
+    Partial,
+    /// The process died mid-command.
+    Crashed,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Cached {
@@ -460,6 +569,9 @@ pub struct Model {
     pub armed: bool,
     #[serde(default, skip_serializing_if = "no")]
     pub revoked: bool,
+    /// A fault armed on an upcoming internal mutation call: (calls until it fires, kind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<(u8, Fault)>,
     /// Coverage events of the current step (not state).
     #[serde(skip)]
     pub events: Vec<&'static str>,
@@ -497,6 +609,7 @@ impl Model {
             cache: vec![],
             armed: false,
             revoked: false,
+            fault: None,
             events: vec![],
         };
         // Every session starts logged in with INBOX selected (the fixture's open).
@@ -511,6 +624,8 @@ impl Model {
                 pending: false,
                 aged: false,
                 blind: vec![],
+                ticket: None,
+                uploading: None,
             };
             s.sel = Some(Selected {
                 folder: 0,
@@ -706,6 +821,8 @@ impl Model {
         x.pending = false;
         x.aged = false;
         x.blind.clear();
+        x.ticket = None;
+        x.uploading = None;
         if let Some(k) = &mut x.known {
             *k = Known::default();
         }
@@ -780,6 +897,99 @@ impl Model {
             }
         }
         true
+    }
+    /// One internal mutation RPC that reaches the commit point: the fault it meets, if any.
+    fn call(&mut self, cfg: &Config) -> Option<Fault> {
+        if cfg.backend != Backend::Remote {
+            return None;
+        }
+        match self.fault {
+            Some((n, f)) if n > 1 => {
+                self.fault = Some((n - 1, f));
+                None
+            }
+            Some((_, f)) => {
+                self.fault = None;
+                self.event(match f {
+                    Fault::Lost => "response-lost",
+                    Fault::Fail => "batch-failed",
+                    Fault::Crash => "crash-mid-command",
+                    Fault::Race => "race-between-batches",
+                });
+                Some(f)
+            }
+            None => None,
+        }
+    }
+    /// The batches a mutation of `uids` goes in: 1,000 UIDs each on the Remote store (none
+    /// for an empty set: no API call), one on Memory.
+    fn chunks(cfg: &Config, uids: &[u32]) -> Vec<Vec<u32>> {
+        match cfg.backend {
+            Backend::Remote => uids.chunks(Config::BATCH).map(<[u32]>::to_vec).collect(),
+            Backend::Memory => vec![uids.to_vec()],
+        }
+    }
+    /// One call per batch; `apply` commits batch i. Batches are atomic; a failure stops the
+    /// command after the batches already committed.
+    fn run(
+        &mut self,
+        cfg: &Config,
+        s: usize,
+        n: usize,
+        apply: &mut dyn FnMut(&mut Self, usize),
+    ) -> Run {
+        if n > 1 {
+            self.event("batched");
+        }
+        for i in 0..n {
+            let fault = self.call(cfg);
+            let stop = if i == 0 {
+                Run::Failed
+            } else {
+                self.event("partial-applied");
+                Run::Partial
+            };
+            if fault == Some(Fault::Fail) {
+                return stop;
+            }
+            apply(self, i);
+            match fault {
+                Some(Fault::Lost) => return stop,
+                Some(Fault::Crash) => {
+                    let inst = cfg.instance(s);
+                    for o in 0..self.sessions.len() {
+                        if self.sessions[o].up && cfg.instance(o) == inst {
+                            self.drop_session(o);
+                        }
+                    }
+                    self.cache.retain(|c| c.instance != inst);
+                    return Run::Crashed;
+                }
+                Some(Fault::Race) => {
+                    if let Some(uid) = self.folders[0].entries.last().map(|e| e.uid) {
+                        let stamp = self.stamp();
+                        self.remove_entry(0, uid, stamp);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if n > 1 {
+            self.event("batched-done");
+        }
+        Run::Done
+    }
+    /// Whether the upload lanes of session s's process have a free permit.
+    fn upload_free(&self, cfg: &Config, s: usize) -> bool {
+        let busy = |f: &dyn Fn(usize) -> bool| {
+            (0..self.sessions.len())
+                .filter(|&o| self.sessions[o].up && self.sessions[o].uploading.is_some() && f(o))
+                .count()
+        };
+        let (i, k) = (cfg.instance(s), cfg.kid(s));
+        let [cred, inbox, workspace, global] = Config::UPLOADS;
+        busy(&|o| cfg.instance(o) == i && cfg.kid(o) == k) < cred
+            && busy(&|o| cfg.instance(o) == i) < inbox.min(workspace).min(global)
     }
     /// The target of "1": by sequence number the first slot; by UID the first slot's UID as
     /// the client knows it (UID 1 when it has no data for that slot).
@@ -960,6 +1170,9 @@ impl Model {
             let x = &self.sessions[s];
             match act {
                 Reconnect(_) => return !x.up && !self.revoked,
+                AppendEnd(_) => return x.up && x.uploading.is_some(),
+                Wake(_) if x.uploading.is_some() => return x.up && x.pending,
+                _ if x.uploading.is_some() => return false,
                 Wake(_) => return x.up && x.pending,
                 // Not while idling: a slot announced by EXISTS during IDLE and expunged before
                 // the DONE refresh may legitimately stay unfetched (RFC 2180 4.1); the model
@@ -985,7 +1198,11 @@ impl Model {
             return false;
         }
         match act {
-            Deliver | Append(..) | Transfer { moving: false, .. } => self.total() < cfg.cap,
+            Deliver | Append(..) | AppendBegin(..) | Transfer { moving: false, .. } => {
+                self.total() < cfg.cap
+            }
+            Bulk => self.total() + Config::BATCH < cfg.cap,
+            Arm(_) => self.fault.is_none(),
             Hint(Some(_)) => cfg.split,
             Revoke => !self.revoked,
             FailSnapshot => !self.armed,
@@ -1013,7 +1230,17 @@ impl Model {
             // stale or aged snapshot before any non-SELECT line, DONE included. A failed
             // refresh there drops the connection (fail closed).
             let selects = matches!(act, Select { .. });
-            if self.before(cfg, s, selects).is_err() {
+            // An APPEND literal is reserved and spooled before the core runs: only the
+            // pending hint is consumed first; the stale refresh and BYE come at completion.
+            let spooled = matches!(act, AppendBegin(..))
+                || (cfg.backend == Backend::Remote && matches!(act, Append(..)));
+            if spooled {
+                if self.wake(cfg, s).is_err() || !self.sessions[s].up {
+                    self.drop_session(s);
+                    out.ok = false;
+                    return self.finish(cfg, out, &before, &gens);
+                }
+            } else if self.before(cfg, s, selects).is_err() {
                 self.event(if self.revoked {
                     "revoked-bye"
                 } else {
@@ -1023,7 +1250,7 @@ impl Model {
                 out.ok = false;
                 return self.finish(cfg, out, &before, &gens);
             }
-            if !matches!(act, Done(_)) && self.bye(cfg, s) {
+            if !matches!(act, Done(_)) && !spooled && self.bye(cfg, s) {
                 self.event("bye-deleted-folder");
                 self.drop_session(s);
                 out.ok = false;
@@ -1112,10 +1339,12 @@ impl Model {
                 if uid {
                     self.event("uid-command");
                 }
-                if uids
+                let present: BTreeSet<u32> = self.folders[sel.folder]
+                    .entries
                     .iter()
-                    .any(|u| !self.truth(sel.folder).iter().any(|e| e.0 == *u))
-                {
+                    .map(|e| e.uid)
+                    .collect();
+                if uids.iter().any(|u| !present.contains(u)) {
                     self.event("target-vanished");
                 }
                 if self.source_gone(cfg, s) && !uids.is_empty() {
@@ -1123,9 +1352,21 @@ impl Model {
                     out.ok = false;
                     return self.finish(cfg, out, &before, &gens);
                 }
-                for uid in &uids {
-                    self.set_flag(sel.folder, *uid, flag, add);
+                let chunks = Self::chunks(cfg, &uids);
+                let folder = sel.folder;
+                let run = self.run(cfg, s, chunks.len(), &mut |m, i| {
+                    for u in &chunks[i] {
+                        m.set_flag(folder, *u, flag, add);
+                    }
+                });
+                if matches!(run, Run::Failed | Run::Crashed) {
+                    out.ok = false;
+                    return self.finish(cfg, out, &before, &gens);
                 }
+                // Partial: the committed batches are reported (FETCH for the targets whose
+                // MODSEQ moved), then NO; a .SILENT client applies nothing on NO.
+                let partial = run == Run::Partial;
+                out.ok = !partial;
                 self.refresh_after(cfg, s);
                 if self.bye(cfg, s) {
                     // The refreshed snapshot no longer has the folder: STORE answers NO and
@@ -1141,7 +1382,7 @@ impl Model {
                         continue;
                     }
                     if silent {
-                        if x.blind.contains(uid) {
+                        if partial || x.blind.contains(uid) {
                             continue;
                         }
                         // The client applies its own change locally.
@@ -1174,8 +1415,19 @@ impl Model {
                         out.ok = false;
                         return self.finish(cfg, out, &before, &gens);
                     }
-                    for uid in &unseen {
-                        self.set_flag(sel.folder, *uid, 0, true);
+                    let chunks = Self::chunks(cfg, &unseen);
+                    let folder = sel.folder;
+                    let run = self.run(cfg, s, chunks.len(), &mut |m, i| {
+                        for u in &chunks[i] {
+                            m.set_flag(folder, *u, 0, true);
+                        }
+                    });
+                    if run != Run::Done {
+                        if run == Run::Partial {
+                            self.refresh_after(cfg, s);
+                        }
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
                     }
                     self.refresh_after(cfg, s);
                     if self.bye(cfg, s) {
@@ -1205,14 +1457,52 @@ impl Model {
                 out.sync = Some(s);
                 if matches!(act, Unselect(_)) || (closing && sel.ro) {
                 } else {
-                    let only = matches!(act, UidExpunge(_)).then(|| self.targets(s, Set::All));
+                    // UID EXPUNGE names its targets. A plain EXPUNGE (or CLOSE) on the Remote
+                    // store sends every UID of its snapshot in batches and the API removes the
+                    // \Deleted ones; Memory removes every \Deleted entry at once.
+                    let remote = cfg.backend == Backend::Remote;
+                    let only = if matches!(act, UidExpunge(_)) {
+                        Some(self.targets(s, Set::All))
+                    } else if remote {
+                        Some(self.shown(cfg, s).0.iter().map(|e| e.0).collect::<Vec<_>>())
+                    } else {
+                        None
+                    };
                     if self.source_gone(cfg, s) && only.as_ref().is_none_or(|u| !u.is_empty()) {
                         self.event("api-refused-deleted-folder");
                         out.sync = None;
                         out.ok = false;
                         return self.finish(cfg, out, &before, &gens);
                     }
-                    self.expunge(sel.folder, only.as_deref());
+                    let folder = sel.folder;
+                    let run = match &only {
+                        None => self.run(cfg, s, 1, &mut |m, _| m.expunge(folder, None)),
+                        Some(u) => {
+                            let chunks = Self::chunks(cfg, u);
+                            self.run(cfg, s, chunks.len(), &mut |m, i| {
+                                m.expunge(folder, Some(&chunks[i]))
+                            })
+                        }
+                    };
+                    match run {
+                        Run::Failed | Run::Crashed => {
+                            out.sync = None;
+                            out.ok = false;
+                            return self.finish(cfg, out, &before, &gens);
+                        }
+                        Run::Partial => {
+                            // EXPUNGE reports the batches that committed, then NO. CLOSE
+                            // answers NO and stays selected.
+                            self.refresh_after(cfg, s);
+                            out.sync = None;
+                            out.ok = false;
+                            if !closing {
+                                self.sync_fill(cfg, s);
+                            }
+                            return self.finish(cfg, out, &before, &gens);
+                        }
+                        Run::Done => {}
+                    }
                     self.refresh_after(cfg, s);
                 }
                 if closing {
@@ -1223,7 +1513,13 @@ impl Model {
                     out.ok = self.sync_fill(cfg, s);
                 }
             }
-            Transfer { s, to, moving, uid } => {
+            Transfer {
+                s,
+                to,
+                moving,
+                uid,
+                all,
+            } => {
                 let Some(sel) = self.sessions[s].sel.clone() else {
                     out.ok = false;
                     return self.finish(cfg, out, &before, &gens);
@@ -1233,31 +1529,140 @@ impl Model {
                     out.ok = false;
                     return self.finish(cfg, out, &before, &gens);
                 }
-                let uids = self.first(s, uid);
+                let uids = if all {
+                    self.targets(s, Set::All)
+                } else {
+                    self.first(s, uid)
+                };
                 if to == sel.folder && !moving && !uids.is_empty() {
                     self.event("copy-into-selected");
                 }
-                if uids
+                let present: BTreeSet<u32> = self.folders[sel.folder]
+                    .entries
                     .iter()
-                    .any(|u| !self.truth(sel.folder).iter().any(|e| e.0 == *u))
-                {
+                    .map(|e| e.uid)
+                    .collect();
+                if uids.iter().any(|u| !present.contains(u)) {
                     self.event("target-vanished");
                 }
                 if !self.exists_for(cfg, s, to) {
                     self.event("trycreate");
                 }
-                // TRYCREATE from the session's folder list, or the API refusing a folder
-                // that another session deleted meanwhile (an empty set never calls the API).
-                if !self.exists_for(cfg, s, to) || (!self.api_has(cfg, s, to) && !uids.is_empty()) {
+                // TRYCREATE from the session's folder list (the core refuses before the
+                // store). The API refusing a folder deleted meanwhile is handled per path.
+                if !self.exists_for(cfg, s, to) {
                     out.ok = false;
                     return self.finish(cfg, out, &before, &gens);
                 }
-                self.transfer(sel.folder, to, &uids, moving);
+                let remote = cfg.backend == Backend::Remote;
+                let chunks = Self::chunks(cfg, &uids);
+                let (from, n) = (sel.folder, chunks.len());
+                let run = if remote && !moving {
+                    // The COPY replay ticket: one per command, a receipt per batch. A retry
+                    // with the same arguments replays committed batches instead of copying
+                    // them again.
+                    let to_gen = self.shown(cfg, s).1[to];
+                    let of = (sel.folder, sel.generation, to, to_gen, uids.clone());
+                    if self.sessions[s].ticket.as_ref().is_none_or(|t| t.of != of) {
+                        self.sessions[s].ticket = Some(Ticket {
+                            of,
+                            done: vec![false; n],
+                        });
+                    }
+                    if !uids.is_empty() && !self.api_has(cfg, s, to) {
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                    let run = self.run(cfg, s, n, &mut |m, i| {
+                        let done = m.sessions[s].ticket.as_ref().is_some_and(|t| t.done[i]);
+                        if done {
+                            m.event("copy-replayed");
+                        } else {
+                            m.transfer(from, to, &chunks[i], false);
+                            if let Some(t) = m.sessions[s].ticket.as_mut() {
+                                t.done[i] = true;
+                            }
+                        }
+                    });
+                    if run == Run::Done {
+                        self.sessions[s].ticket = None;
+                    }
+                    run
+                } else {
+                    if !uids.is_empty() && !self.api_has(cfg, s, to) {
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                    self.run(cfg, s, n, &mut |m, i| {
+                        m.transfer(from, to, &chunks[i], moving)
+                    })
+                };
+                match run {
+                    Run::Failed | Run::Crashed => {
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                    Run::Partial => {
+                        // The committed batches are reported (EXISTS, EXPUNGE), then NO.
+                        self.refresh_after(cfg, s);
+                        self.sync_fill(cfg, s);
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                    Run::Done => {}
+                }
                 self.refresh_after(cfg, s);
                 out.sync = Some(s);
                 out.ok = self.sync_fill(cfg, s);
             }
+            AppendBegin(s, f) => {
+                if !self.upload_free(cfg, s) {
+                    self.event("upload-lane-busy");
+                    out.ok = false;
+                    return self.finish(cfg, out, &before, &gens);
+                }
+                self.event("upload-held");
+                self.sessions[s].uploading = Some(f);
+            }
+            AppendEnd(s) => {
+                let Some(f) = self.sessions[s].uploading.take() else {
+                    out.ok = false;
+                    return self.finish(cfg, out, &before, &gens);
+                };
+                if !self.exists_for(cfg, s, f) || !self.api_has(cfg, s, f) {
+                    out.ok = false;
+                    return self.finish(cfg, out, &before, &gens);
+                }
+                self.new_message(f);
+                self.refresh_after(cfg, s);
+                out.sync = Some(s);
+                out.ok = self.sync_fill(cfg, s);
+            }
+            Bulk => {
+                for _ in 0..Config::BATCH {
+                    self.new_message(0);
+                }
+            }
+            Arm(f) => self.fault = Some((f.countdown(), f)),
             Append(s, f) => {
+                if cfg.backend == Backend::Remote {
+                    if !self.upload_free(cfg, s) {
+                        self.event("upload-lane-busy");
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                    if self.before(cfg, s, false).is_err() || !self.sessions[s].up {
+                        self.drop_session(s);
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                    if self.bye(cfg, s) {
+                        self.event("bye-deleted-folder");
+                        self.drop_session(s);
+                        out.ok = false;
+                        return self.finish(cfg, out, &before, &gens);
+                    }
+                }
                 if !self.exists_for(cfg, s, f) || !self.api_has(cfg, s, f) {
                     out.ok = false;
                     return self.finish(cfg, out, &before, &gens);

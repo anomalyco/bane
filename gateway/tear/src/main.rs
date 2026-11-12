@@ -33,6 +33,10 @@
 //! - [C5] two sessions with the same credential wake on one hint and share the wake cache;
 //!   a commit lands between the cache fill and the second session's use.
 //! - [C6] copy of a message into the selected folder itself (a new UID appears mid-view).
+//! - [C7] up to four sessions hold spooled APPEND literals (`append-begin`) at once against
+//!   the credential (3), inbox (3) and workspace (4) upload lanes and the process pool (8);
+//!   a busy lane answers `NO [LIMIT]` after its 2 s wait (a paused clock here).
+//! - [C8] SMTP: concurrent DATA phases against the DATA lanes (2 per credential and inbox).
 //!
 //! **Crashes, aborts, retries and duplicates**
 //!
@@ -44,6 +48,12 @@
 //!   relative to commits (hint before the change it announces).
 //! - [R4] SMTP: a client retries after a rejected or failed submission; pipelined commands
 //!   after a failed MAIL/RCPT.
+//! - [R5] a mutation commits but its response is lost (503): the command fails, the client
+//!   retries; a COPY retry on the same connection replays its ticket's receipts.
+//! - [R6] a batched command (over 1,000 UIDs) meets a failing batch, a process crash after a
+//!   batch committed, or another writer between batches: committed batches stay and are
+//!   reported, the command answers NO (or nothing, if the process died); a retry completes
+//!   it, replaying COPY batches on the same connection.
 //!
 //! **Lease, lock and staleness expiry; clocks**
 //!
@@ -60,8 +70,10 @@
 //! - [B2] snapshot paging at page size 2: folders with 0, 1, 2, 3 or more entries, deltas
 //!   that end exactly on a page boundary, gone lists and entries paging together.
 //! - [B3] SMTP: exactly 50 recipients then the 51st, caps at limit-1/limit/limit+1 with
-//!   multi-RCPT messages, the 16 MiB DATA bound.
-//! - [B4] not reached here: 2048-row pages, 5000-UID mutate batches, 8 MiB literals and the
+//!   multi-RCPT messages, the DATA size bound.
+//! - [B5] 1,000 and 1,001 UIDs: STORE, COPY, MOVE, UID EXPUNGE and a Remote EXPUNGE run in
+//!   1,000-UID batches inside one command (`--bulk`); 50k folders are in the e2e gate.
+//! - [B4] not reached here: 2048-row pages, 50k-message folders, 8 MiB literals and the
 //!   view byte budget (covered by e2e `large-folder` and unit tests; too slow per step).
 //!
 //! **Revocation and deletion racing in-flight work; permissions**
@@ -246,8 +258,23 @@ fn kind(label: &str) -> &str {
 pub fn walk(seed: u64, len: usize, labels: &[String], cfg: &Config) -> Vec<String> {
     let mut x = seed;
     let mut m = Model::initial(cfg);
-    let mut out = vec![];
+    let mut out: Vec<String> = vec![];
+    let mut failed: Option<String> = None;
     for _ in 0..len {
+        // A client retries a refused or failed command half the time (COPY replay, upload
+        // lanes, refreshes after faults all hinge on the retry).
+        if let Some(label) = failed.take()
+            && splitmix(&mut x) % 2 == 0
+            && parse(&label).is_some_and(|a| m.enabled(cfg, a))
+        {
+            let a = parse(&label).unwrap_or(Act::Deliver);
+            let o = m.step(cfg, a);
+            if !o.ok && a.session().is_some() {
+                failed = Some(label.clone());
+            }
+            out.push(label);
+            continue;
+        }
         let enabled: Vec<(&String, Act)> = labels
             .iter()
             .filter_map(|l| parse(l).filter(|a| m.enabled(cfg, *a)).map(|a| (l, a)))
@@ -274,7 +301,10 @@ pub fn walk(seed: u64, len: usize, labels: &[String], cfg: &Config) -> Vec<Strin
             pick -= w;
         }
         if let Some(a) = parse(label) {
-            m.step(cfg, a);
+            let o = m.step(cfg, a);
+            if !o.ok && a.session().is_some() {
+                failed = Some(label.clone());
+            }
         }
         out.push(label.clone());
     }
@@ -506,13 +536,19 @@ impl Opts {
             c.uid = false;
             c.examine = false;
         }
+        c.uploads = self.has("--uploads");
+        if self.has("--bulk") {
+            c.bulk = true;
+            c.folders = false;
+            c.cap = 2200;
+        }
         if let Some(i) = self.args.iter().position(|a| a == "--sessions") {
             c.sessions = self
                 .args
                 .get(i + 1)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2)
-                .clamp(1, 3);
+                .clamp(1, 4);
         }
         c
     }
@@ -520,7 +556,7 @@ impl Opts {
 
 fn describe(cfg: &Config) -> String {
     format!(
-        "{:?}, {} sessions{}{}{}{}",
+        "{:?}, {} sessions{}{}{}{}{}{}",
         cfg.backend,
         cfg.sessions,
         if cfg.shared_kid {
@@ -539,6 +575,8 @@ fn describe(cfg: &Config) -> String {
         } else {
             ""
         },
+        if cfg.uploads { ", split APPEND" } else { "" },
+        if cfg.bulk { ", 1000-UID bulk" } else { "" },
     )
 }
 
@@ -640,6 +678,135 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
             "A copy 1 Archive",
         ],
     ),
+    // 1,001-UID STORE, COPY and MOVE run in batches inside one command (no NO [LIMIT]).
+    (
+        "remote-bulk",
+        &[
+            "bulk",
+            "deliver",
+            "hint",
+            "A noop",
+            "A store +seen loud 1:*",
+            "A copy 1:* Archive",
+            "A move 1:* Archive",
+            "A select Archive",
+            "A noop",
+        ],
+    ),
+    // The second batch of a COPY fails: the first stays, NO; the retry replays batch one
+    // (its receipt) and copies batch two, so Archive ends with exactly one copy of each.
+    (
+        "remote-bulk",
+        &[
+            "bulk",
+            "deliver",
+            "hint",
+            "A noop",
+            "fail-batch",
+            "A copy 1:* Archive",
+            "A copy 1:* Archive",
+            "A select Archive",
+        ],
+    ),
+    // A STORE stopped after its first batch reports what changed, answers NO; the retry
+    // completes it.
+    (
+        "remote-bulk",
+        &[
+            "bulk",
+            "deliver",
+            "hint",
+            "A noop",
+            "fail-batch",
+            "A store +seen loud 1:*",
+            "A store +seen loud 1:*",
+            "A noop",
+        ],
+    ),
+    // Another writer expunges a message between two EXPUNGE batches ("empty Trash").
+    (
+        "remote-bulk",
+        &[
+            "bulk",
+            "deliver",
+            "hint",
+            "A noop",
+            "A store +deleted silent 1:*",
+            "race-batch",
+            "A expunge",
+            "A noop",
+        ],
+    ),
+    // The process dies after a COPY's last batch: no answer; a retry on a new connection has
+    // a new ticket and copies again (at-least-once across a crash).
+    (
+        "remote-bulk",
+        &[
+            "bulk",
+            "deliver",
+            "hint",
+            "A noop",
+            "crash-batch",
+            "A copy 1:* Archive",
+            "A reconnect",
+            "A copy 1:* Archive",
+            "A select Archive",
+        ],
+    ),
+    // A COPY whose response was lost is retried with the same ticket: no second copy.
+    (
+        "remote",
+        &[
+            "deliver",
+            "hint",
+            "A noop",
+            "lose-response",
+            "A copy 1 Archive",
+            "A copy 1 Archive",
+            "A noop",
+        ],
+    ),
+    // Three spooled APPENDs fill the credential and inbox upload lanes; the fourth gets
+    // NO [LIMIT] until one completes.
+    (
+        "remote-uploads",
+        &[
+            "A append-begin INBOX",
+            "B append-begin INBOX",
+            "C append-begin INBOX",
+            "D append INBOX",
+            "A append-end",
+            "D append INBOX",
+        ],
+    ),
+    // Two sessions of one credential in DATA fill its lane; the third gets 452.
+    (
+        "smtp-remote",
+        &[
+            "A ehlo",
+            "A auth",
+            "A pipeline",
+            "B ehlo",
+            "B auth",
+            "B pipeline",
+            "C ehlo",
+            "C auth",
+            "C pipeline",
+            "A body own",
+            "C pipeline",
+        ],
+    ),
+    // A STORE on a folder another session deleted after this snapshot: the API refuses it.
+    (
+        "remote",
+        &[
+            "B create Work",
+            "B append Work",
+            "A select Work",
+            "B delete Work",
+            "A store +seen loud 1",
+        ],
+    ),
     // A clock stepping back across midnight reopened the SMTP caps (Memory sink).
     (
         "smtp",
@@ -661,6 +828,26 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The configurations regression witnesses name.
+pub fn named(kind: &str) -> Config {
+    let mut cfg = if kind == "memory" {
+        Config::memory()
+    } else {
+        Config::remote()
+    };
+    cfg.shared_kid = matches!(kind, "remote-shared" | "remote-uploads");
+    if kind == "remote-uploads" {
+        cfg.uploads = true;
+        cfg.sessions = 4;
+    }
+    if kind == "remote-bulk" {
+        cfg.bulk = true;
+        cfg.folders = false;
+        cfg.cap = 2200;
+    }
+    cfg
+}
+
 fn regressions() -> R<Value> {
     let start = Instant::now();
     let mut failed = vec![];
@@ -669,15 +856,8 @@ fn regressions() -> R<Value> {
         let actions: Vec<String> = actions.iter().map(|a| (*a).to_owned()).collect();
         let r = match *kind {
             "smtp" => smtp::replay(false, &actions)?,
-            _ => {
-                let mut cfg = if *kind == "memory" {
-                    Config::memory()
-                } else {
-                    Config::remote()
-                };
-                cfg.shared_kid = *kind == "remote-shared";
-                replay(cfg, &actions)?
-            }
+            "smtp-remote" => smtp::replay(true, &actions)?,
+            _ => replay(named(kind), &actions)?,
         };
         for (k, v) in r["coverage"].as_object().into_iter().flatten() {
             *coverage.entry(k.clone()).or_default() += v.as_u64().unwrap_or(0);
@@ -718,6 +898,8 @@ fn ci(seed: u64) -> R<Value> {
     split.split = true;
     split.sessions = 3;
     runs.push(random(split, 400, 30, seed + 4, None)?);
+    runs.push(random(named("remote-uploads"), 400, 30, seed + 7, None)?);
+    runs.push(random(named("remote-bulk"), 40, 25, seed + 8, None)?);
     runs.push(smtp::run(false, 2000, 30, seed + 5, None)?);
     runs.push(smtp::run(true, 400, 30, seed + 6, None)?);
     for t in [
@@ -799,8 +981,25 @@ fn checklist(c: &BTreeMap<String, u64>) -> Value {
         ),
         item("C6 copy into the selected folder", &["copy-into-selected"]),
         item(
+            "C7 upload lanes: credential, inbox, workspace",
+            &["upload-held", "upload-lane-busy"]
+        ),
+        item("C8 SMTP DATA lanes", &["smtp:data-lane-busy"]),
+        item(
             "R1 dropped connection, reconnect",
             &["drop-before-command", "action:reconnect"]
+        ),
+        item(
+            "R5 lost response, idempotent COPY replay",
+            &["response-lost", "copy-replayed"]
+        ),
+        item(
+            "R6 failure, crash and a concurrent writer between batches",
+            &[
+                "partial-applied",
+                "crash-mid-command",
+                "race-between-batches"
+            ]
         ),
         item(
             "R2 refresh fails after a commit",
@@ -826,6 +1025,10 @@ fn checklist(c: &BTreeMap<String, u64>) -> Value {
         ),
         item("B1 empty sequence and UID sets", &["empty-set"]),
         item(
+            "B5 over 1,000 UIDs: batches in one command",
+            &["batched", "batched-done"]
+        ),
+        item(
             "B2 snapshot paging and deltas",
             &["api:paged-snapshot", "api:delta-snapshot"]
         ),
@@ -834,7 +1037,7 @@ fn checklist(c: &BTreeMap<String, u64>) -> Value {
             &["smtp:452", "smtp:451", "smtp:552"]
         ),
         not(
-            "B4 2048-row pages, 5000-UID batches, 8 MiB literals",
+            "B4 2048-row pages, 50k-message folders, 8 MiB literals",
             "too slow per step; e2e large-folder and unit tests"
         ),
         item(
