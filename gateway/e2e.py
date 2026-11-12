@@ -733,7 +733,7 @@ set certificate_file="{tmp / "cert.pem"}"
 
 def memory(tmp):
     with (
-        gateway(tmp, MAILGW_LOGIN_LIMIT="300") as (p, pid),
+        gateway(tmp, MAILGW_LOGIN_LIMIT="300", MAILGW_TENANT_SESSIONS="300") as (p, pid),
         contextlib.ExitStack() as stack,
     ):
         rss = lambda: int(run(["ps", "-o", "rss=", "-p", str(pid)]).strip())
@@ -786,6 +786,13 @@ def account_fairness(tmp):
             assert c.mail(addr)[0]==250 and c.rcpt('recipient@example.invalid')[0]==250
             return c.docmd('DATA')[0]
         assert [begin(i) for i in [0,1,1,2]]==[354,354,452,354]
+    # The same sponsor's workspaces share its open sessions on a task; the other sponsor logs in.
+    with gateway(tmp, MAILGW_TENANT_SESSIONS="2") as (ports,_),contextlib.ExitStack() as stack:
+        def auth(i):
+            wid=f'fair{i}';c=smtplib.SMTP_SSL('localhost',ports['SMTPS'],context=CTX,timeout=5)
+            stack.callback(c.close);c.ehlo()
+            return c.docmd('AUTH','PLAIN '+base64.b64encode(f'\0{wid}@example.invalid\0{PASS+wid}'.encode()).decode())[0]
+        assert [auth(i) for i in [0,1,1,0,2]]==[235,235,421,421,235]
 
 
 def large_folder(tmp):
