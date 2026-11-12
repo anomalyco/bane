@@ -70,8 +70,9 @@ BEGIN
   SELECT CASE WHEN (NEW.feedback_topic_arn IS NULL AND kind='shared') OR EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=NEW.feedback_topic_arn)
          THEN 'send' ELSE 'byo_send' END INTO m FROM provider_connections WHERE workspace_id=NEW.workspace_id ORDER BY kind LIMIT 1;
   IF d=0 OR m IS NULL THEN RETURN NULL; END IF;
+  -- Month arithmetic on UTC wall-clock timestamps: timestamptz + interval '1 month' would follow the session TimeZone.
   h := CASE WHEN date_trunc('month',NEW.created_at,'UTC') < date_trunc('month',now(),'UTC')
-         THEN date_trunc('month',NEW.created_at,'UTC') + interval '1 month' - interval '1 hour'
+         THEN (date_trunc('month',NEW.created_at AT TIME ZONE 'UTC') + interval '1 month' - interval '1 hour') AT TIME ZONE 'UTC'
          ELSE date_trunc('hour',now(),'UTC') END;
   INSERT INTO billing_usage_hourly AS u VALUES (NEW.workspace_id,h,m,1,d,0)
     ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity;
@@ -79,6 +80,7 @@ BEGIN
 END $$;
 
 -- 4. (Review 9) billing_post: a replay returns applied=false before the promo check, so replaying a promo draw never raises.
+--    Paid changes also move the credit lots (7) under the same account lock.
 CREATE OR REPLACE FUNCTION billing_post(wid text, k text, src text, paid bigint, promo bigint, det jsonb, who text) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE a billing_accounts; eid bigint;
@@ -100,6 +102,7 @@ BEGIN
       ELSE recharge_month_total_uc END,
     recharge_month = CASE WHEN det->>'recharge'='true' THEN (date_trunc('month',now() AT TIME ZONE 'UTC'))::date ELSE recharge_month END
   WHERE workspace_id=wid;
+  IF paid<>0 THEN PERFORM billing_lots(wid, k, src, paid, a.balance_uc, coalesce(det,'{}')); END IF;   -- 7: credit lots
   IF credit THEN
     INSERT INTO jobs(id,type,workspace_id,payload) VALUES ('billing.restored:'||wid,'billing.restored',wid,'{}')
       ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL
@@ -208,4 +211,104 @@ BEGIN
     END IF;
   END LOOP;
   RETURN jsonb_build_object('receiveHoldSoon', soon, 'receiveHeld', held, 'writtenOff', written);
+END $$;
+
+-- 7. Prepaid credit expires 12 months after purchase (Ryan, 2026-11-12). Paid credit is held in lots: a top-up opens one
+--    (expires_at = purchase + 12 months, UTC). Paid debits (usage, refunds, disputes, debit adjustments) take the lot
+--    that expires first (the oldest top-up first); promotional credit has no lots and is still spent first by the
+--    settler. What a debit can't take from lots becomes debt, and a credit pays debt before it fills a lot, so the
+--    unexpired lots always hold exactly greatest(balance_uc, 0). A lot's remaining credit leaves the balance through one
+--    'expire' ledger row keyed per top-up (the hourly settler, billing_expire_lot), and the owners get one
+--    'credit_expiring' notice 30 days before. Unused credit is otherwise not refundable: the operator refund records a
+--    basis (billing error, account closure, legal), and a refund or dispute takes the paying top-up's lot first.
+ALTER TABLE billing_ledger DROP CONSTRAINT billing_ledger_kind_check,
+  ADD CONSTRAINT billing_ledger_kind_check CHECK (kind IN ('topup','usage','grant','refund_hold','refund_release',
+    'dispute','dispute_reversal','write_off','adjustment','expire')) NOT VALID;
+ALTER TABLE billing_ledger VALIDATE CONSTRAINT billing_ledger_kind_check;
+ALTER TABLE billing_notices DROP CONSTRAINT billing_notices_kind_check,
+  ADD CONSTRAINT billing_notices_kind_check CHECK (kind IN ('low_balance','sends_paused','receive_hold_soon','receive_held','recharge_failed','credit_expiring')) NOT VALID;
+ALTER TABLE billing_notices VALIDATE CONSTRAINT billing_notices_kind_check;
+
+CREATE TABLE billing_credit_lots (
+  workspace_id text NOT NULL,
+  source_id text NOT NULL,                 -- the ledger source that opened it: 'attempt:<id>' for a top-up
+  kind text NOT NULL,                      -- the ledger kind that opened it
+  amount_uc bigint NOT NULL CHECK (amount_uc > 0),
+  remaining_uc bigint NOT NULL CHECK (remaining_uc >= 0 AND remaining_uc <= amount_uc),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz,                  -- NULL: never (an operator's paid adjustment)
+  expired_at timestamptz, expired_uc bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY (workspace_id, source_id));
+CREATE INDEX billing_credit_lots_spend ON billing_credit_lots (workspace_id, expires_at NULLS LAST, created_at, source_id) WHERE remaining_uc > 0;
+CREATE INDEX billing_credit_lots_due ON billing_credit_lots (expires_at) WHERE remaining_uc > 0 AND expires_at IS NOT NULL;
+
+-- Moves the lots for one paid ledger change. Runs inside billing_post, which holds the account row (lock order:
+-- billing_accounts, then lots). before = balance_uc before the change.
+CREATE FUNCTION billing_lots(wid text, k text, src text, paid bigint, before bigint, det jsonb) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE rest bigint; need bigint; take bigint; l record; target text := CASE WHEN det ? 'attemptId' THEN 'attempt:'||(det->>'attemptId') END;
+  year timestamptz := (now() AT TIME ZONE 'UTC' + interval '12 months') AT TIME ZONE 'UTC';
+BEGIN
+  IF paid > 0 THEN
+    rest := paid - least(paid, greatest(0, -before));          -- debt first
+    IF k = 'topup' THEN
+      INSERT INTO billing_credit_lots(workspace_id,source_id,kind,amount_uc,remaining_uc,expires_at) VALUES (wid,src,k,paid,rest,year)
+        ON CONFLICT DO NOTHING;
+      RETURN;
+    END IF;
+    IF rest <= 0 THEN RETURN; END IF;
+    IF k IN ('refund_release','dispute_reversal','usage') THEN
+      -- Money coming back to credit it came from: the paying top-up first, then the most recently spent lots.
+      FOR l IN SELECT source_id, amount_uc - remaining_uc AS room FROM billing_credit_lots
+          WHERE workspace_id=wid AND expired_at IS NULL AND remaining_uc < amount_uc
+          ORDER BY source_id IS DISTINCT FROM target, expires_at DESC NULLS FIRST, created_at DESC, source_id DESC FOR UPDATE LOOP
+        EXIT WHEN rest = 0;
+        take := least(rest, l.room);
+        UPDATE billing_credit_lots SET remaining_uc=remaining_uc+take WHERE workspace_id=wid AND source_id=l.source_id;
+        rest := rest - take;
+      END LOOP;
+    END IF;
+    IF rest > 0 THEN   -- new money (an operator's paid adjustment never expires) or nothing left to restore into
+      INSERT INTO billing_credit_lots(workspace_id,source_id,kind,amount_uc,remaining_uc,expires_at)
+        VALUES (wid,k||':'||src,k,rest,rest,CASE WHEN k IN ('adjustment','write_off') THEN NULL ELSE year END)
+        ON CONFLICT (workspace_id,source_id) DO UPDATE SET amount_uc=billing_credit_lots.amount_uc+excluded.amount_uc,
+          remaining_uc=billing_credit_lots.remaining_uc+excluded.remaining_uc;
+    END IF;
+    RETURN;
+  END IF;
+  -- A debit: an expiry takes its own lot; a refund or dispute its top-up's lot first; then the lot that expires first.
+  need := -paid;
+  IF k = 'expire' THEN target := det->>'lot'; END IF;
+  FOR l IN SELECT source_id, remaining_uc FROM billing_credit_lots WHERE workspace_id=wid AND expired_at IS NULL AND remaining_uc > 0
+      AND (k <> 'expire' OR source_id = target)
+      ORDER BY source_id IS DISTINCT FROM target, expires_at NULLS LAST, created_at, source_id FOR UPDATE LOOP
+    EXIT WHEN need = 0;
+    take := least(need, l.remaining_uc);
+    UPDATE billing_credit_lots SET remaining_uc=remaining_uc-take,
+        expired_uc=expired_uc+CASE WHEN k='expire' THEN take ELSE 0 END, expired_at=CASE WHEN k='expire' THEN now() ELSE expired_at END
+      WHERE workspace_id=wid AND source_id=l.source_id;
+    need := need - take;
+  END LOOP;
+END $$;
+
+-- Existing paid balances (test and dev data only: billing has not launched) become one lot each, expiring in a year.
+INSERT INTO billing_credit_lots(workspace_id,source_id,kind,amount_uc,remaining_uc,expires_at)
+SELECT workspace_id,'migrated:'||workspace_id,'topup',balance_uc,balance_uc,(now() AT TIME ZONE 'UTC' + interval '12 months') AT TIME ZONE 'UTC'
+FROM billing_accounts WHERE balance_uc > 0 ORDER BY workspace_id;
+
+-- Expires one lot: settles the workspace up to cutoff first (usage before the expiry spends this credit), then posts
+-- the lot's remaining credit as one 'expire' row (idempotent: expire:<wid>:<lot>). Busy accounts wait for the next run.
+CREATE FUNCTION billing_expire_lot(wid text, lot text, cutoff timestamptz) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE s jsonb; l billing_credit_lots; r jsonb;
+BEGIN
+  s := billing_settle(wid, cutoff);
+  IF (s->>'busy')::boolean THEN RETURN jsonb_build_object('busy', true); END IF;
+  SELECT * INTO l FROM billing_credit_lots WHERE workspace_id=wid AND source_id=lot FOR UPDATE;
+  IF NOT FOUND OR l.expired_at IS NOT NULL OR l.expires_at IS NULL OR l.expires_at > now() THEN RETURN jsonb_build_object('expired', false); END IF;
+  IF l.remaining_uc = 0 THEN
+    UPDATE billing_credit_lots SET expired_at=now() WHERE workspace_id=wid AND source_id=lot;
+    RETURN jsonb_build_object('expired', true, 'expiredUc', '0');
+  END IF;
+  r := billing_post(wid, 'expire', 'expire:'||wid||':'||lot, -l.remaining_uc, 0,
+    jsonb_build_object('lot', lot, 'expiresAt', l.expires_at, 'amountUc', l.amount_uc::text), 'system');
+  RETURN jsonb_build_object('expired', (r->>'applied')::boolean, 'expiredUc', l.remaining_uc::text);
 END $$;

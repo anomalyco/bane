@@ -4638,6 +4638,50 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual(after, { balance_uc: '0', unpaid: true }, 'Written off again; unpaid_since (and a receive hold) stays until a top-up.');
     });
   });
+  test('prepaid credit: the oldest top-up is spent first, one notice 30 days before, and it expires once its hour has closed', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { creditExpiry } = await import('./src/billing/cron.js');
+      const wid = unique('billing-lots'), usd = (n: number) => BigInt(Math.round(n * 100)) * 1_000_000n;
+      const post = (kind: string, src: string, paid: bigint) => db.query(`SELECT billing_post($1,$2,$3,$4,0,'{}','system') AS r`, [wid, kind, src, paid.toString()]);
+      const lots = async () => Object.fromEntries((await db.query(`SELECT source_id, remaining_uc::text FROM billing_credit_lots WHERE workspace_id=$1 ORDER BY source_id`, [wid])).rows.map(r => [r.source_id, r.remaining_uc]));
+      const invariant = async () => { const r = (await db.query(`SELECT greatest(a.balance_uc,0)::text AS balance, (SELECT coalesce(sum(remaining_uc),0) FROM billing_credit_lots l WHERE l.workspace_id=a.workspace_id AND l.expired_at IS NULL)::text AS lots FROM billing_accounts a WHERE workspace_id=$1`, [wid])).rows[0]; assert.equal(r.lots, r.balance, 'Unexpired lots hold exactly the positive paid balance.'); };
+      // Two top-ups: $10 bought almost a year ago (expires in 20 days) and $20 today (expires in 12 months).
+      await post('topup', 'attempt:older', usd(10));
+      await db.query(`UPDATE billing_credit_lots SET created_at=now()-interval '345 days', expires_at=now()+interval '20 days' WHERE workspace_id=$1 AND source_id='attempt:older'`, [wid]);
+      await post('topup', 'attempt:newer', usd(20));
+      assert.equal((await db.query(`SELECT (expires_at AT TIME ZONE 'UTC')::date = ((now() AT TIME ZONE 'UTC') + interval '12 months')::date AS year FROM billing_credit_lots WHERE workspace_id=$1 AND source_id='attempt:newer'`, [wid])).rows[0].year, true);
+      // Usage spends the oldest credit first, and across top-ups once it runs out.
+      await post('usage', 'usage:fixture-1', -usd(4));
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(20)), 'attempt:older': String(usd(6)) });
+      // One notice, 30 days before the older top-up's remaining credit expires: running again sends nothing more.
+      for (let i = 0; i < 2; i++) await creditExpiry(runtime);
+      const notices = (await db.query(`SELECT kind, status, data FROM billing_notices WHERE workspace_id=$1`, [wid])).rows;
+      assert.deepEqual(notices.map(n => [n.kind, n.status, n.data.lot, n.data.remainingUc]), [['credit_expiring', 'pending', 'attempt:older', String(usd(6))]]);
+      await post('usage', 'usage:fixture-2', -usd(8));
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(18)), 'attempt:older': '0' });
+      // A usage refund goes back to the credit spent last: the newer top-up's $2, then $1 of the older one.
+      await post('usage', 'usage:fixture-3', usd(3));
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(20)), 'attempt:older': String(usd(1)) });
+      await invariant();
+      // Expiry: the older lot expired 30 minutes into the previous hour. Not before that hour has closed...
+      await db.query(`UPDATE billing_credit_lots SET expires_at=date_trunc('hour', now(), 'UTC') - interval '30 minutes' WHERE workspace_id=$1 AND source_id='attempt:older'`, [wid]);
+      // ...and usage from before the expiry (5 paid sends in that hour) is settled first, so it spends the expiring credit.
+      await db.query(`UPDATE billing_accounts SET free_emails_used=3000, free_month=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date WHERE workspace_id=$1`, [wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 5)`, [wid]);
+      const expiries = async () => (await db.query(`SELECT count(*)::int AS n FROM billing_ledger WHERE workspace_id=$1 AND kind='expire'`, [wid])).rows[0].n;
+      const [earlier, cutoff] = (await db.query(`SELECT date_trunc('hour', now(), 'UTC') - interval '1 hour' AS e, date_trunc('hour', now(), 'UTC') AS c`)).rows.map(r => [r.e.toISOString(), r.c.toISOString()])[0]!;
+      await creditExpiry(runtime, earlier);
+      assert.deepEqual([await expiries(), (await lots())['attempt:older']], [0, String(usd(1))], 'Not before the expiry hour has closed.');
+      await creditExpiry(runtime, cutoff);
+      await creditExpiry(runtime, cutoff);
+      assert.equal(await expiries(), 1, 'Once per top-up.');
+      const rows = (await db.query(`SELECT kind, paid_uc::text, source_id FROM billing_ledger WHERE workspace_id=$1 AND kind IN ('usage','expire') ORDER BY id DESC LIMIT 2`, [wid])).rows;
+      assert.deepEqual(rows.map(r => [r.kind, r.paid_uc, r.source_id]), [['expire', String(-(usd(1) - 100_000n)), `expire:${wid}:attempt:older`], ['usage', '-100000', rows[1].source_id]]);
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(20)), 'attempt:older': '0' });
+      assert.equal((await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].b, String(usd(20)));
+      await invariant();
+    });
+  });
   test('244 removed the per-inbox IMAP charge; password revocation still notifies open sessions', async t => {
     const db = await fixtureDatabase(t);
     const gone = (await db.query(`SELECT to_regprocedure('inbox_protocol_daily_usage(date)') AS f, to_regclass('inbox_protocol_periods') AS t`)).rows[0];
