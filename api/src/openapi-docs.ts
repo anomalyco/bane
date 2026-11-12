@@ -128,6 +128,8 @@ export function createOpenApiDocument(app: App) {
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {
     const operation = pathItem[method];
     if (!operation?.operationId) continue;
+    // Support routes are internal: in the contract and the SDK for Bane's support platform, out of customer docs.
+    if (/^\/v1\/support\//.test(path)) operation['x-internal'] = true;
     operation['x-codeSamples'] = [
       { lang: 'TypeScript', label: 'TypeScript SDK', source: sdkSample(document, path, method, pathItem, operation) },
       { lang: 'Shell', label: 'cURL', source: curlSample(document, path, method, pathItem, operation) },
@@ -182,8 +184,10 @@ function quickstartMarkdown() {
   return `## Quickstart\n\n${quickstart.map((step, index) => `${index + 1}. **${step.title}.** ${step.text}${step.code ? `\n\n   \`\`\`sh\n${step.code.split('\n').map(line => `   ${line}`).join('\n')}\n   \`\`\`` : ''}`).join('\n')}\n\n`;
 }
 
+/** What customers read: everything but internal operations (x-internal). */
+const publicEntries = (document: Json) => operationEntries(document).filter(entry => !entry.operation['x-internal']);
 export function createMarkdownDocs(document: Json, operationId?: string): string | null {
-  const entries = operationEntries(document);
+  const entries = publicEntries(document);
   const selected = operationId ? entries.filter(entry => entry.operation.operationId === operationId) : entries;
   if (operationId && !selected.length) return null;
   const intro = `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`@banemx/sdk\`\n\n`;
@@ -194,6 +198,6 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
 }
 
 export function createLlmsText(document: Json): string {
-  const entries = grouped(document, operationEntries(document)).flatMap(group => group.entries);
+  const entries = grouped(document, publicEntries(document)).flatMap(group => group.entries);
   return `# Bane\n\nBane is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/@banemx/sdk\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

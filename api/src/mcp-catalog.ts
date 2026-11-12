@@ -271,7 +271,8 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
   const operations = new Map<string, McpOperation>();
   for (const [path, item] of Object.entries(spec.paths)) {
     if (!/^\/v1\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\})(?:\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\}))*$/.test(path)) continue;
-    if (/^\/v1\/(?:auth|dashboard|events)(?:\/|$)/.test(path)) continue;
+    // Support and operator routes are internal (Bane staff and support grants only): never an MCP tool.
+    if (/^\/v1\/(?:auth|dashboard|events|support|operator)(?:\/|$)/.test(path)) continue;
     for (const [method, operation] of Object.entries(item as ObjectValue)) {
       if (!METHODS.has(method) || !object(operation)) continue;
       const name = operation.operationId;

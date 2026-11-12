@@ -53,6 +53,16 @@ const SKIP: Partial<Record<Op,string>> = destructive ? {
   receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
 } : safeModeSkips;
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
+// The audit trail's customer view and the support integration: a Google dashboard session, or a support grant minted by
+// an operator. The isolated acceptance suite covers them, including the 403 every customer credential gets.
+const supportInternal = 'Internal: needs a support grant minted by an operator; covered by isolated acceptance.';
+Object.assign(SKIP, {
+  listActivity: 'Google dashboard owners and admins only; covered by isolated acceptance.',
+  contactSupport: 'Google dashboard only; creates a support handoff; covered by isolated acceptance.',
+  getSupportContext: supportInternal, listSupportWorkspaces: supportInternal, listSupportDomains: supportInternal, listSupportEmails: supportInternal, getSupportEmail: supportInternal,
+  listSupportEvents: supportInternal, listSupportWebhookDeliveries: supportInternal, getSupportStanding: supportInternal, getSupportBilling: supportInternal, listSupportAudit: supportInternal,
+  getSupportRequest: supportInternal,
+});
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
 // The receiving MVP (routing, rituals, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is

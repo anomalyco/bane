@@ -153,6 +153,12 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     if (count < RETENTION_BATCH) break;
   }
   await drain('agent_tokens', batch(sql`agent_tokens`, sql`expires_at < ${cutoff}`));
+  // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier.
+  await drain('audit_events', () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE retain_until <= now() ORDER BY retain_until LIMIT ${RETENTION_BATCH}) RETURNING 1)
+    SELECT count(*)::int AS n FROM gone`);
+  // Support grants live two hours; their trail is in audit_events. Handoffs expire after a week.
+  await drain('support_grants', batch(sql`support_grants`, sql`expires_at < ${cutoff}`));
+  await drain('support_handoffs', batch(sql`support_handoffs`, sql`expires_at < ${cutoff}`));
   await drain('audience_operation_plans', batch(sql`audience_operation_plans`, sql`expires_at < now() - interval '1 day'`));
   await drain('sending_email_events', batch(sql`sending_email_events`, sql`created_at < ${cutoff}`));
   // An email and its attachment links leave in the same statement, so no link can outlive its email.
