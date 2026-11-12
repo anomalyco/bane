@@ -861,7 +861,13 @@ impl MailStore for Store {
             .api
             .call(json!({"op":"body","handle":h,"kid":self.principal.kid}))
             // 509: the API's fair-use download cap for this inbox (migration 246).
-            .map_err(|s| if s == 509 { store::Error::DownloadLimit } else { store::Error::Unavailable })?;
+            .map_err(|s| {
+                if s == 509 {
+                    store::Error::DownloadLimit
+                } else {
+                    store::Error::Unavailable
+                }
+            })?;
         if raw.len() != e.size {
             return Err(store::Error::Unavailable);
         }
