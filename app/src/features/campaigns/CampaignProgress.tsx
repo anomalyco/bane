@@ -98,7 +98,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   }
   const pause = useApiMutation((api, id: string) => api.campaigns.pause(id), 'Sending paused', false, false)
   const resume = useApiMutation((api, id: string) => api.campaigns.resume(id), 'Sending resumed', false, false)
-  const update = useApiMutation((api, input: CampaignPacingInput) => api.campaigns.setPacing(campaign.id, input), 'Pacing updated', false, false)
+  const update = useApiMutation((api, input: CampaignPacingInput) => api.campaigns.setPacing(campaign.id, input), 'Pacing updated', false, false, campaign.id)
   const busy = pause.isPending || resume.isPending || update.isPending
   async function run(action: () => Promise<Campaign>) {
     setError('')

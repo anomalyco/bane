@@ -88,14 +88,14 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
   const [busy, setBusy] = useState(false)
   const [routing, setRouting] = useState(false)
   // Single flight: attaching reads the saved version and writes against it, so a second click would conflict with the first.
-  const attach = useSingleFlight(async (change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) => {
+  const attach = useSingleFlight('rituals.attachments', async (change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) => {
     setBusy(true)
     try {
       const current = await request<RitualConfig>('/v1/rituals')
       await request('/v1/rituals/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
       toast(done, 'success'); setRitual(''); await overview.refetch()
     } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
-  })
+  }, address.id)
   const attached = entry?.rituals ?? []
   const available = (overview.data?.rituals ?? []).filter(r => !attached.includes(r.key))
   const elsewhere = (entry?.to ?? []).filter(t => !(t.type === 'inbox' && t.id === address.id))
@@ -137,7 +137,7 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
 /** Wildcard patterns that also deliver here, such as reply+*@acme.com. */
 function PatternsField({ address, inputRef }: { address: InboundAddress; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const [draft, setDraft] = useState('')
-  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Patterns saved')
+  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Patterns saved', false, true, address.id)
   const rules = save.data?.rules ?? address.rules
   const domain = address.address.split('@')[1]
   async function add() {
@@ -168,8 +168,8 @@ export function InboundAddressDetailPage() {
   const navigate = useNavigate()
   const { canAdminister } = useWorkspaceAccess()
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
-  const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved')
-  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted')
+  const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved', false, true, id)
+  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted', false, true, id)
   const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const patternInput = useRef<HTMLInputElement>(null)

@@ -48,8 +48,8 @@ function DomainCardLine({ domain, receiving }: { domain: Domain; receiving?: Mai
 /** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
 /** The page reads the receiving domain before it shows (so this section arrives at its final height) and passes it in. */
 function ReceivingSettings({ domainId, receiving }: { domainId: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown } }) {
-  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')
-  const update = useApiMutation((_api, catchAll: MailboxDomain['catchAll']) => request<MailboxDomain>(`/v1/inbound/domains/${encodeURIComponent(domainId)}`, { method: 'PATCH', body: { catchAll } }), 'Catch-all saved')
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
+  const update = useApiMutation((_api, catchAll: MailboxDomain['catchAll']) => request<MailboxDomain>(`/v1/inbound/domains/${encodeURIComponent(domainId)}`, { method: 'PATCH', body: { catchAll } }), 'Catch-all saved', false, true, domainId)
   const state = update.data ?? receiving.data
   const on = !!state && !['off', 'disabled'].includes(state.status)
   return <section className="section stack" aria-labelledby="domain-receiving">
@@ -153,7 +153,7 @@ export function DomainDetailPage() {
     const updated = await api.domains.chooseReceivingHost!(id, input)
     client.setQueryData(['bane', api.mode, 'domain', id], updated)
     return updated
-  })
+  }, undefined, false, true, id)
   async function chooseHost(host: string | null) {
     choose.reset()
     try { await choose.mutateAsync({ host }) }
@@ -219,9 +219,9 @@ export function DomainDetailPage() {
 function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
   const { multiTenant } = useWorkspaceAccess()
   const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
-  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started')
-  const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off')
-  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')
+  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started', false, true, domainId)
+  const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off', false, true, domainId)
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
   const [conflict, setConflict] = useState<string | null>(null)
   const [disableOpen, setDisableOpen] = useState(false)
   async function start() {

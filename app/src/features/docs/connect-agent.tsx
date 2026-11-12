@@ -72,7 +72,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const chosen = inbox || active[0]?.id || ''
   const label = (box: Inbox) => box.name ? `${box.name} · ${box.address}` : box.address
   // Single flight: each call makes a new idempotency key, so a second click before the first answers would make a second key.
-  const create = useSingleFlight(async () => {
+  const create = useSingleFlight('inbox-connections.create', async () => {
     if (!chosen) return
     setBusy(true); setError('')
     try {
@@ -82,7 +82,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
       setResult({ ...made, key: bearer, client })
     } catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
-  })
+  }, chosen)
   const selected = mcpAccess.find(option => option.value === access)!
   // The API names the key after the inbox (its name, or else its address) and the client it was made for.
   const box = active.find(item => item.id === chosen)

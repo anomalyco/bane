@@ -31,7 +31,7 @@ export function useStartFromTemplate() {
   const { regionId } = useRegion()
   // Hosted campaigns follow their From domain's region, so they need no selected region.
   const { multiTenant } = useWorkspaceAccess()
-  const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }))
+  const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }), undefined, false, true, regionId)
   async function start(template: {id: string; name: string}) {
     try { const campaign = await mutation.mutateAsync(template); navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`) }
     catch (error) { toast(errorMessage(error), 'error') }
@@ -153,16 +153,16 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     finally { savingRef.current = false; setSaving(false) }
   }
   // Publish and Archive run one at a time per action: a second press before the first answers would send the same revision again.
-  const publish = useSingleFlight(async () => {
+  const publish = useSingleFlight('templates.publish', async () => {
     const current = dirty || error ? await save() : template
     if (!current) return
     try { const updated = await api.templates.publish(current.id, current.revision); setTemplate(updated); remember(updated); await refreshLists(); toast('Template published. Use it to start a campaign.', 'success') }
     catch (cause) { toast(errorMessage(cause), 'error') }
-  })
-  const archive = useSingleFlight(async () => {
+  }, template.id)
+  const archive = useSingleFlight('templates.archive', async () => {
     try { const updated = await api.templates.archive(template.id, !archived); setTemplate(updated); remember(updated); await refreshLists(); toast(archived ? 'Template restored' : 'Template archived', 'success') }
     catch (cause) { toast(errorMessage(cause), 'error') }
-  })
+  }, template.id)
   const published = template.publishedRevision !== null && !archived
   const upToDate = template.publishedRevision === template.revision && !dirty
   return <div className="campaign-compose-page template-compose-page">

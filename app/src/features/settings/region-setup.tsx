@@ -93,7 +93,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   const discovery = useRegionDiscovery(entry, {auto: autoDiscover || inspected || explicitInspection})
   const [confirmOpen, setConfirmOpen] = useState(false)
   const refresh = useGuardedMutation({
-    mutationFn: () => api.regions.discover(entry.region, {refresh: true}),
+    mutationFn: () => api.regions.discover(entry.region, {refresh: true}), target: entry.region,
     onSuccess: report => {
       client.setQueryData(regionDiscoveryKey(api, entry.region), report)
       setExplicitInspection(true)
@@ -101,7 +101,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
     },
   })
   const provision = useGuardedMutation({
-    mutationFn: () => api.regions.provision(entry.region),
+    mutationFn: () => api.regions.provision(entry.region), target: entry.region,
     onSuccess: receipt => {
       setExplicitInspection(true)
       client.setQueryData<RegionCatalog>(regionCatalogKey(api), old => old ? {...old, data: old.data.map(row => row.region === entry.region ? {...row, provisionJobId: receipt.jobId, provisionStatus: receipt.status, provisionError: null} : row)} : old)
@@ -174,7 +174,7 @@ function EmailValidation({report}: {report: SesDiscovery}) {
   const {canManage} = useRegionAccess()
   const [pending, setPending] = useState<{stream: Stream; mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>} | null>(null)
   const update = useGuardedMutation({
-    mutationFn: (input: NonNullable<typeof pending>) => api.regions.updateAutoValidation(report.region, input.stream, input.mode),
+    mutationFn: (input: NonNullable<typeof pending>) => api.regions.updateAutoValidation(report.region, input.stream, input.mode), target: report.region,
     onSuccess: result => {
       client.setQueryData<SesDiscovery>(regionDiscoveryKey(api, report.region), old => old ? {...old, resources: {...old.resources, [result.stream]: {...old.resources[result.stream], autoValidation: result.mode}}} : old)
       setPending(null)

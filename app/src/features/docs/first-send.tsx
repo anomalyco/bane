@@ -31,7 +31,7 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
   const to = identity?.email
   const from = `hello@${domain.name}`
   const verified = domain.status === 'verified'
-  const test = useGuardedMutation({ mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
+  const test = useGuardedMutation({ target: domain.id, mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
     onSuccess: data => onSent?.(data.id) })
   if (!to) return null
   return <>

@@ -51,7 +51,7 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
     : type === 'discord' && !/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(value) ? 'Use the webhook URL from Discord: it starts with https://discord.com/api/webhooks/.' : ''
   const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !name && tried ? 'Name it, like support. Rituals call it by this name.' : ''
   // Single flight: a second Create before the first answers would post the endpoint again.
-  const send = useSingleFlight(async () => {
+  const send = useSingleFlight('endpoints.create', async () => {
     setBusy(true); setError('')
     const body = { type, name: name.trim(), ...(type === 'forward' ? { address: target.trim(), ...(from ? { from } : {}), ...(preverify ? { preverify } : {}) } : { url: target.trim() }) }
     try { onCreated(await request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) })) }

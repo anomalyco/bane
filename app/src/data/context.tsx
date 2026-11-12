@@ -258,13 +258,16 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: BaneApi, sig
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
-export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
+/** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
+ *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
+export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
-  // One write per submission: a repeat of the same write, on the same target, while it is in flight is dropped
-  // (lib/single-flight.ts). The target is whatever this render's write closes over, such as the open conversation.
+  // One write while it is in flight: a repeat of the same operation on the same target with the same input is dropped
+  // (lib/single-flight.ts). The operation is the write's source, the same in every render.
   return useGuardedMutation({
+    operation: write.toString(), target,
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {

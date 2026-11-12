@@ -473,12 +473,12 @@ function RescheduleDialog({ campaign, onClose }: { campaign: Campaign; onClose: 
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   // Single flight: a second Reschedule before the first answers would send the same change again.
-  const reschedule = useSingleFlight(async (at: string) => {
+  const reschedule = useSingleFlight('campaigns.reschedule', async (at: string) => {
     setPending(true)
     try { const next = await api.campaigns.reschedule(campaign.id, at); accept(next); toast(`Rescheduled for ${utcLabel(next.scheduledAt!)}`, 'success'); onClose() }
     catch (cause) { setError(message(cause)) }
     finally { setPending(false) }
-  })
+  }, campaign.id)
   function submit(event: FormEvent) {
     event.preventDefault()
     const problem = scheduleError(value)

@@ -133,7 +133,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
   }, [focusMessage, messages])
   const isExpanded = (message: InboundMessage) => expanded[message.id] ?? (message.id === lastId || messages.length <= 3 || message.read === false)
   const toggle = (message: InboundMessage) => setExpanded(current => ({ ...current, [message.id]: !isExpanded(message) }))
-  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }))
+  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }), undefined, false, true, [thread.id, stateAddress])
   const act = (patch: Omit<InboundThreadPatch, 'addressId'>) => { update.mutateAsync(patch).catch(() => undefined) }
   async function loadOlder() {
     if (!olderCursor) return
@@ -193,7 +193,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const [chosen, setChosen] = useState('')
   const [automated, setAutomated] = useState<string | null>(null)
   const key = useRef({ key: '', body: '' })
-  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued')
+  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued', false, true, thread.id)
   useEffect(() => { setText(''); setReplyAll(false); send.reset(); key.current = { key: '', body: '' } }, [thread.id]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setChosen('') }, [target.id])
   // A message linked to several addresses needs an explicit sender; the API refuses to guess (ADDRESS_REQUIRED).
