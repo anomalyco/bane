@@ -74,6 +74,30 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
+test('feedback queue: the consumer ingests only items tagged by this installation, so a foreign producer on the shared queue cannot inject feedback',async()=>{
+  const {authenticFeedback,feedbackMac,feedbackSink,settleFeedbackMessage}=await import('./src/adapters/feedback-queue.js');
+  type Item=import('./src/core.js').FeedbackItem;
+  const secret=randomUUID(),previous=randomUUID(),sent:{body:Item}[]=[];
+  const queue={send:async()=>{},sendBatch:async(messages:{body:Item}[])=>{sent.push(...messages);}} as unknown as Queue<Item>;
+  const item:Item={region:'us-east-2',topicArn:'arn:aws:sns:us-east-2:000000000000:bane-feedback',messageId:randomUUID(),topicKind:'shared',
+    message:{eventType:'Bounce',mail:{messageId:'m1',sendingAccountId:'000000000000'},bounce:{bounceType:'Permanent'}}};
+  await feedbackSink(queue,secret).enqueue([item,{...item,messageId:randomUUID(),mac:'stale'}]);
+  assert.equal(sent.length,2);
+  // Queues hand the consumer a structured clone of the body; the tag must survive it and cover every field.
+  const queued=structuredClone(sent[0]!.body);
+  assert.equal(queued.mac?.length,43);
+  assert.equal(authenticFeedback({authSecret:secret},queued),true);
+  assert.equal(authenticFeedback({authSecret:previous,previousAuthSecret:secret},queued),true,'a rotation keeps in-flight items valid');
+  assert.equal(authenticFeedback({authSecret:previous},queued),false);
+  assert.equal(authenticFeedback({authSecret:secret},structuredClone(sent[1]!.body)),true,'a caller-supplied tag is replaced, never trusted');
+  const forged:Item[]=[item,{...queued,message:{...queued.message,bounce:{bounceType:'Transient'}}},{...queued,topicArn:queued.topicArn+'x'},{...queued,region:'us-east-1'},
+    {...queued,topicKind:'byo'},{...queued,messageId:randomUUID()},{...queued,mac:feedbackMac(previous,item)},{...queued,mac:''},{...queued,mac:'x'.repeat(43)}];
+  for(const candidate of forged) assert.equal(authenticFeedback({authSecret:secret},candidate),false);
+  // Unauthenticated items are retired at once: never retried, never dead-lettered.
+  let acked=0,retried=0;
+  settleFeedbackMessage({attempts:1,ack:()=>{acked++;},retry:()=>{retried++;},body:item},{ok:false,error:'FEEDBACK_UNAUTHENTICATED'});
+  assert.deepEqual([acked,retried],[1,0]);
+});
 test('Cloudflare routing: every API route reaches the Worker before static assets',async()=>{
   // Workers Assets answers paths outside run_worker_first itself (405 for POST, SPA HTML for GET),
   // so a route missing here is unreachable on Cloudflare while the Node server still serves it.

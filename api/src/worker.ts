@@ -26,8 +26,8 @@ function initRuntimeDeps() {
     import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage, workWake }]) => ({
-    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { authenticFeedback, feedbackSink, settleFeedbackMessage, workWake }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, authenticFeedback, feedbackSink, settleFeedbackMessage, workWake,
   }));
 }
 async function toModuleLoadError(error: unknown): Promise<never> {
@@ -125,7 +125,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -191,7 +191,7 @@ export default {
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env) {
-    const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadRuntimeDeps();
+    const { jobConcurrency, followDueJobs, core, authenticFeedback, settleFeedbackMessage } = await loadRuntimeDeps();
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback')) {
@@ -200,11 +200,16 @@ export default {
       // payload never blocks a batch of routine deliveries.
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
-        const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
+        // Only items this installation tagged on the way in are ingested; anything else on the
+        // queue was not verified at /v1/events/ses and is retired without touching the database.
+        const authentic = messages.map(message => authenticFeedback(runtime.config, message.body));
+        const ingested = await ingestFeedbackBatch(runtime, messages.filter((_, index) => authentic[index]).map(message => message.body));
+        const outcomes = authentic.map(ok => ok ? ingested.shift()! : { ok: false, error: 'FEEDBACK_UNAUTHENTICATED' });
         let retiredUnmatched=0;
         for (const [index, message] of messages.entries()) if(settleFeedbackMessage(message, outcomes[index])==='retired_unmatched') retiredUnmatched++;
+        const unauthenticated = authentic.filter(ok => !ok).length;
         const failed=outcomes.filter(outcome=>!outcome.ok).length-retiredUnmatched, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, retiredUnmatched, oldestMs });
+        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, retiredUnmatched, unauthenticated, oldestMs });
       });
       return;
     }
