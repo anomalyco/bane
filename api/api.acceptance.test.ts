@@ -156,6 +156,37 @@ test('ritual compile limits: maximum-size comments remain valid; identifiers, to
   assert.equal(compileRitual(source('/*'+' '.repeat(65536-prefix.length-5)+'*/')).v,1);
   for(const body of ['const '+'a'.repeat(65)+'=0;', ';'.repeat(8193), 'email'+'.a'.repeat(65)]) assert.throws(()=>compileRitual(source(body)),RitualError);
 });
+test('ritual regex tests run on a bounded matcher: its state is charged as steps and a pattern that needs too much is a ritual error',async t=>{
+  const {compileRitual,runRitual,REGEX_STATE_BYTES,RUN_STEPS,MESSAGE_STEPS}=await import('./src/ritual-engine.js'),{RE2JS}=await import('re2js');
+  assert.equal(JSON.parse(await readFile(new URL('./package.json',import.meta.url),'utf8')).dependencies.re2js,'2.10.0','re2js must stay on the version whose matcher limits were checked.');
+  const source=(tests:[string,string][])=>`export default function route(email,ctx){\n${tests.map(([p,f],i)=>`if (/${p}/${f}.test(email.text)) label("m${i}");`).join('\n')}\n}`;
+  const run=(tests:[string,string][],text:string,limit=RUN_STEPS)=>runRitual(compileRitual(source(tests)),{text},{},{},{},limit);
+  let seed=12345;const noise=Array.from({length:65536},()=>{seed=(seed*1103515245+12345)&0x7fffffff;return 'ab'[(seed>>16)&1]}).join('');
+  // Patterns whose matcher needs a new state for almost every character of this text.
+  const wide:[string,string][]=Array.from({length:22},(_,i)=>['a'+'.'.repeat(200+i)+'[XY]','s']);
+  const scan=Math.ceil(65537/32),rss=process.resourceUsage().maxRSS,started=performance.now(),refused=run(wide,noise),ms=performance.now()-started;
+  assert.match(refused.error??'',/^Line 2: Regex needs too many matcher states for this text$/);assert.deepEqual(refused.intents,[]);
+  assert.ok(refused.steps>scan+REGEX_STATE_BYTES/64*0.9&&refused.steps<=scan+REGEX_STATE_BYTES/64+8,`a refused test is charged its whole allowance: ${refused.steps} steps`);
+  assert.ok(ms<1500,`one refused test took ${ms.toFixed(0)} ms`);
+  // A whole message of them: every run stops at its first test, and the message budget ends the rest.
+  let steps=0,runs=0;const all=performance.now();
+  while(steps<MESSAGE_STEPS){steps+=run(wide,noise,MESSAGE_STEPS-steps).steps;runs++;}
+  assert.ok(runs<=Math.ceil(MESSAGE_STEPS/(scan+REGEX_STATE_BYTES/64*0.9)),`${runs} runs`);assert.ok(performance.now()-all<3000,'a message of refused tests');
+  assert.ok((process.resourceUsage().maxRSS-rss)/1024<128,'matcher state is released after every test');
+  // On a short text the same patterns stay inside the allowance, so the state they build is what a run can afford.
+  const short=run(wide,noise.slice(0,300));
+  assert.match(short.error??'',/Step budget exceeded/);assert.ok(short.steps>RUN_STEPS);
+  t.diagnostic(`Refused regex test: ${ms.toFixed(1)} ms, ${refused.steps} steps; ${runs} runs fill a message; 300 characters: ${short.error}`);
+  // Ordinary patterns answer exactly as re2js does, and cost little more than reading the text.
+  const english=('Dear Sir,\nplease RESET your password now. The invoice of $1,299.00 is overdue: wire it to john.doe@example.co.uk\r\n').repeat(580).slice(0,65536);
+  const ordinary:[string,string][]=[['viagra|casino','i'],['\\bpassword\\b','i'],['^dear','im'],['reset.*now',''],['reset.*overdue.*wire','is'],['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z][a-z]+','i'],['\\$\\s?[0-9][0-9,]*(?:\\.[0-9][0-9])?',''],['^.*(?:urgent|immediately).*(?:wire|transfer|payment).*$','im'],['(?:refund|chargeback|dispute)\\W+(?:\\w+\\W+)?(?:\\w+\\W+)?(?:request|claim|now)','i'],['x+x+x+y',''],['\\Bass','']];
+  const bits=(f:string)=>(f.includes('i')?RE2JS.CASE_INSENSITIVE:0)|(f.includes('m')?RE2JS.MULTILINE:0)|(f.includes('s')?RE2JS.DOTALL:0);
+  for(const text of ['',english.slice(0,300),english,noise,'x'.repeat(65536)])for(const [p,f] of ordinary){
+    const r=run([[p,f]],text);
+    assert.equal(r.error,null,`${p} on ${text.length} characters`);assert.equal(r.intents.length===1,RE2JS.compile(p,bits(f)).test(text),`${p} on ${text.length} characters`);
+    assert.ok(r.steps<=Math.ceil((text.length+1)/32)+2500,`${p} on ${text.length} characters: ${r.steps} steps`);
+  }
+});
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
@@ -2381,6 +2412,45 @@ describe('Hosted MCP OAuth and tools', () => {
     return output;
   }
 
+  test('an MCP client name is shown as one short line of the characters that are drawn', async t => {
+    await simulatedSesFixture(t, async ({ db, local, request }) => {
+      // Register a client under this name, open its approval page, approve it, and read it back from the connections list.
+      async function shown(registered: string) {
+        const client = ok(await registerClient(t, db, { client_name: registered }, request), 201);
+        const redirectUri = 'http://127.0.0.1/callback', verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
+        secrets.add(verifier);
+        const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri, scope: writableScope, state: unique('acceptance-mcp-state'),
+          resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
+        const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
+        const oauthQuery = new URL(authorization.url, PUBLIC_ORIGIN).search.slice(1);
+        secrets.add(oauthQuery);
+        const consent = await request('GET', `/mcp/consent?${oauthQuery}`, MANAGER, undefined, { accept: 'text/html' });
+        assert.equal(consent.status, 200);
+        ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
+        const listed = ok(await local('GET', '/v1/mcp-connections')).data.find((row: Json) => row.clientId === client.client_id);
+        return { html: String(consent.body), listed: listed.name as string | null };
+      }
+      // Reordering marks, an invisible character, a line break and a control character inside an over-long name.
+      const long = await shown(`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`), label = `Desk helper notes ${'x'.repeat(142)}`;
+      assert.equal(label.length, 160);
+      assert.ok(long.html.includes(`<h1>Allow ${label} to access Bane?</h1>`), 'The heading names the client on one line.');
+      assert.ok(long.html.includes(`has not verified "${label}".`));
+      assert.doesNotMatch(long.html, /[\u0007\u200B\u202A-\u202E\u2066-\u2069]|x{143}/u);
+      assert.equal(long.listed, label, 'Connections list the same name the approval page showed.');
+      // Joiners and a variation selector that shape what is drawn stay; a soft hyphen, a grapheme joiner and stray joiners go.
+      const shaped = await shown('\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D');
+      assert.equal(shaped.listed, '👩\u200D💻 ❤\uFE0F می\u200Cخواهم Support');
+      assert.ok(shaped.html.includes(`<h1>Allow ${shaped.listed} to access Bane?</h1>`));
+      // Names with nothing to draw get the default label and no name in the list.
+      for (const blank of ['\u034F\u00AD\u206A', '\u2800 \u3164\u{E0041}\uFEFF', '\u0301\u200D\uFE0F']) {
+        const none = await shown(blank);
+        assert.ok(none.html.includes('<h1>Allow This MCP client to access Bane?</h1>'), JSON.stringify(blank));
+        assert.ok(none.html.includes('has not verified "This MCP client".'));
+        assert.equal(none.listed, null);
+      }
+    });
+  });
+
   test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
     await simulatedSesFixture(t, async ({ db, request }) => {
       const {token, consentId}=await oauthGrant(t,db,'opensend:read offline_access',request);
@@ -2753,6 +2823,11 @@ describe('Hosted MCP OAuth and tools', () => {
       const child=ok(await http('POST','/v1/api-keys',parent.secret,{name:'read fixture',permissions:['read']}),201);
       secrets.add(child.secret);grantKeys.push(child.id);
       error(await http('POST','/v1/rituals/test',child.secret,{messageId:'msg_fixture'}),403,'PERMISSION_DENIED');
+      // Routing with read permission: lists and the dry run work, and every change needs manage.
+      ok(await http('GET','/v1/routing/routes',child.secret)); error(await http('POST','/v1/routing/test',child.secret,{}),422,'MISSING_RECIPIENTS');
+      for(const [method,path,body] of [['PUT','/v1/routing',{routes:[]}],['POST','/v1/routing/routes',{match:'fixture@example.com',to:[]}],['PATCH','/v1/routing/routes/billing',{to:[]}],
+        ['DELETE','/v1/routing/routes/billing',undefined],['DELETE','/v1/routing/routes/test',undefined],['POST','/v1/routing/versions/1/restore',undefined]] as const)
+        error(await http(method,path,child.secret,body,{'if-match':'1'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
       await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
       assert.equal(await live(),false);
@@ -5217,6 +5292,15 @@ describe('Campaign authorization and dispatch credentials', () => {
       const meter = await queryBudget(t, db);
       await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
+      // The statement applies the mailbox rule too: an upload that has gone out only in conversation mail is attached by
+      // a key that can read mailboxes, and any key attaches an upload that is not conversation content.
+      const [sender, managing] = [ok(await local('POST', '/v1/api-keys', { name: 'Sender', permissions: ['read', 'send'] }), 201), ok(await local('POST', '/v1/api-keys', { name: 'Managing', permissions: ['manage'] }), 201)];
+      for (const key of [sender, managing]) { secrets.add(key.secret); ok(await request('GET', '/v1/me', key.secret)); }
+      const conversationFile = ok(await local('POST', '/v1/attachments', file), 201);
+      await db.query("INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) VALUES($1,$2,'mailbox','matt_fixture')", [wid, conversationFile.id]);
+      await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('conversation-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', managing.secret, { ...direct, attachments: [conversationFile.id] }), 202), 1);
+      await meter('shared-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [privateFile.id] }), 202), 1);
     });
   });
   test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
@@ -11888,6 +11972,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
       await dispatchDue(runtime, REGION);
+      // Mail sent from an address is conversation mail (a reply can quote what it answers): the sending log lists and
+      // reads it only for credentials that can read the mailbox. Ordinary sends stay visible to every reader.
+      const quoted = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Quoted answer',quote:true },{ ...agent,'Idempotency-Key':'answer-quoted' }),202);
+      const direct = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Direct notice',text:'Direct notice' }),202);
+      const conversation = [reply.emailId,quoted.emailId,tracked.id];
+      const sendingKey = async (permissions:string[],domains:string[]=[]) => { const secret=ok(await post('/v1/api-keys',{ name:unique('log-reader'),permissions,domains }),201).secret; secrets.add(secret); return { authorization:`Bearer ${secret}` }; };
+      const logReader = await sendingKey(['read']), domainReader = await sendingKey(['read'],['example.com']), manageKey = await sendingKey(['manage']);
+      const listed = async (path:string,key?:Record<string,string>) => ok(await get(path,key)).data.map((row:Json)=>row.id);
+      for (const key of [undefined,manageKey]) {
+        for (const id of conversation) assert.ok((await listed('/v1/emails?limit=100',key)).includes(id));
+        assert.match(ok(await get(`/v1/emails/${quoted.emailId}/content`,key)).text,/Quoted answer[\s\S]*second zebra/);
+      }
+      for (const key of [logReader,domainReader]) {
+        for (const path of ['/v1/emails?limit=100','/v1/logs?direction=sent&limit=100']) {
+          const ids = await listed(path,key);
+          assert.ok(ids.includes(direct.id)); assert.deepEqual(conversation.filter(id=>ids.includes(id)),[]);
+        }
+        for (const id of conversation) for (const suffix of ['','/content','/detail','/events']) error(await get(`/v1/emails/${id}${suffix}`,key),404);
+        assert.equal(ok(await get(`/v1/emails/${direct.id}/content`,key)).text,'Direct notice');
+      }
+      // A reply queued before snapshots recorded their origin is still known by its mailbox message.
+      await db.query("UPDATE sending_emails SET snapshot=snapshot-'mailbox' WHERE id=$1",[quoted.emailId]);
+      error(await get(`/v1/emails/${quoted.emailId}/content`,logReader),404); ok(await get(`/v1/emails/${quoted.emailId}/content`,manageKey));
+      // An upload that has gone out only in conversation mail is conversation content as well. A reader without mailbox
+      // access keeps its own uploads, and gets any upload once it is also attached to mail that reader can read.
+      const uploads = new Map<string,{body:Uint8Array;contentType:string}>(), objectStore = runtime.storage;
+      runtime.storage = { async put(k,body,contentType) { uploads.set(k,{body,contentType}); }, async get(k) { return uploads.get(k) ?? null; }, async delete(k) { uploads.delete(k); } };
+      try {
+        const upload = async (filename:string,key?:Record<string,string>) => ok(await post('/v1/attachments',{ filename,content:Buffer.from(filename).toString('base64') },key),201).id as string;
+        const content = async (id:string,key?:Record<string,string>) => Buffer.from(ok(await get(`/v1/attachments/${id}/content`,key)).content,'base64').toString();
+        const sender = await sendingKey(['read','send']);
+        const shared = await upload('shared.txt'), own = await upload('own.txt',sender), legacy = await upload('legacy.txt');
+        const withFiles = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Your files',text:'Attached',replyMailboxId:box.id,attachments:[shared,own] }),202);
+        const older = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'An older file',text:'Attached',replyMailboxId:box.id,attachments:[legacy] }),202);
+        await db.query("UPDATE sending_emails SET snapshot=snapshot-'mailbox' WHERE id=$1",[older.id]);
+        assert.ok(withFiles.id && older.id);
+        for (const key of [undefined,manageKey]) for (const id of [shared,own,legacy]) { ok(await get(`/v1/attachments/${id}`,key)); assert.match(await content(id,key),/\.txt$/); }
+        for (const key of [logReader,domainReader,sender]) for (const id of [shared,legacy]) for (const suffix of ['','/content']) error(await get(`/v1/attachments/${id}${suffix}`,key),404,'ATTACHMENT_NOT_FOUND');
+        for (const key of [logReader,domainReader]) error(await get(`/v1/attachments/${own}/content`,key),404,'ATTACHMENT_NOT_FOUND');
+        assert.equal(await content(own,sender),'own.txt');
+        // Attaching an upload to new mail follows the same rule as reading it.
+        const notice = (attachments:string[]) => ({ from:publicAddress,to:'customer@example.net',subject:'Notice',text:'Notice',attachments });
+        error(await post('/v1/emails/send',notice([shared]),sender),404,'ATTACHMENT_NOT_FOUND');
+        ok(await post('/v1/emails/send',notice([own]),sender),202);
+        ok(await post('/v1/emails/send',notice([shared]),manageKey),202);
+        for (const key of [logReader,sender]) assert.equal(await content(shared,key),'shared.txt');
+        assert.equal(await content(own,logReader),'own.txt');
+        error(await get(`/v1/attachments/${legacy}/content`,logReader),404,'ATTACHMENT_NOT_FOUND');
+        // A mailbox sender attaches again what its mailbox already sent.
+        ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',subject:'Again',text:'Attached again',replyMailboxId:box.id,attachments:[legacy] }),202);
+      } finally { runtime.storage = objectStore; }
       assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
       const wire = outgoing.get(reply.emailId); assert.equal(wire.FromEmailAddress,publicAddress); assert.equal(reply.threadId,detail.threadId);
       assert.deepEqual(wire.Destination,{ ToAddresses:['case-owner@example.net'],CcAddresses:['colleague@example.net'],BccAddresses:[] });
