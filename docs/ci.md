@@ -10,6 +10,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | Every PR, `dev` push | `acceptance` | The API's acceptance suite on Node against an isolated Postgres and S3 fixture, in two shards, plus the **deadlock guard** | ~2–3 min |
 | Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift on every dashboard page | ~3 min, in parallel |
 | `dev` push | Deploy dev | Migrate, deploy, health, live dev E2E | ~5 min |
+| Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
 | Push to `production` | Deploy production | Requires the passing dev E2E for the exact SHA | ~4 min |
 
 `build` and `acceptance` are required on `dev`.
@@ -61,3 +62,23 @@ Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two
 **When it fails:** the log excerpt names both statements and the rows they waited for. Find the two code paths and make them take their locks in the same order: the workspace's `ses_installation_settings` row first, then domain claims, then receipts and their windows (`lockedSettings()` in `api/src/sending.ts` is the helper). Add a test that holds the first lock and proves the second path waits for it (see `regional sender: a send waits on the settings row…`), and add the pair to the `lock order:` stress test once it is fixed.
 
 Locally: `PGPORT=<port> PG_CONTAINER=<container> RUNNER_TEMP=$(mktemp -d) bash ../.github/scripts/acceptance.sh` from `api/`, against a disposable Postgres (`docker run -d -e POSTGRES_PASSWORD=fixture-admin -p 127.0.0.1:<port>:5432 postgres:17.11-alpine`).
+
+## Flakes: quarantine and the nightly runs
+
+A flaky check costs every PR a re-run and teaches everyone to ignore red. The policy:
+
+- **Fix it first.** Most flakes are a race with something else in the shared fixture, or a measurement that depends on timing. Two fixed this way: `database connection refusals…` claimed whichever job was due, so under the full suite it could take another test's job (it now shadows the queue with a transaction-scoped `CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`, as the campaign-run tests do); and the CLS gate's `Settings · webhook` phone measurement (below).
+- **Quarantine while you fix it.** Open an issue, then add `[flaky #<issue>]` to the test's name. The required `acceptance` job skips it; the nightly runs it. `check-premerge.ts` fails the build if the tag names no issue or a closed one. Remove the tag when the fix lands, or when the nightly report lists it as passing every run.
+- **The nightly finds new ones.** `.github/workflows/nightly.yml` runs the acceptance suite (`ACCEPTANCE_QUARANTINE=all`, JUnit output) and the CLS gate ten times each, in parallel, on the dev tip, then keeps one issue labeled `nightly-flakes` current: each failing test or CLS measurement with its failure count and first error, run-level failures (a deadlock, a crashed shard), and quarantined tests that passed every run. A clean night closes the issue. Run it by hand from the Actions tab (5, 10 or 20 runs).
+
+`acceptance.sh` modes: `ACCEPTANCE_QUARANTINE` unset skips quarantined tests, `only` runs just them, `all` runs everything; `ACCEPTANCE_JUNIT=<dir>` also writes `integration.xml` and `simulated.xml` there.
+
+### CLS: fonts arrive late on every run
+
+The CLS gate's `Settings · webhook` phone measurement failed on dev twice on Nov 12 (CLS 0.0334, and a re-run passed): the event-type checkboxes grew 7% and "Complaint" wrapped onto the next line. Inter is 7.2% wider than Arial, and `Inter Fallback` (sized for Arial) named only `Arial` and `Helvetica`, which Linux doesn't have, so CI drew the first paint in unsized Liberation Sans. Whether that paint happened before Inter arrived depended on the runner's load.
+
+- `tokens.css` now also names the metric twins Linux has: Liberation Sans (Arial's metrics) and DejaVu Sans Mono (Menlo's).
+- `cls.mjs` delays every web font until after the slowest API response, so text always paints first in its fallback and the swap is measured on every run, not by luck. It also fails a page if a fallback face has no local font.
+- With fonts always late, Docs showed the same class of shift (0.0023): its text measures were in `ch`, the width of the current font's `0`, which changes with the swap. They are in `em` now.
+
+**When CLS fails only sometimes**, look for something whose size depends on timing: a font swap (a `ch` width, text measured before the font loaded, a fallback without local metrics), an image without dimensions, or content that arrives after its placeholder with a different size. Make the gate reproduce it every run, then fix the page. Never raise the limit.

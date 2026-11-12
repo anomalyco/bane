@@ -1,5 +1,6 @@
 // CLS gate: cumulative layout shift on every main dashboard page, light and dark, on a cold full load and on in-app
-// navigation, over a throttled network with slow API responses that arrive out of order; the main pages again on a
+// navigation, over a throttled network with slow API responses that arrive out of order and web fonts that arrive after
+// them (so text first paints in its local fallback on every run); the main pages again on a
 // phone (390 × 844, touch: the tab bar, cards and native selects). Fails when any page's CLS
 // exceeds 0.001 (or a page errors). The longest task during each in-app navigation is reported, not gated: on CI's
 // shared runner the composer and rituals chunks measured 105–179 ms between runs of the same page, too close to a
@@ -91,6 +92,10 @@ const devices = {
 // every run. Assets load through Chrome's own throttling (150 ms latency, 1.6 Mbps down).
 const apiDelay = path => { let h = 0; for (const c of path) h = (h * 31 + c.charCodeAt(0)) >>> 0; return 300 + (h % 6) * 200; };
 const throttle = { offline: false, latency: 150, downloadThroughput: 1.6 * 1024 * 1024 / 8, uploadThroughput: 750 * 1024 / 8 };
+// Web fonts always arrive after the slowest API response, so text first paints in the local fallbacks and the swap to
+// the web font happens on every cold load. Before, the order depended on the runner's load, and a page whose text
+// changed size on the swap failed only sometimes (Settings · webhook on a phone, 2 of 3 dev runs on Nov 12).
+const FONT_DELAY_MS = 1800;
 
 // Runs in the page before its own scripts.
 const probe = () => {
@@ -179,6 +184,10 @@ async function measure(browser, job, fx) {
       await new Promise(done => setTimeout(done, apiDelay(url.pathname + url.search)));
       await route.continue().catch(() => {});
     });
+    await context.route(url => url.origin === origin && url.pathname.startsWith('/fonts/'), async route => {
+      await new Promise(done => setTimeout(done, FONT_DELAY_MS));
+      await route.continue().catch(() => {});
+    });
     page = await context.newPage();
     net = network(page);
     page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429)) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
@@ -187,6 +196,9 @@ async function measure(browser, job, fx) {
     await cdp.send('Network.enable');
     await cdp.send('Network.emulateNetworkConditions', throttle);
     await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'load', timeout: 60_000 });
+    // The fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
+    const missing = await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
+    for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
     if (job.mode === 'in-app') {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
@@ -248,7 +260,7 @@ function summarize(results, seconds) {
   const lines = [
     `### Layout shift: ${failed.length ? `❌ ${failed.length} of ${results.length} measurements failed` : `✅ ${results.length} measurements, every page at CLS ≤ ${LIMIT}`}`,
     '',
-    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
+    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order, web fonts after ${FONT_DELAY_MS} ms; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
     '',
     '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Phone load | Phone in-app | Longest task |',
     '| --- | --- | --: | --: | --: | --: | --: | --: | --: |',
