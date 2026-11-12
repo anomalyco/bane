@@ -58,11 +58,12 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     </>
   }
   if (kind === 'template') return <div className="campaign-compose-page template-compose-page">
-    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span><Button variant="ghost" disabled>Preview</Button><Button variant="secondary" disabled>Archive</Button><Button variant="primary" disabled>Publish</Button></>} />
+    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>} />
     <LoadingRegion label="Loading template editor" className="campaign-compose-workspace">
       <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+        <p className="template-compose-intro">A reusable starting point for campaigns. Write example content here; add personalization such as {'{{name}}'} in each campaign.</p>
         <div className="campaign-compose-metadata" aria-hidden="true">
-          {['Name', 'Purpose', 'Subject', 'Preview', 'From', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
+          {['Name', 'Purpose', 'Subject', 'Inbox preview', 'From name', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
         </div>
         <ComposerSkeleton />
       </div></div>
