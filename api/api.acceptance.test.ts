@@ -396,7 +396,7 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
       ('connected','Ada','ada@example.org', true), ('legacy','Lee','lee@example.org', true);
       INSERT INTO auth_account(id, account_id, provider_id, user_id) VALUES
       ('link','["https://id.example.org","A"]','account','connected'),('old','123','google','legacy')`);
-    await db.query(await readFile(new URL('./migrations/240_oidc_identities.sql', import.meta.url), 'utf8'));
+    await db.query(await readFile(new URL('./migrations/270_oidc_identities.sql', import.meta.url), 'utf8'));
     assert.deepEqual((await db.query('SELECT * FROM bane_oidc_identities')).rows, [
       {issuer:'https://id.example.org', subject:'A', user_id:'connected'},
     ]);
@@ -409,11 +409,11 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
     assert.equal(await claim(true), 'legacy');
     assert.equal(await claim(true), null);
     assert.equal((await db.query('SELECT count(*) FROM auth_account')).rows[0].count, '2');
-    // 247: no bulk carry-over; a bootstrap claim pins the issuer and the Google context, is used once and audited.
+    // 277: no bulk carry-over; a bootstrap claim pins the issuer and the Google context, is used once and audited.
     await db.query(`INSERT INTO auth_user(id,name,email,email_verified) VALUES ('google','Gia','gia@example.org',true);
       INSERT INTO bane_users(id,name,email,email_verified) SELECT id,name,email,email_verified FROM auth_user WHERE id='google';
       INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES ('g1','456','google','google')`);
-    for (const file of ['244_current_email','247_legacy_google_claims']) await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
+    for (const file of ['274_current_email','277_legacy_google_claims']) await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
     assert.equal((await db.query('SELECT FROM bane_legacy_claims')).rowCount,0,'Nobody is carried over without a claim');
     await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source,required_acr) VALUES('google','https://id.example.org','gia@example.org','bootstrap','urn:anomaly:acr:google')");
     const google = async (email: string, acr: string | null, subject = 'G', issuer = 'https://id.example.org') =>
@@ -526,7 +526,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
   assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
   assert.equal((await request('/v1/me','GET',session)).status,401);
-  // Bootstrap claim (migration 247, scripts/cutover-fresh-start.ts): the pre-assigned person's first Google sign-in
+  // Bootstrap claim (migration 277, scripts/cutover-fresh-start.ts): the pre-assigned person's first Google sign-in
   // adopts the prepared user ID, so its workspace and role are as assigned; the claim is used once and audited.
   const legacyId=randomUUID(), legacyEmail=`legacy-${randomUUID()}@example.org`;
   cleanup(t,async()=>{await db.query('DELETE FROM auth_user WHERE id=$1',[legacyId]);});
@@ -671,7 +671,7 @@ test('MCP cutover expires legacy approvals and tokens but keeps the objects they
     await db.query("INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES('agent','default','mcp_consent','[\"read\"]','[]','fixture',now()+interval '1 day')");
     await db.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT k,'default',k,k,k,'[\"read\"]','[]' FROM unnest(ARRAY['derived','independent']) k");
     await db.query("INSERT INTO mail_grant_objects VALUES('consent','default','api_key','derived')");
-    const migrate=await readFile(new URL('./migrations/246_expire_mcp_legacy.sql',import.meta.url),'utf8');
+    const migrate=await readFile(new URL('./migrations/276_expire_mcp_legacy.sql',import.meta.url),'utf8');
     await db.query(migrate);await db.query(migrate);
     assert.equal((await db.query('SELECT FROM oauth_client WHERE NOT disabled')).rowCount,0);
     for(const table of ['oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE revoked IS NULL OR expires_at>now()`)).rowCount,0);

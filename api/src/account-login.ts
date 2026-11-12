@@ -89,7 +89,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     if (!userId) {
       if (!emailAtLogin) throw loginFailed();
       const email = emailAtLogin;
-      // Pre-approved legacy users (operator claims, or Google-only users carried over by migration 247).
+      // Pre-approved users only: an operator claim (self-host upgrades) or the cutover bootstrap (migration 277).
       const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},true,${typeof claims.acr === 'string' ? claims.acr : null}) AS id`);
       userId = migrated.rows[0]?.id ?? undefined;
       if (userId) log('info', { code: 'SIGN_IN_LEGACY_CLAIMED', userId });
