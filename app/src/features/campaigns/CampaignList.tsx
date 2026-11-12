@@ -1,4 +1,4 @@
-import { Link, useNavigate, useSearchParams } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
@@ -8,7 +8,7 @@ import { SearchField, Button, DataTable, EmptyState, ErrorState, Input, Paginati
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
 import { campaignColumns } from './skeletons'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
-import { campaignPollInterval } from './CampaignProgress'
+import { campaignDisplayStatus, campaignPollInterval } from './CampaignProgress'
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 
@@ -50,13 +50,14 @@ export function CampaignsPage() {
       { value: 'archived', label: 'Archived' },
     ]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignPath(row).endsWith('/edit')) void composer.preload().catch(() => {}) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
-        { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted">{row.subject}</span>}</div> },
-        { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
-        { ...campaignColumns[2], render: row => number(row.recipients) },
-        { ...campaignColumns[3], render: row => ['sent', 'done'].includes(row.status) && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
-        { ...campaignColumns[4], render: row => { const at = row.scheduledAt || row.updatedAt; return <span className="muted campaign-activity" title={`${date(at)} · ${time(at)} UTC`}>{shortDateTime(at)}</span> } },
-        { ...campaignColumns[5], render: row => <CampaignArchiveButton campaign={row} compact onSuccess={() => filter('page', '')} /> },
+      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={campaignPath} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignPath(row).endsWith('/edit')) void composer.preload().catch(() => {}) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
+        { ...campaignColumns[0], render: row => <div className="campaign-row-name"><span>{row.name}</span>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted">{row.subject}</span>}</div>, cardRender: row => row.name },
+        { ...campaignColumns[1], render: row => <StatusBadge status={campaignDisplayStatus(row)} /> },
+        { ...campaignColumns[2], render: row => row.subject.trim() || <span className="muted">No subject</span> },
+        { ...campaignColumns[3], render: row => number(row.recipients), cardRender: row => `${number(row.recipients)} ${row.recipients === 1 ? 'recipient' : 'recipients'}` },
+        { ...campaignColumns[4], render: row => ['sent', 'done'].includes(row.status) && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—', cardRender: row => ['sent', 'done'].includes(row.status) && row.recipients > 0 ? `${percent(row.delivered / row.recipients, 0)} delivered` : 'Not sent' },
+        { ...campaignColumns[5], render: row => { const at = row.scheduledAt || row.updatedAt; return <span className="muted campaign-activity" title={`${date(at)} · ${time(at)} UTC`}>{shortDateTime(at)}</span> }, cardRender: row => (row.scheduledAt ? 'Sends ' : '') + date(row.scheduledAt || row.updatedAt, { month: 'short', day: 'numeric', timeZone: 'UTC' }) },
+        { ...campaignColumns[6], render: row => <CampaignArchiveButton campaign={row} compact onSuccess={() => filter('page', '')} /> },
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}
     </>}

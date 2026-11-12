@@ -19,7 +19,8 @@ const encoded = new Map<string, Promise<Buffer>>();
 async function dashboardFile(request: Request, path: string, response: Response) {
   if (!['GET', 'HEAD'].includes(request.method) || response.status !== 200) return response;
   // The public docs (the Docs page reads the 1.7 MB OpenAPI document) are the same for every reader: compress them too.
-  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
+  // Exactly these paths: a longer one that only starts like them is a dashboard route, with its own answer below.
+  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/[^/]+)$/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
   if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(path)) return response;
   const html = response.headers.get('content-type')?.startsWith('text/html');
   const asset = path.startsWith('/assets/') && !html, font = path.startsWith('/fonts/') && !html;
@@ -39,6 +40,9 @@ async function encode(request: Request, path: string, response: Response, header
   const key = `${encoding} ${path} ${version}`;
   let body = encoded.get(key);
   if (!body) {
+    // Only a GET has the file's bytes. A HEAD before the first GET answers without a length rather than
+    // compressing its empty body, which would then be remembered as the file for every later GET.
+    if (request.method !== 'GET') { headers.delete('content-length'); return new Response(null, { status: 200, headers }); }
     body = response.arrayBuffer().then(raw => encoders[encoding](Buffer.from(raw)));
     body.catch(() => encoded.delete(key));
     if (encoded.size < 1000) encoded.set(key, body);

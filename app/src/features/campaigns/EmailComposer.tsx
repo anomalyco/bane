@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
 import { defaultSlashCommands, Inspector } from '@react-email/editor/ui'
-import { AlignCenter, AlignLeft, AlignRight, Bold, Box, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, SlidersHorizontal, Type, Undo2, X } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, Box, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, SlidersHorizontal, Type, Undo2, UserRound, X } from 'lucide-react'
 import { Alert, Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
@@ -15,7 +15,8 @@ import './composer.css'
 // API. Opening converts block HTML to editor blocks; saving converts blocks back.
 type Draft = { html: string; inlineAttachmentIds?: string[] }
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
-type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
+// personalize offers {{placeholder}} insertions; templates hold literal example content and leave it off.
+type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; personalize?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
 // The library's slash menu reads this shared list and has no image entry, although the
@@ -28,7 +29,7 @@ if (!defaultSlashCommands.some(item => item.title === 'Image')) {
     command: ({ editor: value, range }) => { value.chain().focus().deleteRange(range).run(); pickImage?.() },
   })
 }
-export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, onReady, onDirty, onAttach, onBusy }, ref) {
+export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, personalize = false, onReady, onDirty, onAttach, onBusy }, ref) {
   const api = useApi()
   const attachmentApi = providedAttachmentApi ?? api.attachments
   const preparing = useRef<Promise<Draft> | null>(null)
@@ -294,6 +295,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           { label: 'Divider', icon: <Minus size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHorizontalRule().run()) },
           { label: 'Styled section', icon: <Box size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertSection().run()) },
           { label: 'Two columns', icon: <Columns2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
+          ...(personalize ? [['Contact’s name', 'name'], ['Contact’s first name', 'firstName'], ['Contact’s email', 'email']].map(([label, key]) => ({ label: `${label} {{${key}}}`, icon: <UserRound size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertContent(`{{${key}}}`).run()) })) : []),
         ]} />
         <div className="cluster"><IconButton size="sm" label="Bold" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Bold size={16} /></IconButton><IconButton size="sm" label="Italic" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Italic size={16} /></IconButton></div>
         <div className="cluster"><IconButton size="sm" label="Align left" disabled={inactive} onClick={() => align('left')}><AlignLeft size={16} /></IconButton><IconButton size="sm" label="Align center" disabled={inactive} onClick={() => align('center')}><AlignCenter size={16} /></IconButton><IconButton size="sm" label="Align right" disabled={inactive} onClick={() => align('right')}><AlignRight size={16} /></IconButton></div>
