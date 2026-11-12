@@ -7767,12 +7767,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const frozen=async(id:string)=>(await db.query(`SELECT region,snapshot->'binding' AS binding,status,error_code FROM sending_emails WHERE id=$1`,[id])).rows[0];
       assert.deepEqual((await frozen(mixed[1].id)).binding,{account:acct,topic:trusted,connection:wid,domain:'va-domain',generation});
       await drain(oh);await drain(va);assert.deepEqual(attempts.slice(1),[[oh,'bane-transactional',`bane-${wid}`],[va,'bane-trusted-transactional',`bane-trusted-${wid}`]]);
-      // With the hosted screen on, probation mail (Ohio) is delivered as the copy the screen read; trusted mail (Virginia) as submitted.
+      // With the hosted screen on, probation mail (Ohio) is delivered as the copy the screen read; trusted mail (Virginia) as
+      // submitted. A subtest holds the classifier mock so it is restored before the fixture's own fetch mock.
       const marked='<html><head><style>.x{display:none}</style></head><body><p>Regional fixture</p><!--[if mso]><p>Outlook only</p><![endif]--><p class="x" style="display:none;color:#fff">Hidden line</p></body></html>';
       Object.assign(runtime.config,{hostedScreen:true,screen:{endpoint:'https://screen.regional.invalid',apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
-      const classifier=t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),'https://screen.regional.invalid');return Response.json({answers:{spam:{noul:0.01}}});});
-      ok(await batch({...parent,html:marked},{...child,html:marked}),202);
-      await drain(oh);await drain(va);classifier.mock.restore();Object.assign(runtime.config,{hostedScreen:false,screen:undefined});
+      await t.test('screened tiers',async t=>{
+        t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),'https://screen.regional.invalid');return Response.json({answers:{spam:{noul:0.01}}});});
+        ok(await batch({...parent,html:marked},{...child,html:marked}),202);
+        await drain(oh);await drain(va);
+      });
+      Object.assign(runtime.config,{hostedScreen:false,screen:undefined});
       assert.deepEqual(attempts.slice(3),[[oh,'bane-transactional',`bane-${wid}`],[va,'bane-trusted-transactional',`bane-trusted-${wid}`]]);
       assert.deepEqual(delivered.slice(3),[(await import('./src/screened-html.js')).screenedHtml(marked),marked]);
       assert.ok(!delivered[3]!.includes('<style') && !delivered[3]!.includes('Outlook only') && !delivered[3]!.includes('Hidden line') && delivered[3]!.includes('Regional fixture'));
@@ -9376,7 +9380,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         drawn:['<html><head><style>.decoy{display:none}.offer::before{content:"Sample\\4D arker"}</style></head><body><p class="decoy">Your appointment is confirmed.</p><div class="offer"></div></body></html>',
           '<style>.o{--shown:"SampleMarker"}.o::before{content:var(--shown)}</style><p class="o"></p>','<style>p::before{content:attr(a)attr(b)}</style><p a="Sample" b="Marker">Hello</p>','<style>p::after{content:attr(data-note)}</style><p data-note="SampleMarker">Hello</p>',
           '<p><input type="text" value="SampleMarker" readonly></p>','<p title="SampleMarker">Hello</p>','<svg><text>SampleMarker</text></svg><p>Hello</p>','<!--[if mso]><table><tr><td>SampleMarker</td></tr></table><![endif]--><p>Hello</p>',
-          '<!--[if gte mso 9]><style>.o::after{content:"SampleMarker"}</style><![endif]--><p class="o">Hello</p>','<noscript><p>SampleMarker</p></noscript><p>Hello</p>','<template><p>SampleMarker</p></template><p>Hello</p>',
+          '<!--[if gte mso 9]><style>.o::after{content:"SampleMarker"}</style><![endif]--><p class="o">Hello</p>','<p>Hello</p><noscript><p>SampleMarker</p></noscript>','<template><p>SampleMarker</p></template><p>Hello</p>',
           '<div data-bane-preview="true" style="display:none">SampleMarker</div><p>Hello</p>','<p>Hello</p><p style="background:url(https://samplemarker.invalid/a.png)">Hello</p>'],
       };
       let shape=0;
@@ -9478,7 +9482,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('probation mail is delivered as the copy the screen read',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,local})=>{
+    // A subtest, as the other classifier scenarios: a fetch mock on the fixture's own context would be restored over the
+    // fixture's and leak into later tests.
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('probation copy',async t=>{
       const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2'),{screenedHtml,screenedText}=await import('./src/screened-html.js');
       const wid=runtime.config.workspaceId,acct='112223330003',origin='https://screen.synthetic.invalid';
       runtime.config.hostedSendCaps.firstWeek=10000;
@@ -9549,7 +9555,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(!/\bdir=|direction:/.test(delivered.get('rtlTable')!.html!) && delivered.get('rtlTable')!.html!.includes('<td>o</td><td>n</td>') && screened.get('rtlTable')!.join('').includes('onisac'));
       assert.ok(!delivered.get('minSized')!.html!.includes('min-') && delivered.get('minSized')!.html!.includes('width="1" height="1"'));
       assert.deepEqual([...delivered.get('logoShort')!.files!].sort(),['invoice.pdf','logo.png']);
-    });
+    }));
   });
 
   test('only old or BYO unmatched feedback acks after a short retry; hosted and unavailable writes still retry',()=>import('./src/adapters/feedback-queue.js').then(({settleFeedbackMessage})=>{
