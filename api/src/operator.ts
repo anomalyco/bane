@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { ApiError, dashboardSession, errors, json, notFound, response, security, type App, type Ctx, type DbExecutor } from './core.js';
+import { operatorRole, type OperatorRole } from './operator-identity.js';
 import { applyChange, type Change } from './standing.js';
 import { loadStanding, scoreView, StandingSchema } from './sender-score.js';
 import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
@@ -9,10 +10,10 @@ import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 // The operator API: Anomaly staff with a platform role act on any Hosted workspace through one audited path. The
 // /operator dashboard area, Ryan's support platform (phase 2) and scripts are its clients. Roles live in
 // platform_operators (granted by scripts/set-operator.ts), never a workspace role. Identity is the signed-in user:
-// today a dashboard session, after #89 the same session from Anomaly sign-in, so these routes do not change.
+// today a dashboard session, after #89 the same session from Anomaly sign-in, so these routes do not change. The role's
+// link to the user lives only in src/operator-identity.ts.
 // Hidden from the public OpenAPI document, SDK and llms docs (hide: true).
 
-export type OperatorRole = 'operator' | 'operator:read';
 export type OperatorIdentity = { userId: string; email: string; role: OperatorRole };
 /** The signed-in operator, or 403. `operator` may change things; `operator:read` only reads. */
 export async function operatorActor(c: Ctx, level: OperatorRole): Promise<OperatorIdentity> {
@@ -20,13 +21,9 @@ export async function operatorActor(c: Ctx, level: OperatorRole): Promise<Operat
   const a = c.get('actor');
   if (a?.credential !== 'dashboard') throw new ApiError(403, 'OPERATOR_REQUIRED', 'Use a signed-in operator session.');
   const { userId, email } = dashboardSession(c);
-  const { rows: [row] } = await c.env.db.execute<{ role: OperatorRole }>(sql`SELECT role FROM platform_operators WHERE user_id=${userId}`);
-  if (!row || (level === 'operator' && row.role !== 'operator')) throw new ApiError(403, 'OPERATOR_REQUIRED', level === 'operator' ? 'This action needs the operator role.' : 'This area is for Bane operators.');
-  return { userId, email, role: row.role };
-}
-/** The caller's platform role for GET /v1/me, or null. One indexed read, only for a dashboard session. */
-export async function operatorRole(db: DbExecutor, userId: string) {
-  return (await db.execute<{ role: OperatorRole }>(sql`SELECT role FROM platform_operators WHERE user_id=${userId}`)).rows[0]?.role ?? null;
+  const role = await operatorRole(c.env.db, userId);
+  if (!role || (level === 'operator' && role !== 'operator')) throw new ApiError(403, 'OPERATOR_REQUIRED', level === 'operator' ? 'This action needs the operator role.' : 'This area is for Bane operators.');
+  return { userId, email, role };
 }
 
 const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit log and the customer timeline (at least 10 characters).');
